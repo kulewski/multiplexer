@@ -1,0 +1,13 @@
+--- a/boost.BUILD	2023-07-07 20:02:57.060542220 +0000
++++ b/boost.BUILD	2023-07-07 21:19:06.710419250 +0000
+@@ -2067,9 +2067,6 @@
+ boost_library(
+     name = "tribool",
+     boost_name = "logic",
+-    exclude_hdr = [
+-        "libs/logic/include/boost/logic/tribool_io.hpp",
+-    ],
+     deps = [
+         ":config",
+         ":detail",
+

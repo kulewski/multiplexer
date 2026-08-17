@@ -1,0 +1,28 @@
+# The Bazel build on a clean distribution: exactly the packages the
+# documentation asks for, nothing else. docker/check.sh builds the image
+# and runs the build and the fast tests in it; BASE picks the distribution.
+#
+#   docker build -f docker/Dockerfile.bazel --build-arg BASE=ubuntu:24.04 .
+ARG BASE=debian:12
+FROM ${BASE}
+ARG BAZELISK=v1.20.0
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        g++ \
+        python3-dev \
+        python3-protobuf \
+        protobuf-compiler \
+        libprotobuf-dev \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+# Bazelisk reads .bazelversion and fetches that Bazel; Bazel brings its own JDK.
+RUN curl -fsSL -o /usr/local/bin/bazel \
+        https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK}/bazelisk-linux-amd64 \
+    && chmod +x /usr/local/bin/bazel
+WORKDIR /work
+COPY . /work
+# What ./check.sh runs, without the tools only development needs.
+CMD bazel build //... \
+    && bazel test --test_tag_filters=-slow //... \
+    && ./examples/test_all.sh

@@ -1,0 +1,34 @@
+# A plain `bazel build //...` works. The configs only change optimisation and
+# debug info.
+build --cxxopt=-std=c++17
+
+# Warnings are errors for our own code and the generated protobuf sources.
+# External code is compiled silently and its headers are system headers, so
+# nothing in Boost, pybind11 or zstd can fail a build. One-off escape hatch:
+#   bazel build --per_file_copt=.*@-Wno-error //...
+build --copt=-Wall
+build --copt=-Wextra
+build --features=external_include_paths
+build --per_file_copt=external/.*@-w
+build --per_file_copt=.*,-external/.*@-Werror
+
+build:debug -c dbg
+
+build:release -c opt
+# -c opt passes -g0; keep symbols so the *_with_debug_symbols binaries stay
+# debuggable (cores, perf). maybe_strip produces the stripped copies we ship.
+build:release --copt=-g
+
+# Sanitizers. asan also switches the generate_constants tool (see
+# multiplexer/BUILD); tsan finds data races the annotations cannot.
+build:asan --//:is_asan=true --copt=-fsanitize=address --linkopt=-fsanitize=address
+build:tsan --copt=-fsanitize=thread --linkopt=-fsanitize=thread -c dbg
+# gcc warns about libstdc++ fences it cannot instrument; not our code.
+build:tsan --copt=-Wno-tsan
+
+# Static thread-safety analysis (lib/thread_annotations.h) needs clang.
+# Uses the installed clang-18; everything else stays the same.
+build:clang --repo_env=CC=clang-18
+build:clang --copt=-Wthread-safety
+# clang warns about K&R definitions in zlib even under -w; nothing to do about it.
+build:clang --per_file_copt=external/.*@-Wno-deprecated-non-prototype

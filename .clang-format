@@ -1,0 +1,4 @@
+# Same style the code was written in (LLVM: 2-space indent, braces on the
+# same line), with the line length raised to match black's 120.
+BasedOnStyle: LLVM
+ColumnLimit: 120

@@ -1,0 +1,14 @@
+# Bazel convenience symlinks and outputs
+bazel-*
+# Python
+__pycache__/
+*.pyc
+# Editors
+*.swp
+*~
+# bazel run //compdb (clangd)
+/compile_commands.json
+/external
+/.cache/
+# Editor state
+/.vscode/
