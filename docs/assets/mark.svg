@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Multiplexer">
+<!-- The multiplexer logo. Clients on the left, two multiplexers in the middle, backends on the right, every peer connected to every multiplexer, one request route highlighted. Text is outlined, so no font is needed. -->
+  <rect x="0" y="0" width="200" height="200" rx="40" fill="#3B4756"/>
+  <g fill="none" stroke="#B9C3CF" stroke-width="4" stroke-linecap="round"><path d="M40 52.0 C70.0 52.0 70.0 71.2 100 71.2"/><path d="M40 52.0 C70.0 52.0 70.0 128.8 100 128.8"/><path d="M40 100.0 C70.0 100.0 70.0 71.2 100 71.2"/><path d="M40 148.0 C70.0 148.0 70.0 71.2 100 71.2"/><path d="M40 148.0 C70.0 148.0 70.0 128.8 100 128.8"/><path d="M100 71.2 C130.0 71.2 130.0 52.0 160 52.0"/><path d="M100 71.2 C130.0 71.2 130.0 100.0 160 100.0"/><path d="M100 71.2 C130.0 71.2 130.0 148.0 160 148.0"/><path d="M100 128.8 C130.0 128.8 130.0 100.0 160 100.0"/><path d="M100 128.8 C130.0 128.8 130.0 148.0 160 148.0"/></g>
+  <g fill="none" stroke="#E4572E" stroke-width="5.5" stroke-linecap="round"><path d="M40 100.0 C70.0 100.0 70.0 128.8 100 128.8"/><path d="M100 128.8 C130.0 128.8 130.0 52.0 160 52.0"/></g>
+  <circle cx="40" cy="52.0" r="8" fill="#FFFFFF"/>
+  <circle cx="40" cy="100.0" r="8" fill="#FFFFFF"/>
+  <circle cx="40" cy="148.0" r="8" fill="#FFFFFF"/>
+  <rect x="88" y="59.2" width="24" height="24" rx="3" fill="#E4572E"/>
+  <rect x="88" y="116.8" width="24" height="24" rx="3" fill="#E4572E"/>
+  <circle cx="160" cy="52.0" r="8" fill="#FFFFFF"/>
+  <circle cx="160" cy="100.0" r="8" fill="#FFFFFF"/>
+  <circle cx="160" cy="148.0" r="8" fill="#FFFFFF"/>
+</svg>
