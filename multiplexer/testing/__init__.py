@@ -180,6 +180,8 @@ class Mx:
         memory_log_every: int = 0,
         record: bool = False,
         record_payload_bytes: int = 0,
+        recording_dir: str | None = None,
+        allow_tap: bool = False,
     ):
         self.index = index
         self.rules = rules
@@ -187,6 +189,10 @@ class Mx:
         self.memory_log_every = memory_log_every
         self.record = record
         self.record_payload_bytes = record_payload_bytes
+        # --recording-dir and --allow-tap: sessions and taps peers may ask
+        # for over the protocol (multiplexer.recording.start, tap).
+        self.recording_dir = recording_dir
+        self.allow_tap = allow_tap
         self.proc: subprocess.Popen | None = None
         self.log_path = os.path.join(output_dir(), "mx%d.log" % index)
         self.port_file = os.path.join(output_dir(), "mx%d.port" % index)
@@ -216,6 +222,8 @@ class Mx:
         that `address` names the port it actually listens on."""
         if os.path.exists(self.port_file):
             os.unlink(self.port_file)
+        if self.record and os.path.exists(self.record_file):
+            os.unlink(self.record_file)  # a previous test's recording; the file is appended to
         command = [
             mxcontrol_path(),
             "run_multiplexer",
@@ -232,6 +240,10 @@ class Mx:
             command += ["--memory-log-every", str(self.memory_log_every)]
         if self.record:
             command += ["--record", self.record_file, "--record-payload-bytes", str(self.record_payload_bytes)]
+        if self.recording_dir:
+            command += ["--recording-dir", self.recording_dir]
+        if self.allow_tap:
+            command += ["--allow-tap"]
         self._log = open(self.log_path, "ab")
         self.proc = subprocess.Popen(command, stdout=self._log, stderr=self._log, env=child_env(native=True))
         deadline = time.time() + timeout
@@ -348,6 +360,8 @@ class Cluster:
     context manager: entering starts them, leaving stops every role that is
     still running and then the multiplexers."""
 
+    _counter = 0
+
     def __init__(
         self,
         count: int = 1,
@@ -355,8 +369,17 @@ class Cluster:
         memory_log_every: int = 0,
         record: bool = False,
         record_payload_bytes: int = 0,
+        remote_recording: bool = False,
     ):
         rules = rules or default_rules()
+        # With remote_recording every multiplexer accepts recording sessions
+        # and taps from peers; the sessions of all of them land in one
+        # directory, as they would on a volume replicas share. One
+        # directory per cluster, so a test sees only its own files.
+        Cluster._counter += 1
+        self.recording_dir = os.path.join(output_dir(), "recordings%d" % Cluster._counter) if remote_recording else None
+        if self.recording_dir:
+            os.makedirs(self.recording_dir, exist_ok=True)
         self.mx = [
             Mx(
                 index,
@@ -364,9 +387,18 @@ class Cluster:
                 memory_log_every=memory_log_every,
                 record=record,
                 record_payload_bytes=record_payload_bytes,
+                recording_dir=self.recording_dir,
+                allow_tap=remote_recording,
             )
             for index in range(count)
         ]
+
+    def recording_files(self) -> list[str]:
+        """Every session file written so far under `recording_dir`, oldest first."""
+        if not self.recording_dir:
+            return []
+        paths = [os.path.join(self.recording_dir, name) for name in os.listdir(self.recording_dir)]
+        return sorted(path for path in paths if path.endswith(".rec"))
 
     def wait_for_peer(self, peer_type: int | str, count: int = 1, timeout: float = 15) -> None:
         """Block until at least `count` peers of `peer_type` (a peers.* value
@@ -603,6 +635,30 @@ class Role:
     def rss_kb(self) -> int:
         """The process's resident set size in KiB right now."""
         return rss_kb(self.proc.pid)
+
+
+def mxcontrol(*args: str, timeout: float = 30, expect: int | None = 0) -> subprocess.CompletedProcess:
+    """Run `mxcontrol` with `args` to completion and return the result, its
+    stdout and stderr as text. With `expect` (0 by default) the exit code
+    must be that, or the assertion fails with both streams in the message;
+    None accepts any."""
+    result = subprocess.run(
+        [mxcontrol_path()] + list(args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        env=child_env(native=True),
+        text=True,
+    )
+    if expect is not None:
+        assert result.returncode == expect, "mxcontrol %s exited with %d, expected %d\nstdout:\n%s\nstderr:\n%s" % (
+            " ".join(args),
+            result.returncode,
+            expect,
+            result.stdout,
+            result.stderr,
+        )
+    return result
 
 
 def wait_until(predicate: Callable[[], Any], timeout: float, what: str, interval: float = 0.02) -> Any:

@@ -87,6 +87,7 @@ type in that range as internal and never passes it to `handle_message`.
 |---|---|---|
 | `MULTIPLEXER` | 1 | what a multiplexer announces in its welcome |
 | `ALL_TYPES` | 2 | in a rule: every peer type |
+| `RECORDING_CONTROLLER` | 3 | a peer that drives recording; accepted, as passive, only by a multiplexer started with `--recording-dir` or `--allow-tap`; defined in `Recording.proto`, not in the rules file |
 | `MAX_MULTIPLEXER_SPECIAL_PEER_TYPE` | 99 | end of the reserved range |
 
 | Message type | Value | Meaning |
@@ -96,7 +97,14 @@ type in that range as internal and never passes it to `handle_message`.
 | `BACKEND_FOR_PACKET_SEARCH` | 3 | a client looking for a backend |
 | `HEARTBIT` | 4 | keeps a connection alive |
 | `DELIVERY_ERROR` | 5 | nobody received a message |
+| `RECORDING_CONTROL` | 6 | a peer asks a multiplexer to start, stop or report its recording, or to tap in |
+| `RECORDING_STATUS` | 7 | the multiplexer's answer |
+| `RECORDING_RECORD` | 8 | one record streamed to a peer that tapped in |
 | `MAX_MULTIPLEXER_META_PACKET` | 99 | end of the reserved range |
+
+The three recording types are defined in `Recording.proto` and handled by
+the multiplexer whatever the rules file says; the shipped rules files name
+them so that dumps and logs show names.
 
 The libraries also use two ordinary types by name, so keep them in every rules
 file: `REQUEST_RECEIVED`, which a backend may send with `notify_start()` to say

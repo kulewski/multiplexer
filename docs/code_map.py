@@ -117,6 +117,11 @@ INDEX = [
     ("A peer without the library, for protocol tests", "multiplexer/testing/raw_peer.py", "`RawPeer`"),
     ("Recording routed messages", "multiplexer/recorder.h", "`Recorder`; `multiplexer/recording.py` reads"),
     (
+        "Recording sessions and taps asked for over the protocol",
+        "multiplexer/server.cc",
+        "`Server::_handle_recording_control`; `mxcontrol/recording_control.cc` asks",
+    ),
+    (
         "Thread-safety annotations and the wrong-thread check",
         "lib/thread_checker.h",
         "`MX_DCHECK_RUN_ON`; `lib/thread_annotations.h`, `lib/mutex.h`",

@@ -1,23 +1,81 @@
-// What a multiplexer writes with --record: a stream of Record messages,
-// varint-length-prefixed (lib/protobuf/stream.h), one per event. The first
-// is a RecordingHeader; then a PeerEvent for every peer that registers or
+// What a multiplexer records: a stream of Record messages, varint-length-
+// prefixed (lib/protobuf/stream.h), one per event. The first is a
+// RecordingHeader; then a PeerEvent for every peer that registers or
 // leaves, and a RoutedMessage for every delivery attempt at the routing
-// point, one per recipient. docs/operations.md describes it from the
-// outside; multiplexer/recording.py reads it.
+// point, one per recipient. A recording is written to a file (--record at
+// start, or a session started over the protocol) or streamed to a peer
+// that tapped in; RecordingControl and RecordingStatus are the messages of
+// that protocol. docs/operations.md describes it from the outside;
+// multiplexer/recording.py reads and drives it.
 package multiplexer;
 
 option optimize_for = SPEED;
+
+// The protocol's message types for recording, in the reserved range below
+// 100, the same in every rules file. RECORDING_CONTROL is sent to a
+// multiplexer without `to`; it answers RECORDING_STATUS, `references` set
+// to the request, and streams RECORDING_RECORD messages, each carrying a
+// Record, to a peer that tapped in.
+enum RecordingMessageType {
+  RECORDING_CONTROL = 6;
+  RECORDING_STATUS = 7;
+  RECORDING_RECORD = 8;
+}
+
+// The reserved peer type a controller connects as, accepted only by a
+// multiplexer started with --recording-dir or --allow-tap; no rules file
+// entry needed. Treated as passive.
+enum RecordingPeerType {
+  RECORDING_CONTROLLER = 3;
+}
+
+// What a controller asks. START opens a file session in the multiplexer's
+// --recording-dir, named after `label`, the multiplexer's instance id and
+// the time, so several multiplexers sharing a directory never collide. STOP
+// closes it. TAP subscribes the sender to every record as a
+// RECORDING_RECORD message until UNTAP or its connection ends. STATUS asks.
+message RecordingControl {
+  enum Action {
+    START = 1;
+    STOP = 2;
+    STATUS = 3;
+    TAP = 4;
+    UNTAP = 5;
+  }
+  required Action action = 1;
+  optional string label = 2;            // START: letters, digits, '-' and '_', at most 64
+  optional uint32 payload_limit = 3;    // START, TAP: bytes of each payload to keep; 0 keeps all
+  optional uint64 max_bytes = 4;        // START: close the session at this size; unset means the default cap, 0 no cap
+  optional uint32 max_seconds = 5;      // START: close the session after this long; 0 means never
+}
+
+// The multiplexer's answer to every RecordingControl.
+message RecordingStatus {
+  optional uint64 multiplexer_id = 1;
+  optional string error = 2;            // why the action was refused; unset when it was carried out
+  optional bool recording = 3;          // a file session is open
+  optional string path = 4;             // the open session's file, or the last one's
+  optional string label = 5;
+  optional uint64 started_us = 6;
+  optional uint64 bytes = 7;            // written to the file so far
+  optional uint64 records = 8;
+  optional string stopped = 9;          // why the last session ended, once it has
+  optional uint32 taps = 10;            // peers receiving RECORDING_RECORD messages
+  optional bool tapping = 11;           // the requester is one of them
+  optional uint64 dropped = 12;         // records the requester's tap lost to a full outgoing queue
+}
 
 message RecordingHeader {
   optional uint64 multiplexer_id = 1;   // the instance id of the multiplexer that wrote the file
   optional string rules_sha1 = 2;       // SHA-1 of its rules file; the generated constants carry the same
   optional uint64 started_us = 3;       // when recording started, microseconds since the epoch
   optional uint32 payload_limit = 4;    // --record-payload-bytes; 0 means payloads are complete
+  optional string label = 5;            // the session's label, when started over the protocol
 }
 
 message PeerEvent {
   enum Kind {
-    CONNECTED = 1;      // the peer's welcome was accepted
+    CONNECTED = 1;      // the peer's welcome was accepted, or it was already connected when the session started
     DISCONNECTED = 2;   // its connection ended
   }
   optional Kind kind = 1;
@@ -52,10 +110,11 @@ message RoutedMessage {
 }
 
 message Record {
-  optional uint64 timestamp_us = 1;     // microseconds since the epoch
+  optional uint64 timestamp_us = 1;     // microseconds since the epoch, the multiplexer's clock
   oneof event {
     RecordingHeader header = 2;
     PeerEvent peer = 3;
     RoutedMessage routed = 4;
   }
+  optional uint64 multiplexer_id = 5;   // set on streamed records, so a tap on several multiplexers can tell them apart
 }

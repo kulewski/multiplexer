@@ -78,6 +78,22 @@ cc_library(
 )
 
 cc_library(
+    name = "recording_control",
+    srcs = ["recording_control.cc"],
+    deps = [
+        ":task",
+        ":tasks_holder",
+        "//lib/protobuf:stream",
+        "//multiplexer:client",
+        "//multiplexer:multiplexer_cc_proto",
+        "//multiplexer:recording_cc_proto",
+        "@boost//:asio",
+        "@boost//:optional",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "stream_logs",
     srcs = ["stream_logs.cc"],
     deps = [
@@ -112,6 +128,7 @@ maybe_strip_cc_binary(
         ":dump_recording",
         ":help",
         ":receive_logs",
+        ":recording_control",
         ":start_multiplexer_server",
         ":stream_logs",
         "//lib:core_dump",

@@ -100,7 +100,7 @@ void BasicClient::shutdown() {
 // reconnects during its next call at the earliest.
 void BasicClient::connection_destroyed(Connection *conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  MX_LOG(ERROR, LOWVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
+  MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
   Connection::pointer c;
   ConnectionByEndpoint::iterator endpoint_entry =
       connection_by_endpoint_.find(conn->managers_private_data().expected_endpoint);

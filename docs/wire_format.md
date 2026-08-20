@@ -73,6 +73,9 @@ Types 1 to 99 are the protocol's. A backend library answers them itself.
 | `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type; each backend answers with a `PING` referencing the search's id, addressed to the client |
 | `HEARTBIT` (4) | empty | keep-alive, ignored |
 | `DELIVERY_ERROR` (5) | `DeliveryError` | the multiplexer, to a message's `from`, when nobody received it: `packet_id` names the message; `failed_type` lists the peer types with no receiver, or `failed_to` the missing instance id, or `is_known_type` false for an unknown type; `original_message` is included only if the rule asked for it. `references` is the failed message's id |
+| `RECORDING_CONTROL` (6) | `RecordingControl` | a peer, without `to`, asking the multiplexer it is connected to for START, STOP, STATUS, TAP or UNTAP of its recording ([operations](operations.md#recording-on-demand-over-the-protocol)); refused unless the multiplexer allows it |
+| `RECORDING_STATUS` (7) | `RecordingStatus` | the multiplexer's answer, `references` the request's id, `error` set when it was refused |
+| `RECORDING_RECORD` (8) | `Record` | the multiplexer, to every peer that tapped in, one per record, `multiplexer_id` set |
 
 ## What the multiplexer does with a frame
 

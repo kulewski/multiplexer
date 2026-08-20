@@ -6,6 +6,8 @@
 #ifndef MX_MULTIPLEXER_DEFAULTS_H_
 #define MX_MULTIPLEXER_DEFAULTS_H_
 
+#include <boost/cstdint.hpp>
+
 namespace multiplexer {
 
 // Unread messages a client library holds before dropping new ones.
@@ -25,6 +27,10 @@ static const float HEARTBIT_INTERVAL = 3.0;
 // starts the drop, and how much longer it then waits before closing.
 static const float NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL = 30;
 static const float NO_HEARTBIT_SO_REALLY_DROP_INTERVAL = 60;
+
+// A recording session started over the protocol closes itself at this
+// size unless the request says otherwise (RecordingControl.max_bytes).
+static const boost::uint64_t DEFAULT_REMOTE_RECORDING_MAX_BYTES = 1024ULL * 1024 * 1024;
 
 }; // namespace multiplexer
 

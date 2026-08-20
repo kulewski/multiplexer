@@ -7,6 +7,7 @@
 
 #include <boost/asio/placeholders.hpp>
 #include <boost/bind/bind.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/foreach.hpp>
 #include <boost/lexical_cast.hpp>
 #include <cstdio>
@@ -26,7 +27,7 @@ using mx::repr;
 Server::Server(boost::asio::io_service &io_service, const std::string &host, unsigned short port)
     : Base(io_service),
       acceptor_(io_service, boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port)),
-      io_service_(io_service) {}
+      io_service_(io_service), session_timer_(io_service) {}
 
 void Server::start() { _start_accept(); }
 
@@ -261,7 +262,13 @@ bool Server::_handle_meta_message(MessageMetaHandler &meta_handler) {
 
   case types::PING:
   case types::DELIVERY_ERROR:
+  case RECORDING_STATUS:
+  case RECORDING_RECORD:
     // Only meaningful with a `to` field, which was handled before this.
+    return true;
+
+  case RECORDING_CONTROL:
+    _handle_recording_control(meta_handler);
     return true;
 
   case types::BACKEND_FOR_PACKET_SEARCH: {
@@ -426,12 +433,225 @@ void Server::_write_peers_file(Connection *leaving) {
       Connection::pointer connection = entry->second.lock();
       if (!connection || connection.get() == leaving || !connection->living())
         continue;
-      out << connection->peer_id() << " " << config_.peer_name_by_type(connection->peer_type()) << " "
-          << connection->peer_type() << "\n";
+      out << connection->peer_id() << " " << _peer_name(connection->peer_type()) << " " << connection->peer_type()
+          << "\n";
     }
   }
   if (std::rename(tmp.c_str(), peers_file_.c_str()) != 0)
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT("cannot rename peers file to " + peers_file_));
 }
 
-}; // namespace multiplexer
+std::string Server::_peer_name(boost::uint32_t peer_type) const {
+  if (peer_type == RECORDING_CONTROLLER)
+    return "RECORDING_CONTROLLER";
+  return config_.peer_name_by_type(peer_type);
+}
+
+// Recording.
+
+bool Server::start_recording(const std::string &path, const std::string &label, unsigned int payload_limit,
+                             boost::uint64_t max_bytes, unsigned int max_seconds, std::string *error) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (recorder_) {
+    *error = "already recording " + recorder_->path();
+    return false;
+  }
+  std::unique_ptr<Recorder> recorder(new Recorder(path, payload_limit));
+  if (!recorder->ok()) {
+    *error = "cannot open " + path;
+    return false;
+  }
+  recorder->header(instance_id_, rules_sha1_, label);
+  // The peers connected right now, so that the file stands on its own.
+  const boost::uint64_t now = recording::now_us();
+  for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
+    Connection::pointer connection = entry->second.lock();
+    if (!connection || !connection->living())
+      continue;
+    Record record;
+    recording::fill_peer(record, PeerEvent::CONNECTED, connection->peer_id(), connection->peer_type());
+    record.set_timestamp_us(now);
+    recorder->write(record);
+  }
+  recorder_ = std::move(recorder);
+  session_ = Session();
+  session_.label = label;
+  session_.path = path;
+  session_.started_us = now;
+  session_.max_bytes = max_bytes;
+  if (max_seconds) {
+    session_timer_.expires_from_now(boost::posix_time::seconds(max_seconds));
+    session_timer_.async_wait(
+        boost::bind(&Server::_on_session_deadline, weak_pointer(shared_from_this()), boost::placeholders::_1));
+  }
+  MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("recording to " + path));
+  return true;
+}
+
+void Server::stop_recording(const std::string &reason) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (!recorder_)
+    return;
+  session_.bytes = recorder_->bytes();
+  session_.records = recorder_->records();
+  session_.stopped = reason;
+  recorder_.reset();
+  session_timer_.cancel();
+  MX_LOG(INFO, LOWVERBOSITY,
+         CTX("multiplexer.server") TEXT("recording to " + session_.path + " closed: " + reason + " (" +
+                                        repr(session_.records) + " records, " + repr(session_.bytes) + " bytes)"));
+}
+
+void Server::_on_session_deadline(weak_pointer server, const boost::system::error_code &error) {
+  if (error)
+    return; // cancelled: the session ended first
+  if (pointer self = server.lock())
+    self->stop_recording("max_seconds reached");
+}
+
+void Server::_emit_peer(PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type) {
+  if (!recorder_ && taps_.empty())
+    return;
+  Record record;
+  recording::fill_peer(record, kind, peer_id, peer_type);
+  _emit(record);
+}
+
+void Server::_emit(Record &record) {
+  record.set_timestamp_us(recording::now_us());
+  if (recorder_) {
+    recorder_->write(record);
+    if (!recorder_->ok())
+      stop_recording("write failed");
+    else if (session_.max_bytes && recorder_->bytes() >= session_.max_bytes)
+      stop_recording("max_bytes reached");
+  }
+  if (taps_.empty())
+    return;
+  record.set_multiplexer_id(instance_id_);
+  for (Taps::size_type index = 0; index < taps_.size();) {
+    Tap &tap = taps_[index];
+    Connection::pointer connection = tap.conn.lock();
+    if (!connection || !connection->living()) {
+      taps_.erase(taps_.begin() + index);
+      continue;
+    }
+    MultiplexerMessage mxmsg;
+    mxmsg.set_id(random_());
+    mxmsg.set_from(instance_id_);
+    mxmsg.set_to(tap.peer_id);
+    mxmsg.set_type(RECORDING_RECORD);
+    if (tap.payload_limit && record.has_routed() && record.routed().payload().size() > tap.payload_limit)
+      recording::truncate(record, tap.payload_limit).SerializeToString(mxmsg.mutable_message());
+    else
+      record.SerializeToString(mxmsg.mutable_message());
+    boost::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+    if (!connection->schedule(raw))
+      tap.dropped += 1;
+    ++index;
+  }
+}
+
+Server::Taps::iterator Server::_find_tap(const Connection *conn) {
+  for (Taps::iterator tap = taps_.begin(); tap != taps_.end(); ++tap)
+    if (tap->conn.lock().get() == conn)
+      return tap;
+  return taps_.end();
+}
+
+void Server::_untap(const Connection *conn) {
+  Taps::iterator tap = _find_tap(conn);
+  if (tap != taps_.end())
+    taps_.erase(tap);
+}
+
+void Server::_handle_recording_control(MessageMetaHandler &meta_handler) {
+  const MultiplexerMessage &msg = meta_handler.msg;
+  Connection::pointer conn = meta_handler.conn;
+  RecordingControl control;
+  RecordingStatus status;
+  if (!control.ParseFromString(msg.message())) {
+    status.set_error("garbled RecordingControl");
+  } else {
+    switch (control.action()) {
+    case RecordingControl::START: {
+      std::string error;
+      if (recording_dir_.empty()) {
+        status.set_error("remote recording is off; start the multiplexer with --recording-dir");
+      } else if (!recording::valid_label(control.label())) {
+        status.set_error("label must be 1 to 64 letters, digits, '-' or '_'");
+      } else {
+        const boost::uint64_t max_bytes =
+            control.has_max_bytes() ? control.max_bytes() : DEFAULT_REMOTE_RECORDING_MAX_BYTES;
+        const std::string path =
+            recording::session_path(recording_dir_, control.label(), instance_id_, recording::now_us());
+        if (!start_recording(path, control.label(), control.payload_limit(), max_bytes, control.max_seconds(), &error))
+          status.set_error(error);
+        else
+          MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("recording started by peer " + repr(msg.from())));
+      }
+      break;
+    }
+    case RecordingControl::STOP:
+      stop_recording("stopped by peer " + repr(msg.from()));
+      break;
+    case RecordingControl::STATUS:
+      break;
+    case RecordingControl::TAP:
+      if (!allow_tap_) {
+        status.set_error("taps are off; start the multiplexer with --allow-tap");
+      } else if (_find_tap(conn.get()) == taps_.end()) {
+        Tap tap;
+        tap.conn = conn;
+        tap.peer_id = conn->peer_id();
+        tap.payload_limit = control.payload_limit();
+        tap.dropped = 0;
+        taps_.push_back(tap);
+        MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("peer " + repr(msg.from()) + " taps the recording"));
+      }
+      break;
+    case RecordingControl::UNTAP:
+      _untap(conn.get());
+      break;
+    }
+  }
+  _fill_status(status, conn.get());
+  _reply(meta_handler, RECORDING_STATUS, status);
+}
+
+void Server::_fill_status(RecordingStatus &status, const Connection *requester) {
+  status.set_multiplexer_id(instance_id_);
+  status.set_recording(recorder_ != nullptr);
+  if (recorder_ || !session_.path.empty()) {
+    status.set_path(session_.path);
+    if (!session_.label.empty())
+      status.set_label(session_.label);
+    status.set_started_us(session_.started_us);
+    status.set_bytes(recorder_ ? recorder_->bytes() : session_.bytes);
+    status.set_records(recorder_ ? recorder_->records() : session_.records);
+    if (!session_.stopped.empty())
+      status.set_stopped(session_.stopped);
+  }
+  status.set_taps(taps_.size());
+  Taps::iterator tap = _find_tap(requester);
+  if (tap != taps_.end()) {
+    status.set_tapping(true);
+    status.set_dropped(tap->dropped);
+  }
+}
+
+void Server::_reply(const MessageMetaHandler &meta_handler, boost::uint32_t type,
+                    const ::google::protobuf::Message &payload) {
+  MultiplexerMessage mxmsg;
+  mxmsg.set_id(random_());
+  mxmsg.set_from(instance_id_);
+  mxmsg.set_to(meta_handler.msg.from());
+  mxmsg.set_type(type);
+  mxmsg.set_references(meta_handler.msg.id());
+  mxmsg.set_workflow(meta_handler.msg.workflow());
+  payload.SerializeToString(mxmsg.mutable_message());
+  boost::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+  meta_handler.conn->schedule(raw);
+}
+
+} // namespace multiplexer

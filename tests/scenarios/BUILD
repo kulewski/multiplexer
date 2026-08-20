@@ -487,3 +487,70 @@ py_binary(
     )
     for client in LANGS
 ]
+
+# Recording sessions and taps driven over the protocol.
+[
+    mx_integration_test(
+        name = "remote_recording_%s_%s" % (backend, client),
+        size = "medium",
+        extra_deps = [
+            "//multiplexer:clients",
+            "//multiplexer:recording",
+            "//multiplexer:recording_py_proto",
+        ],
+        roles = {
+            "backend": backend,
+            "client": client,
+        },
+        scenario = "remote_recording/remote_recording.py",
+    )
+    for backend in LANGS
+    for client in ["py"]
+]
+
+mx_integration_test(
+    name = "remote_recording_refused_test",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    scenario = "remote_recording_refused/remote_recording_refused.py",
+)
+
+mx_integration_test(
+    name = "remote_recording_cap_py",
+    size = "medium",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+    ],
+    roles = {"event_client": "py"},
+    scenario = "remote_recording_cap/remote_recording_cap.py",
+)
+
+mx_integration_test(
+    name = "recording_tap_py_py",
+    size = "medium",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    roles = {
+        "backend": "py",
+        "client": "py",
+        "event_client": "py",
+    },
+    scenario = "recording_tap/recording_tap.py",
+)
+
+mx_integration_test(
+    name = "remote_recording_stay_test",
+    size = "medium",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+    ],
+    scenario = "remote_recording_stay/remote_recording_stay.py",
+)
