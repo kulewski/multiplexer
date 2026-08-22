@@ -41,6 +41,7 @@ SECTIONS = [
     ("examples/echo", "The echo example"),
     ("bazel", "Build machinery"),
     ("docker", "Clean-machine checks"),
+    ("make", "The build without Bazel"),
     ("docs", "Documentation generators"),
     ("docs/diagrams", "The step-by-step pictures"),
     (".", "Repository root"),
@@ -130,7 +131,7 @@ INDEX = [
     ("Consuming this repository as `@mx`", "bazel/deps.bzl", "`mx_dependencies`, `mx_setup` in `bazel/setup.bzl`"),
 ]
 
-SKIP_DIRS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "__pycache__", ".cache", "compdb"}
+SKIP_DIRS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "__pycache__", ".cache", "compdb", "build"}
 SKIP_FILES = {"compile_commands.json", "external"}
 
 

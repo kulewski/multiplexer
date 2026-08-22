@@ -78,6 +78,49 @@ binaries next to the ones with symbols), `--config=asan` and
 `--config=tsan` (the sanitizers), and `--config=clang` (the static
 thread-safety analysis). `./check.sh` runs what CI should.
 
+## Without Bazel
+
+A `Makefile` at the root builds the same things from the distribution's own
+packages, for a machine that will not have Bazel: no fetching, no JDK, no
+sandbox. It needs the compiler and protobuf from the table above, plus
+Boost, pybind11 (2.9, Ubuntu 22.04's, is the oldest tested) and, for the
+tests, googletest:
+
+```
+sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libboost-dev libboost-program-options-dev \
+    python3-dev python3-protobuf pybind11-dev python3-pybind11 libgtest-dev \
+    python3-pip python3-setuptools python3-wheel
+make -j                      # build/bin/mxcontrol, build/libmultiplexer.a, build/python/
+make check                   # the C++ and Python unit tests, against what was built
+make wheel                   # build/dist/multiplexer-<version>-<python>-<platform>.whl
+sudo make install            # mxcontrol, the library and the headers under /usr/local
+make RULES=your.rules -j     # the constants from your rules file, as --//:multiplexer_rules does
+```
+
+What comes out, and how a program uses it:
+
+| Output | Use |
+|---|---|
+| `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
+| `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles with `-std=c++17 -I/usr/local/include/mx` and links `-lmultiplexer -lprotobuf -lboost_program_options -pthread`; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
+| `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension included |
+| `build/dist/*.whl` | `pip install` it; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
+
+`make check` runs the C++ unit tests with googletest and the Python ones
+with `unittest`, including the ones that start a multiplexer, which they
+find through `MXCONTROL`: `multiplexer.testing` runs the binary that
+variable names when it is set, so a test of yours outside Bazel starts
+real multiplexers with `MXCONTROL=build/bin/mxcontrol`. `make/` holds the
+pieces: `sources.mk`, the source lists generated from the BUILD
+files by `./format.sh` (so the two builds cannot disagree about which
+files exist), `setup.py` for the wheel, and `wheel_smoke.py`, which
+`docker/check.sh make` runs with the wheel installed in a fresh virtual
+environment. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
+`PREFIX`, `PYTHON` and `PROTOC` are variables like `RULES`.
+
+Not built this way: the test roles and scenarios under `tests/`, the
+examples, the sanitizer and analysis configurations. Those are Bazel's.
+
 ## Development tools
 
 Only for working on the repository, never for building it: `clang-format-18`,

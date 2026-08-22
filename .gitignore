@@ -1,5 +1,7 @@
 # Bazel convenience symlinks and outputs
 bazel-*
+# make (see Makefile)
+/build/
 # Python
 __pycache__/
 *.pyc
