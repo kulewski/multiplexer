@@ -58,15 +58,15 @@ program is shaped. A `ThreadedClient` that receives requests addressed to
 its instance id and replies to them is a legitimate shape too, a service
 reachable by `to` after an introduction.
 
-| | `BaseMultiplexerServer` | `ThreadedClient` | `Client` |
-|---|---|---|---|
-| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread | nobody between calls |
-| found by typed requests | yes: answers the backend search | no: never answers it | no |
-| receives | requests routed by type, events, addressed messages | events routed to its type, addressed messages | replies only, and `receive_message()` |
-| handles | `handle_message()`, one at a time, reply by default | `on_message`, must return quickly | nothing arrives on its own |
-| sends | replies, and anything from `periodic_task()` | queries and events from any thread | queries and events from its thread |
-| peer type | not passive | not passive | `is_passive` |
-| leaves | drain, then `serve_forever()` returns | `shutdown()` | `shutdown()` |
+| | `BaseMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `Client` |
+|---|---|---|---|---|
+| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
+| found by typed requests | yes: answers the backend search | no: never answers it | no | no |
+| receives | requests routed by type, events, addressed messages | events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
+| handles | `handle_message()`, one at a time, reply by default | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing arrives on its own |
+| sends | replies, and anything from `periodic_task()` | queries and events from any thread | awaited | queries and events from its thread |
+| peer type | not passive | not passive | not passive | `is_passive` |
+| leaves | drain, then `serve_forever()` returns | `shutdown()` | `aclose()` | `shutdown()` |
 
 [Using the Python library](api_python.md) and [the C++ library](api_cpp.md)
 describe each.
@@ -159,8 +159,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [The rules file](rules.md): peer types, message types, routing rules, the
   reserved ranges, pointing a build at your file.
 - [Using the Python library](api_python.md) and
-  [using the C++ library](api_cpp.md): `Client` and `BaseMultiplexerServer`,
-  every call and every exception; the Python page also covers
+  [using the C++ library](api_cpp.md): `Client`, `ThreadedClient`,
+  `AsyncClient` for asyncio, and `BaseMultiplexerServer`, every call and
+  every exception; the Python page also covers
   [testing](api_python.md#testing) with `multiplexer.testing` and reading a
   recording.
 - [mxcontrol](mxcontrol.md): running a multiplexer, the log tools, dumping
@@ -182,6 +183,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 ## Recipes
 
 - [Add a peer type or a message type](recipes/add_a_message_type.md)
+- [Use the client from an async web server](recipes/async_web_server.md):
+  `AsyncClient` under Django Channels, one per worker, pushing to sockets,
+  backpressure.
 - [Use the client from a threaded web server](recipes/web_server.md): one
   `ThreadedClient` per process, request threads, events without a receiver thread, fork and exit.
 - [Add an integration test scenario](recipes/add_a_scenario.md)

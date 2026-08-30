@@ -1,0 +1,4 @@
+# The example workspace's flags: C++17, and the rules file the constants
+# are generated from, so every build of this workspace uses chat.rules.
+build --cxxopt=-std=c++17
+build --@mx//:multiplexer_rules=//:chat.rules

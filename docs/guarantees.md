@@ -34,7 +34,7 @@ What the multiplexer promises, stated so that you can design around it.
   backend cannot tell the attempts apart by `id`, so deduplicate on
   something in the payload, never on the message id.
 - **`references` means "this is the reply".** A client matches replies to
-  its queries by the id they reference, and a threaded client
+  its queries by the id they reference, and a threaded or asyncio client
   drops what references a query it has seen answered, the last 1024,
   since a retried query's second reply must not reach the program as a
   stray and nothing tells such a reply from a follow-up that merely points

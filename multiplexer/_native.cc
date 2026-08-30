@@ -236,6 +236,29 @@ struct PythonThreadedClient {
     GilRelease release;
     return client.send_serialized_and_wait(serialized, all, timeout);
   }
+  // The flushing send completed by `callback(written)` on the io thread
+  // instead of a wait; the asyncio client's send. Held like a query's.
+  void send_with_callback(std::string serialized, bool all, float timeout, pybind11::function callback) {
+    std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function *function) {
+      CallbackSlot slot;
+      if (!slot.ok)
+        return; // leaked on purpose, see sink_for
+      pybind11::gil_scoped_acquire acquire;
+      delete function;
+    });
+    client.send_serialized_with_callback(serialized, all, timeout, [held](unsigned int written) {
+      CallbackSlot slot;
+      if (!slot.ok)
+        return;
+      pybind11::gil_scoped_acquire acquire;
+      try {
+        (*held)(written);
+      } catch (pybind11::error_already_set &error) {
+        error.restore();
+        PyErr_Print();
+      }
+    });
+  }
   pybind11::tuple query(std::string payload, boost::uint32_t type, float timeout) {
     ThreadedClient::Result result;
     {
@@ -426,6 +449,7 @@ PYBIND11_MODULE(_native, module) {
       .def("send", &multiplexer::PythonThreadedClient::send)
       .def("send_all", &multiplexer::PythonThreadedClient::send_all)
       .def("send_and_wait", &multiplexer::PythonThreadedClient::send_and_wait)
+      .def("send_with_callback", &multiplexer::PythonThreadedClient::send_with_callback)
       .def("query", &multiplexer::PythonThreadedClient::query)
       .def("query_with_callback", &multiplexer::PythonThreadedClient::query_with_callback)
       .def("shutdown", &multiplexer::PythonThreadedClient::shutdown);

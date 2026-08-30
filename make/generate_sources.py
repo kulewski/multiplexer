@@ -20,7 +20,7 @@ OUTPUT = os.path.join(ROOT, "make", "sources.mk")
 SHIPPED = "//mxcontrol:mxcontrol_with_debug_symbols + //multiplexer:_native_with_debug_symbols.so"
 PYTHON_PACKAGE = (
     "//multiplexer:servers + //multiplexer:clients + //multiplexer:threaded_client_py + //multiplexer:recording"
-    " + //multiplexer/testing:testing + //multiplexer/mxlog:streaming + //multiplexer/util:decorators"
+    " + //multiplexer:aio + //multiplexer/testing:testing + //multiplexer/mxlog:streaming + //multiplexer/util:decorators"
     " + //multiplexer/util:timer"
 )
 # Python tests that need Bazel's runfiles layout and mean nothing outside it.

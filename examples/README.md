@@ -51,6 +51,14 @@ build --@mx//:multiplexer_rules=//:my.rules
 
 The multiplexer needs `protoc` and `libprotobuf` from the system, and C++17.
 
+## The examples
+
+- [echo](echo/): a backend and a client in both languages, the threaded
+  client shared by worker threads, and the test infrastructure used from
+  another workspace.
+- [aio](aio/): an asyncio TCP gateway with `AsyncClient` in front of a chat
+  backend, replies to the client that asked and broadcasts to every client.
+
 ## Adding an example
 
 Copy `echo/`, keep its `WORKSPACE` and `.bazelrc`, replace the rules file and
