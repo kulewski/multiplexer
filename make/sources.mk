@@ -152,5 +152,7 @@ PY_TEST_FILES := \
   multiplexer/pickle_test.py \
   multiplexer/serve_thread_test.py \
   multiplexer/testing/fakes_test.py \
+  multiplexer/testing/lanes_test.py \
   multiplexer/threaded_client_py_test.py \
+  multiplexer/threaded_lanes_test.py \
 

@@ -76,6 +76,7 @@ class LeakTest(unittest.TestCase):
         def serve():
             """The backend, built and driven on this thread."""
             backend = Backend([self.endpoint], type=peers.PYTHON_TEST_SERVER)
+            self.backend_id = backend.conn.instance_id
             ready.set()
             while self.serving:
                 try:
@@ -124,6 +125,55 @@ class LeakTest(unittest.TestCase):
         tracemalloc.stop()
         client.shutdown()
 
+    def lane_calls(self, client) -> None:
+        """One round of everything lanes and addressing add: typed and
+        addressed queries on a lane, either probe, a lane made and dropped
+        per call, the reply's connection preferred, a flushing send."""
+        lane = client.lane()
+        self.assertEqual(b"HELLO", client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=lane).message)
+        reply, connection = client.query(
+            b"hello", type=types.PYTHON_TEST_REQUEST, to=self.backend_id, multiplexer=lane, with_connection=True
+        )
+        self.assertEqual(b"HELLO", reply.message)
+        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=self.backend_id, probe=types.PING)
+        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=client.lane(pinned=True))
+        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=connection)
+        client.send_message(b"event", type=types.PYTHON_TEST_REQUEST, multiplexer=client.lane(), flush=True)
+
+    def test_lanes_and_addressed_queries_do_not_accumulate(self):
+        """tracemalloc by line and the object count over thousands of calls
+        through lanes and by address, on both clients."""
+        for client in (
+            Client([self.endpoint], type=peers.WEBSITE),
+            ThreadedClient([self.endpoint], type=peers.WEBSITE),
+        ):
+            for _ in range(50):
+                self.lane_calls(client)
+            gc.collect()
+            tracemalloc.start()
+            before = tracemalloc.take_snapshot()
+            objects_before = len(gc.get_objects())
+            for _ in range(QUERIES // 6):
+                self.lane_calls(client)
+            self.assert_no_growth(before, objects_before)
+            tracemalloc.stop()
+            client.shutdown()
+
+    def test_a_lane_keeps_nothing_alive(self):
+        """A lane referenced after its client was shut down and dropped
+        holds neither the client nor a connection."""
+        client = ThreadedClient([self.endpoint], type=peers.WEBSITE)
+        lane = client.lane()
+        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=lane, timeout=10)
+        self.assertTrue(lane.connected)
+        client.shutdown()
+        weak_client = weakref.ref(client)
+        del client
+        gc.collect()
+        self.assertIsNone(weak_client(), "the lane kept the client alive")
+        self.assertFalse(lane.connected, "the lane kept a connection alive")
+        self.assertTrue(lane.holds_connection)
+
     def test_threaded_client_releases_callbacks_and_replies(self):
         """The binding must drop every reference it takes: the callback's
         reference count is back where it was, and a weak reference to it
@@ -145,6 +195,11 @@ class LeakTest(unittest.TestCase):
             self.assertTrue(done.acquire(timeout=30), "a query never completed")
         self.assertEqual(QUERIES, len(replies))
         self.assertEqual(b"HELLO", replies[0].message)
+        # The io thread drops its last reference after the callback returned
+        # and only once it gets the GIL, which this thread must give up.
+        deadline = time.time() + 10
+        while sys.getrefcount(callback) != refcount_before and time.time() < deadline:
+            time.sleep(0.01)
         gc.collect()
         self.assertEqual(refcount_before, sys.getrefcount(callback), "the binding kept a reference to the callback")
         replies.clear()

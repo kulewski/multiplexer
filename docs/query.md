@@ -502,10 +502,277 @@ graph LR
   style Q fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
-Where this lives: `Client::_query` in `multiplexer/client.h` and
-`Client.query` in `multiplexer/mxclient.py`; the search is routed in
-`Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
-`query_one.py`, `round_robin.py`, `backend_dies.py`, `two_mx_backends_on_each.py`
-and `unrouted_type.py` under `tests/scenarios/` exercise these pictures.
+## An addressed query
+
+A request with `to` set, the instance id of one peer, is an addressed query:
+only that peer ever gets it, never another instance of its type. It has the
+same three stages, with the middle one locating that instance instead of
+searching for any backend, and one `timeout` covering all three. The
+picture shows the moment that needs the middle stage: multiplexer 1 has
+just restarted, the client is back on it, and the addressee is not yet.
+Two instances of the type exist; the request is for instance 2.
+
+### 1. The client sends the request through one connection
+
+With `to` set and a delivery error requested, through the lane's connection when the call gave a lane, else any live one; here multiplexer 1. A reply would end the query here, as it does whenever the addressee is behind the multiplexer chosen.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 0 stroke:#d62828,stroke-width:3px
+  style Q fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 2. The multiplexer does not have the instance
+
+Instance 2 has not reconnected to multiplexer 1 yet, so it answers at once with `DELIVERY_ERROR` naming the instance in `failed_to`. Instance 1, of the same type, is right there and does not get the request: an addressed query never takes a detour.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 1 stroke:#d62828,stroke-width:3px
+  style M1 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 3. The client probes for the instance on every connection
+
+The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which a backend declines while it drains, or with `probe=PING` a `PING`, which a peer answers as long as it lives, for a request that must land even then. Delivery errors are requested, so a multiplexer without the instance says so. The connection dying under the first stage leads here too. A request that simply gets no answer within the timeout does not: a silent addressee is one the multiplexer still has, and a probe would find the same one.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 2,3 stroke:#d62828,stroke-width:3px
+  style Q fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 4. One multiplexer says no, the other delivers
+
+Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the probe to instance 2. Every connection failing would end the query with `OperationFailed`, at once: the instance is gone.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 4,5 stroke:#d62828,stroke-width:3px
+  style M1 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+  style M2 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 5. The instance answers with a PING
+
+Through the multiplexer that has it, which the client now knows.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 6,7 stroke:#d62828,stroke-width:3px
+  style B2 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 6. The client repeats the request through that connection
+
+A fresh id, the same `to`, through the connection the `PING` came on. A lane given to the call adopts that connection, so what the caller sends next follows the query. A reply to the first attempt arriving late is accepted too, so a slow instance may see the request twice.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 8,9 stroke:#d62828,stroke-width:3px
+  style Q fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 7. Instance 2 answers
+
+The reply ends the query. Nothing within the timeout is `OperationTimedOut`; a `DELIVERY_ERROR` for the repeated request, the instance leaving between the probe and the request, is `OperationFailed`.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    Q[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    B1[instance 1]
+    B2[instance 2]
+  end
+  Q -- "request, to: instance 2" --> M1
+  M1 -- "DELIVERY_ERROR, failed_to" --> Q
+  Q -- "probe, to: instance 2" --> M1
+  Q -- "probe, to: instance 2" --> M2
+  M1 -- "DELIVERY_ERROR" --> Q
+  M2 -- "probe" --> B2
+  B2 -- "PING" --> M2
+  M2 -- "PING" --> Q
+  Q -- "request again, to: instance 2" --> M2
+  M2 -- "request" --> B2
+  B2 -- "reply" --> M2
+  M2 -- "reply" --> Q
+  M1 -- "connected" --> B1
+  M2 -- "connected" --> B1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 10,11 stroke:#d62828,stroke-width:3px
+  style B2 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+Where this lives: `Client::_query` and `Client::_query_addressed` in
+`multiplexer/client.cc`, `Client.query` in `multiplexer/mxclient.py`, and
+the state machine of `multiplexer/threaded_client.cc` for the threaded and
+asyncio clients; the search is routed in `Server::_handle_meta_message` in
+`multiplexer/server.h`. Scenarios `query_one.py`, `round_robin.py`,
+`backend_dies.py`, `two_mx_backends_on_each.py` and `unrouted_type.py`
+under `tests/scenarios/` exercise the typed pictures;
+`multiplexer/testing/lanes_test.py` and `multiplexer/threaded_lanes_test.py`
+the addressed one.
 
 <!-- generated by docs/diagrams/generate.py; edit that file, not this one -->

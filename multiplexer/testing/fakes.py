@@ -16,8 +16,10 @@ from typing import Any, Callable
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.clients import Client
+from multiplexer.mxclient import ConnectionWrapper, Lane
+from multiplexer.multiplexer_constants import types
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import Cluster, wait_until
+from multiplexer.testing import Cluster, Mx, wait_until
 
 # What a FakePeer handler returns: the reply payload (bytes, str or a
 # protocol buffer message), or None for no reply.
@@ -100,10 +102,13 @@ class _ScriptedBackend(BaseMultiplexerServer):
         self.peer = peer
 
     def handle_message(self, mxmsg: MultiplexerMessage) -> None:
-        """Record `mxmsg`, then reply as scripted or declare no response."""
+        """Record `mxmsg` and the multiplexer it came through, then reply as
+        scripted or declare no response."""
         peer = self.peer
+        via = peer.cluster.multiplexer_at(self.last_connwrap.endpoint)
         with peer._cond:
             peer.received.append(mxmsg)
+            peer._via[id(mxmsg)] = via
             peer._cond.notify_all()
         handler = peer._handlers.get(mxmsg.type)
         if handler is None:
@@ -121,6 +126,10 @@ class _ScriptedBackend(BaseMultiplexerServer):
         self.peer.errors.append(exc)
         return True
 
+    def should_respond_to_backend_for_packet_search(self) -> bool:
+        """Decline while the peer plays a draining backend."""
+        return not self.peer.declining_searches and super().should_respond_to_backend_for_packet_search()
+
 
 class FakePeer:
     """A scripted backend of `peer_type`, connected to every multiplexer of
@@ -130,30 +139,69 @@ class FakePeer:
     with a fixed payload, on() with what a handler returns; a type with no
     handler is received and dropped. `received` is every message in
     arrival order, messages(type) those of one type, wait_for(type, count)
-    blocks until enough have arrived. A handler that raises fails the test
-    at stop(), which also joins the thread; the requester meanwhile got a
-    BACKEND_ERROR. Use as a context manager or call start() and stop().
+    blocks until enough have arrived, via(mxmsg) is the multiplexer a
+    message came through and arrivals(type) pairs each message with it. A
+    handler that raises fails the test at stop(), which also joins the
+    thread; the requester meanwhile got a BACKEND_ERROR. Use as a context
+    manager or call start() and stop().
     """
 
-    def __init__(self, cluster: Cluster, peer_type: int, name: str | None = None):
+    def __init__(
+        self,
+        cluster: Cluster,
+        peer_type: int,
+        name: str | None = None,
+        endpoints: list[tuple[str, int]] | None = None,
+    ):
+        """`endpoints` restricts the peer to some of the cluster's
+        multiplexers, for a test of a peer that is behind one only."""
         self.cluster = cluster
         self.peer_type = peer_type
         self.name = name or "fake-peer-%d" % peer_type
+        self.endpoints = list(endpoints) if endpoints is not None else list(cluster.endpoints)
         self.received: list[MultiplexerMessage] = []
         self.errors: list[Exception] = []
         self._handlers: dict[int, tuple[Handler, int | None]] = {}
+        self._via: dict[int, Mx] = {}  # id(mxmsg) -> the Mx it came through
+        # True: decline every search for a backend, as a draining backend
+        # does, while still serving what arrives.
+        self.declining_searches = False
         self._cond = threading.Condition()
         self._thread = BackendThread(self._build, name=self.name)
 
     def _build(self) -> BaseMultiplexerServer:
         """The backend, built on the serving thread."""
-        return _ScriptedBackend(self, self.cluster.endpoints)
+        return _ScriptedBackend(self, self.endpoints)
 
     @property
     def backend(self) -> BaseMultiplexerServer | None:
         """The BaseMultiplexerServer behind the peer, once started; for what
         the script does not cover, such as sending from a handler."""
         return self._thread.backend
+
+    @property
+    def instance_id(self) -> int:
+        """The peer's instance id, once started: what a client addresses with `to`."""
+        backend = self.backend
+        assert backend is not None, "not started"
+        return backend.conn.instance_id
+
+    def via(self, mxmsg: MultiplexerMessage) -> Mx:
+        """The multiplexer a received message came through, so that a test
+        can say "all of these came the same way" without reading a recording."""
+        with self._cond:
+            return self._via[id(mxmsg)]
+
+    def arrivals(self, type: int, matching: Matcher | None = None) -> list[tuple[MultiplexerMessage, Mx]]:
+        """Every message of `type` received so far paired with the
+        multiplexer it came through, in arrival order; with `matching`,
+        those for which `matching(mxmsg)` is true."""
+        with self._cond:
+            return [
+                (mxmsg, self._via[id(mxmsg)])
+                for mxmsg in self.received
+                if mxmsg.type == type and (matching is None or matching(mxmsg))
+            ]
 
     def on(self, request_type: int, handler: Handler, reply_type: int | None = None) -> "FakePeer":
         """Answer every message of `request_type` with what `handler(mxmsg)`
@@ -169,9 +217,18 @@ class FakePeer:
         return self.on(request_type, lambda _: payload, reply_type)
 
     def start(self, timeout: float = 15) -> "FakePeer":
-        """Connect and serve; returns once every multiplexer has the peer registered."""
+        """Connect and serve; returns once every multiplexer the peer connects to has it registered."""
         self._thread.start(timeout)
-        self.cluster.wait_for_peer(self.peer_type, timeout=timeout)
+        if len(self.endpoints) == len(self.cluster.endpoints):
+            self.cluster.wait_for_peer(self.peer_type, timeout=timeout)
+        else:
+            for endpoint in self.endpoints:
+                multiplexer = self.cluster.multiplexer_at(endpoint)
+                wait_until(
+                    lambda: any(number == self.peer_type for _, _, number in multiplexer.connected_peers()),
+                    timeout,
+                    "%s registered on multiplexer %d" % (self.name, multiplexer.index),
+                )
         return self
 
     def stop(self, timeout: float = 10) -> None:
@@ -230,17 +287,55 @@ class TestClient:
         self.peer_type = peer_type
         self.client = Client(cluster.endpoints, type=peer_type)
 
-    def send(self, payload: Any, type: int, to: int = 0, flush: bool = True, **kwargs: Any) -> int:
+    @property
+    def instance_id(self) -> int:
+        """The client's instance id, what a peer addresses with `to`."""
+        return self.client.instance_id
+
+    def lane(self, pinned: bool = False, connection: ConnectionWrapper | None = None) -> Lane:
+        """A Lane for `multiplexer=`: one connection for a stream of messages; Client.lane() says the rest."""
+        return self.client.lane(pinned, connection)
+
+    def send(
+        self,
+        payload: Any,
+        type: int,
+        to: int = 0,
+        flush: bool = True,
+        multiplexer: int | Lane | ConnectionWrapper = Client.ONE,
+        **kwargs: Any,
+    ) -> int:
         """Send `payload` (bytes, str or a protocol buffer message) as a
-        message of `type`, routed by the rules or to instance `to`; flushed
-        to the socket by default. Returns the message id."""
+        message of `type`, routed by the rules or to instance `to`, through
+        one connection, a Lane's or a ConnectionWrapper's; flushed to the
+        socket by default. Returns the message id."""
         if to:
             kwargs["to"] = to
-        return self.client.send_message(payload, type=type, flush=flush, **kwargs)
+        return self.client.send_message(payload, type=type, flush=flush, multiplexer=multiplexer, **kwargs)
 
-    def query(self, payload: Any, type: int, timeout: float = 10) -> MultiplexerMessage:
-        """Send `payload` as a request of `type` and return the reply."""
-        return self.client.query(payload, type=type, timeout=timeout)
+    def query(
+        self,
+        payload: Any,
+        type: int,
+        timeout: float = 10,
+        to: int = 0,
+        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
+        multiplexer: int | Lane | ConnectionWrapper = Client.ONE,
+        with_connection: bool = False,
+    ) -> Any:
+        """Send `payload` as a request of `type` and return the reply; with
+        `to`, addressed to that instance, located with `probe` when it
+        moved; through a Lane or a ConnectionWrapper as `multiplexer`;
+        (reply, connection) with `with_connection`. Client.query() says the rest."""
+        return self.client.query(
+            payload,
+            type=type,
+            timeout=timeout,
+            to=to,
+            probe=probe,
+            multiplexer=multiplexer,
+            with_connection=with_connection,
+        )
 
     def receive(self, timeout: float = 10) -> MultiplexerMessage:
         """The next message addressed to this client."""

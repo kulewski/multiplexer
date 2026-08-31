@@ -282,6 +282,7 @@ cc_library(
         ":connections_manager",
         ":multiplexer_cc_constants",
         "//lib:fork",
+        "//lib:mutex",
         "//lib:spanset",
         "//lib:timer",
         "//lib:triple",
@@ -462,6 +463,18 @@ py_test(
     name = "aio_test",
     size = "medium",
     srcs = ["aio_test.py"],
+    deps = [
+        ":aio",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "threaded_lanes_test",
+    size = "medium",
+    srcs = ["threaded_lanes_test.py"],
     deps = [
         ":aio",
         ":multiplexer_constants",

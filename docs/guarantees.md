@@ -15,7 +15,10 @@ What the multiplexer promises, stated so that you can design around it.
   more than 2048 other messages arrived between the copies.
 - **Order holds per connection only.** Two messages from one peer through
   one multiplexer reach a backend in the order they were sent. Through two
-  multiplexers there is no order.
+  multiplexers there is no order. A lane keeps a stream on one connection
+  while that connection lives, so the stream is in order; at a failover
+  the lane moves and there is a gap or a reorder, once, unless the lane
+  is pinned, in which case the stream ends with `NotConnected` instead.
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type. For `ANY` a
   full peer is skipped in favour of the next one; for `ALL`, and when every
@@ -26,6 +29,9 @@ What the multiplexer promises, stated so that you can design around it.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
   delivery error means the search starts, the search finding nobody means
   `OperationFailed`, a stage running out of time means `OperationTimedOut`.
+  An addressed request, one with `to`, reaches that instance or nobody:
+  the instance gone means `OperationFailed`, and its being behind another
+  multiplexer than the one asked is bridged by the locate phase.
   A request that reached a backend which then died is repeated to another
   backend, so a backend must tolerate seeing the same request twice, or make
   its work idempotent. Every attempt is a new message with a new `id`: the
@@ -52,6 +58,11 @@ What the multiplexer promises, stated so that you can design around it.
 - **A backend dies mid-request.** The client waits out its timeout, searches,
   and repeats the request elsewhere; the total wait is up to three timeouts.
   [How a query is answered](query.md) shows it.
+- **The addressee of an addressed request dies or leaves.** Every
+  multiplexer reports it gone and the request fails with `OperationFailed`
+  at once; no other instance of its type gets it. An addressee that only
+  moved, behind a multiplexer the client's request did not go through, is
+  found by the locate phase within the one timeout.
 - **A multiplexer dies.** Backends reconnect within about 3 s. A synchronous
   client notices inside its next call, waits there for the reconnect and
   sends again, or uses another connection at once; a threaded client sends

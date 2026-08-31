@@ -30,6 +30,22 @@ asks every multiplexer who else handles the type and repeats the request to
 the first backend that answers. The caller sees a slow call instead of an
 error, which is the right outcome for a pool of interchangeable workers.
 
+**Can I send a request to one particular backend?**
+Yes: `query(..., to=instance_id)`, the id from an earlier reply's `from_`.
+Only that instance gets it; if it is gone the call fails with
+`OperationFailed` rather than going to another instance, and if it merely
+sits behind another multiplexer the client finds it. What the id names is
+one process: a session it holds dies with it, so a caller that keeps an
+instance id keeps the failure in mind. [How a query is answered](query.md#an-addressed-query)
+draws the stages.
+
+**Can I keep a stream of messages in order?**
+Through one connection, yes: `multiplexer=client.lane()` sends everything
+through the connection the first message took, and a query through the
+lane leaves it where the reply came from. Across a failover there is one
+gap or reorder, or, with `lane(pinned=True)`, a `NotConnected` instead.
+[Sending an event](events.md#through-a-lane-a-stream-in-order) shows it.
+
 **Can a backend receive the same request twice?**
 Yes. The original backend may have handled it and died before replying, or
 the connection may have died with the request on the wire; the client sends

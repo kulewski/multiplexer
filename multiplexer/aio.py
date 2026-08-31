@@ -22,6 +22,9 @@ asyncio.gather. Messages that are not replies, events and requests
 addressed to this peer, go to the subscriptions and to messages(); the io
 thread never waits for the loop, so a queue nobody drains drops its
 oldest message with a warning.
+
+A query with `to` is addressed, and `multiplexer=` takes a Lane from
+lane() or a ConnectionWrapper, as on ThreadedClient.
 """
 
 import asyncio
@@ -32,7 +35,8 @@ import threading
 from typing import Any, Awaitable, Callable
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.mxclient import NotConnected, OperationTimedOut
+from multiplexer.multiplexer_constants import types
+from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut
 from multiplexer.mxlog import WARNING, LOWVERBOSITY, log
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
 
@@ -125,34 +129,70 @@ class AsyncClient:
         except RuntimeError:
             pass  # the loop is closed; nobody is waiting
 
+    def lane(self, pinned: bool = False, connection: ConnectionWrapper | None = None) -> Lane:
+        """A Lane: one connection for a stream of messages, given as
+        `multiplexer=` to send_message() and query(); ThreadedClient.lane()
+        says the rest."""
+        return self._threaded.lane(pinned, connection)
+
     # Requests.
 
-    async def query(self, message: Any, type: int, timeout: float = DEFAULT_TIMEOUT) -> MultiplexerMessage:
+    async def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = DEFAULT_TIMEOUT,
+        to: int = 0,
+        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
+        multiplexer: int | Lane | ConnectionWrapper = ONE,
+        with_connection: bool = False,
+    ) -> Any:
         """Send a request and await its reply. Raises the same exceptions
         as the synchronous client: NotConnected, OperationTimedOut,
         OperationFailed, BackendError. Cancelling the await does not cancel
-        the request: a backend may still receive it, its reply is dropped."""
+        the request: a backend may still receive it, its reply is dropped.
+        `to`, `probe`, `multiplexer` and `with_connection` are
+        ThreadedClient.query()'s: an addressed query, how it locates its
+        addressee, a lane or a connection to go through, and (reply,
+        connection) as the result."""
         future = self._future()
-        self._threaded.query(message, type, timeout, callback=lambda result: self._settle(future, result))
+        self._threaded.query(
+            message,
+            type,
+            timeout,
+            callback=lambda result: self._settle(future, result),
+            to=to,
+            probe=probe,
+            multiplexer=multiplexer,
+            with_connection=with_connection,
+        )
         return await future
 
-    async def query_pickle(self, data: Any, type: int, timeout: float = DEFAULT_TIMEOUT) -> Any:
-        """query() with `data` pickled as the payload; the reply's payload unpickled."""
-        reply = await self.query(pickle.dumps(data), type, timeout)
+    async def query_pickle(self, data: Any, type: int, timeout: float = DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
+        """query() with `data` pickled as the payload; the reply's payload
+        unpickled. The kwargs are query()'s: `to`, `probe`, `multiplexer`."""
+        reply = await self.query(pickle.dumps(data), type, timeout, **kwargs)
         return pickle.loads(reply.message)
 
     # Sends.
 
     async def send_message(
-        self, message: Any, multiplexer: int = ONE, timeout: float = DEFAULT_TIMEOUT, **kwargs: Any
+        self,
+        message: Any,
+        multiplexer: int | Lane | ConnectionWrapper = ONE,
+        timeout: float = DEFAULT_TIMEOUT,
+        **kwargs: Any,
     ) -> int:
         """Send an event and await it reaching a socket; returns the message
         id. `message` is a MultiplexerMessage or a payload wrapped with the
         remaining kwargs, such as type= and to=. On one connection, resent
-        through another if the first dies under it, or on every connection
-        with multiplexer=ALL. Raises NotConnected when no connection took it
-        by `timeout`, OperationTimedOut when the write did not finish."""
+        through another if the first dies under it, on every connection
+        with multiplexer=ALL, on a Lane's connection, or on a
+        ConnectionWrapper's while it is live. Raises NotConnected when no
+        connection took it by `timeout`, or the pinned lane given is gone,
+        OperationTimedOut when the write did not finish."""
         future = self._future()
+        lane = multiplexer if isinstance(multiplexer, Lane) else None
         mxmsg_id = self._threaded.send_message(
             message,
             multiplexer,
@@ -163,7 +203,7 @@ class AsyncClient:
         )
         written = await future
         if written == 0:
-            raise NotConnected() if self.connections_count() == 0 else OperationTimedOut()
+            self._threaded._raise_for_nothing_written(lane)
         return mxmsg_id
 
     async def send_pickle(self, data: Any, **kwargs: Any) -> int:

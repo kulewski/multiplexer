@@ -11,13 +11,22 @@
 // Queries run as a state machine on the io thread, the same three stages as
 // Client::_query (request; search for a backend on every connection; the
 // request again to the backend found), each stage with its own deadline
-// timer. A connection dying under a query does not cost the query its
-// timeout: the request is sent again through another connection, or as
-// soon as one comes back, the way the synchronous Client does inside a
-// call. Many queries may be in flight at once, from any number of threads:
-// replies are matched by the ids they reference, never by arrival order.
-// The asynchronous form calls back on the io thread; the synchronous form
-// is the same thing behind a future.
+// timer. A request with `to` set is an addressed query, Client::_query_addressed
+// in shape: the middle stage locates that one instance, with a search or a
+// PING addressed to it, and the three stages share one deadline. A
+// connection dying under a query does not cost the query its timeout: the
+// request is sent again through another connection, or as soon as one
+// comes back, the way the synchronous Client does inside a call. Many
+// queries may be in flight at once, from any number of threads: replies
+// are matched by the ids they reference, never by arrival order. The
+// asynchronous form calls back on the io thread; the synchronous form is
+// the same thing behind a future.
+//
+// A Lane (basic_client.h) given to a send or a query keeps a stream on one
+// connection: the io thread writes the connection it used into the lane
+// and reads it back for the next message; a pinned lane refuses any other
+// connection. A ConnectionWrapper given instead is the connection to
+// prefer for one message.
 //
 // Everything else that arrives is handled here or handed to the on_message
 // callback given at construction: a late reply to a query that already
@@ -26,7 +35,9 @@
 // follow-up that is not the reply must not reference the request but be
 // addressed to the peer and correlated in the payload), REQUEST_RECEIVED
 // for an unknown id is dropped, a
-// PING without references is answered, and the rest, events and requests
+// PING without references is answered, a BACKEND_FOR_PACKET_SEARCH
+// addressed to this instance is answered with a PING, one routed by type
+// is dropped (this peer is no backend), and the rest, events and requests
 // addressed to this peer, go to on_message, or are logged and dropped when
 // there is none. Nothing is ever queued for a reader that may never come.
 //
@@ -99,33 +110,62 @@ public:
   // the io thread right after, so they are safe from callbacks. With no
   // live connection the message waits, on the io thread, for one to come
   // up within DEFAULT_TIMEOUT and is dropped with a warning after that.
+  // With a lane, on the lane's connection, which takes the connection
+  // chosen when it has none or lost its own; a pinned lane whose
+  // connection is gone drops the message with a warning, the lane being
+  // closed() for the caller to see.
   void send(const MultiplexerMessage &msg);
+  void send(const MultiplexerMessage &msg, LanePtr lane);
   void send_all(const MultiplexerMessage &msg);
+  // Through `connection`, the one a reply came through, while it is live,
+  // another when it is gone.
+  void send(const MultiplexerMessage &msg, const ConnectionWrapper &connection);
   // The flushing forms, from any thread but the io thread: wait until the
   // message reached the socket, on one connection (sent again through
   // another if the first dies under it, the way the synchronous Client's
-  // flush does) or on every connection, or until `timeout` passes. Return
-  // the number of connections it was written to; 0 means none in time.
+  // flush does), on the lane's, on `connection` or another, or on every
+  // connection, or until `timeout` passes. Return the number of
+  // connections it was written to; 0 means none in time, or a pinned lane
+  // whose connection is gone.
   unsigned int send(const MultiplexerMessage &msg, float timeout);
+  unsigned int send(const MultiplexerMessage &msg, LanePtr lane, float timeout);
+  unsigned int send(const MultiplexerMessage &msg, const ConnectionWrapper &connection, float timeout);
   unsigned int send_all(const MultiplexerMessage &msg, float timeout);
-  // The same three for an already serialized MultiplexerMessage (the
-  // Python side).
-  void send_serialized(std::string serialized);
+  // The same for an already serialized MultiplexerMessage (the Python
+  // side).
+  void send_serialized(std::string serialized, LanePtr lane = LanePtr());
   void send_all_serialized(std::string serialized);
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout);
+  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr());
   // The flushing send with a callback instead of a wait, safe from any
   // thread including the io thread: `done(written)` runs on the io thread
   // once the message reached the socket(s), or with 0 when `timeout`
   // passed or the client shut down first. What an asyncio layer awaits.
   typedef std::function<void(unsigned int)> SendCallback;
-  void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done);
+  void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
+                                     LanePtr lane = LanePtr());
   MultiplexerMessage new_message(boost::uint32_t type, const std::string &payload);
 
   // A request with a reply, see the file comment. The callback runs on the
   // io thread. The blocking form throws std::logic_error when called on the
-  // io thread, that is from a callback, where it would deadlock.
-  void query(const std::string &payload, boost::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT);
-  Result query(const std::string &payload, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT);
+  // io thread, that is from a callback, where it would deadlock. The
+  // message forms take the request as a whole, `to` included, and set its
+  // id and from per attempt; `probe` is how an addressed query locates its
+  // addressee. With a lane the request goes through the lane's connection
+  // and the lane adopts the connection the reply came through, a pinned
+  // lane allowing no other; with a connection, through that one while it
+  // is live.
+  void query(const std::string &payload, boost::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
+             LanePtr lane = LanePtr());
+  Result query(const std::string &payload, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT,
+               LanePtr lane = LanePtr());
+  void query(const MultiplexerMessage &msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
+             LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH);
+  Result query(const MultiplexerMessage &msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
+               Probe probe = PROBE_SEARCH);
+  void query(const MultiplexerMessage &msg, const ConnectionWrapper &connection, Callback callback,
+             float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH);
+  Result query(const MultiplexerMessage &msg, const ConnectionWrapper &connection, float timeout = DEFAULT_TIMEOUT,
+               Probe probe = PROBE_SEARCH);
 
   // Ends every in-flight query with SHUT_DOWN, closes the connections and
   // stops the io thread. Idempotent; the destructor calls it.
@@ -139,9 +179,13 @@ private:
   struct PendingSend;
   typedef std::shared_ptr<PendingSend> PendingSendPtr;
   void _orphan_teardown();
-  void _submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done);
+  void _submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
+                    LanePtr lane);
   void _attempt_send(const PendingSendPtr &pending) MX_RUN_ON(io_thread_);
   void _advance_sends() MX_RUN_ON(io_thread_);
+  BasicClient::BasicScheduledMessageTracker _schedule(const boost::shared_ptr<const RawMessage> &raw,
+                                                      const LanePtr &lane, ConnectionWrapper *used, bool *refused)
+      MX_RUN_ON(io_thread_);
   typedef boost::shared_ptr<InFlight> InFlightPtr;
 
   void _io_thread_main();
@@ -155,7 +199,9 @@ private:
   void _advance(InFlightPtr in_flight, const IncomingMessage &incoming) MX_RUN_ON(io_thread_);
   void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _direct(InFlightPtr in_flight, const IncomingMessage &ping) MX_RUN_ON(io_thread_);
+  void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
+  float _stage_timeout(const InFlightPtr &in_flight) const MX_RUN_ON(io_thread_);
   void _on_deadline(InFlightPtr in_flight, unsigned int generation, const boost::system::error_code &error)
       MX_RUN_ON(io_thread_);
   void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage *reply) MX_RUN_ON(io_thread_);

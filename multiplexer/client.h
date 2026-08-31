@@ -8,7 +8,14 @@
 // through one connection; on DELIVERY_ERROR or timeout, search every
 // connection for a backend of the type (BACKEND_FOR_PACKET_SEARCH), take the
 // first PING that answers, and repeat the request to that backend by
-// instance id. docs/query.md draws it.
+// instance id. docs/query.md draws it. A request with `to` set is an
+// addressed query, _query_addressed: the same shape, except that the
+// middle stage locates that one instance rather than any backend of the
+// type, and the three stages share one timeout.
+//
+// A Lane (basic_client.h) given to send or query keeps a stream of messages
+// on one connection, following a failover or, pinned, refusing one; a
+// ConnectionWrapper given instead is the connection to prefer.
 //
 // All calls run the io_service inline until they are done or time out;
 // nothing runs between calls. One Client per thread.
@@ -216,27 +223,52 @@ public:
   // the same one once reconnected, so a multiplexer restart between two
   // calls costs the reconnect delay, not the message. Throws NotConnected
   // when no connection exists by the deadline, OperationTimedOut otherwise.
-  ConnectionWrapper send(const MultiplexerMessage &msg, float timeout = DEFAULT_TIMEOUT) {
+  // With a lane, through the lane's connection, which takes the connection
+  // used when it has none or lost its own; a pinned lane whose connection
+  // is gone throws NotConnected.
+  ConnectionWrapper send(const MultiplexerMessage &msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr()) {
     basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
-    return _send_one(msg, *timer, ConnectionWrapper());
+    return _send_one(msg, *timer, ConnectionWrapper(), lane);
+  }
+  // Through `connection`, the one a reply came through, while it is live,
+  // and through another when it is gone, as a backend's reply goes back the
+  // way the request came. A pinned Lane seeded with the connection is the
+  // form that refuses any other.
+  ConnectionWrapper send(const MultiplexerMessage &msg, const ConnectionWrapper &connection,
+                         float timeout = DEFAULT_TIMEOUT) {
+    return send(msg, timeout, std::make_shared<Lane>(connection));
   }
 
   // A request with a reply. The payload overload fills in id, from and
   // type. Returns the reply as an IncomingMessage, whose `third` is the
-  // parsed message and `second` the connection it came on. Each stage of the
-  // algorithm gets its own `timeout`; see _query.
-  IncomingMessage query(const MultiplexerMessage &mxmsg, float timeout = DEFAULT_TIMEOUT) {
+  // parsed message and `second` the connection it came on. A typed request
+  // gives each stage of the algorithm its own `timeout`; a request with
+  // `to` set is addressed and its stages share one, see _query. With a
+  // lane, the request goes through the lane's connection and the lane
+  // adopts the connection the reply came through; `probe` is how an
+  // addressed query locates its addressee.
+  IncomingMessage query(const MultiplexerMessage &mxmsg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
+                        Probe probe = PROBE_SEARCH) {
     basic_client_->check_not_orphaned();
-    return _query(mxmsg, timeout);
+    return _query(mxmsg, timeout, lane, probe);
+  }
+  // Through `connection` while it is live, another when it is gone; a
+  // pinned Lane seeded with the connection is the form that refuses any
+  // other.
+  IncomingMessage query(const MultiplexerMessage &mxmsg, const ConnectionWrapper &connection,
+                        float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH) {
+    return query(mxmsg, timeout, std::make_shared<Lane>(connection), probe);
   }
 
-  IncomingMessage query(shared_ptr<const MultiplexerMessage> mxmsg, float timeout = DEFAULT_TIMEOUT) {
+  IncomingMessage query(shared_ptr<const MultiplexerMessage> mxmsg, float timeout = DEFAULT_TIMEOUT,
+                        LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH) {
     basic_client_->check_not_orphaned();
-    return _query(*mxmsg, timeout);
+    return _query(*mxmsg, timeout, lane, probe);
   }
 
-  IncomingMessage query(const std::string &message, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT) {
+  IncomingMessage query(const std::string &message, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT,
+                        LanePtr lane = LanePtr()) {
     basic_client_->check_not_orphaned();
 
     MultiplexerMessage mxmsg;
@@ -244,7 +276,7 @@ public:
     mxmsg.set_from(instance_id());
     mxmsg.set_type(type);
     mxmsg.set_message(message);
-    return _query(mxmsg, timeout);
+    return _query(mxmsg, timeout, lane, PROBE_SEARCH);
   }
 
   // Queues `msg` on every live connection; returns how many took it.
@@ -264,15 +296,18 @@ public:
 protected:
   // The query algorithm and the send-and-receive it is built on live in
   // client.cc; see the comments there.
-  IncomingMessage _query(const MultiplexerMessage &query, float timeout);
+  IncomingMessage _query(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe);
+  IncomingMessage _query_addressed(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _send_and_receive(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, bool schedule_all = false,
                                     bool handle_delivery_errors = false, boost::uint64_t accept_id = 0,
                                     boost::uint32_t ignore_type = 0, boost::uint64_t ignore_id = -1,
-                                    ConnectionWrapper connection = ConnectionWrapper());
+                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr());
   IncomingMessage _send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer &timer,
                                         std::vector<uint64_t> accept_ids, boost::uint32_t ignore_type,
-                                        boost::uint64_t ignore_id, ConnectionWrapper connection);
-  ConnectionWrapper _send_one(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, ConnectionWrapper preferred);
+                                        boost::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane);
+  ConnectionWrapper _send_one(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, ConnectionWrapper preferred,
+                              LanePtr lane = LanePtr());
+  MultiplexerMessage _probe_for(const MultiplexerMessage &query, Probe probe);
   IncomingMessage _receive(mx::SimpleTimer &timer, const std::vector<uint64_t> &accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper *watch = NULL, bool *lost = NULL);
 

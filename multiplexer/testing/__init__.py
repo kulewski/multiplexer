@@ -24,6 +24,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -453,6 +454,16 @@ class Cluster:
     def addresses(self) -> list[str]:
         """Every multiplexer's host:port, as the roles' --mx takes it."""
         return [multiplexer.address for multiplexer in self.mx]
+
+    def multiplexer_at(self, endpoint: tuple[str, int]) -> Mx:
+        """The Mx listening on `endpoint`, a (host, port) as a ConnectionWrapper
+        reports it; KeyError when none of this cluster does."""
+        for multiplexer in self.mx:
+            if multiplexer.port == endpoint[1] and socket.gethostbyname(multiplexer.host) == socket.gethostbyname(
+                endpoint[0]
+            ):
+                return multiplexer
+        raise KeyError("no multiplexer of this cluster listens on %s:%s" % endpoint)
 
     @property
     def endpoints(self) -> list[tuple[str, int]]:

@@ -109,6 +109,11 @@ type {
 - **Load balancing and fan-out from one rules file.** Round-robin across a
   backend pool, publish/subscribe to every subscriber, or direct addressing,
   chosen per message type, no code change ([rules](docs/rules.md)).
+- **One instance, one path, when it matters.** A request addressed to one
+  backend instance reaches it or fails, never another instance, and is
+  found again behind another multiplexer; a lane keeps a stream of
+  messages on one connection, in order, following a failover or pinned
+  ([lanes, pinning and addressed queries](docs/api_python.md#lanes-pinning-and-addressed-queries)).
 - **High performance, low latency.** One thread and one event loop per multiplexer, frames forwarded
   as they arrived, never re-serialized: over 100,000 request/reply round
   trips per second through one multiplexer on 70% of one core, 18 µs per

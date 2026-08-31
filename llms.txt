@@ -8,7 +8,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 
 - Prerequisites: Bazel 6.2.1 through Bazelisk (`.bazelversion`), a C++17 compiler (gcc 11 or newer, clang 18), `protoc` with `libprotobuf` of the same version, Python 3.10 or newer with headers and `python3-protobuf`; Boost, pybind11 and googletest are fetched by Bazel. Verified on clean Debian 12 and 13, Ubuntu 22.04 and 24.04 (docs/building.md). Without Bazel, `make` builds the same from the distribution's Boost, pybind11 (2.9 or newer) and googletest packages.
 - Consuming it: declare the repository as `@mx` with `git_repository`, call `mx_dependencies()` then `mx_setup()` in WORKSPACE, point the build at your rules file with `--@mx//:multiplexer_rules=`, depend on `@mx//multiplexer:clients` or `:servers` (Python) and `@mx//multiplexer:client` (C++); tests get `@mx//multiplexer/testing`.
-- Guarantees: a message is delivered at most once per multiplexer to whoever is connected now, nothing is queued or persisted; a request whose reply is late is sent again to another backend, so a backend may receive a request twice and every attempt has a new id; no authentication, for a trusted network (docs/guarantees.md).
+- Guarantees: a message is delivered at most once per multiplexer to whoever is connected now, nothing is queued or persisted; a request whose reply is late is sent again to another backend, so a backend may receive a request twice and every attempt has a new id; a request addressed to one instance (`to=`) reaches that instance or fails; order holds per connection, and a lane keeps a stream on one connection; no authentication, for a trusted network (docs/guarantees.md).
 - Reserved: peer types and message types 1 to 99 belong to the protocol; deployments use 100 and up in their own rules file, from which the constants are generated (docs/rules.md).
 
 ## Start here
@@ -28,7 +28,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 ## Reference
 
 - [The rules file](docs/rules.md)
-- [Using the Python library](docs/api_python.md): Client, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer
+- [Using the Python library](docs/api_python.md): Client, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer; lanes, pinning and addressed queries
 - [Which class to build on](docs/README.md#backend-or-client-which-class-to-build-on): backend or client, one table
 - [Using the C++ library](docs/api_cpp.md)
 - [mxcontrol](docs/mxcontrol.md)

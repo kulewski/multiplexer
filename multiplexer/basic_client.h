@@ -19,6 +19,7 @@
 
 #include "lib/assertion.h"
 #include "lib/functors.h"
+#include "lib/mutex.h"
 #include "lib/spanset.h"
 #include "lib/timer.h"
 #include "lib/triple.h"
@@ -32,6 +33,7 @@
 #include <boost/logic/tribool_io.hpp>
 #include <boost/shared_ptr.hpp>
 #include <deque>
+#include <memory>
 
 namespace multiplexer {
 
@@ -134,6 +136,8 @@ public:
     endpoint_ = other.endpoint_;
     return *this;
   }
+  // The multiplexer's address, kept after the connection is gone.
+  const BasicClientTraits::Endpoint &endpoint() const { return endpoint_; }
 
 private:
   Connection::weak_pointer conn_;
@@ -143,6 +147,74 @@ private:
   friend class Client;
   friend class ThreadedClient;
 };
+
+// One connection for a stream of messages, owned by the caller: a soft,
+// late pin, or made pinned, a hard one. A message sent or queried with a
+// lane goes through the lane's connection while it is live. Empty until
+// first use, when it pins itself to the connection the library chose; a
+// lane that is not pinned lets go at a failover, the library writing the
+// new connection into it, and adopts the connection a query's reply came
+// through, so the messages after a query follow the query. A pinned lane
+// is its first connection for good: once that connection is gone, every
+// send and query through the lane fails with NotConnected until the
+// caller makes a new lane, and a message of its that the dying connection
+// had not written is reported lost, never handed to another connection. A lane holds its connection weakly, like a
+// ConnectionWrapper, and nothing else, and the library keeps no registry
+// of lanes, so a lane lives exactly as long as the caller's pointer and
+// keeps nothing alive. Shared between the caller's thread and a
+// ThreadedClient's io thread, hence the mutex. docs/api_cpp.md, "Lanes".
+class Lane {
+public:
+  explicit Lane(bool pinned = false) : pinned_(pinned) {}
+  // Seeded with a connection, the one a reply came through.
+  explicit Lane(const ConnectionWrapper &connection, bool pinned = false)
+      : connection_(connection), pinned_(pinned), holds_(true) {}
+  Lane(const Lane &) = delete;
+  Lane &operator=(const Lane &) = delete;
+
+  bool pinned() const { return pinned_; }
+  // The connection held; empty until the first message went through.
+  ConnectionWrapper connection() const {
+    mx::MutexLock lock(mutex_);
+    return connection_;
+  }
+  // Whether a connection was ever written into the lane.
+  bool holds_connection() const {
+    mx::MutexLock lock(mutex_);
+    return holds_;
+  }
+  // Whether the connection held is live.
+  bool connected() const { return static_cast<bool>(connection()); }
+  // A pinned lane whose connection is gone: nothing goes through it any
+  // more.
+  bool closed() const {
+    mx::MutexLock lock(mutex_);
+    return pinned_ && holds_ && !connection_;
+  }
+  // The library writes the connection it used or a reply came through;
+  // public because the Python synchronous client runs the algorithm in
+  // Python. A pinned lane takes the first connection only.
+  void adopt(const ConnectionWrapper &connection) {
+    mx::MutexLock lock(mutex_);
+    if (pinned_ && holds_)
+      return;
+    connection_ = connection;
+    holds_ = true;
+  }
+
+private:
+  mutable mx::Mutex mutex_;
+  ConnectionWrapper connection_ MX_GUARDED_BY(mutex_);
+  const bool pinned_;
+  bool holds_ MX_GUARDED_BY(mutex_) = false;
+};
+typedef std::shared_ptr<Lane> LanePtr;
+
+// How an addressed query locates its addressee when the request did not
+// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which a
+// backend declines while it drains, or a PING, which a peer answers as
+// long as it lives. docs/query.md, "An addressed query".
+enum Probe { PROBE_SEARCH, PROBE_PING };
 
 // The three ways a client call fails; Client inherits them and the Python
 // binding maps them to exceptions of the same names. NotConnected: no live
@@ -432,6 +504,8 @@ public:
   // A connection that shuts down with unsent messages offers them here; they
   // are spread round robin over the live connections, and whatever no
   // connection takes stays in the buffer and is reported lost by the caller.
+  // A message pinned to its connection (RawMessage::pinned, a pinned lane's)
+  // is never handed over: it is reported lost, which is what the pin means.
   template <typename MessagesBuffer> void inline handle_orphaned_outgoing_messages(MessagesBuffer &outgoing_messages) {
     MX_DCHECK_RUN_ON(&owner_thread());
     std::list<Connection::pointer> working_connections;
@@ -442,6 +516,8 @@ public:
           working_connections.push_back(conn);
 
     BOOST_FOREACH (typename MessagesBuffer::value_type &message, outgoing_messages) {
+      if (message.second->pinned())
+        continue;
 
       for (size_t n = working_connections.size(); n; --n) {
         if (working_connections.front()->take_over(message)) {

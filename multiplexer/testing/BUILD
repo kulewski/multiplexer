@@ -72,6 +72,13 @@ py_test(
 )
 
 py_test(
+    name = "lanes_test",
+    size = "medium",
+    srcs = ["lanes_test.py"],
+    deps = [":testing"],
+)
+
+py_test(
     name = "config_test",
     size = "small",
     srcs = ["config_test.py"],

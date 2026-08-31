@@ -59,9 +59,9 @@ class BasicClient(mxclient.Client):
     @log_call
     def query(self, *args, **kwargs):
         """Like mxclient.Client.query, but a BACKEND_ERROR reply raises BackendError."""
-        mxmsg = super(BasicClient, self).query(*args, **kwargs)
-        self.__check_backend_error(mxmsg)
-        return mxmsg
+        result = super(BasicClient, self).query(*args, **kwargs)
+        self.__check_backend_error(result[0] if kwargs.get("with_connection") else result)
+        return result
 
     def __check_backend_error(self, mxmsg):
         """Raise BackendError if `mxmsg` is a BACKEND_ERROR reply."""
@@ -72,9 +72,11 @@ class BasicClient(mxclient.Client):
     # MultiplexerServer (or any backend using send_pickle) with another.
     # Only between Python peers, and only where the network is trusted,
     # since unpickling runs code.
-    def query_pickle(self, data: Any, type: int, timeout: float = mxclient.DEFAULT_TIMEOUT) -> Any:
-        """query() with `data` pickled as the payload; returns the reply's payload unpickled."""
-        return pickle.loads(self.query(pickle.dumps(data), type, timeout).message)
+    def query_pickle(self, data: Any, type: int, timeout: float = mxclient.DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
+        """query() with `data` pickled as the payload; returns the reply's
+        payload unpickled. The kwargs are query()'s: `to`, `probe`,
+        `multiplexer`."""
+        return pickle.loads(self.query(pickle.dumps(data), type, timeout, **kwargs).message)
 
     def send_pickle(self, data: Any, **kwargs: Any) -> int:
         """send_message() with `data` pickled as the payload; the kwargs are send_message's."""

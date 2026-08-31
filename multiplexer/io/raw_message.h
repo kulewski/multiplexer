@@ -67,6 +67,14 @@ public:
   inline Usability usability() const { return usability_; }
   inline const std::string &get_message() const { return contents_; }
 
+  // A message pinned to its connection: when that connection dies with the
+  // message still unsent, the client reports it lost instead of handing it
+  // to another connection (BasicClient::handle_orphaned_outgoing_messages).
+  // Set by the client for a pinned lane; mutable because a queued message
+  // is shared as const.
+  inline void mark_pinned() const { pinned_ = true; }
+  inline bool pinned() const { return pinned_; }
+
   /* ASIO reading buffers (for reading RawMessage from channel) */
   // returns buffer for reading-in RawMessage header
   inline boost::asio::mutable_buffer get_header_buffer() {
@@ -114,6 +122,7 @@ private:
   boost::uint32_t length_, crc32_;
   std::string header_;
   std::string contents_;
+  mutable bool pinned_ = false;
   std::list<boost::asio::const_buffer> writing_buffers_; // buffers that can be used in write operations
 };
 

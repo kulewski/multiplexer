@@ -72,6 +72,73 @@ graph LR
   style M1 fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
+## Through a lane: a stream in order
+
+Round robin spreads consecutive events over the connections, and order holds
+per connection only, so a stream of events to one receiver can arrive out of
+order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
+keeps a stream on one connection, a soft and late pin: the first event
+through it pins it to the connection the library chose, and every later
+one follows. When that connection dies, the lane lets go and takes
+another, and the stream goes on from there, with a gap or a reorder at the
+failover and no other; a pinned lane, `lane(pinned=True)`, is the hard pin
+and refuses instead, raising `NotConnected`, for a stream that must not be
+split. A query through a lane leaves it on the connection
+the reply came through, so the events after a request follow the request.
+
+### 1. The lane takes the first connection used
+
+Event 1 goes through multiplexer 1, chosen round robin; the lane now holds that connection. Event 2 follows it, where round robin would have sent it through multiplexer 2.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    S[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    L1[backend 1]
+  end
+  S -- "event 1" --> M1
+  S -- "event 2" --> M1
+  M1 -- "events 1, 2" --> L1
+  S -- "event 3" --> M2
+  M2 -- "event 3" --> L1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 0,1,2 stroke:#d62828,stroke-width:3px
+  style S fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
+### 2. Multiplexer 1 dies; the lane moves
+
+Event 3 finds the lane's connection gone, goes through multiplexer 2, and the lane holds that connection from now on. The backend saw events 1 and 2 in order, then event 3; a pinned lane would have raised `NotConnected` here instead.
+
+```mermaid
+graph LR
+  subgraph col0 [Clients]
+    S[client]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Backends]
+    L1[backend 1]
+  end
+  S -- "event 1" --> M1
+  S -- "event 2" --> M1
+  M1 -- "events 1, 2" --> L1
+  S -- "event 3" --> M2
+  M2 -- "event 3" --> L1
+  linkStyle default stroke:#a0a0a0,stroke-width:1px
+  linkStyle 3,4 stroke:#d62828,stroke-width:3px
+  style S fill:#fde8e8,stroke:#d62828,stroke-width:2px
+  style M2 fill:#fde8e8,stroke:#d62828,stroke-width:2px
+```
+
 ## Through every connection
 
 `multiplexer=ALL` in Python, also available as `Client.event()`, and

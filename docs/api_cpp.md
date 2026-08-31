@@ -48,20 +48,24 @@ client.shutdown();
   multiplexer is unreachable; the connection is retried every 3 s while the
   library runs. `async_connect(host, port)` takes a literal IP address and
   returns at once; `wait_for_connection(wrapper, timeout)` waits for it.
-- `query(payload, type, timeout = 10)` and `query(mxmsg, timeout)` send a
-  request and return an `IncomingMessage`, a triple whose `third` is a
-  `shared_ptr<MultiplexerMessage>` with the reply and whose `second` is the
-  connection it came on. The algorithm is the one in
-  [how a query is answered](query.md): one connection first, then a search
-  on all of them, then the request again to the backend found, each stage
-  with its own `timeout`. Throws `Client::OperationFailed` when no backend
-  can be found, `Client::OperationTimedOut` when a stage runs out of time,
+- `query(payload, type, timeout = 10, lane = nullptr)` and `query(mxmsg,
+  timeout, lane, probe)` send a request and return an `IncomingMessage`, a
+  triple whose `third` is a `shared_ptr<MultiplexerMessage>` with the
+  reply and whose `second` is the connection it came on. The algorithm is
+  the one in [how a query is answered](query.md): one connection first,
+  then a search on all of them, then the request again to the backend
+  found, each stage with its own `timeout`. A message with `to` set is an
+  addressed query, with one `timeout` for its stages, see
+  [below](#lanes-pinning-and-addressed-queries). Throws
+  `Client::OperationFailed` when no backend can be found,
+  `Client::OperationTimedOut` when a stage runs out of time,
   `Client::NotConnected` when no connection is live. All three derive from
   `Client::MxClientError`, which derives from `std::exception`.
-- `send(mxmsg, timeout)` writes an event through one connection and returns
-  it, replacing a connection that dies under the write or waiting for the
-  reconnect within `timeout`: the way to send an event from a client that
-  may have lost its connection since the last call.
+- `send(mxmsg, timeout, lane = nullptr)` writes an event through one
+  connection and returns it, replacing a connection that dies under the
+  write or waiting for the reconnect within `timeout`: the way to send an
+  event from a client that may have lost its connection since the last
+  call. `send(mxmsg, connection, timeout)` prefers that connection.
 - `schedule_one(mxmsg)` queues an event on one connection and returns a
   `ScheduledMessageTracker`; `schedule_one(mxmsg, wrapper, timeout)` picks
   the connection. `schedule_all(mxmsg)` queues it on every connection and
@@ -77,6 +81,45 @@ client.shutdown();
 A message built by hand must carry `set_id(client.random64())` and
 `set_from(client.instance_id())`, or the receiving library drops it. The
 `query(payload, type)` overload does that for you.
+
+### Lanes, pinning and addressed queries
+
+The same on `Client` and `ThreadedClient`; the reasoning is in
+[the Python API](api_python.md#lanes-pinning-and-addressed-queries).
+
+- **An addressed query** is a `query(mxmsg, ...)` whose message has
+  `set_to(instance_id)`: only that instance ever gets it. When a
+  multiplexer reports the instance is not behind it, or the connection
+  dies under the wait, the client probes for it on every connection and
+  repeats the request through the connection that found it; an instance
+  nobody has is `OperationFailed` (`FAILED`) at once; one `timeout`
+  covers the stages. The probe is `PROBE_SEARCH` by default, a
+  `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which a draining
+  backend declines, or `PROBE_PING`, answered as long as the peer lives.
+  The library sets `report_delivery_error` on the request. The old
+  behaviour of `Client::query` with `to`, a search by type and the
+  request to whichever backend answered, is gone.
+- **A lane**, `multiplexer::Lane` in `multiplexer/basic_client.h`, held as
+  `LanePtr` (a `std::shared_ptr<Lane>`), is a soft, late pin, or, made
+  pinned, the hard one; it keeps a stream on one connection: `send(msg, lane)`, `send(msg, lane, timeout)` and
+  `query(..., lane)` go through the lane's connection, the first message
+  taking the connection the library chose, a query leaving the lane on
+  the connection the reply came through. A lane that is not pinned takes
+  another connection when its own dies; `Lane(true)` is pinned and
+  refuses, `send` returning 0 and `query` `NOT_CONNECTED`
+  (`NotConnected` on `Client`) once `closed()`, and a pinned message a
+  dying connection had not written is reported lost, never handed to
+  another connection (`RawMessage::pinned`). `Lane(connection, pinned)`
+  seeds a lane. `connection()`, `holds_connection()`, `connected()`,
+  `closed()`, `pinned()` read it. A lane holds its connection weakly and
+  the library keeps no registry, so it lives as long as your `LanePtr`; a
+  query in flight holds it until it ends. Safe to share with the io
+  thread.
+- **A connection**, `send(msg, connection)`, `send(msg, connection,
+  timeout)` and `query(msg, connection, ...)`, is preferred for that
+  message and replaced when gone, as `send_message` in a backend replies
+  the way the request came. `Result::reply.second` and
+  `IncomingMessage::second` are where a connection comes from.
 
 ## BaseMultiplexerServer
 
@@ -180,27 +223,37 @@ client.send(client.new_message(multiplexer::types::SOME_EVENT, "payload"));
 client.shutdown();
 ```
 
-- `query(payload, type, timeout)` blocks and returns a `Result`: `outcome`
-  is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend anywhere), `NOT_CONNECTED`
-  or `SHUT_DOWN`, and `check()` returns the reply or throws the exception
-  `Client::query` would have. Any number of threads may call it at once;
-  replies are matched by the ids they reference. Called on the io thread,
-  from a callback, it throws `std::logic_error` rather than deadlock. The
-  callback form returns at once and runs the callback on the io thread.
+- `query(payload, type, timeout, lane)` blocks and returns a `Result`: `outcome`
+  is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend anywhere, or the
+  addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and `check()` returns
+  the reply or throws the exception `Client::query` would have. `query(msg,
+  timeout, lane, probe)` takes the request as a whole, `to` included, and
+  sets its id and from per attempt: the addressed form, and
+  `query(msg, connection, ...)` prefers a connection, see
+  [above](#lanes-pinning-and-addressed-queries). Any number of threads may
+  call it at once; replies are matched by the ids they reference. Called
+  on the io thread, from a callback, it throws `std::logic_error` rather
+  than deadlock. The callback form returns at once and runs the callback
+  on the io thread.
 - `send(msg)` and `send_all(msg)` queue a message on one or every
   connection and return at once; the io thread writes it right after, and a
-  message that finds no live connection waits there for one. Both are safe
-  from callbacks. `send(msg, timeout)` and `send_all(msg, timeout)` are the
-  flushing forms: they wait until the message reached the socket, resending
-  through another connection if the first dies under it, and return the
-  number of connections written to, 0 on timeout; not from callbacks.
+  message that finds no live connection waits there for one. `send(msg,
+  lane)` and `send(msg, connection)` choose the connection. All are safe
+  from callbacks. `send(msg, timeout)`, `send(msg, lane, timeout)`,
+  `send(msg, connection, timeout)` and `send_all(msg, timeout)` are the
+  flushing forms: they wait until the message reached the socket,
+  resending through another connection if the first dies under it, and
+  return the number of connections written to, 0 on timeout or for a
+  pinned lane whose connection is gone; not from callbacks.
   `new_message()` fills in id and from.
 - The `MessageSink` given to the constructor runs on the io thread with
   every message that is not a reply to a query or one of the protocol's
   own: events and requests addressed to this peer. Without one such
   messages are logged and dropped; nothing is queued. A late reply to a
-  query that already ended, `REQUEST_RECEIVED` for an untracked query and
-  a `PING`, which the client answers itself, never reach it. The
+  query that already ended, `REQUEST_RECEIVED` for an untracked query, a
+  `PING`, which the client answers itself, and a
+  `BACKEND_FOR_PACKET_SEARCH`, answered with a `PING` when addressed to
+  this instance and dropped when routed by type, never reach it. The
   late-reply rule binds the peers that send to this client: `references`
   means "this is the reply", and what references a query this client has
   seen answered (the last 1024) is dropped whatever its type, so a

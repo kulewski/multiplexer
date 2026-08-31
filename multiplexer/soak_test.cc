@@ -48,6 +48,7 @@ struct InProcessMultiplexer {
 struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
   EchoBackend(const multiplexer::backend::MultiplexerAddresses &addresses)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  boost::uint64_t instance_id() const { return conn->instance_id(); }
   void handle_message(multiplexer::MultiplexerMessage &mxmsg) override {
     std::string payload = mxmsg.message();
     for (char &character : payload)
@@ -66,6 +67,28 @@ void run_queries(ThreadedClient &client, int count) {
   }
 }
 
+// The same through lanes and by address: typed queries on one lane,
+// addressed queries on it with either probe, a lane made and dropped per
+// query, a flushing send per query, and the reply's connection preferred.
+void run_lane_queries(ThreadedClient &client, boost::uint64_t backend_id, int count) {
+  multiplexer::LanePtr lane(new multiplexer::Lane());
+  for (int index = 0; index < count; ++index) {
+    ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 10, lane);
+    ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
+    multiplexer::MultiplexerMessage request = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "hello");
+    request.set_to(backend_id);
+    result = client.query(request, 10, lane, index % 2 ? multiplexer::PROBE_PING : multiplexer::PROBE_SEARCH);
+    ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
+    ASSERT_EQ("HELLO", result.reply.third->message());
+    multiplexer::LanePtr dropped(new multiplexer::Lane(index % 3 == 0));
+    result = client.query(request, 10, dropped);
+    ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
+    ASSERT_EQ(1, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "event"), dropped, 10));
+    result = client.query(request, result.reply.second, 10);
+    ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
+  }
+}
+
 } // namespace
 
 TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
@@ -74,10 +97,10 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   addresses.push_back(std::make_pair(std::string("127.0.0.1"), mx.port));
   // The backend is built and driven on one thread, as the library requires.
   std::atomic<bool> keep_serving{true};
-  std::promise<void> backend_ready;
+  std::promise<boost::uint64_t> backend_ready;
   std::thread backend_thread([&] {
     EchoBackend backend(addresses);
-    backend_ready.set_value();
+    backend_ready.set_value(backend.instance_id());
     while (keep_serving) {
       try {
         backend.loop_iter(0.2f);
@@ -85,16 +108,18 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
       }
     }
   });
-  backend_ready.get_future().wait();
+  boost::uint64_t backend_id = backend_ready.get_future().get();
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 
   run_queries(client, 2000); // warm-up: buffers, caches, the dedup window, the ring of finished query ids
+  run_lane_queries(client, backend_id, 200);
   size_t before = mx::heap_in_use_bytes();
   run_queries(client, 8000);
+  run_lane_queries(client, backend_id, 1000); // five thousand more, through lanes and by address
   size_t after = mx::heap_in_use_bytes();
   // The three peers share this heap; a leak per message would be megabytes.
-  EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after << " bytes over 8000 queries";
+  EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after << " bytes over 13000 queries";
 
   keep_serving = false;
   backend_thread.join();

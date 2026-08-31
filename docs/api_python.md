@@ -43,7 +43,8 @@ connections. A connection that fails or drops is retried every 3 s, but only
 while the library is running its loop, which for a client means inside calls.
 The peer type must be marked `is_passive` in the rules file.
 
-- `query(message, type, timeout=10)`: sends a request and returns the reply, a
+- `query(message, type, timeout=10, to=0, probe=types.BACKEND_FOR_PACKET_SEARCH, multiplexer=Client.ONE, with_connection=False)`:
+  sends a request and returns the reply, a
   `MultiplexerMessage`. `message` is bytes, a `str` (encoded as UTF-8), or a
   protocol buffer message (serialized). The request goes through one
   connection; if it comes back as a delivery error, or nothing comes back
@@ -54,12 +55,18 @@ The peer type must be marked `is_passive` in the rules file.
   when a stage runs out of time, `NotConnected` when there is no live
   connection, and `BackendError` when the backend answered with
   `BACKEND_ERROR`, which the Python backend does when its handler raised.
-  [How a query is answered](query.md) draws it.
+  [How a query is answered](query.md) draws it. With `to`, the instance
+  id of one peer, the query is addressed: only that peer ever gets it,
+  located again with `probe` when a multiplexer no longer has it, and one
+  `timeout` covers the stages; `multiplexer` and `with_connection` are for
+  lanes and pinning. All three are described under
+  [Lanes, pinning and addressed queries](#lanes-pinning-and-addressed-queries).
 - `send_message(message, type=..., to=0, multiplexer=Client.ONE, flush=False, timeout=10)`:
   queues an event and returns its message id. `multiplexer=Client.ONE` uses
   one connection; `Client.ALL` uses every connection, in which case the
   receivers drop the copies; a `ConnectionWrapper` from an earlier reply
-  picks that connection. `flush=True` waits until the message reached the
+  prefers that connection, and a `Lane` from `lane()` keeps a stream on
+  one, see below. `flush=True` waits until the message reached the
   socket, every socket for `ALL`, and it is what makes an event survive a
   dead connection: the call notices, waits for the reconnect within
   `timeout`, and writes the event again, or uses another connection at
@@ -106,6 +113,65 @@ fork-aware. Such a program holds one `ThreadedClient` per process instead;
 `multiplexer.mxclient`: `NotConnected`, `OperationTimedOut` and
 `OperationFailed`, all subclasses of `MultiplexerClientError`;
 `BackendError` is in `multiplexer.clients`.
+
+### Lanes, pinning and addressed queries
+
+The same on `Client`, `ThreadedClient` and `AsyncClient`. A message has
+two coordinates the caller may fix: the peer it is for and the path it
+takes.
+
+**The peer: `to=`.** `query(..., to=instance_id)` is an addressed query:
+the request carries `to`, and only that peer ever gets it. When a
+multiplexer reports the peer is not behind it, or the connection dies
+under the wait, the client locates the peer with a probe addressed to it
+on every connection and repeats the request through the connection that
+found it; a peer nobody has is `OperationFailed`, at once, never a detour
+to another instance of its type; one `timeout` covers the three stages,
+and a request that gets no answer at all within it is `OperationTimedOut`
+without a probe, since a silent peer is one the multiplexer still has.
+The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance,
+which a draining backend declines, so a request does not reach a backend
+on its way out; `probe=types.PING` reaches it even then, for a request
+that must land, such as tearing down a session the backend still holds.
+The instance id comes from a reply, `reply.from_`, or from the peer
+itself, `instance_id`. [How a query is answered](query.md#an-addressed-query)
+draws the stages.
+
+**The path: `multiplexer=`.** Two pins, a soft one and a hard one, both
+a `Lane`, the small object `client.lane()` returns and the caller owns:
+`multiplexer=lane` on `send_message()` and `query()` sends through the
+lane's connection. A lane is a soft, late pin: empty until its first
+message, which pins it to the connection the library chose; every later
+one follows, so a stream of events arrives in order, and a query
+through the lane leaves it on the connection the reply came through, so
+the events after a request follow the request. When the connection dies
+the lane lets go and takes another, with a gap or a reorder at the
+failover and no other; a sequencer on the receiving side is for that.
+`lane(pinned=True)` is the hard pin: once its connection is gone, every
+send and query through it raises `NotConnected`, and `lane.closed` says
+so, until the caller makes a new lane; a pinned lane is the guarantee
+that everything through it went through one multiplexer, down to the
+messages a dying connection had not written yet, which are reported
+lost rather than handed to another connection as any other message is. `lane(connection=c)` seeds a
+lane with a connection a reply came through, pinned or not. A lane holds
+its connection weakly and the library keeps no registry of lanes, so a
+lane lives as long as your reference and keeps nothing alive; a query in
+flight holds it until it ends. `multiplexer=connection`, a
+`ConnectionWrapper`, prefers that connection for one message and uses
+another when it is gone, which is how a backend's reply goes back the way
+the request came; `query(..., with_connection=True)` returns `(reply,
+connection)` so that a later message can go the same way. A lane never
+carries `to`: keep the peer id beside it.
+
+| | the peer | the path |
+|---|---|---|
+| hard pin, fails loudly | `to=instance_id`, `OperationFailed` when the instance is gone | `lane(pinned=True)`, `NotConnected` when its connection is gone |
+| soft pin, follows a move | the locate phase of an addressed query | `lane()`, pinned late to its first connection, taking the next when it dies |
+| preferred only | | `multiplexer=connection` |
+| where the value comes from | `reply.from_`, `peer.instance_id` | `with_connection=True`, or the lane a query updated |
+
+`multiplexer=` on `query()` takes `ONE`, a lane or a connection, never
+`ALL`. The C++ forms are in [the C++ API](api_cpp.md#lanes-pinning-and-addressed-queries).
 
 ## BaseMultiplexerServer
 
@@ -225,25 +291,30 @@ client.send_message(b"payload", type=types.SOME_EVENT, multiplexer=ThreadedClien
 client.shutdown()
 ```
 
-- `query(message, type, timeout=10, callback=None)` is the same three-stage
-  algorithm as `Client.query()` and raises the same exceptions, plus
-  `threaded_client.BackendError`. Any number of threads may call it at
-  once; replies are matched to queries by the ids they reference, never by
-  arrival order. With `callback` it returns `None` at once and calls
-  `callback(result)` on the io thread with the reply or with the exception
-  instance, the shape C++'s callback overload has. The blocking form raises
-  `RuntimeError` when called from a callback, where it would block the io
-  thread.
-- `send_message(message, type=..., multiplexer=ONE|ALL, flush=False,
-  timeout=10)` queues an event on one connection, or on all of them, and
-  returns its message id at once; the io thread writes it right after, and
-  a message that finds no live connection waits there for one within
-  `timeout`. With `flush=True` it waits until the message reached the
-  socket, resending through another connection if the first dies under it,
-  and raises `OperationTimedOut` or `NotConnected`; the flushing form must
+- `query(message, type, timeout=10, callback=None, to=0, probe=..., multiplexer=ONE, with_connection=False)`
+  is the same three-stage algorithm as `Client.query()` and raises the
+  same exceptions, plus `threaded_client.BackendError`; `to`, `probe`,
+  `multiplexer` and `with_connection` are
+  [the same too](#lanes-pinning-and-addressed-queries). Any number of
+  threads may call it at once; replies are matched to queries by the ids
+  they reference, never by arrival order. With `callback` it returns
+  `None` at once and calls `callback(result)` on the io thread with the
+  reply, `(reply, connection)` with `with_connection`, or with the
+  exception instance, the shape C++'s callback overload has. The blocking
+  form raises `RuntimeError` when called from a callback, where it would
+  block the io thread.
+- `send_message(message, type=..., multiplexer=ONE|ALL|lane|connection, flush=False,
+  timeout=10)` queues an event on one connection, on all of them, on a
+  lane's or on a connection's, and returns its message id at once; the
+  io thread writes it right after, and a message that finds no live
+  connection waits there for one within `timeout`, except through a
+  pinned lane whose connection is gone, which raises `NotConnected` at
+  once. With `flush=True` it waits until the message reached the socket,
+  resending through another connection if the first dies under it, and
+  raises `OperationTimedOut` or `NotConnected`; the flushing form must
   not be called from a callback. The same call and the same result as on
-  `Client`.
-- `query_pickle(data, type, timeout, callback=None)` and
+  `Client`. `lane(pinned=False, connection=None)` makes a lane.
+- `query_pickle(data, type, timeout, callback=None, **query_kwargs)` and
   `send_pickle(data, ...)`: the pickle convention, as on `Client`; with a
   callback, it gets the unpickled reply or the exception.
 - `on_message(mxmsg)`, given at construction, runs on the io thread with
@@ -297,18 +368,22 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   block its loop even once. One client belongs to one loop, the way a
   synchronous `Client` belongs to one thread; a call from another loop
   raises `RuntimeError`.
-- `await query(message, type, timeout=10)` returns the reply and raises
-  the same exceptions as the synchronous client: `NotConnected`,
-  `OperationTimedOut`, `OperationFailed`, `BackendError`.
-  `await query_pickle(data, type)` for the pickle convention. Cancelling
-  the await does not cancel the request: a backend may still get it, the
-  reply is dropped.
+- `await query(message, type, timeout=10, to=0, probe=..., multiplexer=ONE, with_connection=False)`
+  returns the reply and raises the same exceptions as the synchronous
+  client: `NotConnected`, `OperationTimedOut`, `OperationFailed`,
+  `BackendError`; `to`, `probe`, `multiplexer` and `with_connection` are
+  [the same too](#lanes-pinning-and-addressed-queries), and `lane()` makes
+  a lane. `await query_pickle(data, type)` for the pickle convention.
+  Cancelling the await does not cancel the request: a backend may still
+  get it, the reply is dropped.
 - `await send_message(message, multiplexer=ONE, timeout=10, **fields)`
   returns the message id once the message reached a socket, every socket
-  for `ALL`, resent through another connection if the first dies under it;
-  raises `NotConnected` when nothing took it by the deadline. It is the
-  only send: an await costs the loop microseconds and blocks nothing, and
-  many at once is `asyncio.gather`. `await send_pickle(data, ...)` likewise.
+  for `ALL`, a lane's or a connection's for those, resent through another
+  connection if the first dies under it; raises `NotConnected` when
+  nothing took it by the deadline, or the pinned lane given is gone. It
+  is the only send: an await costs the loop microseconds and blocks
+  nothing, and many at once is `asyncio.gather`. `await send_pickle(data,
+  ...)` likewise.
 - `subscribe(type, handler, matching=None)` runs `handler(mxmsg)` on the
   loop for every message of `type` (`None` for all) that `matching`
   accepts; a coroutine function runs as a task. A handler that raises, at
@@ -400,8 +475,10 @@ class SearchTest(unittest.TestCase):
   `wait_for_peer_gone(type_or_name, timeout=15)` until none does; each
   `Mx` in `mx` has `connected_peers()`, `stop()`, `kill()`, `restart()`,
   `pause()`, `resume()` and, with `record=True`, `record_file`.
-- `FakePeer(cluster, peer_type, name=None)` is a scripted backend on its own
-  thread. `reply_with(request_type, payload, reply_type=None)` answers every
+- `FakePeer(cluster, peer_type, name=None, endpoints=None)` is a scripted
+  backend on its own thread, connected to every multiplexer of the
+  cluster or to the `endpoints` given, for a peer that is behind one
+  only. `reply_with(request_type, payload, reply_type=None)` answers every
   request of that type with the payload as a reply of `reply_type`, the
   request's type by default; `on(request_type, handler, reply_type=None)`
   answers with what `handler(mxmsg)` returns, or nothing for `None`. It keeps
@@ -409,18 +486,27 @@ class SearchTest(unittest.TestCase):
   filters, and `wait_for(type, count=1, timeout=10, matching=None)` blocks
   for them; `matching` is a predicate on the `MultiplexerMessage`, so a
   wait names the message it means, `wait_for(types.SEARCH_REQUEST,
-  matching=lambda m: m.message == b"pears")`. A type it has no script for
-  is received and dropped. A handler that raises makes the
+  matching=lambda m: m.message == b"pears")`. `via(mxmsg)` is the `Mx`
+  a received message came through and `arrivals(type, matching=None)`
+  pairs each message with it, so a test of a lane asserts
+  `len({peer.via(m) for m in chunks}) == 1` without reading a recording.
+  `instance_id` is what a client addresses with `to=`;
+  `declining_searches = True` makes the fake decline backend searches as
+  a draining backend does, while it keeps serving. A type it has no
+  script for is received and dropped. A handler that raises makes the
   requester get `BACKEND_ERROR` and makes `stop()` raise, so the test fails.
 - `BackendThread(factory, poll=0.05, name=None)` serves a
   `BaseMultiplexerServer` of yours on its own thread: `factory()` builds it
   there, `start()` returns once it is connected, `stop()` asks it to leave
   and re-raises what serving raised; `backend` is the instance.
 - `TestClient(cluster, peer_type)` sends and queries from the test:
-  `send(payload, type, to=0, flush=True)` returns the message id, `query(payload,
-  type, timeout=10)` returns the reply, `receive(timeout)` the next message
-  addressed to it; `client` is the `clients.Client` underneath. Its peer type
-  should be `is_passive`, as for every synchronous client.
+  `send(payload, type, to=0, flush=True, multiplexer=ONE)` returns the
+  message id, `query(payload, type, timeout=10, to=0, probe=...,
+  multiplexer=ONE, with_connection=False)` returns the reply,
+  `receive(timeout)` the next message addressed to it, `lane(pinned=False,
+  connection=None)` a lane for `multiplexer=`, `instance_id` its id;
+  `client` is the `clients.Client` underneath. Its peer type should be
+  `is_passive`, as for every synchronous client.
 - `wait_until(predicate, timeout, what)` polls until the predicate returns
   something true and returns it, or raises `TimeoutError` naming `what`.
 - `spawn(role, lang, mx, type, **options)` runs a peer as a process and

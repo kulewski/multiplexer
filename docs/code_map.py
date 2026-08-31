@@ -59,6 +59,16 @@ INDEX = [
         "`Client::_query`; `Client.query` in `multiplexer/mxclient.py`",
     ),
     (
+        "An addressed query: one instance, located when it moved",
+        "multiplexer/client.cc",
+        "`Client::_query_addressed`; `__query_addressed` in `multiplexer/mxclient.py`; `_search` in `multiplexer/threaded_client.cc`",
+    ),
+    (
+        "Lanes: a stream on one connection, pinned or following a failover",
+        "multiplexer/basic_client.h",
+        "`Lane`; `_schedule` in `multiplexer/threaded_client.cc`, `_send_one` in `multiplexer/client.cc`",
+    ),
+    (
         "A client with its own io thread, queries in flight at once",
         "multiplexer/threaded_client.h",
         "`ThreadedClient`; `multiplexer/threaded_client.py` for Python",

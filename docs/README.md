@@ -109,7 +109,9 @@ graph LR
 - A message reaches a connected peer of the right type, or is dropped. There
   is no queue for peers that are not there and no persistence across restarts.
 - A request either gets its answer or the call fails with a timeout or a
-  delivery error, so the caller always knows.
+  delivery error, so the caller always knows. A request addressed to one
+  instance reaches that instance or fails; it never goes to another.
+- Order holds per connection; a lane keeps a stream on one connection.
 - Delivery is at most once per multiplexer; sending through several
   multiplexers can produce copies, which the receiving library drops by
   message id.

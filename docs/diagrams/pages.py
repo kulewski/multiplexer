@@ -223,13 +223,114 @@ itself with `DELIVERY_ERROR` marked `is_known_type`, and the client raises
                 ),
             ],
         ),
+        Section(
+            "An addressed query",
+            """
+A request with `to` set, the instance id of one peer, is an addressed query:
+only that peer ever gets it, never another instance of its type. It has the
+same three stages, with the middle one locating that instance instead of
+searching for any backend, and one `timeout` covering all three. The
+picture shows the moment that needs the middle stage: multiplexer 1 has
+just restarted, the client is back on it, and the addressee is not yet.
+Two instances of the type exist; the request is for instance 2.
+""",
+            columns=[
+                Column("Clients", [("Q", "client")]),
+                Column("Multiplexers", [("M1", "multiplexer 1"), ("M2", "multiplexer 2")]),
+                Column("Backends", [("B1", "instance 1"), ("B2", "instance 2")]),
+            ],
+            edges=[
+                Edge("Q", "M1", "request, to: instance 2"),  # 0
+                Edge("M1", "Q", "DELIVERY_ERROR, failed_to"),  # 1
+                Edge("Q", "M1", "probe, to: instance 2"),  # 2
+                Edge("Q", "M2", "probe, to: instance 2"),  # 3
+                Edge("M1", "Q", "DELIVERY_ERROR"),  # 4
+                Edge("M2", "B2", "probe"),  # 5
+                Edge("B2", "M2", "PING"),  # 6
+                Edge("M2", "Q", "PING"),  # 7
+                Edge("Q", "M2", "request again, to: instance 2"),  # 8
+                Edge("M2", "B2", "request"),  # 9
+                Edge("B2", "M2", "reply"),  # 10
+                Edge("M2", "Q", "reply"),  # 11
+                Edge("M1", "B1", "connected"),  # 12
+                Edge("M2", "B1", "connected"),  # 13
+            ],
+            steps=[
+                Step(
+                    "The client sends the request through one connection",
+                    "With `to` set and a delivery error requested, through the lane's "
+                    "connection when the call gave a lane, else any live one; here "
+                    "multiplexer 1. A reply would end the query here, as it does whenever "
+                    "the addressee is behind the multiplexer chosen.",
+                    [0],
+                    ["Q"],
+                ),
+                Step(
+                    "The multiplexer does not have the instance",
+                    "Instance 2 has not reconnected to multiplexer 1 yet, so it answers at "
+                    "once with `DELIVERY_ERROR` naming the instance in `failed_to`. Instance 1, "
+                    "of the same type, is right there and does not get the request: an "
+                    "addressed query never takes a detour.",
+                    [1],
+                    ["M1"],
+                ),
+                Step(
+                    "The client probes for the instance on every connection",
+                    "The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, "
+                    "which a backend declines while it drains, or with `probe=PING` a `PING`, "
+                    "which a peer answers as long as it lives, for a request that must land "
+                    "even then. Delivery errors are requested, so a multiplexer without the "
+                    "instance says so. The connection dying under the first stage leads here "
+                    "too. A request that simply gets no answer within the timeout does not: "
+                    "a silent addressee is one the multiplexer still has, and a probe would "
+                    "find the same one.",
+                    [2, 3],
+                    ["Q"],
+                ),
+                Step(
+                    "One multiplexer says no, the other delivers",
+                    "Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the probe "
+                    "to instance 2. Every connection failing would end the query with "
+                    "`OperationFailed`, at once: the instance is gone.",
+                    [4, 5],
+                    ["M1", "M2"],
+                ),
+                Step(
+                    "The instance answers with a PING",
+                    "Through the multiplexer that has it, which the client now knows.",
+                    [6, 7],
+                    ["B2"],
+                ),
+                Step(
+                    "The client repeats the request through that connection",
+                    "A fresh id, the same `to`, through the connection the `PING` came on. A "
+                    "lane given to the call adopts that connection, so what the caller sends "
+                    "next follows the query. A reply to the first attempt arriving late is "
+                    "accepted too, so a slow instance may see the request twice.",
+                    [8, 9],
+                    ["Q"],
+                ),
+                Step(
+                    "Instance 2 answers",
+                    "The reply ends the query. Nothing within the timeout is `OperationTimedOut`; "
+                    "a `DELIVERY_ERROR` for the repeated request, the instance leaving between "
+                    "the probe and the request, is `OperationFailed`.",
+                    [10, 11],
+                    ["B2"],
+                ),
+            ],
+        ),
     ],
     outro="""
-Where this lives: `Client::_query` in `multiplexer/client.h` and
-`Client.query` in `multiplexer/mxclient.py`; the search is routed in
-`Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
-`query_one.py`, `round_robin.py`, `backend_dies.py`, `two_mx_backends_on_each.py`
-and `unrouted_type.py` under `tests/scenarios/` exercise these pictures.
+Where this lives: `Client::_query` and `Client::_query_addressed` in
+`multiplexer/client.cc`, `Client.query` in `multiplexer/mxclient.py`, and
+the state machine of `multiplexer/threaded_client.cc` for the threaded and
+asyncio clients; the search is routed in `Server::_handle_meta_message` in
+`multiplexer/server.h`. Scenarios `query_one.py`, `round_robin.py`,
+`backend_dies.py`, `two_mx_backends_on_each.py` and `unrouted_type.py`
+under `tests/scenarios/` exercise the typed pictures;
+`multiplexer/testing/lanes_test.py` and `multiplexer/threaded_lanes_test.py`
+the addressed one.
 """,
 )
 
@@ -284,6 +385,53 @@ live ones.
                     "multiplexer, one connection is enough to reach them all.",
                     [2, 3],
                     ["M1"],
+                ),
+            ],
+        ),
+        Section(
+            "Through a lane: a stream in order",
+            """
+Round robin spreads consecutive events over the connections, and order holds
+per connection only, so a stream of events to one receiver can arrive out of
+order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
+keeps a stream on one connection, a soft and late pin: the first event
+through it pins it to the connection the library chose, and every later
+one follows. When that connection dies, the lane lets go and takes
+another, and the stream goes on from there, with a gap or a reorder at the
+failover and no other; a pinned lane, `lane(pinned=True)`, is the hard pin
+and refuses instead, raising `NotConnected`, for a stream that must not be
+split. A query through a lane leaves it on the connection
+the reply came through, so the events after a request follow the request.
+""",
+            columns=[
+                Column("Clients", [("S", "client")]),
+                Column("Multiplexers", [("M1", "multiplexer 1"), ("M2", "multiplexer 2")]),
+                Column("Backends", [("L1", "backend 1")]),
+            ],
+            edges=[
+                Edge("S", "M1", "event 1"),  # 0
+                Edge("S", "M1", "event 2"),  # 1
+                Edge("M1", "L1", "events 1, 2"),  # 2
+                Edge("S", "M2", "event 3"),  # 3
+                Edge("M2", "L1", "event 3"),  # 4
+            ],
+            steps=[
+                Step(
+                    "The lane takes the first connection used",
+                    "Event 1 goes through multiplexer 1, chosen round robin; the lane now "
+                    "holds that connection. Event 2 follows it, where round robin would have "
+                    "sent it through multiplexer 2.",
+                    [0, 1, 2],
+                    ["S"],
+                ),
+                Step(
+                    "Multiplexer 1 dies; the lane moves",
+                    "Event 3 finds the lane's connection gone, goes through multiplexer 2, and "
+                    "the lane holds that connection from now on. The backend saw events 1 and 2 "
+                    "in order, then event 3; a pinned lane would have raised `NotConnected` "
+                    "here instead.",
+                    [3, 4],
+                    ["S", "M2"],
                 ),
             ],
         ),
