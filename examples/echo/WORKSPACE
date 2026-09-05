@@ -1,0 +1,37 @@
+# A workspace that consumes the multiplexer as @mx, the way your own would.
+workspace(name = "echo_example")
+
+# This example lives inside the multiplexer repository, so it points at the
+# checkout it is in. Your own workspace would pin a released commit instead:
+#
+#     load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+#
+#     git_repository(
+#         name = "mx",
+#         commit = "<commit sha>",
+#         remote = "https://github.com/kulewski/multiplexer.git",
+#     )
+#
+# or, without git on the build machine:
+#
+#     load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+#
+#     http_archive(
+#         name = "mx",
+#         sha256 = "<sha256 of the archive>",
+#         strip_prefix = "multiplexer-<commit sha>",
+#         urls = ["https://github.com/kulewski/multiplexer/archive/<commit sha>.tar.gz"],
+#     )
+local_repository(
+    name = "mx",
+    path = "../..",
+)
+
+# The two load-and-call pairs below stay the same either way.
+load("@mx//bazel:deps.bzl", "mx_dependencies")
+
+mx_dependencies()
+
+load("@mx//bazel:setup.bzl", "mx_setup")
+
+mx_setup()

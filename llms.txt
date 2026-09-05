@@ -1,0 +1,54 @@
+# Multiplexer
+
+> A lightweight, highly available message broker for request/reply and publish/subscribe messaging between microservices on a trusted internal network: peers connect over TCP, announce a peer type, and exchange typed messages routed by a declarative rules file, with round-robin load balancing, fan-out and automatic failover across active-active instances. Stateless, no single point of failure. C++17 core, C++ and Python client libraries, built with Bazel.
+
+Vocabulary used everywhere: a peer is a client (passive, sends requests or events) or a backend (runs the library loop, receives, may answer); both talk to multiplexers.
+
+## Facts to know before reading further
+
+- Prerequisites: Bazel 6.2.1 through Bazelisk (`.bazelversion`), a C++17 compiler (gcc 11 or newer, clang 18), `protoc` with `libprotobuf` of the same version, Python 3.10 or newer with headers and `python3-protobuf`; Boost, pybind11 and googletest are fetched by Bazel. Verified on clean Debian 12 and 13, Ubuntu 22.04 and 24.04 (docs/building.md).
+- Consuming it: declare the repository as `@mx` with `git_repository`, call `mx_dependencies()` then `mx_setup()` in WORKSPACE, point the build at your rules file with `--@mx//:multiplexer_rules=`, depend on `@mx//multiplexer:clients` or `:servers` (Python) and `@mx//multiplexer:client` (C++); tests get `@mx//multiplexer/testing`.
+- Guarantees: a message is delivered at most once per multiplexer to whoever is connected now, nothing is queued or persisted; a request whose reply is late is sent again to another backend, so a backend may receive a request twice and every attempt has a new id; no authentication, for a trusted network (docs/guarantees.md).
+- Reserved: peer types and message types 1 to 99 belong to the protocol; deployments use 100 and up in their own rules file, from which the constants are generated (docs/rules.md).
+
+## Start here
+
+- [Overview](docs/README.md): what it is, the words, the healthy deployment, what it promises
+- [Ten-minute walkthrough](docs/walkthrough.md): run a multiplexer, a backend and a client
+- [Working on this repository](AGENTS.md): layout, commands, conventions, how to add things
+- [Code map](docs/code_map.md): one line per source file and where each mechanism lives
+
+## Protocol, step by step
+
+- [How a query is answered](docs/query.md)
+- [Sending an event](docs/events.md)
+- [How the multiplexer routes a message](docs/routing.md)
+- [Connecting to a multiplexer](docs/handshake.md)
+
+## Reference
+
+- [The rules file](docs/rules.md)
+- [Using the Python library](docs/api_python.md)
+- [Using the C++ library](docs/api_cpp.md)
+- [mxcontrol](docs/mxcontrol.md)
+- [The wire format](docs/wire_format.md)
+- [Guarantees, failure modes and defaults](docs/guarantees.md)
+- [Building](docs/building.md): prerequisites verified on clean Debian and Ubuntu, bring-your-own protobuf, configurations, docker/check.sh
+- [Operations](docs/operations.md): several multiplexers, restarts, logs, the peers file, recording what was routed
+- [Testing programs built on it](docs/api_python.md#testing): multiplexer.testing, real multiplexers on ephemeral ports, scripted peers, the mx_integration_test macro
+- [Questions people ask](docs/faq.md)
+
+## Recipes
+
+- [Add a peer type or a message type](docs/recipes/add_a_message_type.md)
+- [Add an integration test scenario](docs/recipes/add_a_scenario.md)
+- [Add an mxcontrol subcommand](docs/recipes/add_an_mxcontrol_subcommand.md)
+- [Change a timeout or a limit](docs/recipes/change_a_default.md)
+- [Use the client from a threaded web server](docs/recipes/web_server.md)
+
+## Optional
+
+- [Integration tests](tests/README.md)
+- [Scenario index, one picture each](tests/scenarios/README.md)
+- [Examples as separate workspaces](examples/README.md)
+- [The echo example](examples/echo/README.md)

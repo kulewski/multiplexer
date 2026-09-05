@@ -1,0 +1,61 @@
+// What a multiplexer writes with --record: a stream of Record messages,
+// varint-length-prefixed (lib/protobuf/stream.h), one per event. The first
+// is a RecordingHeader; then a PeerEvent for every peer that registers or
+// leaves, and a RoutedMessage for every delivery attempt at the routing
+// point, one per recipient. docs/operations.md describes it from the
+// outside; multiplexer/recording.py reads it.
+package multiplexer;
+
+option optimize_for = SPEED;
+
+message RecordingHeader {
+  optional uint64 multiplexer_id = 1;   // the instance id of the multiplexer that wrote the file
+  optional string rules_sha1 = 2;       // SHA-1 of its rules file; the generated constants carry the same
+  optional uint64 started_us = 3;       // when recording started, microseconds since the epoch
+  optional uint32 payload_limit = 4;    // --record-payload-bytes; 0 means payloads are complete
+}
+
+message PeerEvent {
+  enum Kind {
+    CONNECTED = 1;      // the peer's welcome was accepted
+    DISCONNECTED = 2;   // its connection ended
+  }
+  optional Kind kind = 1;
+  optional uint64 peer_id = 2;
+  optional uint32 peer_type = 3;
+}
+
+message RoutedMessage {
+  enum Disposition {
+    DELIVERED = 1;      // queued on the recipient's connection
+    NO_RECIPIENT = 2;   // nobody of the type, or the `to` instance, is connected
+    UNKNOWN_TYPE = 3;   // the type has no entry in the rules file
+    NO_RULE = 4;        // the type has an entry but no routing rule, and no `to`
+    QUEUE_FULL = 5;     // the recipient's outgoing queue was full
+  }
+  // The envelope, as received.
+  optional uint64 id = 1;
+  optional uint64 from = 2;
+  optional uint64 to = 3;
+  optional uint64 references = 4;
+  optional uint32 type = 5;
+  optional string workflow = 6;
+  optional uint32 from_peer_type = 7;   // the type of the peer whose connection it arrived on
+  // The recipient as routing resolved it: an instance id for a delivery,
+  // the intended instance id or peer type for a failure.
+  optional uint64 recipient = 8;
+  optional uint32 recipient_peer_type = 9;
+  optional Disposition disposition = 10;
+  optional bool error_reported = 11;    // a DELIVERY_ERROR goes back to the sender for this
+  optional bytes payload = 12;
+  optional bool truncated = 13;         // payload cut at the --record-payload-bytes limit
+}
+
+message Record {
+  optional uint64 timestamp_us = 1;     // microseconds since the epoch
+  oneof event {
+    RecordingHeader header = 2;
+    PeerEvent peer = 3;
+    RoutedMessage routed = 4;
+  }
+}

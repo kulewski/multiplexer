@@ -1,0 +1,63 @@
+// What a test role reports, one Event per line of stdout in protocol buffer
+// text format, the same from the Python and the C++ roles and from a binary
+// of your own that plays a role. multiplexer.testing parses the lines;
+// tests/README.md says which fields each event carries. Every field is
+// optional: an event sets the ones it has.
+syntax = "proto2";
+
+package mxtesting;
+
+message Event {
+    // "connected", "request", "response", "error", "done", ... (see README)
+    required string event = 1;
+
+    // which worker thread of a client role, and which query of its list
+    optional int32 worker = 2;
+    optional int32 round = 3;
+    optional int32 index = 4;
+
+    // message identification
+    optional uint32 query_type = 5;
+    optional uint32 type = 6;
+    optional uint64 id = 7;
+    optional uint64 from_ = 8;
+    optional uint64 to = 9;
+    optional uint64 references = 10;
+
+    // timing and payload
+    optional double ms = 11;
+    optional string payload = 12;   // present when short
+    optional uint64 size = 13;
+    optional string sha256 = 14;    // present when the payload is long
+
+    // outcomes and counters
+    optional string kind = 15;      // the exception's name, for "error"
+    optional uint64 instance_id = 16;
+    optional uint32 connections = 17;
+    optional string name = 18;
+    optional bool threaded = 19;
+    optional int32 workers = 20;
+    optional int32 responses = 21;
+    optional int32 errors = 22;
+    optional int32 sent = 23;
+    optional int32 received = 24;
+    optional int32 handled = 25;
+    optional bool in_queue = 26;
+    optional bool is_sent = 27;
+    optional bool is_lost = 28;
+
+    // a stdout line that was not an event, kept by the harness
+    optional string line = 29;
+
+    // "memory" events, every --memory-every messages: after how many, the
+    // C heap in use (mx::heap_in_use_bytes), and for Python roles the
+    // interpreter's own allocations (tracemalloc) and its object count
+    optional int64 after = 30;
+    optional uint64 heap_bytes = 31;
+    optional uint64 py_bytes = 32;
+    optional int64 objects = 33;
+
+    // "draining": the backend stopped answering searches and will exit
+    // after this many seconds
+    optional double drain_seconds = 34;
+}

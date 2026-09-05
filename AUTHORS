@@ -1,0 +1,14 @@
+Multiplexer was designed and first prototyped in Python by Krzysztof Kulewski
+at Azouk Network Ltd. in 2008. The C++ implementation and the client
+libraries that this repository grew out of were written by Piotr Findeisen at
+Azouk in 2008-2009. Azouk Network Ltd. released the code under the MIT
+license. Since 2010 the project has been owned, maintained and developed by
+Krzysztof Kulewski. See LICENSE for the copyright holders.
+
+Author and maintainer since 2010
+
+    Krzysztof Kulewski <kulewski at gmail.com>
+
+Original C++ implementation, Azouk Network Ltd., 2008-2009
+
+    Piotr Findeisen <piotr.findeisen at gmail.com>
