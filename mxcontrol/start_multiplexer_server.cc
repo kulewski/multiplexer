@@ -66,14 +66,17 @@ int StartMultiplexerServer::run() {
   server->clear_rules();
   server->read_rules(rules_file_);
   server->set_memory_log_every(memory_log_every_);
+  {
+    std::ifstream rules(rules_file_.c_str(), std::ios::binary);
+    std::string rules_text((std::istreambuf_iterator<char>(rules)), std::istreambuf_iterator<char>());
+    server->set_rules_sha1(mx::sha1_hex(rules_text));
+  }
+  server->set_recording_dir(recording_dir_);
+  server->set_allow_tap(allow_tap_);
   if (!record_file_.empty()) {
-    std::unique_ptr<multiplexer::Recorder> recorder(new multiplexer::Recorder(record_file_, record_payload_bytes_));
-    if (recorder->ok()) {
-      std::ifstream rules(rules_file_.c_str(), std::ios::binary);
-      std::string rules_text((std::istreambuf_iterator<char>(rules)), std::istreambuf_iterator<char>());
-      recorder->header(server->instance_id(), mx::sha1_hex(rules_text));
-      server->set_recorder(std::move(recorder));
-    }
+    std::string error;
+    if (!server->start_recording(record_file_, "", record_payload_bytes_, 0, 0, &error))
+      MX_LOG(ERROR, LOWVERBOSITY, TEXT("--record: " + error));
   }
   if (!peers_file_.empty())
     server->set_peers_file(peers_file_);

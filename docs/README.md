@@ -139,7 +139,7 @@ Each page is one fixed picture whose arrows light up one step at a time.
   [testing](api_python.md#testing) with `multiplexer.testing` and reading a
   recording.
 - [mxcontrol](mxcontrol.md): running a multiplexer, the log tools, dumping
-  a recording.
+  and driving a recording.
 - [The wire format](wire_format.md): frames, the envelope, the handshake and
   the protocol's own messages, for peers written without the library.
 - [Guarantees, failure modes and defaults](guarantees.md): what is promised,
@@ -147,7 +147,8 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Building](building.md): the packages a clean machine needs, bringing
   your own protobuf, the build configurations, the Docker check.
 - [Operations](operations.md): several multiplexers, restarts, logs, the
-  peers file, recording what was routed, sizing.
+  peers file, recording what was routed and driving it on a running
+  cluster, sizing.
 - [Questions people ask](faq.md): why it is built this way.
 - [Code map](code_map.md): one line per source file and where each
   mechanism lives, generated from the files' header comments.

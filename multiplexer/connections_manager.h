@@ -62,7 +62,7 @@ protected:
   // The instance id is drawn once here; it is what the peer announces in its
   // welcome and what `from` and `to` fields refer to.
   ConnectionsManager(boost::asio::io_service &io_service) : io_service_(io_service), instance_id_(random_()) {
-    MX_LOG(INFO, LOWVERBOSITY,
+    MX_LOG(DEBUG, HIGHVERBOSITY,
            CTX("ConnectionsManager") TEXT("created new ConnectionsManager with id " + repr(instance_id_)));
   }
 
@@ -284,11 +284,13 @@ public:
   inline const Config &config() const { return config_; }
   void clear_rules() { config_.clear(); }
   void read_rules(const std::string &file) { config_.read_configuration(file); }
-  // The queue_size the rules file gives `peer_type`, or the default.
+  // The queue_size the rules file gives `peer_type`, or the default for a
+  // type it does not name (a reserved one the derived class accepted).
   unsigned int outgoing_queue_max_size(boost::uint32_t peer_type) const {
     if (config_.initialized()) {
-      Assert(config_.peer_by_type().find(peer_type) != config_.peer_by_type().end());
-      return config_.peer_by_type().find(peer_type)->second.queue_size();
+      typename Config::PeerDescriptionById::const_iterator entry = config_.peer_by_type().find(peer_type);
+      if (entry != config_.peer_by_type().end())
+        return entry->second.queue_size();
     }
     return DEFAULT_OUT_QUEUE_SIZE;
   }

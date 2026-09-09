@@ -9,8 +9,10 @@ namespace mxcontrol {
 // run_multiplexer: run one multiplexer until SIGINT or SIGTERM. Options:
 // --rules (the rules file), --address host:port (0.0.0.0:1980; port 0 picks
 // a free port), --port-file (where to write the bound address), --record
-// and --record-payload-bytes (the recording), --peers-file (the connected
-// peers, rewritten on every change). See docs/mxcontrol.md.
+// and --record-payload-bytes (a recording from the start), --recording-dir
+// and --allow-tap (recording sessions and taps peers may ask for),
+// --peers-file (the connected peers, rewritten on every change). See
+// docs/mxcontrol.md.
 class StartMultiplexerServer : public Task {
 public:
   virtual int run();
@@ -33,6 +35,10 @@ protected:
         "append every peer event and delivery attempt to this file (Recording.proto records)")(
         "record-payload-bytes", po::value(&record_payload_bytes_)->default_value(0),
         "keep only the first N bytes of each recorded payload; 0 keeps all")(
+        "recording-dir", po::value(&recording_dir_),
+        "let peers start and stop recording sessions over the protocol, written to this directory")(
+        "allow-tap", po::bool_switch(&allow_tap_),
+        "let peers receive every record over their connection (RECORDING_CONTROL TAP)")(
         "peers-file", po::value(&peers_file_),
         "rewrite this file with the connected peers on every registration and unregistration");
   }
@@ -48,6 +54,8 @@ private:
   unsigned int memory_log_every_;
   std::string record_file_;
   unsigned int record_payload_bytes_;
+  std::string recording_dir_;
+  bool allow_tap_ = false;
   std::string peers_file_;
 };
 

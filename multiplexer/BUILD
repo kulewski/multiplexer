@@ -112,6 +112,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":multiplexer_constants",
+        ":mxclient",
         ":recording_py_proto",
     ],
 )
@@ -244,6 +245,16 @@ cc_test(
         ":in_process_multiplexer",
         ":multiplexer_cc_constants",
         ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "recorder_test",
+    size = "small",
+    srcs = ["recorder_test.cc"],
+    deps = [
+        ":recorder",
         "@com_google_googletest//:gtest_main",
     ],
 )

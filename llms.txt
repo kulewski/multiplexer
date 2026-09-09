@@ -34,7 +34,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 - [The wire format](docs/wire_format.md)
 - [Guarantees, failure modes and defaults](docs/guarantees.md)
 - [Building](docs/building.md): prerequisites verified on clean Debian and Ubuntu, bring-your-own protobuf, configurations, docker/check.sh
-- [Operations](docs/operations.md): several multiplexers, restarts, logs, the peers file, recording what was routed
+- [Operations](docs/operations.md): several multiplexers, restarts, logs, the peers file, recording what was routed, starting and tapping a recording on a running cluster
 - [Testing programs built on it](docs/api_python.md#testing): multiplexer.testing, real multiplexers on ephemeral ports, scripted peers, the mx_integration_test macro
 - [Questions people ask](docs/faq.md)
 

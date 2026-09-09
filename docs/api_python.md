@@ -399,11 +399,45 @@ a shared build machine looks like.
 ## Recording
 
 `multiplexer.recording.read(path)` yields the `Record` messages of a file
-written by `run_multiplexer --record`, checking that the recording's rules
-match the generated constants (`check_rules=False` to skip);
+written by a multiplexer, checking that the recording's rules match the
+generated constants (`check_rules=False` to skip); `read_many(paths)`
+merges several files by time, each record tagged with its multiplexer;
 `describe(record)` renders one with names, `involves_peer(record, id)`
 filters by instance id. A `Cluster(record=True)` records every multiplexer;
 [operations](operations.md#recording) describes the file.
+
+The same module drives recording on running multiplexers, through any
+client connected to them, for example one of the reserved controller type,
+which needs no rules entry and is accepted when the multiplexer was
+started with `--recording-dir` or `--allow-tap`:
+
+```python
+from multiplexer import recording
+from multiplexer.clients import Client
+
+controller = Client(endpoints, type=recording.RECORDING_CONTROLLER)
+for status in recording.start(controller, "checkout-bug", max_seconds=600):
+    print(status.multiplexer_id, status.error or status.path)
+...
+recording.stop(controller)
+```
+
+- `start(client, label, payload_limit=0, max_bytes=None, max_seconds=0)`,
+  `stop(client)` and `status(client)` send one `RecordingControl` on every
+  connection and return the `RecordingStatus` of every multiplexer that
+  answered within `timeout`: `recording`, `path`, `label`, `bytes`,
+  `records`, `stopped` (why the last session ended), `taps`, `tapping`,
+  `dropped`, and `error` when the request was refused. `max_bytes=None`
+  leaves the multiplexer's default cap, 0 removes it.
+- `tap(client, payload_limit=0, timeout=10)` subscribes on every connection
+  and returns an iterator over the records as they are routed, each with
+  `multiplexer_id`; it raises `OperationTimedOut` after `timeout` seconds
+  without one. Records the client does not read in time are dropped and
+  counted in the status. `control(client, RecordingControl.UNTAP)` ends it.
+- In a test, `Cluster(remote_recording=True)` starts every multiplexer with
+  both options and one shared `recording_dir`; `cluster.recording_files()`
+  lists the sessions written, and `mxcontrol("recording", "start", ...)`
+  runs the command line tool.
 
 ## Lower level
 

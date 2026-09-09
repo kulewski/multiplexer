@@ -102,6 +102,11 @@ class Recording(unittest.TestCase):
             self.assertTrue(unserved[0].error_reported)
             errors = [r for r in routed if r.type == C.types.DELIVERY_ERROR and r.recipient == client_id]
             self.assertTrue(errors, "the delivery error sent back is a routed message too")
+            self.assertEqual(
+                {(records[0].header.multiplexer_id, C.peers.MULTIPLEXER)},
+                {(getattr(r, "from"), r.from_peer_type) for r in errors},
+                "it is the multiplexer's own message, whichever connection carried it",
+            )
 
     def test_payloads_can_be_truncated(self):
         cfg = harness.CONFIG

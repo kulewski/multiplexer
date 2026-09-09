@@ -99,6 +99,24 @@ type {
 }
 
 type {
+    type: 6
+    name: "RECORDING_CONTROL"
+    comment: "a peer asks a multiplexer to start, stop or report its recording, or to tap in; payload is RecordingControl"
+}
+
+type {
+    type: 7
+    name: "RECORDING_STATUS"
+    comment: "the multiplexer's answer to RECORDING_CONTROL; payload is RecordingStatus"
+}
+
+type {
+    type: 8
+    name: "RECORDING_RECORD"
+    comment: "one Record streamed to a peer that tapped in"
+}
+
+type {
     type: 99
     name: "MAX_MULTIPLEXER_META_PACKET"
     comment: "this only defines a constant"

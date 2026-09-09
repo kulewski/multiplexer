@@ -17,6 +17,7 @@
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
+#include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/enable_shared_from_this.hpp>
@@ -27,11 +28,13 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "lib/functors.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/config.h"
 #include "multiplexer/connections_manager.h"
+#include "multiplexer/defaults.h"
 #include "multiplexer/io/connection.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 #include "multiplexer/recorder.h"
@@ -92,9 +95,27 @@ public:
   // messages=<count>". Zero, the default, logs nothing and costs nothing.
   void set_memory_log_every(unsigned int every) { memory_log_every_ = every; }
 
-  // --record: every peer event and delivery attempt goes to `recorder`
-  // (Recording.proto). Off, the default, costs nothing per message.
-  void set_recorder(std::unique_ptr<Recorder> recorder) { recorder_ = std::move(recorder); }
+  // Recording (Recording.proto): every peer event and delivery attempt, to
+  // a file session and to the peers that tapped in. Off, the default, costs
+  // nothing per message. A file session is opened by start_recording(), at
+  // start for --record, or by a peer's RECORDING_CONTROL START once
+  // --recording-dir names where such sessions go; a peer taps in with TAP
+  // once --allow-tap is set. The rules file's SHA-1 goes into every header.
+  void set_rules_sha1(const std::string &sha1) { rules_sha1_ = sha1; }
+  void set_recording_dir(const std::string &dir) { recording_dir_ = dir; }
+  void set_allow_tap(bool allow) { allow_tap_ = allow; }
+  bool remote_recording_enabled() const { return !recording_dir_.empty() || allow_tap_; }
+
+  // Opens a file session on `path`, with the peers connected right now
+  // written first, and returns true; false with `error` set when a session
+  // is open or the file cannot be opened. `label` names the session in the
+  // header and the status; `max_bytes` and `max_seconds` close it on their
+  // own, 0 means never.
+  bool start_recording(const std::string &path, const std::string &label, unsigned int payload_limit,
+                       boost::uint64_t max_bytes, unsigned int max_seconds, std::string *error);
+  // Closes the file session, if one is open, noting `reason` for the status.
+  void stop_recording(const std::string &reason);
+  bool recording() const { return recorder_ != nullptr; }
 
   // --peers-file: rewritten atomically on every registration and
   // unregistration, one line per connected peer: "<instance id> <peer type
@@ -109,24 +130,29 @@ public:
   void stop();
 
   // Peers may not announce a reserved type (1 to 99), and must be in the
-  // rules file.
+  // rules file; the one exception is a recording controller, accepted when
+  // remote recording is on.
   bool inline accept_peer_type(boost::uint32_t peer_type) const {
+    if (peer_type == RECORDING_CONTROLLER)
+      return remote_recording_enabled();
     return peer_type > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE && Base::accept_peer_type(peer_type);
   }
 
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
-  // and note the arrival for the recording and the peers file.
+  // and note the arrival for the recording and the peers file. A recording
+  // controller is passive: it calls in when it has something to ask.
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage &) {
+    if (new_connection->peer_type() == RECORDING_CONTROLLER)
+      new_connection->set_is_passive(true);
     new_connection->start_rest();
-    if (recorder_)
-      recorder_->peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
+    _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
     _write_peers_file();
   }
 
-  // A registered peer's connection ended.
+  // A registered peer's connection ended; a tap it held ends with it.
   void connection_unregistered(Connection *conn) {
-    if (recorder_)
-      recorder_->peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
+    _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
+    _untap(conn);
     _write_peers_file(conn);
   }
 
@@ -185,16 +211,61 @@ private:
   unsigned int send_to_all(MessageMetaHandler &meta_handler, ConnectionsList &connections);
   unsigned int send_to_one(MessageMetaHandler &meta_handler, ConnectionsList &connections);
 
-  // One delivery attempt for the recording; nothing when not recording.
+  // Recording. A record is built once and goes to the file session and to
+  // every tap; nothing is built while neither exists.
   void _record(const MessageMetaHandler &meta_handler, boost::uint64_t recipient, boost::uint32_t recipient_type,
                RoutedMessage::Disposition disposition, bool error_reported) {
-    if (recorder_)
-      recorder_->routed(meta_handler.msg, meta_handler.conn->peer_type(), recipient, recipient_type, disposition,
-                        error_reported);
+    if (!recorder_ && taps_.empty())
+      return;
+    // A message of the multiplexer's own, a DELIVERY_ERROR, is routed
+    // through the connection of the peer it answers; it is still ours.
+    const boost::uint32_t from_peer_type =
+        meta_handler.msg.from() == instance_id_ ? peers::MULTIPLEXER : meta_handler.conn->peer_type();
+    Record record;
+    recording::fill_routed(record, meta_handler.msg, from_peer_type, recipient, recipient_type, disposition,
+                           error_reported);
+    _emit(record);
   }
+  void _emit_peer(PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type);
+  // Stamps `record`, writes it to the file session, closing the session at
+  // its cap, and streams it to every tap.
+  void _emit(Record &record);
+
+  // A peer receiving every record as RECORDING_RECORD messages.
+  struct Tap {
+    Connection::weak_pointer conn;
+    boost::uint64_t peer_id;
+    unsigned int payload_limit;
+    boost::uint64_t dropped; // records its full outgoing queue lost
+  };
+  typedef std::vector<Tap> Taps;
+  Taps::iterator _find_tap(const Connection *conn);
+  void _untap(const Connection *conn);
+
+  // What a file session was, kept after it closed for the status.
+  struct Session {
+    std::string label;
+    std::string path;
+    boost::uint64_t started_us = 0;
+    boost::uint64_t max_bytes = 0;
+    boost::uint64_t bytes = 0;
+    boost::uint64_t records = 0;
+    std::string stopped; // why it ended; empty while open or before the first
+  };
+
+  // RECORDING_CONTROL from a peer: carry it out and answer RECORDING_STATUS.
+  void _handle_recording_control(MessageMetaHandler &meta_handler);
+  void _fill_status(RecordingStatus &status, const Connection *requester);
+  // Queues `payload` as a message of `type` on the sender's connection,
+  // referencing the message being handled.
+  void _reply(const MessageMetaHandler &meta_handler, boost::uint32_t type, const ::google::protobuf::Message &payload);
+  static void _on_session_deadline(weak_pointer server, const boost::system::error_code &error);
+
   // The peers file, if configured; `leaving` is excluded, since it is
   // written before the indexes drop it.
   void _write_peers_file(Connection *leaving = NULL);
+  // A peer type's name for the peers file: from the rules, or the reserved name.
+  std::string _peer_name(boost::uint32_t peer_type) const;
 
 private:
   boost::asio::ip::tcp::acceptor acceptor_;
@@ -202,7 +273,13 @@ private:
   boost::asio::io_service &io_service_;
   unsigned int memory_log_every_ = 0;
   unsigned long routed_messages_ = 0;
+  std::string rules_sha1_;
+  std::string recording_dir_;
+  bool allow_tap_ = false;
   std::unique_ptr<Recorder> recorder_;
+  Session session_;
+  boost::asio::deadline_timer session_timer_;
+  Taps taps_;
   std::string peers_file_;
 }; // class Server
 

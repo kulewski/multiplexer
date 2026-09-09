@@ -123,11 +123,12 @@ type {
   processes for end-to-end tests, and a Bazel macro that runs a scenario
   against the shipped roles or a binary of your own
   ([testing](docs/api_python.md#testing)).
-- **See what was routed, when asked.** Two optional flags at start:
-  `--peers-file` keeps a list of who is connected, and `--record` writes
-  every routed message, with who sent it, who received it or why nobody
-  did, so a development session can be replayed offline and test peers
-  scripted from real traffic ([operations](docs/operations.md#recording)).
+- **See what was routed, when asked.** A peers file lists who is
+  connected. A recording holds every routed message, with who sent it, who
+  received it or why nobody did; switched on at start, or started, stopped
+  and tapped live on a running cluster from one command, with the
+  operator's consent given as a flag. A session replays offline and scripts
+  test peers from real traffic ([operations](docs/operations.md#recording)).
 
 ## How it compares
 

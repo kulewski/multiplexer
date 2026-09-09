@@ -31,6 +31,10 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
 - `Cluster(record=True)` makes every multiplexer write a recording of what
   it routed (`Mx.record_file`, read with `multiplexer.recording`), the
   `recording` scenarios check it against what the roles reported.
+  `Cluster(remote_recording=True)` lets peers start sessions and tap in
+  (one shared `recording_dir`, `recording_files()`), and `mxcontrol(*args)`
+  runs the tool to completion; the `remote_recording*` and `recording_tap`
+  scenarios use both.
 - Memory: roles emit `memory` events every `--memory-every` messages with
   the exact C heap in use (and, in Python, tracemalloc bytes and the object
   count); `Cluster(memory_log_every=N)` makes the multiplexer log its heap

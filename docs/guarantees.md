@@ -82,7 +82,8 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before it closes the connection |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a library holds per peer |
-| `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type |
+| `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
+| `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
 | dedup window | 2048 ids | repeats the library recognizes |
 
 Changing a constant means rebuilding everything that embeds it, and the

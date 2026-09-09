@@ -153,6 +153,67 @@ bytes of each (`truncated` is set), which is enough to see what happened
 and keeps a long recording small. Use it for a session, not forever: there
 is no rotation.
 
+### Recording on demand, over the protocol
+
+A running multiplexer can be asked to record by any peer, so a session on a
+cluster starts and stops from one command, without restarts or a shell on
+the hosts. It is off unless the multiplexer was started with one of:
+
+| Option | Allows |
+|---|---|
+| `--recording-dir DIR` | file sessions: a peer's START opens a file under `DIR`, its STOP closes it |
+| `--allow-tap` | taps: a peer receives every record over its own connection, live, and nothing is written on the host |
+
+The request is a `RECORDING_CONTROL` message (reserved type 6, payload
+`RecordingControl`) sent without `to` on a connection to the multiplexer;
+the answer is a `RECORDING_STATUS` (7) referencing it. A peer may connect
+for this alone as the reserved peer type `RECORDING_CONTROLLER` (3),
+accepted only when one of the options is on, so no rules file needs an
+entry. Anyone who can reach the port can ask, as with everything else on
+this network; the options are the operator's consent.
+
+`mxcontrol recording` is the command
+([mxcontrol](mxcontrol.md#recording)); from Python, `multiplexer.recording`
+has `start()`, `stop()`, `status()` and `tap()` ([api](api_python.md#recording)).
+
+**File sessions.** A START names a session with a label, letters, digits,
+`-` and `_` only; the multiplexer chooses the path:
+
+```
+<recording-dir>/<label>.<UTC time>.<multiplexer instance id>.rec
+```
+
+so several replicas writing into one shared directory never collide, and
+neither do two sessions on one replica. The status reply carries the path.
+The file starts with the header, then one `CONNECTED` event for every peer
+connected at that moment, so it stands on its own. One session at a time
+per multiplexer: a second START is refused until STOP. A session closes by
+itself at `max_bytes`, one gibibyte unless the request says otherwise (0 for
+no cap), or after `max_seconds`; the status then says why it stopped and
+where the file is. A multiplexer started with `--record` has a session too,
+without a label, which a STOP closes.
+
+**Taps.** A TAP subscribes the requesting peer: every record goes to it as
+a `RECORDING_RECORD` message (8) carrying the `Record`, with
+`multiplexer_id` set, until UNTAP or the connection ends. The tap's outgoing
+queue is the only buffer: a peer that reads too slowly loses records, which
+the multiplexer counts in the status as `dropped`, and routing is never
+held up. A tap costs one serialization and one queued frame per record for
+each tap.
+
+**Several replicas.** Every multiplexer answers for itself, so a controller
+connects to each: `mxcontrol recording` takes `-M host:port` repeatedly and
+resolves a host name to every address it has, so a headless Kubernetes
+service name reaches every pod. A replica replaced mid-session comes back
+not recording, since the state lives in the process: `mxcontrol recording
+start --stay` keeps polling and starts the session again on any replica
+that has never had one; a tap resubscribes the same way. Read the files of
+a session together with `dump_recording FILE...` or
+`multiplexer.recording.read_many()`, which merge them by timestamp and tag
+each record with its multiplexer. Timestamps are each multiplexer's own
+clock, so order within a replica is exact and order between replicas is as
+good as their clocks.
+
 ## Sizing
 
 One multiplexer is one thread with one event loop. Every message is forwarded
