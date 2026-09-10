@@ -34,6 +34,9 @@ both talk to multiplexers. Spell out "multiplexer" in prose, "mx" only in code.
 - `bazel/`: dependency macros and patches.
 - `docker/`: `check.sh` builds and tests the tree on a clean distribution;
   `docs/building.md` is the page it proves.
+- `Makefile` and `make/`: the build without Bazel; `make/sources.mk` is
+  generated from the BUILD files by `./format.sh`, so a new source file
+  needs no Makefile change.
 
 ## Commands
 
@@ -48,7 +51,8 @@ bazel build --config=clang //...           # clang thread-safety analysis (lib/t
 bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only
 bazel build --config=asan //...            # AddressSanitizer
 ./check.sh --leaks                         # LeakSanitizer over the scenarios; soak_memory samples RSS per process
-./docker/check.sh [bazel] [debian:12]      # the build and the fast tests on a clean distribution, needs Docker
+./docker/check.sh [bazel|make] [debian:12] # the build and the fast tests on a clean distribution, needs Docker
+make -j && make check                      # the build without Bazel (Makefile, docs/building.md)
 ./tests/bench.sh                           # the throughput and latency numbers the README quotes
 bazel run //compdb                         # compile_commands.json for clangd, after a debug build
 ```

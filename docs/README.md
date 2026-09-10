@@ -145,7 +145,8 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Guarantees, failure modes and defaults](guarantees.md): what is promised,
   what happens when things die, and every timeout and limit in one table.
 - [Building](building.md): the packages a clean machine needs, bringing
-  your own protobuf, the build configurations, the Docker check.
+  your own protobuf, the build configurations, the Docker check, and the
+  build without Bazel.
 - [Operations](operations.md): several multiplexers, restarts, logs, the
   peers file, recording what was routed and driving it on a running
   cluster, sizing.

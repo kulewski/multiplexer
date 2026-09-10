@@ -1,12 +1,12 @@
 # Multiplexer
 
-> A lightweight, highly available message broker for request/reply and publish/subscribe messaging between microservices on a trusted internal network: peers connect over TCP, announce a peer type, and exchange typed messages routed by a declarative rules file, with round-robin load balancing, fan-out and automatic failover across active-active instances. Stateless, no single point of failure. C++17 core, C++ and Python client libraries, built with Bazel.
+> A lightweight, highly available message broker for request/reply and publish/subscribe messaging between microservices on a trusted internal network: peers connect over TCP, announce a peer type, and exchange typed messages routed by a declarative rules file, with round-robin load balancing, fan-out and automatic failover across active-active instances. Stateless, no single point of failure. C++17 core, C++ and Python client libraries, built with Bazel or with a Makefile.
 
 Vocabulary used everywhere: a peer is a client (passive, sends requests or events) or a backend (runs the library loop, receives, may answer); both talk to multiplexers.
 
 ## Facts to know before reading further
 
-- Prerequisites: Bazel 6.2.1 through Bazelisk (`.bazelversion`), a C++17 compiler (gcc 11 or newer, clang 18), `protoc` with `libprotobuf` of the same version, Python 3.10 or newer with headers and `python3-protobuf`; Boost, pybind11 and googletest are fetched by Bazel. Verified on clean Debian 12 and 13, Ubuntu 22.04 and 24.04 (docs/building.md).
+- Prerequisites: Bazel 6.2.1 through Bazelisk (`.bazelversion`), a C++17 compiler (gcc 11 or newer, clang 18), `protoc` with `libprotobuf` of the same version, Python 3.10 or newer with headers and `python3-protobuf`; Boost, pybind11 and googletest are fetched by Bazel. Verified on clean Debian 12 and 13, Ubuntu 22.04 and 24.04 (docs/building.md). Without Bazel, `make` builds the same from the distribution's Boost, pybind11 (2.9 or newer) and googletest packages.
 - Consuming it: declare the repository as `@mx` with `git_repository`, call `mx_dependencies()` then `mx_setup()` in WORKSPACE, point the build at your rules file with `--@mx//:multiplexer_rules=`, depend on `@mx//multiplexer:clients` or `:servers` (Python) and `@mx//multiplexer:client` (C++); tests get `@mx//multiplexer/testing`.
 - Guarantees: a message is delivered at most once per multiplexer to whoever is connected now, nothing is queued or persisted; a request whose reply is late is sent again to another backend, so a backend may receive a request twice and every attempt has a new id; no authentication, for a trusted network (docs/guarantees.md).
 - Reserved: peer types and message types 1 to 99 belong to the protocol; deployments use 100 and up in their own rules file, from which the constants are generated (docs/rules.md).
@@ -33,7 +33,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 - [mxcontrol](docs/mxcontrol.md)
 - [The wire format](docs/wire_format.md)
 - [Guarantees, failure modes and defaults](docs/guarantees.md)
-- [Building](docs/building.md): prerequisites verified on clean Debian and Ubuntu, bring-your-own protobuf, configurations, docker/check.sh
+- [Building](docs/building.md): prerequisites verified on clean Debian and Ubuntu, bring-your-own protobuf, configurations, docker/check.sh, the build without Bazel (make)
 - [Operations](docs/operations.md): several multiplexers, restarts, logs, the peers file, recording what was routed, starting and tapping a recording on a running cluster
 - [Testing programs built on it](docs/api_python.md#testing): multiplexer.testing, real multiplexers on ephemeral ports, scripted peers, the mx_integration_test macro
 - [Questions people ask](docs/faq.md)

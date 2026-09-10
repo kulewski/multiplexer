@@ -244,6 +244,23 @@ bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //...
 
 When this repository is consumed as an external Bazel repository named `mx`, the flag is `--@mx//:multiplexer_rules=...`. At run time `mxcontrol run_multiplexer` reads `multiplexer.rules` from the current directory unless `--rules` points elsewhere.
 
+## Building without Bazel
+
+For a machine that will not have Bazel, a `Makefile` builds the same things
+from the distribution's own compiler, protobuf, Boost and pybind11:
+
+```
+make -j                      # build/bin/mxcontrol, build/libmultiplexer.a with headers, build/python/
+make check                   # the C++ and Python unit tests, against what was built
+make wheel                   # a pip wheel of the Python package
+sudo make install            # mxcontrol, the library and the headers under /usr/local
+make RULES=your.rules -j     # the constants from your rules file
+```
+
+[docs/building.md](docs/building.md#without-bazel) lists the packages and
+what a program links and imports. The test roles, the scenarios, the
+examples and the sanitizer builds stay with Bazel.
+
 ## Using it from another Bazel workspace
 
 Declare this repository as `mx`, then two calls in your `WORKSPACE`:
