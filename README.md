@@ -110,10 +110,12 @@ type {
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with
   Protocol Buffers ([wire format](docs/wire_format.md)).
-- **Thread-safe clients for C++ and Python.** A synchronous client for simple
-  programs and a threaded client with callback-based asynchronous queries for
-  servers, safe to share between threads, fork-aware and clean at interpreter
-  exit ([Python API](docs/api_python.md), [C++ API](docs/api_cpp.md)).
+- **Thread-safe clients for C++ and Python, and asyncio.** A synchronous
+  client for simple programs, a threaded client with callback-based
+  asynchronous queries for servers, safe to share between threads, and an
+  `AsyncClient` for asyncio programs that awaits queries and sends and
+  delivers events to coroutines on the loop; all fork-aware and clean at
+  interpreter exit ([Python API](docs/api_python.md), [C++ API](docs/api_cpp.md)).
 - **Tested for every failure mode.** One documented integration scenario per
   failure, AddressSanitizer, ThreadSanitizer, LeakSanitizer, clang thread-safety
   analysis and a soak test ([scenarios](tests/scenarios/README.md)).

@@ -113,6 +113,7 @@ PROTOS := \
 
 # The Python package, without the generated modules.
 PY_FILES := \
+  multiplexer/aio.py \
   multiplexer/clients.py \
   multiplexer/mxclient.py \
   multiplexer/mxlog/__init__.py \
@@ -141,6 +142,7 @@ CC_TEST_SRCS := \
 
 
 PY_TEST_FILES := \
+  multiplexer/aio_test.py \
   multiplexer/fork_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \

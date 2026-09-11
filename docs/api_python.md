@@ -267,10 +267,63 @@ replaces. [examples/echo/workers.py](../examples/echo/workers.py) shows
 several worker threads sharing one client, each taking its replies from
 its own queue.
 
+## AsyncClient
+
+`multiplexer.aio.AsyncClient` is the client for asyncio programs: an
+async face on `ThreadedClient`. The io thread keeps the sockets, the
+heartbeats, the reconnects and the query algorithm; the coroutine awaits a
+future the io thread settles through the loop, so nothing ever blocks the
+event loop. Depend on `@mx//multiplexer:aio`.
+
+```python
+from multiplexer.aio import AsyncClient
+from multiplexer.multiplexer_constants import peers, types
+
+client = AsyncClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.WEBSITE)
+reply = await client.query(b"pears", types.SEARCH_REQUEST, timeout=10)
+await client.send_message(b"seen", type=types.SEARCH_EVENT)
+unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine function, or a plain one
+```
+
+- `AsyncClient(addresses, type, timeout=10, loop=None, queue_size=1024)`
+  connects and binds to the running loop; `await AsyncClient.create(...)`
+  does the connecting in the default executor for a program that must not
+  block its loop even once. One client belongs to one loop, the way a
+  synchronous `Client` belongs to one thread; a call from another loop
+  raises `RuntimeError`.
+- `await query(message, type, timeout=10)` returns the reply and raises
+  the same exceptions as the synchronous client: `NotConnected`,
+  `OperationTimedOut`, `OperationFailed`, `BackendError`.
+  `await query_pickle(data, type)` for the pickle convention. Cancelling
+  the await does not cancel the request: a backend may still get it, the
+  reply is dropped.
+- `await send_message(message, multiplexer=ONE, timeout=10, **fields)`
+  returns the message id once the message reached a socket, every socket
+  for `ALL`, resent through another connection if the first dies under it;
+  raises `NotConnected` when nothing took it by the deadline. It is the
+  only send: an await costs the loop microseconds and blocks nothing, and
+  many at once is `asyncio.gather`. `await send_pickle(data, ...)` likewise.
+- `subscribe(type, handler, matching=None)` runs `handler(mxmsg)` on the
+  loop for every message of `type` (`None` for all) that `matching`
+  accepts; a coroutine function runs as a task. Returns the function that
+  ends the subscription. `messages(type=None)` is the pull form, an async
+  iterator over a queue of `queue_size`: when nobody reads, the oldest
+  message is dropped and a warning logged, because the io thread never
+  waits for the loop.
+- `close()` closes the connections and joins the io thread, blocking
+  briefly; `await aclose()` does it in the executor; `async with` works.
+- `AsyncClient.holder(type, addresses)` keeps one client per process,
+  created on the running loop at first `get()` and forgotten in a forked
+  child, with `addresses` read lazily: what a worker of an ASGI server
+  uses, since those fork before the loop runs.
+  [The async web server recipe](recipes/async_web_server.md) shows it under
+  Django Channels; [examples/aio](../examples/aio) is a complete asyncio
+  gateway.
+
 ## Threads, exit and fork
 
 A synchronous `Client` belongs to one thread; a `ThreadedClient` may be
-used from any number of them. A backend built on one thread and served
+used from any number of them; an `AsyncClient` belongs to one event loop. A backend built on one thread and served
 from another is fine: `serve_forever()` adopts its thread. In debug builds
 of the extension the rules are checked and a violation fails an
 assertion.
@@ -285,8 +338,10 @@ exit. A non-daemon thread in `serve_forever()` keeps the interpreter alive
 until something clears `working`, and `threading._shutdown` runs before
 `atexit`, so a backend on a thread runs as a daemon or the program calls
 `stop()` on it before exiting. The extension registers an `atexit` hook
-that marks the exit; do not install another `_native` import path that
-skips `multiplexer.mxclient`.
+that marks the exit and lets every callback and wait that was already
+about to take the GIL finish first; do not install another `_native`
+import path that skips `multiplexer.mxclient`. A program that exits with
+an `AsyncClient` or a `ThreadedClient` alive exits cleanly.
 
 **Fork.** A client inherited by a forked child, from gunicorn's workers,
 `multiprocessing`, or Django's parallel test runner, is an orphan there:

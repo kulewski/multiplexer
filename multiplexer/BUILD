@@ -446,6 +446,30 @@ py_test(
     ],
 )
 
+# The asyncio face of the threaded client; see aio.py.
+py_library(
+    name = "aio",
+    srcs = ["aio.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mxclient",
+        ":threaded_client_py",
+    ],
+)
+
+py_test(
+    name = "aio_test",
+    size = "medium",
+    srcs = ["aio_test.py"],
+    deps = [
+        ":aio",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "threaded_client_py_test",
     size = "small",

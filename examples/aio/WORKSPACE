@@ -1,0 +1,16 @@
+# A workspace that consumes the multiplexer as @mx from asyncio; the echo
+# example's WORKSPACE explains the two ways to point at the repository.
+workspace(name = "aio_example")
+
+local_repository(
+    name = "mx",
+    path = "../..",
+)
+
+load("@mx//bazel:deps.bzl", "mx_dependencies")
+
+mx_dependencies()
+
+load("@mx//bazel:setup.bzl", "mx_setup")
+
+mx_setup()

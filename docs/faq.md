@@ -86,6 +86,16 @@ base class and the reply defaults, and a decision on ordering, since
 requests handled in parallel are no longer answered in order. It is the
 natural next step after the threaded client.
 
+**Can I use it from asyncio?**
+Yes: `multiplexer.aio.AsyncClient` awaits queries and sends and delivers
+events to coroutines on the loop. It is an async face on the threaded
+client: the io thread still runs the protocol, and the loop only ever
+waits on futures, so nothing blocks it. One client belongs to one loop;
+a worker of an ASGI server makes its own at first use, through the
+holder. There is no asyncio backend: a backend has a thread of its own by
+design, and a program that wants both sides runs the backend on
+`BackendThread`.
+
 **Why Bazel?**
 The rules file has to produce the same constants in C++ and Python in one
 step, the multiplexer and both libraries share one C++ core, and a consuming

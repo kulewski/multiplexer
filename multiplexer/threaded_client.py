@@ -107,6 +107,7 @@ class ThreadedClient:
         multiplexer: int = ONE,
         flush: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
+        callback: Callable[[int], None] | None = None,
         **kwargs: Any,
     ) -> int:
         """Send an event and return its message id. `message` is a
@@ -118,7 +119,12 @@ class ThreadedClient:
         safe from callbacks. With `flush=True` it waits until the message
         reached the socket, resending through another connection if the
         first dies under it, and raises OperationTimedOut when `timeout`
-        passes first, or NotConnected when no connection was live at all."""
+        passes first, or NotConnected when no connection was live at all.
+        With `flush=True` and a `callback`, it returns at once instead and
+        `callback(written)` runs on the io thread once the message reached
+        the socket(s), with the number of connections written, 0 when
+        `timeout` passed first; safe from callbacks, and what
+        multiplexer.aio awaits."""
         mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
         raw = mxmsg.SerializeToString()
         every = multiplexer == ThreadedClient.ALL
@@ -127,6 +133,9 @@ class ThreadedClient:
                 self._native.send_all(raw)
             else:
                 self._native.send(raw)
+            return mxmsg.id
+        if callback is not None:
+            self._native.send_with_callback(raw, every, timeout, callback)
             return mxmsg.id
         if self._native.send_and_wait(raw, every, timeout) == 0:
             raise NotConnected() if self.connections_count() == 0 else OperationTimedOut()

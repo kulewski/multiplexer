@@ -110,6 +110,12 @@ public:
   void send_serialized(std::string serialized);
   void send_all_serialized(std::string serialized);
   unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout);
+  // The flushing send with a callback instead of a wait, safe from any
+  // thread including the io thread: `done(written)` runs on the io thread
+  // once the message reached the socket(s), or with 0 when `timeout`
+  // passed or the client shut down first. What an asyncio layer awaits.
+  typedef std::function<void(unsigned int)> SendCallback;
+  void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done);
   MultiplexerMessage new_message(boost::uint32_t type, const std::string &payload);
 
   // A request with a reply, see the file comment. The callback runs on the
@@ -130,8 +136,7 @@ private:
   struct PendingSend;
   typedef std::shared_ptr<PendingSend> PendingSendPtr;
   void _orphan_teardown();
-  void _submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout,
-                    std::shared_ptr<std::promise<unsigned int>> promise);
+  void _submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done);
   void _attempt_send(const PendingSendPtr &pending) MX_RUN_ON(io_thread_);
   void _advance_sends() MX_RUN_ON(io_thread_);
   typedef boost::shared_ptr<InFlight> InFlightPtr;

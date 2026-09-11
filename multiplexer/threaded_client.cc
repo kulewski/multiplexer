@@ -192,22 +192,29 @@ unsigned int ThreadedClient::connections_count() {
 struct ThreadedClient::PendingSend {
   boost::shared_ptr<const RawMessage> raw;
   bool all = false;  // every connection, or one
-  bool wait = false; // a flushing send: report through `promise` when written
+  bool wait = false; // a flushing send: report through `done` when written
   std::chrono::steady_clock::time_point deadline;
   std::vector<Client::ScheduledMessageTracker> trackers; // one per connection written to (ALL), or one
   ConnectionWrapper used;                                // ONE: the connection the message is queued on
   unsigned int sent = 0;
-  std::shared_ptr<std::promise<unsigned int>> promise;
+  SendCallback done; // a flushing send's completion: the count written, on the io thread
 };
+
+namespace {
+// A blocking send's completion: the promise its caller waits on.
+ThreadedClient::SendCallback settle(std::shared_ptr<std::promise<unsigned int>> promise) {
+  return [promise](unsigned int written) { promise->set_value(written); };
+}
+} // namespace
 
 void ThreadedClient::send(const MultiplexerMessage &msg) {
   _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, false, DEFAULT_TIMEOUT,
-               std::shared_ptr<std::promise<unsigned int>>());
+               ThreadedClient::SendCallback());
 }
 
 void ThreadedClient::send_all(const MultiplexerMessage &msg) {
   _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, false, DEFAULT_TIMEOUT,
-               std::shared_ptr<std::promise<unsigned int>>());
+               ThreadedClient::SendCallback());
 }
 
 unsigned int ThreadedClient::send(const MultiplexerMessage &msg, float timeout) {
@@ -215,7 +222,8 @@ unsigned int ThreadedClient::send(const MultiplexerMessage &msg, float timeout) 
     throw std::logic_error("flushing ThreadedClient::send() called on the io thread, from a callback");
   std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
   std::future<unsigned int> future = promise->get_future();
-  _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, true, timeout, promise);
+  _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, true, timeout,
+               settle(promise));
   return future.get();
 }
 
@@ -224,18 +232,18 @@ unsigned int ThreadedClient::send_all(const MultiplexerMessage &msg, float timeo
     throw std::logic_error("flushing ThreadedClient::send_all() called on the io thread, from a callback");
   std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
   std::future<unsigned int> future = promise->get_future();
-  _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, true, timeout, promise);
+  _submit_send(boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, true, timeout, settle(promise));
   return future.get();
 }
 
 void ThreadedClient::send_serialized(std::string serialized) {
   _submit_send(boost::shared_ptr<const RawMessage>(new RawMessage(&serialized)), false, false, DEFAULT_TIMEOUT,
-               std::shared_ptr<std::promise<unsigned int>>());
+               ThreadedClient::SendCallback());
 }
 
 void ThreadedClient::send_all_serialized(std::string serialized) {
   _submit_send(boost::shared_ptr<const RawMessage>(new RawMessage(&serialized)), true, false, DEFAULT_TIMEOUT,
-               std::shared_ptr<std::promise<unsigned int>>());
+               ThreadedClient::SendCallback());
 }
 
 unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, bool all, float timeout) {
@@ -243,15 +251,19 @@ unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, bo
     throw std::logic_error("flushing ThreadedClient send called on the io thread, from a callback");
   std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
   std::future<unsigned int> future = promise->get_future();
-  _submit_send(boost::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, promise);
+  _submit_send(boost::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, settle(promise));
   return future.get();
 }
 
+void ThreadedClient::send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done) {
+  _submit_send(boost::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, done);
+}
+
 // Hands a send to the io thread. Never blocks the caller: a plain post, so
-// callbacks may send. A flushing send carries a promise the io thread
-// settles once the message is written or the deadline passed.
+// callbacks may send. A flushing send carries a completion the io thread
+// calls once the message is written or the deadline passed.
 void ThreadedClient::_submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout,
-                                  std::shared_ptr<std::promise<unsigned int>> promise) {
+                                  SendCallback done) {
   basic_client_->check_not_orphaned();
   if (_stopped())
     MXTHROW(NotConnected());
@@ -261,12 +273,12 @@ void ThreadedClient::_submit_send(boost::shared_ptr<const RawMessage> raw, bool 
   pending->wait = wait;
   pending->deadline =
       std::chrono::steady_clock::now() + std::chrono::microseconds(boost::numeric_cast<long>(timeout * 1e6));
-  pending->promise = promise;
+  pending->done = done;
   _post([this, pending] {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (shut_down_) {
-      if (pending->promise)
-        pending->promise->set_value(0);
+      if (pending->done)
+        pending->done(0);
       return;
     }
     pending_sends_.push_back(pending);
@@ -335,11 +347,11 @@ void ThreadedClient::_advance_sends() {
         ++in_queue;
     }
     if (queued && in_queue == 0 && (pending->all || sent)) {
-      pending->promise->set_value(sent); // every copy written, or lost on a connection that died
+      pending->done(sent); // every copy written, or lost on a connection that died
       continue;
     }
     if (now >= pending->deadline) {
-      pending->promise->set_value(sent);
+      pending->done(sent);
       continue;
     }
     still_pending.push_back(pending);
@@ -408,8 +420,8 @@ void ThreadedClient::shutdown() {
       if (in_flight->callback)
         _finish(in_flight, SHUT_DOWN, NULL);
     for (auto &send : pending_sends_)
-      if (send->promise)
-        send->promise->set_value(0);
+      if (send->done)
+        send->done(0);
     pending_sends_.clear();
     basic_client_->shutdown();
     work_.reset();

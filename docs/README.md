@@ -134,8 +134,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [The rules file](rules.md): peer types, message types, routing rules, the
   reserved ranges, pointing a build at your file.
 - [Using the Python library](api_python.md) and
-  [using the C++ library](api_cpp.md): `Client` and `BaseMultiplexerServer`,
-  every call and every exception; the Python page also covers
+  [using the C++ library](api_cpp.md): `Client`, `ThreadedClient`,
+  `AsyncClient` for asyncio, and `BaseMultiplexerServer`, every call and
+  every exception; the Python page also covers
   [testing](api_python.md#testing) with `multiplexer.testing` and reading a
   recording.
 - [mxcontrol](mxcontrol.md): running a multiplexer, the log tools, dumping
@@ -157,6 +158,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 ## Recipes
 
 - [Add a peer type or a message type](recipes/add_a_message_type.md)
+- [Use the client from an async web server](recipes/async_web_server.md):
+  `AsyncClient` under Django Channels, one per worker, pushing to sockets,
+  backpressure.
 - [Use the client from a threaded web server](recipes/web_server.md): one
   `ThreadedClient` per process, request threads, events without a receiver thread, fork and exit.
 - [Add an integration test scenario](recipes/add_a_scenario.md)
