@@ -57,24 +57,38 @@ class ThreadedClient:
         addresses: list[Endpoint],
         type: int,
         timeout: float = DEFAULT_TIMEOUT,
-        on_message: Callable[[MultiplexerMessage], None] | None = None,
+        on_message: Callable[..., None] | None = None,
+        *,
+        with_connection: bool = False,
+        search_policy: Callable[[], bool] | None = None,
     ):
         """Start the io thread and connect to every (host, port) in `addresses`.
 
         `on_message(mxmsg)` runs on the io thread with every message that is
         not a reply to a query or one of the protocol's own; a program that
         wants a queue passes `queue.put`. Without it such messages are
-        logged and dropped.
+        logged and dropped. With `with_connection`, it is called as
+        `on_message(mxmsg, connection)`, the connection the message came on,
+        for a reply that must go back the same way. `search_policy`, a
+        function returning whether to answer a client's search for a
+        backend, makes the client a backend: what
+        multiplexer.threaded_server builds on; without it only a search
+        addressed to this instance is answered.
         """
         native_callback = None
         if on_message is not None:
 
-            def native_callback(raw: bytes, _connection: Any) -> None:
+            def native_callback(raw: bytes, connection: Any) -> None:
                 """The C++ side's callback: parse and hand over."""
-                on_message(self._parse(raw))
+                if with_connection:
+                    on_message(self._parse(raw), connection)
+                else:
+                    on_message(self._parse(raw))
 
         self._native = _native.ThreadedClient(type, native_callback)
         self.type = type
+        if search_policy is not None:
+            self._native.set_search_policy(search_policy)
         for host, port in addresses:
             self.connect((host, port), timeout)
 

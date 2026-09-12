@@ -10,6 +10,7 @@
 
 #include "lib/memory.h"
 #include "multiplexer/backend/base_multiplexer_server.h"
+#include "multiplexer/backend/base_threaded_multiplexer_server.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/server.h"
 #include "multiplexer/threaded_client.h"
@@ -56,6 +57,23 @@ struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", payload)
                      .set("type", static_cast<boost::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+  }
+};
+
+// The same backend on worker threads behind a heartbeating io thread.
+struct EchoThreadedBackend : multiplexer::backend::BaseThreadedMultiplexerServer {
+  EchoThreadedBackend(const multiplexer::backend::MultiplexerAddresses &addresses, unsigned int workers)
+      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER, options_for(workers)) {}
+  static Options options_for(unsigned int workers) {
+    Options options;
+    options.workers = workers;
+    return options;
+  }
+  void handle_message(const multiplexer::backend::RequestPtr &request) override {
+    std::string payload = request->mxmsg().message();
+    for (char &character : payload)
+      character = std::toupper(static_cast<unsigned char>(character));
+    request->reply(payload, multiplexer::types::PYTHON_TEST_RESPONSE);
   }
 };
 
@@ -123,5 +141,31 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
 
   keep_serving = false;
   backend_thread.join();
+  client.shutdown();
+}
+
+TEST(Soak, ThousandsOfRequestsThroughAThreadedBackendDoNotGrowTheHeap) {
+  InProcessMultiplexer mx;
+  multiplexer::backend::MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair(std::string("127.0.0.1"), mx.port));
+  EchoThreadedBackend backend(addresses, 2);
+  std::thread serving([&] { backend.serve_forever(0.05f); });
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+
+  run_queries(client, 2000); // warm-up
+  size_t before = mx::heap_in_use_bytes();
+  run_queries(client, 8000);
+  std::vector<std::future<void>> at_once; // and from four threads at once, for the two workers
+  for (int thread = 0; thread < 4; ++thread)
+    at_once.push_back(std::async(std::launch::async, [&] { run_queries(client, 1000); }));
+  for (auto &done : at_once)
+    done.get();
+  size_t after = mx::heap_in_use_bytes();
+  EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after
+                                       << " bytes over 12000 requests through a threaded backend";
+
+  backend.stop();
+  serving.join();
   client.shutdown();
 }

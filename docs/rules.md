@@ -30,9 +30,12 @@ peer {
 - `comment`: optional, for the reader.
 - `queue_size`: how many messages the multiplexer will hold for one
   connection of this type before dropping new ones. Default 1024.
-- `is_passive`: true for clients, which run the library's loop only inside
-  calls. The multiplexer then does not expect heartbeats from them and does
-  not drop them for silence. Default false, which is right for backends.
+- `is_passive`: true for peer types built on the synchronous `Client`,
+  which runs the library's loop only inside calls. The multiplexer then
+  does not expect heartbeats from them and does not drop them for
+  silence. Default false, which is right for backends, `ThreadedClient`
+  and `AsyncClient`, all of which run the loop all the time; a deployment
+  built on those never needs the mark.
 
 ## A message type
 

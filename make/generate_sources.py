@@ -16,13 +16,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT = os.path.join(ROOT, "make", "sources.mk")
 
 # What ships: the multiplexer with every subcommand, the Python extension,
-# and the C++ test roles' Event proto, which the testing package needs.
-SHIPPED = "//mxcontrol:mxcontrol_with_debug_symbols + //multiplexer:_native_with_debug_symbols.so"
+# the C++ backend classes, and the C++ test roles' Event proto, which the
+# testing package needs.
+SHIPPED = (
+    "//mxcontrol:mxcontrol_with_debug_symbols + //multiplexer:_native_with_debug_symbols.so"
+    " + //multiplexer/backend:base_threaded_multiplexer_server"
+)
 PYTHON_PACKAGE = (
     "//multiplexer:servers + //multiplexer:clients + //multiplexer:threaded_client_py + //multiplexer:recording"
-    " + //multiplexer:aio + //multiplexer/testing:testing + //multiplexer/mxlog:streaming + //multiplexer/util:decorators"
-    " + //multiplexer/util:timer"
+    " + //multiplexer:aio + //multiplexer:threaded_server + //multiplexer/testing:testing"
+    " + //multiplexer/mxlog:streaming + //multiplexer/util:decorators + //multiplexer/util:timer"
 )
+# Tests tagged slow (minutes each) are Bazel's `bazel test //...`, not make check.
+SLOW = "attr(tags, slow, //lib/... + //multiplexer/...)"
 # Python tests that need Bazel's runfiles layout and mean nothing outside it.
 NOT_OUTSIDE_BAZEL = {"multiplexer/testing/config_test.py"}
 
@@ -58,9 +64,11 @@ def generate() -> str:
     shipped = query(ours("deps(%s)" % SHIPPED))
     tool = query(ours("deps(//multiplexer:generate_constants)"))
     package = query(ours("deps(%s)" % PYTHON_PACKAGE))
-    cc_tests = query("labels(srcs, kind(cc_test, //lib/... + //multiplexer/...))")
+    cc_tests = query("labels(srcs, kind(cc_test, //lib/... + //multiplexer/...) - %s)" % SLOW)
     py_tests = [
-        path for path in query("labels(srcs, kind(py_test, //multiplexer/...))") if path not in NOT_OUTSIDE_BAZEL
+        path
+        for path in query("labels(srcs, kind(py_test, //multiplexer/...) - %s)" % SLOW)
+        if path not in NOT_OUTSIDE_BAZEL
     ]
 
     def sources(paths, prefixes, exclude=()):

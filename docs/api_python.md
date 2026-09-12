@@ -5,7 +5,11 @@ Three modules matter: `multiplexer.clients` holds `Client` for clients,
 `multiplexer.multiplexer_constants` holds `peers` and `types`, generated
 from the [rules file](rules.md) the build was pointed at. Depend on
 `@mx//multiplexer:clients` or `@mx//multiplexer:servers`, and on
-`@mx//multiplexer:multiplexer_constants`.
+`@mx//multiplexer:multiplexer_constants`. `multiplexer.threaded_client`,
+`multiplexer.aio` and `multiplexer.threaded_server` hold the threaded and
+asyncio clients and the threaded backend, each described below;
+[which class to build on](README.md#backend-or-client-which-class-to-build-on)
+is the one-table answer.
 
 ```python
 from multiplexer.clients import Client
@@ -41,7 +45,10 @@ client = Client([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_CLIENT
 Connects to every address, each with a 10 s timeout, and keeps the
 connections. A connection that fails or drops is retried every 3 s, but only
 while the library is running its loop, which for a client means inside calls.
-The peer type must be marked `is_passive` in the rules file.
+The peer type must be marked `is_passive` in the rules file: this is the
+one class that needs the mark, since nothing heartbeats between its calls;
+`ThreadedClient`, `AsyncClient` and both backend classes run the loop all
+the time and their peer types are ordinary ones.
 
 - `query(message, type, timeout=10, to=0, probe=types.BACKEND_FOR_PACKET_SEARCH, multiplexer=Client.ONE, with_connection=False)`:
   sends a request and returns the reply, a
@@ -271,6 +278,94 @@ calls `process_pickle(data)`, and replies with its return value through
 `send_pickle()`. It is the backend end of the pickle convention that
 `query_pickle()` on the clients is the other end of; only useful when both
 ends are Python, and pickles from the network must be trusted.
+
+## BaseThreadedMultiplexerServer
+
+`multiplexer.threaded_server.BaseThreadedMultiplexerServer` is the backend
+whose handlers run on worker threads behind a heartbeating io thread.
+Depend on `@mx//multiplexer:threaded_server`.
+
+```python
+from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
+
+
+class Echo(BaseThreadedMultiplexerServer):
+    def handle_message(self, request: Request):
+        request.reply(request.mxmsg.message.upper(), type=types.ECHO_RESPONSE)
+
+
+Echo(addresses, type=peers.ECHO_BACKEND, workers=4).serve_forever()
+```
+
+**Which backend class.** `BaseMultiplexerServer` runs the loop and the
+handler on one thread, so while a handler runs nothing heartbeats, and a
+handler that runs longer than the multiplexer's drop interval, 90 s as
+shipped ([guarantees](guarantees.md#failure-modes)), gets the backend
+dropped mid-work. Use it when every handler is quick, requests are to be
+handled one at a time, and a handler never blocks on a query of its own;
+it is the simplest class and the one most backends are. Use
+`BaseThreadedMultiplexerServer` when a request may take long, when
+several requests should be handled at once (`workers=4`), or when a
+handler must block, on a `query()` to another backend for instance,
+without the multiplexer taking the backend for dead. With `workers=1`
+it handles requests one at a time in arrival order, exactly as
+`BaseMultiplexerServer` does, and only the heartbeats differ. The
+interface differs in one place: the handler gets a `Request` and answers
+through it, rather than through `self`.
+
+- `BaseThreadedMultiplexerServer(addresses, type=None, workers=1,
+  queue_size=1024, decline_searches_when_full=False, timeout=10)`
+  connects and starts the workers; `type` may instead be the class
+  attribute `multiplexer_client_type`. The io thread heartbeats,
+  reconnects, answers pings and the search clients use to find a
+  backend, and queues every other message for the workers. `queue_size`
+  bounds the requests waiting for a worker, the same 1024 the library's
+  incoming queue and the multiplexer's per-connection queue hold; beyond
+  it a request is dropped with a warning, as a full queue on the
+  multiplexer drops, and the requester's retry goes through the search.
+- `handle_message(request)` runs on a worker with every message that is
+  not the protocol's own. `request.mxmsg` is the message and
+  `request.connection` the connection it came on. `request.reply(message,
+  type=..., **fields)` answers it, with `to`, `references`, `workflow` and
+  the connection filled in from the request, through the threaded client
+  from whichever thread calls it: a handler may hand the request to
+  another thread and return, and the reply comes later.
+  One reply per request: `reply()` sets `references`, and a threaded
+  requester drops what references a query it has seen answered, so a
+  follow-up that is not the reply goes through `self.send_message(...,
+  to=request.mxmsg.from_)` with no `references`, correlated in the
+  payload. `request.no_response()` says the message needs none, as an
+  event; `request.report_error(message)` answers with `BACKEND_ERROR`;
+  `request.notify_start()` sends `REQUEST_RECEIVED`;
+  `request.parse_message(SomeProto)`, `request.parse_pickle()` and
+  `request.reply_pickle(data)` are the parsers and the pickle reply. A
+  request dropped without a reply or `no_response()` is logged when it is
+  collected. `self.send_message(message, **kwargs)` sends a message that is
+  not a reply, with no defaults; `self.client` is the `ThreadedClient`.
+- Searches are answered while the backend serves, as today: a busy
+  `BaseMultiplexerServer` answers a search when it gets to it, and this
+  class answers at once from the io thread. `decline_searches_when_full=True`
+  leaves a search unanswered while every worker is busy and requests wait,
+  so a client's retry lands on another instance;
+  `should_respond_to_backend_for_packet_search()` is overridable for any
+  other condition, and runs on the io thread, so it must be quick.
+- `serve_forever(poll=1.0, drain_seconds=0.0)` runs until `stop()` or a
+  drain is over, calling `periodic_task()` every `poll` seconds on its own
+  thread; then it takes no new message, lets the workers finish the
+  queue, closes the connections and returns. `stop()`, `start_draining()`,
+  `draining`, `drained()` and `on_handler_exception(exc)` are
+  `BaseMultiplexerServer`'s, with the same meanings; a handler that raises
+  gets the requester `BACKEND_ERROR` and the exception goes to
+  `on_handler_exception()` on the worker thread, and `False` from there
+  makes `serve_forever()` return and re-raise. `close()` joins the
+  workers, so from a handler it raises `RuntimeError` rather than join
+  itself; a handler that wants the server gone calls `stop()`. `pending`
+  is the number of requests waiting or being handled, `dropped` the
+  number a full queue refused; `instance_id` what a client addresses
+  with `to`.
+- A handler may call the blocking `query()` and a flushing `send_message()`
+  on `self.client`, since it is not on the io thread, which is the point.
+  `BackendThread` from `multiplexer.testing` serves this class too.
 
 ## ThreadedClient
 

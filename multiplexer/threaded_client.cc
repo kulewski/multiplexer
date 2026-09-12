@@ -189,6 +189,14 @@ bool ThreadedClient::connect(const std::string &host, boost::uint16_t port, floa
   }
 }
 
+void ThreadedClient::set_search_policy(SearchPolicy answer) {
+  _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    search_policy_ = answer;
+    return 0;
+  });
+}
+
 unsigned int ThreadedClient::connections_count() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -557,8 +565,14 @@ void ThreadedClient::_on_unmatched(const IncomingMessage &incoming) {
   if (msg.type() == types::PING || msg.type() == types::BACKEND_FOR_PACKET_SEARCH) {
     if (msg.references())
       return; // an answer to a ping nobody here is waiting for
-    if (msg.type() == types::BACKEND_FOR_PACKET_SEARCH && msg.to() != instance_id_)
-      return; // a search by type: this peer is no backend and never answers one
+    if (msg.type() == types::BACKEND_FOR_PACKET_SEARCH) {
+      if (search_policy_) {
+        if (!search_policy_())
+          return; // a backend that declines, draining or full
+      } else if (msg.to() != instance_id_) {
+        return; // a search by type: this peer is no backend and never answers one
+      }
+    }
     // An echo request, or a search addressed to this instance (an addressed
     // query locating it): answer with a PING, the payload echoed, through
     // the connection it came on, the way a backend does.

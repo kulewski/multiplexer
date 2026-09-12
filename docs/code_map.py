@@ -73,6 +73,11 @@ INDEX = [
         "multiplexer/threaded_client.h",
         "`ThreadedClient`; `multiplexer/threaded_client.py` for Python",
     ),
+    (
+        "A backend with handlers on worker threads, the request as a value",
+        "multiplexer/backend/base_threaded_multiplexer_server.h",
+        "`BaseThreadedMultiplexerServer`, `Request`; `multiplexer/threaded_server.py` for Python",
+    ),
     ("Frame layout, size limit, CRC", "multiplexer/io/raw_message.h", "`RawMessage`"),
     ("The welcome handshake", "multiplexer/io/connection.h", "`Connection::_receive_internal_message`"),
     (

@@ -14,6 +14,7 @@ LIB_SRCS := \
   lib/random.cc \
   lib/release.cc \
   multiplexer/backend/base_multiplexer_server.cc \
+  multiplexer/backend/base_threaded_multiplexer_server.cc \
   multiplexer/basic_client.cc \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
@@ -86,6 +87,7 @@ HEADERS := \
   lib/type_utils.h \
   lib/vector.h \
   multiplexer/backend/base_multiplexer_server.h \
+  multiplexer/backend/base_threaded_multiplexer_server.h \
   multiplexer/basic_client.h \
   multiplexer/client.h \
   multiplexer/config.h \
@@ -126,6 +128,7 @@ PY_FILES := \
   multiplexer/testing/fakes.py \
   multiplexer/testing/raw_peer.py \
   multiplexer/threaded_client.py \
+  multiplexer/threaded_server.py \
   multiplexer/util/decorators.py \
   multiplexer/util/timer.py \
 
@@ -136,6 +139,7 @@ CC_TEST_SRCS := \
   lib/logging/verbosity_test.cc \
   lib/thread_checker_test.cc \
   multiplexer/backend/serve_thread_test.cc \
+  multiplexer/backend/threaded_server_test.cc \
   multiplexer/fork_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/soak_test.cc \
@@ -155,4 +159,5 @@ PY_TEST_FILES := \
   multiplexer/testing/lanes_test.py \
   multiplexer/threaded_client_py_test.py \
   multiplexer/threaded_lanes_test.py \
+  multiplexer/threaded_server_test.py \
 

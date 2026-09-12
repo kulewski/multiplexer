@@ -95,8 +95,9 @@ class BasicClient(mxclient.Client):
 class Client(BasicClient):
     """A client connected to every multiplexer in `addresses`, a list of (host, port) pairs.
 
-    Clients are passive: the loop runs only inside calls, so the peer type
-    must be marked is_passive in the rules file. See docs/api_python.md.
+    This client is passive: the loop runs only inside calls, so the peer
+    type must be marked is_passive in the rules file, which no other
+    class needs. See docs/api_python.md.
     """
 
     @log_call

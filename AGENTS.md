@@ -67,6 +67,9 @@ bazel run //compdb                         # compile_commands.json for clangd, a
   built on the synchronous `Client` is passive and only calls in when it has
   something to send; a `ThreadedClient` runs the loop on its own thread and
   may use an active peer type. Do not build an active client any other way.
+  A backend is a `BaseMultiplexerServer`, one thread, or a
+  `BaseThreadedMultiplexerServer`, handlers on workers behind the threaded
+  client's io thread; `docs/README.md` says which to use when.
 - There is no peer authentication and `from` is not checked; the broker runs
   inside a trusted network. Do not add either without discussing it first.
 - Warnings are errors for our code (`-Wall -Wextra -Werror`), external code is

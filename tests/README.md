@@ -25,7 +25,8 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   the same options and the same Event events, so a scenario can be run with any
   mix. `backend` answers requests and `event_backend` only receives events;
   `client` sends requests and waits for answers, `event_client` sends events
-  and does not. The suite assumes every client is passive.
+  and does not. The shipped client roles are built on the synchronous
+  client, so their peer types are passive.
 - `multiplexer/testing/raw_peer.py`: a peer that speaks the wire format
   directly, for protocol and robustness scenarios.
 - `Cluster(record=True)` makes every multiplexer write a recording of what

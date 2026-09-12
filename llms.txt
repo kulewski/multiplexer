@@ -2,7 +2,7 @@
 
 > A lightweight TCP message broker for service-to-service messaging, not a socket multiplexer and not a WebSocket server: request/reply and publish/subscribe between services on a trusted network. Peers connect over TCP, announce a peer type, and exchange typed messages routed by a declarative rules file, with round-robin load balancing, fan-out and automatic failover across active-active instances. Stateless, no single point of failure. C++17 core, C++ and Python client libraries, built with Bazel or with a Makefile.
 
-Vocabulary used everywhere: a peer is a client (passive, sends requests or events) or a backend (runs the library loop, receives, may answer); both talk to multiplexers.
+Vocabulary used everywhere: a peer is a client (keeps control, sends requests or events) or a backend (hands control to the library loop, receives, may answer); both talk to multiplexers. Only a client built on the synchronous `Client` is passive; the threaded and asyncio clients and both backend classes run the loop all the time.
 
 ## Facts to know before reading further
 
@@ -10,6 +10,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 - Consuming it: declare the repository as `@mx` with `git_repository`, call `mx_dependencies()` then `mx_setup()` in WORKSPACE, point the build at your rules file with `--@mx//:multiplexer_rules=`, depend on `@mx//multiplexer:clients` or `:servers` (Python) and `@mx//multiplexer:client` (C++); tests get `@mx//multiplexer/testing`.
 - Guarantees: a message is delivered at most once per multiplexer to whoever is connected now, nothing is queued or persisted; a request whose reply is late is sent again to another backend, so a backend may receive a request twice and every attempt has a new id; a request addressed to one instance (`to=`) reaches that instance or fails; order holds per connection, and a lane keeps a stream on one connection; no authentication, for a trusted network (docs/guarantees.md).
 - Reserved: peer types and message types 1 to 99 belong to the protocol; deployments use 100 and up in their own rules file, from which the constants are generated (docs/rules.md).
+- `is_passive` in the rules file is needed only by peer types built on the synchronous `Client`; ThreadedClient, AsyncClient and both backend classes run the loop all the time. A BaseMultiplexerServer handler must finish within the multiplexer's drop interval (90 s); BaseThreadedMultiplexerServer has no such limit.
 
 ## Start here
 
@@ -28,7 +29,7 @@ Vocabulary used everywhere: a peer is a client (passive, sends requests or event
 ## Reference
 
 - [The rules file](docs/rules.md)
-- [Using the Python library](docs/api_python.md): Client, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer; lanes, pinning and addressed queries
+- [Using the Python library](docs/api_python.md): Client, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer, BaseThreadedMultiplexerServer for handlers on worker threads; lanes, pinning and addressed queries
 - [Which class to build on](docs/README.md#backend-or-client-which-class-to-build-on): backend or client, one table
 - [Using the C++ library](docs/api_cpp.md)
 - [mxcontrol](docs/mxcontrol.md)

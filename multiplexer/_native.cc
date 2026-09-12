@@ -250,6 +250,33 @@ struct PythonThreadedClient {
     GilRelease release;
     client.shutdown();
   }
+  // `answer` is a Python callable returning whether to answer a search
+  // for a backend; runs on the io thread with the GIL. See
+  // ThreadedClient::set_search_policy.
+  void set_search_policy(pybind11::object answer) {
+    std::shared_ptr<pybind11::object> held(new pybind11::object(answer), [](pybind11::object *object) {
+      CallbackSlot slot;
+      if (!slot.ok)
+        return; // leaked on purpose, see sink_for
+      pybind11::gil_scoped_acquire acquire;
+      delete object;
+    });
+    ThreadedClient::SearchPolicy policy = [held]() -> bool {
+      CallbackSlot slot;
+      if (!slot.ok)
+        return false;
+      pybind11::gil_scoped_acquire acquire;
+      try {
+        return (*held)().cast<bool>();
+      } catch (pybind11::error_already_set &error) {
+        error.restore();
+        PyErr_Print();
+        return false;
+      }
+    };
+    GilRelease release;
+    client.set_search_policy(policy);
+  }
 
   bool connect(const std::string &host, boost::uint16_t port, float timeout) {
     GilRelease release;
@@ -521,6 +548,7 @@ PYBIND11_MODULE(_native, module) {
       .def("random", [](multiplexer::PythonThreadedClient &client) { return client.client.random64(); })
       .def("connect", &multiplexer::PythonThreadedClient::connect)
       .def("connections_count", &multiplexer::PythonThreadedClient::connections_count)
+      .def("set_search_policy", &multiplexer::PythonThreadedClient::set_search_policy)
       .def("send", &multiplexer::PythonThreadedClient::send, pybind11::arg("serialized"),
            pybind11::arg("lane") = multiplexer::LanePtr())
       .def("send_all", &multiplexer::PythonThreadedClient::send_all)

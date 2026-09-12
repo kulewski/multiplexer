@@ -22,6 +22,7 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.threaded_client import ThreadedClient
+from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
 
 QUERIES = 2000
 ALLOWED_GROWTH = 64 * 1024  # bytes tracemalloc may report over QUERIES queries
@@ -39,6 +40,16 @@ class Backend(BaseMultiplexerServer):
     def handle_message(self, mxmsg):
         """Reply to one request."""
         self.send_message(message=mxmsg.message.upper(), type=types.PYTHON_TEST_RESPONSE)
+
+
+class ThreadedBackend(BaseThreadedMultiplexerServer):
+    """The same, on worker threads; a second instance of the type next to Backend."""
+
+    multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+    def handle_message(self, request: Request) -> None:
+        """Reply to one request."""
+        request.reply(request.mxmsg.message.upper(), type=types.PYTHON_TEST_RESPONSE)
 
 
 class LeakTest(unittest.TestCase):
@@ -173,6 +184,32 @@ class LeakTest(unittest.TestCase):
         self.assertIsNone(weak_client(), "the lane kept the client alive")
         self.assertFalse(lane.connected, "the lane kept a connection alive")
         self.assertTrue(lane.holds_connection)
+
+    def test_threaded_backend_does_not_accumulate(self):
+        """Thousands of requests through a BaseThreadedMultiplexerServer with
+        two workers, addressed to it so that only it answers: the object
+        count and tracemalloc's total inside the backend's process."""
+        backend = ThreadedBackend([self.endpoint], workers=2)
+        serving = threading.Thread(target=backend.serve_forever, kwargs={"poll": 0.05})
+        serving.start()
+        client = ThreadedClient([self.endpoint], type=peers.WEBSITE)
+        try:
+            for _ in range(200):
+                client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=backend.instance_id, timeout=10)
+            gc.collect()
+            tracemalloc.start()
+            before = tracemalloc.take_snapshot()
+            objects_before = len(gc.get_objects())
+            for _ in range(QUERIES):
+                reply = client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=backend.instance_id, timeout=10)
+                self.assertEqual(b"HELLO", reply.message)
+            self.assertEqual(0, backend.pending)
+            self.assert_no_growth(before, objects_before)
+            tracemalloc.stop()
+        finally:
+            client.shutdown()
+            backend.stop()
+            serving.join(10)
 
     def test_threaded_client_releases_callbacks_and_replies(self):
         """The binding must drop every reference it takes: the callback's

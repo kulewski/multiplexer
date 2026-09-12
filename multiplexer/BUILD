@@ -270,6 +270,7 @@ cc_test(
         ":threaded_client",
         "//lib:memory",
         "//multiplexer/backend:base_multiplexer_server",
+        "//multiplexer/backend:base_threaded_multiplexer_server",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -396,6 +397,7 @@ py_test(
         ":multiplexer_constants",
         ":servers",
         ":threaded_client_py",
+        ":threaded_server",
     ],
 )
 
@@ -525,6 +527,47 @@ py_test(
     size = "small",
     srcs = ["mxlog_test.py"],
     deps = ["//multiplexer/mxlog"],
+)
+
+py_library(
+    name = "threaded_server",
+    srcs = ["threaded_server.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":multiplexer_constants",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        "//multiplexer/mxlog",
+    ],
+)
+
+py_test(
+    name = "threaded_server_test",
+    size = "medium",
+    srcs = ["threaded_server_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+# About two minutes: a request longer than the multiplexer's drop interval.
+py_test(
+    name = "threaded_server_long_test",
+    size = "large",
+    srcs = ["threaded_server_long_test.py"],
+    tags = ["slow"],
+    deps = [
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
 )
 
 py_library(

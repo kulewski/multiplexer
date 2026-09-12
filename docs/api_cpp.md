@@ -41,7 +41,9 @@ client.shutdown();
 
 - The constructor takes the peer type and creates its own `io_service`; the
   overloads taking a `boost::asio::io_service` share yours. The client runs
-  that service only inside its calls, so the peer type must be `is_passive`
+  that service only inside its calls, so the peer type must be `is_passive`;
+  this is the one class that needs the mark, every other runs the loop
+  all the time
   in the rules file.
 - `connect(host, port, timeout = 10)` resolves `host`, connects, performs the
   handshake and returns a `ConnectionWrapper`. It does not throw when the
@@ -204,6 +206,68 @@ rather than timing out; the backend keeps serving. A Python requester sees
 message itself, so check `reply.third->type()` when the backend may fail.
 `close()` drops the connections.
 
+## BaseThreadedMultiplexerServer
+
+`multiplexer::backend::BaseThreadedMultiplexerServer` in
+[multiplexer/backend/base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h)
+is the backend whose handlers run on worker threads behind a heartbeating
+io thread; target `@mx//multiplexer/backend:base_threaded_multiplexer_server`.
+When to use it rather than `BaseMultiplexerServer` is in
+[the Python API](api_python.md#basethreadedmultiplexerserver): a request
+that may take longer than the multiplexer's drop interval, several handled
+at once, or a handler that blocks on a query of its own.
+
+```cpp
+#include "multiplexer/backend/base_threaded_multiplexer_server.h"
+
+using multiplexer::backend::BaseThreadedMultiplexerServer;
+using multiplexer::backend::RequestPtr;
+
+class Echo : public BaseThreadedMultiplexerServer {
+public:
+  Echo(const multiplexer::backend::MultiplexerAddresses &addresses, const Options &options)
+      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::ECHO_BACKEND, options) {}
+
+protected:
+  void handle_message(const RequestPtr &request) override {
+    request->reply(upper(request->mxmsg().message()), multiplexer::types::ECHO_RESPONSE);
+  }
+};
+
+multiplexer::backend::ThreadedServerOptions options;
+options.workers = 4;
+Echo(addresses, options).serve_forever();
+```
+
+- `ThreadedServerOptions`: `workers` (1), `queue_size` (1024, the requests
+  waiting for a worker; beyond it a request is dropped with a warning, as
+  the multiplexer's full queue drops), `decline_searches_when_full`
+  (false: searches are answered while the backend serves; true leaves
+  them unanswered while every worker is busy and requests wait) and
+  `connect_timeout`.
+- `handle_message(const RequestPtr &)` runs on a worker. The `Request`,
+  held by `shared_ptr` so a handler may keep it and answer from another
+  thread later, has `mxmsg()`, `connection()`, `reply(payload, type)`,
+  `reply(MultiplexerMessage)` (id, from, to, references and workflow
+  filled in when empty), `no_response()`, `report_error(message)`,
+  `notify_start()` and `parse_message<T>()`; a request destroyed without a
+  reply or `no_response()` logs a warning. The reply goes the way the
+  request came, or another way when that connection is gone. One reply
+  per request: `reply()` sets `references`, which a threaded requester
+  uses to drop late replies, so a follow-up that is not the reply goes
+  through `client().send()` with `to` set and no `references`.
+- `serve_forever(poll, drain_seconds)`, `stop()`, `start_draining()`,
+  `draining()`, `drained()`, `periodic_task()`,
+  `on_handler_exception()` and `should_respond_to_backend_for_packet_search()`
+  are `BaseMultiplexerServer`'s, with the same meanings; `close()` takes
+  no more messages, lets the workers finish the queue and closes the
+  connections, and throws `std::logic_error` from a handler, on a
+  worker, rather than join itself, `stop()` being the call for that;
+  `pending()`, `dropped()`, `instance_id()` and `client()` for messages
+  that are not replies. A handler that throws gets the requester
+  `BACKEND_ERROR`; `false` from `on_handler_exception()` makes
+  `serve_forever()` return and rethrow.
+
 ## ThreadedClient
 
 `multiplexer::ThreadedClient` in
@@ -291,5 +355,8 @@ one load per call, nothing when nobody forks. Create clients after
 forking.
 
 **Backends on threads.** `BaseMultiplexerServer::stop()` clears `working`
-from any thread; `serve_forever()` notices within one poll.
+from any thread; `serve_forever()` notices within one poll. A
+`BaseThreadedMultiplexerServer` is made of threads: its handlers run on
+the workers, its `Request` may be answered from any thread, and
+`serve_forever()` only polls.
 

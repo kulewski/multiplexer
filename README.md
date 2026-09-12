@@ -61,8 +61,8 @@ graph LR
 
 The rules behind the picture, in the format [rules.md](docs/rules.md)
 describes; the web servers are `is_passive` because they use the
-synchronous client, which calls in only to send (a threaded client would not
-need it):
+synchronous client, which calls in only to send; no other class needs the
+mark:
 
 ```
 peer {
@@ -129,6 +129,11 @@ type {
   `AsyncClient` for asyncio programs that awaits queries and sends and
   delivers events to coroutines on the loop; all fork-aware and clean at
   interpreter exit ([Python API](docs/api_python.md), [C++ API](docs/api_cpp.md)).
+- **Two backend classes.** One that runs the loop and the handler on one
+  thread, for quick handlers, and one whose handlers run on worker threads
+  behind a heartbeating io thread, for requests that take minutes,
+  several at once, or a handler that blocks on a query of its own
+  ([which to use](docs/README.md#backend-or-client-which-class-to-build-on)).
 - **Tested for every failure mode.** One documented integration scenario per
   failure, AddressSanitizer, ThreadSanitizer, LeakSanitizer, clang thread-safety
   analysis and a soak test ([scenarios](tests/scenarios/README.md)).

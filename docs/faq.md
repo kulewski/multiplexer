@@ -1,13 +1,15 @@
 # Questions people ask
 
 **Why must a client be passive?**
-The synchronous `Client` runs its event loop only inside calls, so between
-calls it can neither send heartbeats nor notice a closed socket. A
-multiplexer that expected heartbeats from it would drop it after 90 s of
-not being called. Marking the peer type `is_passive` tells the multiplexer
-to expect nothing. `ThreadedClient` has no such limit: its io thread runs
-all the time, so its peer type can be an ordinary, active one, and it
-reconnects on its own. Use `is_passive` for peers built on `Client` only.
+Only the synchronous `Client` must be. It runs its event loop only inside
+calls, so between calls it can neither send heartbeats nor notice a
+closed socket, and a multiplexer that expected heartbeats from it would
+drop it after 90 s of not being called; marking the peer type
+`is_passive` tells the multiplexer to expect nothing. No other class needs
+the mark: `ThreadedClient`, `AsyncClient` and both backend classes run
+the loop all the time, so their peer types are ordinary, active ones,
+and they reconnect on their own. A deployment that builds every peer on
+those never writes `is_passive` at all.
 
 **Why do the multiplexers not talk to each other?**
 Because then nothing has to agree. Each one routes on its own from the same
@@ -93,14 +95,15 @@ wrote or a flag another thread set, within one poll. A pure C++ backend may
 still set a `sig_atomic_t` from a handler of its own and read it there.
 
 **Can a backend be threaded too?**
-Not yet. A backend built on `ThreadedClient` would run its handlers on a
-worker pool while the io thread keeps the heartbeats going, so a slow
-handler would no longer look like a dead peer to the multiplexer, and one
-backend could serve several requests at once. The pieces exist: the io
-thread, the receive queue, `send()` from any thread. What is missing is the
-base class and the reply defaults, and a decision on ordering, since
-requests handled in parallel are no longer answered in order. It is the
-natural next step after the threaded client.
+Yes: `BaseThreadedMultiplexerServer`, in `multiplexer.threaded_server` and
+`multiplexer/backend/base_threaded_multiplexer_server.h`. Its io thread
+keeps the heartbeats going while its handlers run on worker threads, so a
+slow handler no longer looks like a dead peer to the multiplexer, and with
+several workers one backend serves several requests at once; with one
+worker it handles them in arrival order, as `BaseMultiplexerServer` does.
+The handler gets a `Request` and answers through it, from any thread.
+[Which class to build on](README.md#backend-or-client-which-class-to-build-on)
+says when to prefer it.
 
 **Can I use it from asyncio?**
 Yes: `multiplexer.aio.AsyncClient` awaits queries and sends and delivers

@@ -94,6 +94,16 @@ public:
   explicit ThreadedClient(boost::uint32_t peer_type, MessageSink on_message = MessageSink());
   ~ThreadedClient(); // shutdown() if not done, then joins the io thread
 
+  // A backend built on this client answers the search clients use to find
+  // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
+  // by type or addressed to this instance, is answered with a PING when
+  // `answer()` returns true (on the io thread, so it must be quick) and
+  // dropped otherwise, the way BaseMultiplexerServer declines while it
+  // drains. Without a policy the client is no backend: it answers only a
+  // search addressed to it and drops the rest. Call before connecting.
+  typedef std::function<bool()> SearchPolicy;
+  void set_search_policy(SearchPolicy answer);
+
   boost::uint64_t instance_id() const { return instance_id_; }
   boost::uint32_t peer_type() const { return peer_type_; }
   boost::uint64_t random64(); // thread-safe
@@ -230,6 +240,7 @@ private:
   std::deque<boost::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
   std::unordered_set<boost::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
   const MessageSink on_message_;
+  SearchPolicy search_policy_ MX_GUARDED_BY(io_thread_);
   // Sends not yet written: waiting for a connection, or flushing ones
   // waiting for their write. Polled every few milliseconds by
   // send_timer_ while any exist, and on every connection coming up.

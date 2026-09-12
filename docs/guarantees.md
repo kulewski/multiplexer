@@ -71,9 +71,11 @@ What the multiplexer promises, stated so that you can design around it.
   them twice. [Connecting to a multiplexer](handshake.md) shows it.
 - **A backend hangs without dying.** Its connection stays registered as long
   as its library still runs the loop and answers heartbeats, so it keeps
-  receiving its share of round-robin requests, which time out. A backend
-  that blocks in `handle_message` for more than 90 s is dropped by the
-  multiplexer and reconnects afterwards.
+  receiving its share of round-robin requests, which time out. A
+  `BaseMultiplexerServer` that blocks in `handle_message` for more than
+  90 s is dropped by the multiplexer and reconnects afterwards; a
+  `BaseThreadedMultiplexerServer` keeps heartbeating from its io thread
+  while a handler runs, for any length of time, and is not.
 - **A client is idle for a long time.** Nothing happens: passive peers are
   never dropped for silence, and a `ThreadedClient` keeps heartbeating.
 - **A multiplexer restarts while a synchronous client is idle.** The

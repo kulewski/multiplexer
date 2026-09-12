@@ -34,8 +34,9 @@ a pool of interchangeable workers, and publish/subscribe for events.
   event, which expects nothing. A client built on the synchronous `Client`
   does not run the loop between calls, so its peer type is marked
   `is_passive` in the rules file and the multiplexer does not expect a
-  heartbeat from it. A `ThreadedClient` runs the loop on a thread of its own
-  and needs no such mark.
+  heartbeat from it. That is the only class that needs the mark: a
+  `ThreadedClient`, an `AsyncClient` and both backend classes run the loop
+  all the time.
 - **Peer type**: what kind of program a peer is, chosen from the rules file
   when it connects. Backends of one type are interchangeable; routing is by
   peer type.
@@ -51,22 +52,33 @@ a pool of interchangeable workers, and publish/subscribe for events.
 
 ## Backend or client: which class to build on
 
-A program that serves requests by type subclasses `BaseMultiplexerServer`,
-because only a backend answers the search that typed requests are routed
-by; everything else is a client, and which client is a matter of how the
-program is shaped. A `ThreadedClient` that receives requests addressed to
-its instance id and replies to them is a legitimate shape too, a service
-reachable by `to` after an introduction.
+A program that serves requests by type subclasses one of the two backend
+classes, because only a backend answers the search that typed requests
+are routed by; everything else is a client, and which client is a matter
+of how the program is shaped. A `ThreadedClient` that receives requests
+addressed to its instance id and replies to them is a legitimate shape
+too, a service reachable by `to` after an introduction.
 
-| | `BaseMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `Client` |
-|---|---|---|---|---|
-| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
-| found by typed requests | yes: answers the backend search | no: never answers it | no | no |
-| receives | requests routed by type, events, addressed messages | events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
-| handles | `handle_message()`, one at a time, reply by default | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing arrives on its own |
-| sends | replies, and anything from `periodic_task()` | queries and events from any thread | awaited | queries and events from its thread |
-| peer type | not passive | not passive | not passive | `is_passive` |
-| leaves | drain, then `serve_forever()` returns | `shutdown()` | `aclose()` | `shutdown()` |
+Among backends: `BaseMultiplexerServer` when every handler is quick and
+requests are handled one at a time, the simplest class and the usual
+one; `BaseThreadedMultiplexerServer` when a request may run longer than
+the multiplexer's drop interval (90 s as shipped), when several must be
+handled at once, or when a handler blocks on a query of its own. Among
+clients: `Client` for a program with one thread and no event loop, the
+only class whose peer type needs `is_passive`; `ThreadedClient` for a
+threaded server or anything with more than one thread; `AsyncClient`
+for asyncio.
+
+| | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `Client` |
+|---|---|---|---|---|---|
+| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
+| found by typed requests | yes: answers the backend search | yes | no: never answers it | no | no |
+| receives | requests routed by type, events, addressed messages | the same | events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
+| handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing arrives on its own |
+| a handler may block | no: nothing heartbeats meanwhile | yes, for as long as it needs | no: it runs on the io thread | no: it runs on the loop | |
+| sends | replies, and anything from `periodic_task()` | replies from any thread, events from any thread | queries and events from any thread | awaited | queries and events from its thread |
+| peer type | not passive | not passive | not passive | not passive | `is_passive` |
+| leaves | drain, then `serve_forever()` returns | the same, the queue finished first | `shutdown()` | `aclose()` | `shutdown()` |
 
 [Using the Python library](api_python.md) and [the C++ library](api_cpp.md)
 describe each.

@@ -37,6 +37,23 @@ private:
   Mutex &mutex_;
 };
 
+// A scoped lock a std::condition_variable_any can release and retake
+// while waiting: lock() and unlock() are what the wait calls. Held for its
+// scope like MutexLock, and read as such by the analysis, which is right,
+// since the wait gives the lock back before it returns.
+class MX_SCOPED_CAPABILITY UniqueLock {
+public:
+  explicit UniqueLock(Mutex &mutex) MX_ACQUIRE(mutex) : lock_(mutex) {}
+  ~UniqueLock() MX_RELEASE() {}
+  UniqueLock(const UniqueLock &) = delete;
+  UniqueLock &operator=(const UniqueLock &) = delete;
+  void lock() MX_ACQUIRE() { lock_.lock(); }
+  void unlock() MX_RELEASE() { lock_.unlock(); }
+
+private:
+  std::unique_lock<Mutex> lock_;
+};
+
 } // namespace mx
 
 #endif // MX_LIB_MUTEX_H_
