@@ -22,7 +22,7 @@ PYTHON ?= python3
 PROTOC ?= protoc
 CXX ?= g++
 AR ?= ar
-VERSION ?= 0.1.0
+VERSION ?= 2.0.0
 # The optimisation and debug flags; the rest is what the code needs.
 CXXFLAGS ?= -O2 -g -DNDEBUG
 GTEST_LIBS ?= -lgtest -lgtest_main
