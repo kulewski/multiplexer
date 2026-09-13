@@ -19,7 +19,7 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   `wait_until(predicate, timeout, what)` on anything else. Every process's
   stderr and events land in the test's undeclared outputs directory.
   `harness/` here re-exports it with the constants of `testing.rules`.
-  `FakePeer`, `BackendThread` and `TestClient` are the in-process peers for
+  `FakePeer`, `BackendThread`, `TestClient` and `ThreadedTestClient` are the in-process peers for
   unit tests, described in [docs/api_python.md](../docs/api_python.md#testing).
 - `roles/py/` and `roles/cc/`: the same four roles in both languages, with
   the same options and the same Event events, so a scenario can be run with any

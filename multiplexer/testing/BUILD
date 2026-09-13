@@ -61,6 +61,7 @@ py_library(
         "//multiplexer:multiplexer_constants",
         "//multiplexer:multiplexer_py_proto",
         "//multiplexer:servers",
+        "//multiplexer:threaded_client_py",
     ],
 )
 

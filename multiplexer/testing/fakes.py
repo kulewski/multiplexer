@@ -5,9 +5,11 @@ FakePeer stands in for a backend the code under test talks to: tell it what
 to answer, run the code, then look at what it received. BackendThread serves
 a BaseMultiplexerServer of yours on its own thread, the thread the client
 library requires, and keeps what it raised. TestClient sends and queries
-from the test itself. They complement the roles that run as processes
-(spawn): those exercise a whole program, these keep a test in one process
-where it can inspect everything.
+from the test itself, on the synchronous client; ThreadedTestClient does
+the same on a ThreadedClient, so that a test sees what a production peer
+built on one sees, and keeps what arrives on its own. They complement the
+roles that run as processes (spawn): those exercise a whole program, these
+keep a test in one process where it can inspect everything.
 """
 
 import threading
@@ -20,6 +22,7 @@ from multiplexer.mxclient import ConnectionWrapper, Lane
 from multiplexer.multiplexer_constants import types
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import Cluster, Mx, wait_until
+from multiplexer.threaded_client import ThreadedClient
 
 # What a FakePeer handler returns: the reply payload (bytes, str or a
 # protocol buffer message), or None for no reply.
@@ -346,6 +349,139 @@ class TestClient:
         self.client.shutdown()
 
     def __enter__(self) -> "TestClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.shutdown()
+
+
+class ThreadedTestClient:
+    """A client of `peer_type` shaped like a production peer built on
+    ThreadedClient: an io thread of its own, an active peer type, replies
+    matched to queries by id, a late reply to a query it has seen answered
+    dropped, a search addressed to it answered. What arrives on its own,
+    events and requests addressed to it, is kept: `received` in arrival
+    order, messages(type, matching=None), wait_for(type, count=1,
+    timeout=10, matching=None), via(mxmsg) and arrivals(type), as on
+    FakePeer. TestClient, on the synchronous client, never drops a late
+    reply and never answers a search, so a test of a threaded peer that
+    passes on it may not pass in production; this one shows what
+    production shows. `client` is the ThreadedClient underneath.
+    """
+
+    def __init__(self, cluster: Cluster, peer_type: int, name: str | None = None):
+        self.cluster = cluster
+        self.peer_type = peer_type
+        self.name = name or "threaded-test-client-%d" % peer_type
+        self.received: list[MultiplexerMessage] = []
+        self._via: dict[int, Mx] = {}
+        self._cond = threading.Condition()
+        self.client = ThreadedClient(
+            cluster.endpoints, type=peer_type, on_message=self._on_message, with_connection=True
+        )
+
+    def _on_message(self, mxmsg: MultiplexerMessage, connection: ConnectionWrapper) -> None:
+        """The io thread: keep the message and the multiplexer it came through."""
+        via = self.cluster.multiplexer_at(connection.endpoint)
+        with self._cond:
+            self.received.append(mxmsg)
+            self._via[id(mxmsg)] = via
+            self._cond.notify_all()
+
+    @property
+    def instance_id(self) -> int:
+        """The client's instance id, what a peer addresses with `to`."""
+        return self.client.instance_id
+
+    def lane(self, pinned: bool = False, connection: ConnectionWrapper | None = None) -> Lane:
+        """A Lane for `multiplexer=`; ThreadedClient.lane() says the rest."""
+        return self.client.lane(pinned, connection)
+
+    def send(
+        self,
+        payload: Any,
+        type: int,
+        to: int = 0,
+        flush: bool = True,
+        multiplexer: int | Lane | ConnectionWrapper = ThreadedClient.ONE,
+        **kwargs: Any,
+    ) -> int:
+        """Send `payload` as a message of `type`, routed by the rules or to
+        instance `to`, through one connection, a Lane's or a
+        ConnectionWrapper's; waited for by default. Returns the message id."""
+        if to:
+            kwargs["to"] = to
+        return self.client.send_message(payload, type=type, flush=flush, multiplexer=multiplexer, **kwargs)
+
+    def query(
+        self,
+        payload: Any,
+        type: int,
+        timeout: float = 10,
+        to: int = 0,
+        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
+        multiplexer: int | Lane | ConnectionWrapper = ThreadedClient.ONE,
+        with_connection: bool = False,
+    ) -> Any:
+        """Send `payload` as a request of `type` and return the reply, or
+        raise as ThreadedClient.query() does; its `to`, `probe`,
+        `multiplexer` and `with_connection`."""
+        return self.client.query(
+            payload,
+            type,
+            timeout,
+            to=to,
+            probe=probe,
+            multiplexer=multiplexer,
+            with_connection=with_connection,
+        )
+
+    def messages(self, type: int, matching: Matcher | None = None) -> list[MultiplexerMessage]:
+        """Every message of `type` that arrived on its own so far; with `matching`, those it selects."""
+        with self._cond:
+            return [mxmsg for mxmsg in self.received if mxmsg.type == type and (matching is None or matching(mxmsg))]
+
+    def wait_for(
+        self, type: int, count: int = 1, timeout: float = 10, matching: Matcher | None = None
+    ) -> list[MultiplexerMessage]:
+        """Block until at least `count` messages of `type` (that `matching`
+        selects) have arrived and return them; TimeoutError names the type
+        and how many came."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                found = [
+                    mxmsg for mxmsg in self.received if mxmsg.type == type and (matching is None or matching(mxmsg))
+                ]
+                if len(found) >= count:
+                    return found
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "%s: %d of %d message(s) of type %d%s within %ss"
+                        % (self.name, len(found), count, type, " matching" if matching else "", timeout)
+                    )
+                self._cond.wait(min(remaining, 0.5))
+
+    def via(self, mxmsg: MultiplexerMessage) -> Mx:
+        """The multiplexer a received message came through."""
+        with self._cond:
+            return self._via[id(mxmsg)]
+
+    def arrivals(self, type: int, matching: Matcher | None = None) -> list[tuple[MultiplexerMessage, Mx]]:
+        """Every message of `type` received paired with the multiplexer it came through, in arrival order."""
+        with self._cond:
+            return [
+                (mxmsg, self._via[id(mxmsg)])
+                for mxmsg in self.received
+                if mxmsg.type == type and (matching is None or matching(mxmsg))
+            ]
+
+    def shutdown(self) -> None:
+        """Fail what is in flight, close the connections, stop the io thread."""
+        self.client.shutdown()
+
+    def __enter__(self) -> "ThreadedTestClient":
         return self
 
     def __exit__(self, *exc: object) -> None:

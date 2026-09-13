@@ -12,7 +12,7 @@ from multiplexer.clients import BackendError, MxClient
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationFailed, OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient, wait_until
+from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient, ThreadedTestClient, wait_until
 
 
 class FakePeerTest(unittest.TestCase):
@@ -142,6 +142,69 @@ class FakePeerTest(unittest.TestCase):
             client.send(b"direct", types.PYTHON_TEST_RESPONSE, to=second.backend.conn.instance_id)
             self.assertEqual(b"direct", second.wait_for(types.PYTHON_TEST_RESPONSE)[0].message)
             self.assertEqual([], first.received)
+
+
+class ThreadedTestClientTest(unittest.TestCase):
+    """A test client that behaves as a production peer on ThreadedClient does."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cluster = Cluster(1).__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.cluster.__exit__(None, None, None)
+
+    def test_queries_and_keeps_what_arrives_on_its_own(self):
+        """A query is answered; an event addressed to the client lands in
+        `received`, with the multiplexer it came through."""
+        with (
+            FakePeer(self.cluster, peers.PYTHON_TEST_SERVER) as peer,
+            ThreadedTestClient(self.cluster, peers.PYTHON_TEST_CLIENT) as client,
+            TestClient(self.cluster, peers.WEBSITE) as other,
+        ):
+            peer.reply_with(types.PYTHON_TEST_REQUEST, b"pong", types.PYTHON_TEST_RESPONSE)
+            self.assertEqual(b"pong", client.query(b"ping", types.PYTHON_TEST_REQUEST).message)
+            reply, connection = client.query(
+                b"ping", types.PYTHON_TEST_REQUEST, to=peer.instance_id, with_connection=True
+            )
+            self.assertEqual(peer.instance_id, reply.from_)
+            self.assertTrue(connection)
+            other.send(b"for you", types.PYTHON_TEST_RESPONSE, to=client.instance_id)
+            (event,) = client.wait_for(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"for you")
+            self.assertIs(self.cluster.mx[0], client.via(event))
+            self.assertEqual([(event, self.cluster.mx[0])], client.arrivals(types.PYTHON_TEST_RESPONSE))
+            self.assertEqual([], client.messages(types.PYTHON_TEST_REQUEST))
+
+    def test_a_late_reply_is_dropped_and_a_follow_up_without_references_is_kept(self):
+        """The fake answers after the query gave up: the late reply
+        references a query the client has seen end, so the client drops it,
+        as a production ThreadedClient does and TestClient would not. A
+        follow-up addressed to the client with no `references` arrives."""
+        with (
+            FakePeer(self.cluster, peers.PYTHON_TEST_SERVER) as peer,
+            ThreadedTestClient(self.cluster, peers.PYTHON_TEST_CLIENT) as client,
+        ):
+
+            def slowly(mxmsg):
+                time.sleep(1.5)
+                backend = peer.backend
+                assert backend is not None
+                backend.send_message(
+                    message=b"follow-up", type=types.PYTHON_TEST_RESPONSE, to=mxmsg.from_, references=0, flush=True
+                )
+                return b"too late"
+
+            peer.on(types.PYTHON_TEST_REQUEST, slowly, types.PYTHON_TEST_RESPONSE)
+            with self.assertRaises((OperationTimedOut, OperationFailed)):
+                client.query(b"ping", types.PYTHON_TEST_REQUEST, timeout=0.3)
+            (follow_up,) = client.wait_for(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"follow-up")
+            self.assertEqual(0, follow_up.references)
+            peer.wait_for(types.PYTHON_TEST_REQUEST)
+            time.sleep(0.5)  # the late reply, if it were going to arrive, has had time to
+            self.assertEqual(
+                [], client.messages(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"too late")
+            )
 
 
 class SendAfterRestartTest(unittest.TestCase):

@@ -602,6 +602,15 @@ class SearchTest(unittest.TestCase):
   connection=None)` a lane for `multiplexer=`, `instance_id` its id;
   `client` is the `clients.Client` underneath. Its peer type should be
   `is_passive`, as for every synchronous client.
+- `ThreadedTestClient(cluster, peer_type, name=None)` is the same on a
+  `ThreadedClient`, and so shaped like a production peer built on one: an
+  active peer type, replies matched by id, a late reply to a query it has
+  seen answered dropped, a search addressed to it answered. `send()`,
+  `query()`, `lane()` and `instance_id` as on `TestClient`; what arrives
+  on its own is kept, with `received`, `messages()`, `wait_for()`, `via()`
+  and `arrivals()` as on `FakePeer`. A test of a threaded peer that passes
+  on `TestClient` may not pass in production, since the synchronous client
+  keeps every late reply; this one shows what production shows.
 - `wait_until(predicate, timeout, what)` polls until the predicate returns
   something true and returns it, or raises `TimeoutError` naming `what`.
 - `spawn(role, lang, mx, type, **options)` runs a peer as a process and
@@ -611,8 +620,9 @@ class SearchTest(unittest.TestCase):
 
 Everything in-process uses the client library as your code does, so what a
 test sees is what production sees, including the thread rules: a
-`FakePeer` or `BackendThread` is served on its own thread, and a
-`TestClient` belongs to the test's thread.
+`FakePeer` or `BackendThread` is served on its own thread, a
+`TestClient` belongs to the test's thread, and a `ThreadedTestClient`
+may be used from any.
 
 ### Tests that hold up under load
 

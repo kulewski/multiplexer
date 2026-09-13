@@ -746,5 +746,5 @@ def main() -> None:
 
 # The in-process peers, re-exported so that a test imports everything from
 # multiplexer.testing; fakes.py needs Cluster and wait_until, defined above.
-from multiplexer.testing.fakes import BackendThread, FakePeer, TestClient  # noqa: E402
+from multiplexer.testing.fakes import BackendThread, FakePeer, TestClient, ThreadedTestClient  # noqa: E402
 from multiplexer.testing.raw_peer import RawPeer  # noqa: E402
