@@ -145,6 +145,11 @@ public:
     Assert(!is_living_);
     Assert(!shuts_down_);
     is_living_ = true;
+    // Every write is one whole frame, so Nagle's algorithm has nothing to
+    // coalesce and only delays a small frame sent right after another one
+    // until the peer's ACK arrives. Off on both sides.
+    boost::system::error_code ignored;
+    socket_.set_option(boost::asio::ip::tcp::no_delay(true), ignored);
     _start_read();
   }
 
