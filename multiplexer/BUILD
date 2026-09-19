@@ -243,6 +243,20 @@ cc_test(
 )
 
 cc_test(
+    name = "connect_by_name_test",
+    size = "small",
+    srcs = ["connect_by_name_test.cc"],
+    data = ["//:multiplexer.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "recorder_test",
     size = "small",
     srcs = ["recorder_test.cc"],
@@ -547,6 +561,19 @@ py_test(
     size = "large",
     srcs = ["threaded_server_long_test.py"],
     tags = ["slow"],
+    deps = [
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "connect_by_name_test_py",
+    size = "small",
+    srcs = ["connect_by_name_test.py"],
+    main = "connect_by_name_test.py",
     deps = [
         ":multiplexer_constants",
         ":threaded_client_py",

@@ -30,7 +30,11 @@
 #include <asio/steady_timer.hpp>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace multiplexer {
 
@@ -38,6 +42,10 @@ struct BasicClientTraits {
   typedef asio::steady_timer Timer;
   typedef std::shared_ptr<Timer> TimerPointer;
   typedef asio::ip::tcp::endpoint Endpoint;
+  // What a connection was asked for: a host name or address, and a port.
+  // Resolved on every attempt, so a multiplexer whose address changed is
+  // found again at the next reconnect.
+  typedef std::pair<std::string, std::uint16_t> Target;
 };
 
 class BasicClient;
@@ -92,28 +100,33 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
     };
   };
 
-  // Stored inside each Connection: the address it was asked to connect to,
-  // so that a dropped connection can be re-established without the caller.
+  // Stored inside each Connection: what it was asked to connect to, so that
+  // a dropped connection can be re-established without the caller; the
+  // addresses that resolved to this time, tried in turn; and the one in use.
   struct ConnectionManagerPrivateDataInConnection {
   private:
+    BasicClientTraits::Target target;
     BasicClientTraits::Endpoint expected_endpoint;
+    std::vector<BasicClientTraits::Endpoint> candidates;
+    std::size_t next_candidate = 0;
     friend class BasicClient;
   };
 
   typedef multiplexer::Connection<BasicClient> Connection;
 };
 
-// The handle callers see for a connection: a weak reference plus the
-// endpoint. It is false once the connection is gone, and scheduling through
-// it may reconnect to the remembered endpoint (see schedule_one). Replies
-// carry the wrapper of the connection they arrived on, so a peer can answer
-// through the same multiplexer.
+// The handle callers see for a connection: a weak reference plus what it
+// was asked to connect to and the address that resolved to. It is false
+// once the connection is gone, and scheduling through it may reconnect to
+// the remembered target (see schedule_one). Replies carry the wrapper of
+// the connection they arrived on, so a peer can answer through the same
+// multiplexer.
 class ConnectionWrapper {
 public:
   inline operator bool() const { return static_cast<bool>(lock()); }
-  // Same connection, or the same endpoint once it is gone (the observer's
-  // "down" notification carries only the endpoint).
-  bool is_same_connection(const ConnectionWrapper &other) const { return endpoint_ == other.endpoint_; }
+  // Same connection, or the same target once it is gone (the observer's
+  // "down" notification carries only the target).
+  bool is_same_connection(const ConnectionWrapper &other) const { return target_ == other.target_; }
 
 private:
   typedef ConnectionsManagerTraits<BasicClient>::Connection Connection;
@@ -123,9 +136,9 @@ public:
   ConnectionWrapper(const ConnectionWrapper &) = default;
 
 private:
-  // ConnectionWrapper(Connection::pointer conn) : conn_(conn) {}
-  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Endpoint &endpoint)
-      : conn_(conn), endpoint_(endpoint) {}
+  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target &target,
+                    const BasicClientTraits::Endpoint &endpoint)
+      : conn_(conn), target_(target), endpoint_(endpoint) {}
   Connection::pointer lock() const { return conn_.lock(); }
 
 public:
@@ -133,14 +146,19 @@ public:
     if (this == &other)
       return *this;
     conn_ = other.conn_;
+    target_ = other.target_;
     endpoint_ = other.endpoint_;
     return *this;
   }
-  // The multiplexer's address, kept after the connection is gone.
+  // What the connection was asked for, host and port, kept after it is gone.
+  const BasicClientTraits::Target &target() const { return target_; }
+  // The address that resolved to and the connection used, kept after it is
+  // gone; unspecified until a name resolved.
   const BasicClientTraits::Endpoint &endpoint() const { return endpoint_; }
 
 private:
   Connection::weak_pointer conn_;
+  BasicClientTraits::Target target_;
   BasicClientTraits::Endpoint endpoint_;
 
   friend class BasicClient;
@@ -286,8 +304,12 @@ public:
 
   // Connectivity. async_connect returns at once; connect runs the loop until
   // the handshake completed or `timeout` passed, and returns the wrapper
-  // either way (check it). A connection that fails or drops is retried from
-  // connection_destroyed after AUTO_RECONNECT_TIME, whenever the loop runs.
+  // either way (check it). A host name is resolved on this client's thread,
+  // asynchronously, and every address it resolves to is tried in turn; a
+  // name that does not resolve counts as an attempt that failed. A
+  // connection that fails or drops is retried from connection_destroyed
+  // after AUTO_RECONNECT_TIME, whenever the loop runs, resolving the name
+  // again each time, so a multiplexer that moved is found at the next try.
   void shutdown(); // close every connection; idempotent
 
   // Fork, see lib/fork.h: a client a forked child inherited is an orphan
@@ -305,11 +327,20 @@ public:
   // thread and driven from another; BaseMultiplexerServer::serve_forever()
   // calls it on entry. Only the debug-build thread checks care.
   void bind_to_current_thread();
-  ConnectionWrapper async_connect(const Endpoint &peer_endpoint);            // start connecting, return at once
-  bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const; // run the loop until registered
-  ConnectionWrapper connect(const Endpoint &peer_endpoint, float timeout);   // async_connect + wait
+  ConnectionWrapper async_connect(const Endpoint &peer_endpoint);               // an address: start connecting
+  ConnectionWrapper async_connect(const std::string &host, std::uint16_t port); // a name or an address
+  bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const;    // run the loop until registered
+  ConnectionWrapper connect(const Endpoint &peer_endpoint, float timeout);      // async_connect + wait
+  ConnectionWrapper connect(const std::string &host, std::uint16_t port, float timeout);
   void connection_destroyed(Connection *conn); // a connection ended; schedule the reconnect
-  void reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint, const asio::error_code &);
+  void reconnect_after_timeout(TimerPointer, Target target, const asio::error_code &);
+
+  // How a host name becomes addresses: the system resolver unless a test
+  // installs one, a function of the host and the port that returns the
+  // addresses, or none with `error` set. Called on this client's thread.
+  typedef std::function<std::vector<Endpoint>(const std::string &host, std::uint16_t port, asio::error_code &error)>
+      Resolver;
+  void set_resolver(Resolver resolver) { resolver_hook_ = resolver; }
 
 public:
   // A deadline `timeout` seconds from now on this client's io_service;
@@ -351,7 +382,7 @@ public:
   void after_connection_registration(Connection::pointer conn, const WelcomeMessage &) {
     MX_DCHECK_RUN_ON(&owner_thread());
     if (connection_observer_)
-      connection_observer_(ConnectionWrapper(conn, conn->managers_private_data().expected_endpoint), true);
+      connection_observer_(_wrap(conn), true);
   }
 
   inline bool has_incoming_messages() const { return !incoming_messages_.empty(); }
@@ -450,7 +481,7 @@ public:
       // round-robin: move *entry to the end of multiplexers list
       connections.splice(connections.end(), connections, entry);
       if (used)
-        *used = ConnectionWrapper(conn, conn->managers_private_data().expected_endpoint);
+        *used = _wrap(conn);
       return tracker;
     }
     return BasicScheduledMessageTracker();
@@ -536,7 +567,21 @@ public:
   std::uint32_t inline client_type() const { return client_type_; } // this peer's type
 
 private:
-  typedef std::map<Endpoint, Connection::weak_pointer> ConnectionByEndpoint;
+  typedef std::map<Target, Connection::weak_pointer> ConnectionByTarget;
+
+  // The wrapper of a connection, from what it stores.
+  static ConnectionWrapper _wrap(const Connection::pointer &conn) {
+    return ConnectionWrapper(conn, conn->managers_private_data().target,
+                             conn->managers_private_data().expected_endpoint);
+  }
+  // A new connection for `target`, in the map, replacing an earlier one.
+  Connection::pointer _new_connection(const Target &target);
+  // Resolves the connection's target, then connects; on the io thread.
+  void _resolve_and_start(Connection::pointer conn);
+  void _resolved(Connection::pointer conn, const asio::error_code &error, std::vector<Endpoint> candidates);
+  // Connects to the next address the target resolved to, or gives up.
+  void _try_next_candidate(Connection::pointer conn);
+  void _connected(Connection::pointer conn, const asio::error_code &error);
 
   /* instance properties */
   std::uint32_t client_type_;
@@ -548,8 +593,10 @@ private:
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
 
-  ConnectionByEndpoint connection_by_endpoint_;
+  ConnectionByTarget connection_by_target_;
   const unsigned int fork_generation_at_creation_;
+  asio::ip::tcp::resolver resolver_;
+  Resolver resolver_hook_;
 
   std::shared_ptr<const RawMessage> welcome_message_;
 

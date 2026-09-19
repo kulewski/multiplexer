@@ -18,7 +18,8 @@ using std::cerr;
 
 BasicClient::BasicClient(asio::io_service &io_service, std::uint32_t client_type)
     : Base(io_service), client_type_(client_type), shuts_down_(false),
-      incoming_queue_max_size_(DEFAULT_INCOMING_QUEUE_MAX_SIZE), fork_generation_at_creation_(mx::fork_generation()) {}
+      incoming_queue_max_size_(DEFAULT_INCOMING_QUEUE_MAX_SIZE), fork_generation_at_creation_(mx::fork_generation()),
+      resolver_(io_service) {}
 
 bool BasicClient::orphaned() const { return mx::fork_generation() != fork_generation_at_creation_; }
 
@@ -28,7 +29,7 @@ void BasicClient::check_not_orphaned() const {
 }
 
 void BasicClient::orphan_close_descriptors() {
-  for (ConnectionByEndpoint::iterator entry = connection_by_endpoint_.begin(); entry != connection_by_endpoint_.end();
+  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
        ++entry) {
     if (Connection::pointer conn = entry->second.lock()) {
       int fd = conn->socket().native_handle();
@@ -53,8 +54,7 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     return;
   }
 
-  IncomingMessagesBuffer::value_type incoming =
-      mx::make_triple(raw, ConnectionWrapper(conn, conn->managers_private_data().expected_endpoint), mxmsg);
+  IncomingMessagesBuffer::value_type incoming = mx::make_triple(raw, _wrap(conn), mxmsg);
   if (incoming_sink_) {
     incoming_sink_(incoming);
     return;
@@ -67,12 +67,16 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
   incoming_messages_.push_back(incoming);
 }
 
-// BasicClient::async_connect() helper function
-static inline void handle_connect(BasicClient::Connection::pointer conn, const asio::error_code &error) {
+// After the socket's connect: the handshake, or the next address the
+// target resolved to, or the end of this attempt.
+void BasicClient::_connected(Connection::pointer conn, const asio::error_code &error) {
   if (!error) {
     conn->start();
-  } else {
-    conn->shutdown();
+  } else if (!conn->shuts_down()) {
+    MX_LOG(DEBUG, MEDIUMVERBOSITY,
+           CTX("BasicClient") TEXT("connect to " + repr(conn->managers_private_data().expected_endpoint) +
+                                   " failed: " + error.message()));
+    _try_next_candidate(conn);
   }
 }
 
@@ -84,100 +88,160 @@ void BasicClient::shutdown() {
     return;
   MX_DCHECK_RUN_ON(&owner_thread());
   shuts_down_ = true;
-  for (ConnectionByEndpoint::iterator next = connection_by_endpoint_.begin(), entry;
-       next != connection_by_endpoint_.end() && (entry = next++, true);)
+  resolver_.cancel();
+  for (ConnectionByTarget::iterator next = connection_by_target_.begin(), entry;
+       next != connection_by_target_.end() && (entry = next++, true);)
     if (Connection::pointer conn = entry->second.lock())
-      // this does modify connection_by_endpoint_, so we have to use two
+      // this does modify connection_by_target_, so we have to use two
       // iterators
       conn->shutdown();
 }
 
 // Called from Connection::shutdown for any reason: the multiplexer closed,
-// the connect failed, or shutdown() here. Unless the client itself is
-// shutting down, a timer is armed to connect to the same endpoint again.
-// The timer fires only while some call runs the loop, so a passive client
-// reconnects during its next call at the earliest.
+// the connect failed, the name did not resolve, or shutdown() here. Unless
+// the client itself is shutting down, a timer is armed to connect to the
+// same target again, resolving it afresh. The timer fires only while some
+// call runs the loop, so a passive client reconnects during its next call
+// at the earliest.
 void BasicClient::connection_destroyed(Connection *conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
+  const Target target = conn->managers_private_data().target;
   Connection::pointer c;
-  ConnectionByEndpoint::iterator endpoint_entry =
-      connection_by_endpoint_.find(conn->managers_private_data().expected_endpoint);
-
-  if (endpoint_entry != connection_by_endpoint_.end() && (c = endpoint_entry->second.lock()) && c.get() == conn) {
-    connection_by_endpoint_.erase(endpoint_entry);
+  ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
+  if (target_entry != connection_by_target_.end() && (c = target_entry->second.lock()) && c.get() == conn) {
+    connection_by_target_.erase(target_entry);
   }
 
   if (connection_observer_)
-    connection_observer_(ConnectionWrapper(Connection::pointer(), conn->managers_private_data().expected_endpoint),
-                         false);
+    connection_observer_(
+        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
   if (!shuts_down_) {
     // auto reconnect after AUTO_RECONNECT_TIME seconds
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
-                                   repr(conn->managers_private_data().expected_endpoint)));
+                                   target.first + ":" + repr(target.second)));
     TimerPointer timer(new Timer(io_service_, std::chrono::seconds(AUTO_RECONNECT_TIME)));
-    Endpoint endpoint = conn->managers_private_data().expected_endpoint;
-    timer->async_wait([self = this->shared_from_this(), timer, endpoint](const asio::error_code &error) {
-      self->reconnect_after_timeout(timer, endpoint, error);
+    timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code &error) {
+      self->reconnect_after_timeout(timer, target, error);
     });
   }
 }
 
-void BasicClient::reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint, const asio::error_code &error) {
+void BasicClient::reconnect_after_timeout(TimerPointer, Target target, const asio::error_code &error) {
   if (!error) {
-    if (connection_by_endpoint_.find(peer_endpoint) == connection_by_endpoint_.end())
-      async_connect(peer_endpoint);
+    if (connection_by_target_.find(target) == connection_by_target_.end())
+      async_connect(target.first, target.second);
   } else {
     MX_LOG(ERROR, HIGHVERBOSITY,
-           CTX("BasicClient") TEXT("auto reconnect to " + repr(peer_endpoint) +
-                                   "cancelled "
-                                   "by error" +
-                                   repr(error)));
+           CTX("BasicClient") TEXT("auto reconnect to " + target.first + ":" + repr(target.second) +
+                                   " cancelled by error " + repr(error)));
   }
 }
 
-// Starts a connection to `peer_endpoint`; the handshake runs asynchronously
-// once the socket connects (Connection::start). Connecting twice to one
-// endpoint replaces the earlier connection, which is also how the reconnect
-// timer behaves if the caller connected again in the meantime.
-ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint &peer_endpoint) {
+// A new connection for `target`, in the map. Connecting twice to one target
+// replaces the earlier connection, which is also how the reconnect timer
+// behaves if the caller connected again in the meantime.
+BasicClient::Connection::pointer BasicClient::_new_connection(const Target &target) {
   MX_DCHECK_RUN_ON(&owner_thread());
-
-  // close any previous connections with the same endpoint
-  ConnectionByEndpoint::iterator endpoint_entry = connection_by_endpoint_.find(peer_endpoint);
-  if (endpoint_entry != connection_by_endpoint_.end()) {
-    if (Connection::pointer conn = endpoint_entry->second.lock())
+  ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
+  if (target_entry != connection_by_target_.end()) {
+    if (Connection::pointer conn = target_entry->second.lock())
       conn->shutdown();
   }
 #ifndef NDEBUG
   // discard weak references that point to no connections at all
-  for (ConnectionByEndpoint::iterator next = connection_by_endpoint_.begin(), entry;
-       next != connection_by_endpoint_.end() && (entry = next++, true);) {
+  for (ConnectionByTarget::iterator next = connection_by_target_.begin(), entry;
+       next != connection_by_target_.end() && (entry = next++, true);) {
     if (!entry->second.lock()) {
       MX_LOG(ERROR, LOWVERBOSITY,
              CTX("BasicClient.connect") TEXT("there should be no dangling weak references in "
-                                             "connection_by_endpoint_"));
-      connection_by_endpoint_.erase(entry);
+                                             "connection_by_target_"));
+      connection_by_target_.erase(entry);
     }
   }
 #endif
-
-  // save newly created connection in the map
   Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
-  new_connection->managers_private_data().expected_endpoint = peer_endpoint;
-  connection_by_endpoint_.insert(std::make_pair(peer_endpoint, new_connection));
+  new_connection->managers_private_data().target = target;
+  connection_by_target_.insert(std::make_pair(target, new_connection));
+  return new_connection;
+}
 
-  // start connection asynchronously
-  new_connection->socket().async_connect(
-      peer_endpoint, [new_connection](const asio::error_code &error) { handle_connect(new_connection, error); });
+// An address given as such: no resolving, the connect starts at once.
+ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint &peer_endpoint) {
+  Connection::pointer conn = _new_connection(Target(peer_endpoint.address().to_string(), peer_endpoint.port()));
+  conn->managers_private_data().candidates.assign(1, peer_endpoint);
+  _try_next_candidate(conn);
+  return _wrap(conn);
+}
 
-  return ConnectionWrapper(new_connection, new_connection->managers_private_data().expected_endpoint);
+// A host name, or an address in text: the name is resolved on this thread
+// first, every address it has tried in turn; the wrapper is returned at
+// once, unspecified until an address is in use.
+ConnectionWrapper BasicClient::async_connect(const std::string &host, std::uint16_t port) {
+  asio::error_code literal;
+  asio::ip::address address = asio::ip::make_address(host, literal);
+  if (!literal)
+    return async_connect(Endpoint(address, port));
+  Connection::pointer conn = _new_connection(Target(host, port));
+  _resolve_and_start(conn);
+  return _wrap(conn);
+}
+
+void BasicClient::_resolve_and_start(Connection::pointer conn) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  const Target &target = conn->managers_private_data().target;
+  if (resolver_hook_) {
+    asio::error_code error;
+    std::vector<Endpoint> candidates = resolver_hook_(target.first, target.second, error);
+    _resolved(conn, error, candidates);
+    return;
+  }
+  resolver_.async_resolve(target.first, std::to_string(target.second),
+                          [self = this->shared_from_this(), conn](const asio::error_code &error,
+                                                                  asio::ip::tcp::resolver::results_type results) {
+                            std::vector<Endpoint> candidates;
+                            for (const asio::ip::tcp::resolver::results_type::value_type &entry : results)
+                              candidates.push_back(entry.endpoint());
+                            self->_resolved(conn, error, candidates);
+                          });
+}
+
+void BasicClient::_resolved(Connection::pointer conn, const asio::error_code &error, std::vector<Endpoint> candidates) {
+  if (conn->shuts_down())
+    return;
+  const Target &target = conn->managers_private_data().target;
+  if (error || candidates.empty()) {
+    MX_LOG(WARNING, MEDIUMVERBOSITY,
+           CTX("BasicClient") TEXT(target.first + ":" + repr(target.second) + " does not resolve" +
+                                   (error ? ": " + error.message() : std::string()) + "; trying again later"));
+    conn->shutdown(); // arms the reconnect timer, which resolves again
+    return;
+  }
+  conn->managers_private_data().candidates = candidates;
+  conn->managers_private_data().next_candidate = 0;
+  _try_next_candidate(conn);
+}
+
+// The next address of the connection's target, or the end of this attempt
+// when every one failed; the reconnect timer then starts the next.
+void BasicClient::_try_next_candidate(Connection::pointer conn) {
+  auto &data = conn->managers_private_data();
+  if (data.next_candidate >= data.candidates.size()) {
+    conn->shutdown();
+    return;
+  }
+  data.expected_endpoint = data.candidates[data.next_candidate++];
+  asio::error_code ignored;
+  conn->socket().close(ignored); // a socket that failed to connect is reopened by async_connect
+  conn->socket().async_connect(
+      data.expected_endpoint,
+      [self = this->shared_from_this(), conn](const asio::error_code &error) { self->_connected(conn, error); });
 }
 
 void BasicClient::bind_to_current_thread() {
   bind_owner_to_current_thread();
-  for (ConnectionByEndpoint::iterator entry = connection_by_endpoint_.begin(); entry != connection_by_endpoint_.end();
+  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
        ++entry) {
     if (Connection::pointer conn = entry->second.lock())
       conn->bind_io_thread_to_current();
@@ -207,8 +271,13 @@ bool BasicClient::wait_for_connection(ConnectionWrapper connwrap, float timeout)
 }
 
 ConnectionWrapper BasicClient::connect(const asio::ip::tcp::endpoint &peer_endpoint, float timeout) {
-
   ConnectionWrapper connwrap = async_connect(peer_endpoint);
+  wait_for_connection(connwrap, timeout);
+  return connwrap;
+}
+
+ConnectionWrapper BasicClient::connect(const std::string &host, std::uint16_t port, float timeout) {
+  ConnectionWrapper connwrap = async_connect(host, port);
   wait_for_connection(connwrap, timeout);
   return connwrap;
 }

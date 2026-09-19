@@ -76,6 +76,13 @@ that changes.
   them twice and the caller sees nothing; backends and clients reconnect to
   the restarted multiplexer within about 3 s. [Connecting to a
   multiplexer](handshake.md) shows it.
+- **A multiplexer moves.** A peer given a host name resolves it inside the
+  library on every attempt, at startup and at every reconnect, and tries
+  each address the name has in turn; so an instance that comes back under
+  another address, a rescheduled pod for example, is found at the next
+  reconnect, within about 3 s of the name changing. A name that does not
+  resolve yet is not an error: `connect()` returns without a connection,
+  as for a port that refuses, and the library keeps trying every 3 s.
 - **The only multiplexer dies.** There is no other connection. A threaded
   client sends its in-flight requests again as soon as it is reconnected; a
   synchronous client waits for the reconnect inside its current call and

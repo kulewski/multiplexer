@@ -144,6 +144,7 @@ CC_TEST_SRCS := \
   lib/thread_checker_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
+  multiplexer/connect_by_name_test.cc \
   multiplexer/fork_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/soak_test.cc \
@@ -152,6 +153,7 @@ CC_TEST_SRCS := \
 
 PY_TEST_FILES := \
   multiplexer/aio_test.py \
+  multiplexer/connect_by_name_test.py \
   multiplexer/fork_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \

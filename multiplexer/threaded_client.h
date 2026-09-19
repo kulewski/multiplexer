@@ -105,6 +105,8 @@ public:
   // search addressed to it and drops the rest. Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
+  // How host names become addresses; for tests. See BasicClient::Resolver.
+  void set_resolver(BasicClient::Resolver resolver);
 
   std::uint64_t instance_id() const { return instance_id_; }
   std::uint32_t peer_type() const { return peer_type_; }

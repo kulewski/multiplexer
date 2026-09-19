@@ -14,7 +14,6 @@ never share objects.
 from multiplexer._native import *
 import multiplexer._native as _mxclient
 import atexit
-import socket
 import time
 from functools import wraps
 import google.protobuf.message
@@ -156,8 +155,7 @@ class Client(_mxclient.Client):
         endpoint is e.g. ("localhost", 1980)
         return ConnectionWrapper
         """
-        ip4 = socket.gethostbyname(endpoint[0])
-        return super(Client, self).async_connect(ip4, endpoint[1])
+        return super(Client, self).async_connect(endpoint[0], endpoint[1])
 
     def connect(self, endpoint, timeout=DEFAULT_TIMEOUT):
         """
@@ -165,8 +163,7 @@ class Client(_mxclient.Client):
         endpoint is e.g. ("localhost", 1980)
         return ConnectionWrapper
         """
-        ip4 = socket.gethostbyname(endpoint[0])
-        return super(Client, self).connect(ip4, endpoint[1], timeout)
+        return super(Client, self).connect(endpoint[0], endpoint[1], timeout)
 
     def wait_for_connection(self, connwrap, timeout=DEFAULT_TIMEOUT):
         """wait for connection initiated with async_connect"""

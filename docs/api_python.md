@@ -43,8 +43,12 @@ client = Client([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_CLIENT
 ```
 
 Connects to every address, each with a 10 s timeout, and keeps the
-connections. A connection that fails or drops is retried every 3 s, but only
-while the library is running its loop, which for a client means inside calls.
+connections. A host is an address or a name; a name is resolved by the
+library on every attempt, each address it has tried in turn, so a
+multiplexer that moved is found at the next reconnect, and a name that
+does not resolve yet is retried like a port that refuses. A connection that
+fails or drops is retried every 3 s, but only while the library is running
+its loop, which for a client means inside calls.
 The peer type must be marked `is_passive` in the rules file: this is the
 one class that needs the mark, since nothing heartbeats between its calls;
 `ThreadedClient`, `AsyncClient` and both backend classes run the loop all

@@ -106,21 +106,19 @@ public:
     return basic_client_->connect(peer_endpoint, timeout);
   }
 
-  // IPv4 in nnn.nnn... form or IPv6 in hhh:hhh:... form
+  // A host name or an address in text. The name is resolved inside the
+  // library, on every attempt, so a multiplexer that moved is found again.
   ConnectionWrapper async_connect(const std::string &host, std::uint16_t port) {
-    return async_connect(asio::ip::tcp::endpoint(asio::ip::address::from_string(host), port));
+    basic_client_->check_not_orphaned();
+    return basic_client_->async_connect(host, port);
   }
-  // IPv4 in nnn.nnn... form or IPv6 in hhh:hhh:... form
   ConnectionWrapper connect(const std::string &host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
-    asio::ip::tcp::resolver resolver(io_service_);
-    std::string port_str = std::to_string(port);
-    asio::ip::tcp::resolver::query query(host, port_str);
-    asio::ip::tcp::resolver::iterator iter = resolver.resolve(query);
-    asio::ip::tcp::endpoint endpoint = *iter;
     MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
-    return connect(endpoint, timeout);
+    return basic_client_->connect(host, port, timeout);
   }
+  // How host names become addresses; for tests. See BasicClient::Resolver.
+  void set_resolver(BasicClient::Resolver resolver) { basic_client_->set_resolver(resolver); }
 
   unsigned int inline connections_count() { return basic_client_->connections_count(true); } // live ones
   std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }          // our `from`

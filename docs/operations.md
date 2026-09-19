@@ -21,18 +21,15 @@ process dying but not against the host going, and they double every
 Nothing special is needed: no operator, no leader, no shared state. Each
 multiplexer is an independent process that listens on a port, and the
 redundancy comes from every peer being connected to all of them. What that
-asks of Kubernetes is one thing: an address per instance that always
-resolves and never changes. Every peer gets the list, and the libraries
-connect to the one address a name resolves to, so a Service that
-load-balances over the instances would give a peer one connection where
-it needs all. And two details of the libraries decide the shape: a name
-that does not resolve fails `connect()`, and thus the peer's startup, while
-a port that refuses is retried every 3 s; and the reconnect goes to the
-IP address resolved at startup, not to the name. A pod's own address, as
-a headless Service publishes it, exists only while the pod runs and
-changes when it is rescheduled; a ClusterIP Service per pod has an
-address that always resolves and stays, so that is the shape: a
-StatefulSet, and one Service per pod selecting it by name.
+asks of Kubernetes is one thing: a name per instance, because every peer
+gets the list and connects to each one, and a Service that load-balances
+over the instances would give a peer one connection where it needs all. A
+StatefulSet behind a headless Service provides exactly that: `mx-0.mx`,
+`mx-1.mx`, `mx-2.mx`, each name one pod, kept across restarts and
+reschedules. The libraries resolve a name on every attempt and try each
+address it has, so a pod that comes back under a new address is found at
+the next reconnect, and a name not published yet, during a rollout, is
+retried like a port that refuses.
 
 ```yaml
 apiVersion: v1
@@ -46,22 +43,8 @@ apiVersion: v1
 kind: Service
 metadata: {name: mx}
 spec:
-  clusterIP: None            # the StatefulSet's governing Service; peers never use it
+  clusterIP: None            # headless: a DNS name per pod, no load balancing
   selector: {app: mx}
-  ports: [{name: mx, port: 1980}]
----
-apiVersion: v1
-kind: Service
-metadata: {name: mx-0}     # one per pod: a stable address that always resolves
-spec:
-  selector: {statefulset.kubernetes.io/pod-name: mx-0}
-  ports: [{name: mx, port: 1980}]
----
-apiVersion: v1
-kind: Service
-metadata: {name: mx-1}
-spec:
-  selector: {statefulset.kubernetes.io/pod-name: mx-1}
   ports: [{name: mx, port: 1980}]
 ---
 apiVersion: apps/v1
@@ -69,7 +52,7 @@ kind: StatefulSet
 metadata: {name: mx}
 spec:
   serviceName: mx
-  replicas: 2
+  replicas: 3
   selector: {matchLabels: {app: mx}}
   template:
     metadata: {labels: {app: mx}}
@@ -100,14 +83,14 @@ spec:
   selector: {matchLabels: {app: mx}}
 ```
 
-Peers in the same namespace get `mx-0:1980,mx-1:1980`; from another
-namespace the names carry it, `mx-0.<namespace>:1980`. A rolling update
-of the StatefulSet restarts the pods one at a time and waits for each to
-be ready, which is the procedure under "Restarting one" below; with the
-peers on both, it costs nothing. Scaling up is one more replica, its
-Service, and its name in the peers' lists. The readiness probe matters
-for the per-pod Services too: while a pod is not ready its Service has no
-endpoint, connects are refused, and the peers keep retrying.
+Peers in the same namespace get `mx-0.mx:1980,mx-1.mx:1980,mx-2.mx:1980`;
+from another namespace the names carry it, `mx-0.mx.<namespace>:1980`. A
+rolling update of the StatefulSet restarts the pods one at a time and
+waits for each to be ready, which is the procedure under "Restarting one"
+below; with the peers on all three, it costs nothing. Scaling up is one
+more replica and its name in the peers' lists. A ClusterIP Service per pod,
+which older libraries needed for an address that never changes, still
+works; it is just no longer required.
 
 The image runs as `nonroot` and holds only the binary, so there is no
 shell to `kubectl exec` into; the logs go to stderr, and

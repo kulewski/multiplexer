@@ -160,12 +160,9 @@ MultiplexerMessage ThreadedClient::new_message(std::uint32_t type, const std::st
 }
 
 bool ThreadedClient::connect(const std::string &host, std::uint16_t port, float timeout) {
-  asio::ip::tcp::resolver resolver(io_service_);
-  asio::ip::tcp::resolver::iterator found = resolver.resolve(asio::ip::tcp::resolver::query(host, repr(port)));
-  asio::ip::tcp::endpoint endpoint = *found;
   ConnectionWrapper wrapper = _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
-    return basic_client_->async_connect(endpoint);
+    return basic_client_->async_connect(host, port);
   });
   // The handshake completes on the io thread; wait for it here by asking
   // every 20 ms, up to the deadline. Connecting is rare, so polling is fine.
@@ -184,6 +181,14 @@ bool ThreadedClient::connect(const std::string &host, std::uint16_t port, float 
       return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
+}
+
+void ThreadedClient::set_resolver(BasicClient::Resolver resolver) {
+  _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    basic_client_->set_resolver(resolver);
+    return 0;
+  });
 }
 
 void ThreadedClient::set_search_policy(SearchPolicy answer) {

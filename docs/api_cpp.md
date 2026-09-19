@@ -45,11 +45,15 @@ client.shutdown();
   this is the one class that needs the mark, every other runs the loop
   all the time
   in the rules file.
-- `connect(host, port, timeout = 10)` resolves `host`, connects, performs the
-  handshake and returns a `ConnectionWrapper`. It does not throw when the
-  multiplexer is unreachable; the connection is retried every 3 s while the
-  library runs. `async_connect(host, port)` takes a literal IP address and
-  returns at once; `wait_for_connection(wrapper, timeout)` waits for it.
+- `connect(host, port, timeout = 10)` connects, performs the handshake and
+  returns a `ConnectionWrapper`. `host` is an address or a name; a name is
+  resolved inside the library, on every attempt, and each address it has
+  is tried in turn, so a multiplexer that moved is found at the next
+  reconnect. It does not throw when the multiplexer is unreachable or the
+  name does not resolve yet; the connection is retried every 3 s while the
+  library runs. `async_connect(host, port)` returns at once;
+  `wait_for_connection(wrapper, timeout)` waits for it. The wrapper's
+  `target()` is the host and port given, `endpoint()` the address in use.
 - `query(payload, type, timeout = 10, lane = nullptr)` and `query(mxmsg,
   timeout, lane, probe)` send a request and return an `IncomingMessage`, a
   triple whose `third` is a `shared_ptr<MultiplexerMessage>` with the

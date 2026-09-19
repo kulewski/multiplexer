@@ -576,8 +576,10 @@ for silence.
         Section(
             "Reconnecting after a multiplexer restart",
             """
-Every peer's library remembers the address it was told to connect to and
-reconnects on its own when the connection goes away. A backend, which runs
+Every peer's library remembers what it was told to connect to, a host name
+or an address, and reconnects on its own when the connection goes away,
+resolving the name again each time, so a multiplexer that comes back under
+another address is found too. A backend, which runs
 the loop all the time, does this within a few seconds. A client does it the
 next time it calls the library. The picture has one backend, one client and
 one multiplexer that is restarted; with the several multiplexers a
@@ -609,9 +611,9 @@ none of this is visible to the caller.
                 ),
                 Step(
                     "The backend reconnects",
-                    "The backend's library waits 3 s, connects to the same address again "
-                    "and repeats the handshake. If the multiplexer is still down it tries "
-                    "again every 3 s. Once it is back, the backend is registered as if "
+                    "The backend's library waits 3 s, resolves the name it was given, "
+                    "connects again and repeats the handshake. If the multiplexer is "
+                    "still down, or the name does not resolve, it tries again every 3 s. Once it is back, the backend is registered as if "
                     "nothing had happened, under the same instance id.",
                     [3],
                     ["B"],
