@@ -100,11 +100,14 @@ the time and their peer types are ordinary ones.
 - `instance_id`, `connections_count()`, `shutdown()`. After `shutdown()` the
   object is done.
 
-A multiplexer restarting between two calls costs the next call the
-reconnect delay, about 3 s, and nothing else: inside the call the client
-notices the dead connection, waits for its reconnect timer, and sends
-again. With several multiplexers it simply uses another one. Only when no
-multiplexer comes back within `timeout` does the call raise
+A multiplexer restarting between two calls costs nothing when the client
+is connected to others: the next call uses another one. With a single
+multiplexer the next call notices the dead connection, waits for its
+reconnect timer, about 3 s, and sends again; it is answered if the backend
+is back on the fresh multiplexer by then, and raises `OperationFailed` if
+the client reconnected first, since a multiplexer with nobody of the type
+reports a delivery error ([semantics](semantics.md#failure-modes)). Only
+when no multiplexer comes back within `timeout` does the call raise
 `NotConnected`.
 
 `MxClient(peer_type, addresses)` in the same module holds one such client,
@@ -300,7 +303,7 @@ Echo(addresses, type=peers.ECHO_BACKEND, workers=4).serve_forever()
 **Which backend class.** `BaseMultiplexerServer` runs the loop and the
 handler on one thread, so while a handler runs nothing heartbeats, and a
 handler that runs longer than the multiplexer's drop interval, 90 s as
-shipped ([guarantees](guarantees.md#failure-modes)), gets the backend
+shipped ([semantics](semantics.md#failure-modes)), gets the backend
 dropped mid-work. Use it when every handler is quick, requests are to be
 handled one at a time, and a handler never blocks on a query of its own;
 it is the simplest class and the one most backends are. Use
@@ -424,7 +427,7 @@ client.shutdown()
   references a query this client has seen answered (the last 1024) is
   dropped whatever its type, so a follow-up that is not the reply must
   not reference the request; it is addressed to this peer with `to` and
-  correlated in the payload ([guarantees](guarantees.md#delivery)). The
+  correlated in the payload ([semantics](semantics.md#delivery)). The
   same holds for `AsyncClient`, which is built on this class.
 - Callbacks, `on_message` and `query`'s, hold the GIL on the io thread and
   must return quickly; they may call `query()` with a callback and
@@ -635,7 +638,7 @@ usually assumed something the protocol does not promise. What holds:
   So the client sees one answer, but a backend may see two requests, and
   will under load. Count events, which are sent once, or the answers; do
   not assert an exact number of requests received, or give the request a
-  key and count keys ([guarantees](guarantees.md)).
+  key and count keys ([semantics](semantics.md)).
 - **Wait for the thing itself.** `FakePeer.wait_for(type, matching=...)`,
   `wait_until(predicate, timeout, what)` and `Cluster.wait_for_peer()`
   block until what the test needs has happened; a wait on a total, or a

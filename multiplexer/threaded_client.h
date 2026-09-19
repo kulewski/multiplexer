@@ -16,7 +16,9 @@
 // PING addressed to it, and the three stages share one deadline. A
 // connection dying under a query does not cost the query its timeout: the
 // request is sent again through another connection, or as soon as one
-// comes back, the way the synchronous Client does inside a call. Many
+// comes back, the way the synchronous Client does inside a call (a request
+// resent to the only multiplexer before its backend is back fails, as
+// docs/semantics.md says). Many
 // queries may be in flight at once, from any number of threads: replies
 // are matched by the ids they reference, never by arrival order. The
 // asynchronous form calls back on the io thread; the synchronous form is

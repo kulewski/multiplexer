@@ -1,10 +1,15 @@
 # Threaded mx restarts
 
-The multiplexer restarts with a ThreadedClient's queries in flight; all are answered.
+A multiplexer restarts with a ThreadedClient's queries in flight: what survives.
 
-Queries whose request was on the wire when the connection died are sent
-again as soon as the client is reconnected, without waiting for a timeout;
-the backend reconnects on its own as well.
+With one multiplexer, the only promise is that nothing hangs. The client
+and the backend both reconnect 3 s after the drop, in no fixed order. A
+query caught by the restart is sent again once the client is reconnected,
+and is answered if the backend is back by then, or fails at once with
+`OperationFailed` if the client got there first: a multiplexer with nobody
+of the type reports a delivery error, and the search that follows asks the
+same one multiplexer. With two multiplexers the queries in flight on the
+dead connection go through the live one at once, and none fails or waits.
 
 ## What happens
 
@@ -18,14 +23,21 @@ sequenceDiagram
     Note over C: the io thread sees the connection die, in-flight requests wait
     C-->>M: reconnect after 3 s
     C->>M: the waiting requests again, fresh ids
-    B-->>M: reconnects too
-    B->>C: replies
+    B-->>M: reconnects after 3 s too, before or after the client
+    B->>C: replies, or DELIVERY_ERROR from M if B is not back yet
 ```
 
 ## What is checked
 
-- All 40 queries are answered, none fails, and none took anywhere near its timeout.
-- The connection count is back to 1 at the end.
+- One multiplexer, either order: all 40 queries resolve, by a reply or by
+  an `OperationFailed` at once, none by a timeout; the last eight, issued
+  well after the reconnect, are all answered; the connection is back.
+- One multiplexer, the backend first: the client process is paused with
+  SIGSTOP across the restart and resumed once the backend is registered
+  again, so every query is answered and none fails.
+- One of two multiplexers: every query is answered, none fails, and none
+  waited for the reconnect: the other connection served it; the client is
+  back on both at the end.
 
 ## Run
 

@@ -166,8 +166,9 @@ type {
   do not know each other, and the clients provide the redundancy by
   connecting to all of them.
 
-[Guarantees, failure modes and defaults](docs/guarantees.md) states exactly
-what is promised.
+[Semantics: delivery, failures and defaults](docs/semantics.md) states
+exactly what is promised, for the deployment the multiplexer is designed for:
+several of them, every peer connected to all.
 
 Start with [docs/README.md](docs/README.md): it defines the terminology,
 shows the reference deployment, and traces a query and an event step by step.
@@ -355,10 +356,8 @@ The C++ client offers the same calls: `Client::query`, `schedule_one`,
 Multiplexer was built at Azouk Network Ltd. in 2008-2009, first as a Python
 prototype by Krzysztof Kulewski and then as the C++ implementation this
 repository grew out of, by Piotr Findeisen. Azouk released it under the MIT
-license, and Krzysztof Kulewski has owned and developed it since 2010. It
-has run in production in countless projects throughout, which is where the
-failure handling described in [docs/guarantees.md](docs/guarantees.md) was
-learned. See [AUTHORS](AUTHORS).
+license, and Krzysztof Kulewski has owned and developed it since 2010, in
+production use throughout. See [AUTHORS](AUTHORS).
 
 ## License
 

@@ -323,7 +323,7 @@ client.shutdown();
   seen answered (the last 1024) is dropped whatever its type, so a
   follow-up that is not the reply must not reference the request; it is
   addressed to this peer with `to` and correlated in the payload
-  ([guarantees](guarantees.md#delivery)).
+  ([semantics](semantics.md#delivery)).
 - Callbacks and the sink must return quickly; they may start asynchronous
   queries and send, but not call the blocking `query` or `shutdown`.
 - `shutdown()`, also run by the destructor, fails every query in flight

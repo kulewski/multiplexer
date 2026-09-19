@@ -4,7 +4,7 @@
 // BaseMultiplexerServer runs the loop and the handler on one thread, so
 // while handle_message runs nothing heartbeats, and a backend whose one
 // request takes longer than the multiplexer's drop interval
-// (docs/guarantees.md) is dropped mid-work. This class puts the io on a
+// (docs/semantics.md) is dropped mid-work. This class puts the io on a
 // ThreadedClient's thread, which heartbeats, reconnects, answers pings and
 // the search clients use to find a backend, and hands every other message
 // to a bounded queue that `workers` threads take from. With one worker

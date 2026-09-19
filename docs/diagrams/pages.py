@@ -217,7 +217,10 @@ itself with `DELIVERY_ERROR` marked `is_known_type`, and the client raises
                     "Every multiplexer says no",
                     "Each answers the search with `DELIVERY_ERROR`. Once every connection "
                     "has failed, the query fails: `OperationFailed` in Python, right away "
-                    "rather than after a timeout.",
+                    "rather than after a timeout. A multiplexer that has just restarted "
+                    "and has no backend of the type back yet says no the same way, which "
+                    "is why a restart of the only multiplexer can fail a request in "
+                    "flight, and a restart of one of several cannot.",
                     [4, 5],
                     ["Q"],
                 ),
@@ -577,7 +580,9 @@ Every peer's library remembers the address it was told to connect to and
 reconnects on its own when the connection goes away. A backend, which runs
 the loop all the time, does this within a few seconds. A client does it the
 next time it calls the library. The picture has one backend, one client and
-one multiplexer that is restarted.
+one multiplexer that is restarted; with the several multiplexers a
+deployment runs, a request in flight simply goes through another one and
+none of this is visible to the caller.
 """,
             columns=[
                 Column("Clients", [("C", "client")]),
@@ -625,8 +630,11 @@ one multiplexer that is restarted.
                     "The reconnect timer fires 3 s later, inside the call, the handshake "
                     "runs, and the request goes out again with a fresh id. The caller "
                     "sees a slow call, not an error, as long as the multiplexer is back "
-                    "within the call's timeout. With connections to several multiplexers "
-                    "the request goes through another one at once instead.",
+                    "within the call's timeout and the backend reconnected before the "
+                    "client did: both reconnect 3 s after the drop, in no fixed order, "
+                    "and a request that reaches the fresh multiplexer before its backend "
+                    "fails with `OperationFailed`. With connections to several "
+                    "multiplexers the request goes through another one at once instead.",
                     [5, 6],
                     ["C"],
                 ),
@@ -636,8 +644,9 @@ Where this lives: `multiplexer/io/connection.h` for the welcome exchange and
 the heartbeat timers, `multiplexer/connections_manager.h` for registration,
 `multiplexer/basic_client.cc` for the reconnect timer, `multiplexer/defaults.h`
 for the intervals. The `raw_protocol` scenario in `tests/scenarios/` performs
-the handshake byte by byte; the `mx_restarts` and `mx_restarts_under_idle_client`
-scenarios record what a backend and a client see across a restart.
+the handshake byte by byte; the `mx_restarts`, `mx_restarts_under_idle_client`
+and `threaded_mx_restarts` scenarios record what a backend and a client see
+across a restart.
 """,
         ),
     ],

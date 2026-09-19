@@ -620,6 +620,16 @@ class Role:
         self._stderr.close()
         return exit_code
 
+    def pause(self) -> None:
+        """Freeze the process (SIGSTOP), as Mx.pause(): its sockets stay open
+        and nothing it would do happens until resume(). A way to fix the
+        order of two peers' reconnects across a multiplexer restart."""
+        self.proc.send_signal(signal.SIGSTOP)
+
+    def resume(self) -> None:
+        """Unfreeze the process (SIGCONT)."""
+        self.proc.send_signal(signal.SIGCONT)
+
     def request_drain(self) -> None:
         """Ask a backend role to leave by creating its drain file, which its
         periodic_task() notices within one poll: the file mechanism a

@@ -1,6 +1,14 @@
-# Guarantees, failure modes and defaults
+# Semantics: delivery, failures and defaults
 
 What the multiplexer promises, stated so that you can design around it.
+It is written for the deployment the multiplexer is designed for and every
+other page assumes: several multiplexers, every client and every backend
+connected to all of them ([the healthy deployment](README.md#the-healthy-deployment)).
+A query's search stage asks every multiplexer the client is connected to,
+a request whose connection dies goes out again through another, and a
+multiplexer restarting costs nobody anything. With a single multiplexer
+there is no other connection to use, and the failure modes below say what
+that changes.
 
 ## Delivery
 
@@ -63,12 +71,21 @@ What the multiplexer promises, stated so that you can design around it.
   at once; no other instance of its type gets it. An addressee that only
   moved, behind a multiplexer the client's request did not go through, is
   found by the locate phase within the one timeout.
-- **A multiplexer dies.** Backends reconnect within about 3 s. A synchronous
-  client notices inside its next call, waits there for the reconnect and
-  sends again, or uses another connection at once; a threaded client sends
-  again as soon as it is reconnected. Requests that were on the wire when
-  the connection died are sent again with a fresh id, so a backend may see
-  them twice. [Connecting to a multiplexer](handshake.md) shows it.
+- **A multiplexer dies.** Requests in flight on that connection go out again
+  with a fresh id through another connection, at once, so a backend may see
+  them twice and the caller sees nothing; backends and clients reconnect to
+  the restarted multiplexer within about 3 s. [Connecting to a
+  multiplexer](handshake.md) shows it.
+- **The only multiplexer dies.** There is no other connection. A threaded
+  client sends its in-flight requests again as soon as it is reconnected; a
+  synchronous client waits for the reconnect inside its current call and
+  sends again. The request is answered if the backend of its type is back
+  on the fresh multiplexer by then, and fails at once with `OperationFailed`
+  if the client reconnected first: a multiplexer with nobody of the type
+  reports a delivery error, and the search that follows asks the same one
+  multiplexer. Which reconnect lands first is chance, since both are
+  scheduled 3 s after the drop. Run two multiplexers if a restart must be
+  invisible; the `threaded_mx_restarts` scenario records both cases.
 - **A backend hangs without dying.** Its connection stays registered as long
   as its library still runs the loop and answers heartbeats, so it keeps
   receiving its share of round-robin requests, which time out. A
@@ -83,8 +100,9 @@ What the multiplexer promises, stated so that you can design around it.
   connection that multiplexer closed is retired first and the message goes
   through another, or waits for the reconnect; it is never written into
   the closed socket, which would succeed and lose it.
-- **Nobody handles a type.** The client learns at once, from a delivery
-  error, rather than by timeout.
+- **Nobody handles a type.** Every multiplexer the client is connected to
+  answers the search with a delivery error, and the client learns at once
+  rather than by timeout.
 - **A message is bigger than 128 MiB.** The receiving side closes the
   connection.
 

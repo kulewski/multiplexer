@@ -475,7 +475,7 @@ graph LR
 
 ### 4. Every multiplexer says no
 
-Each answers the search with `DELIVERY_ERROR`. Once every connection has failed, the query fails: `OperationFailed` in Python, right away rather than after a timeout.
+Each answers the search with `DELIVERY_ERROR`. Once every connection has failed, the query fails: `OperationFailed` in Python, right away rather than after a timeout. A multiplexer that has just restarted and has no backend of the type back yet says no the same way, which is why a restart of the only multiplexer can fail a request in flight, and a restart of one of several cannot.
 
 ```mermaid
 graph LR

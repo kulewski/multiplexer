@@ -1,6 +1,6 @@
 // Every timeout and limit, compiled into the multiplexer and both client
 // libraries (the Python binding exports them as module attributes).
-// docs/guarantees.md has the same table with context. Changing one means
+// docs/semantics.md has the same table with context. Changing one means
 // rebuilding everything that embeds it, and the heartbeat intervals must
 // agree between a multiplexer and its peers.
 #ifndef MX_MULTIPLEXER_DEFAULTS_H_

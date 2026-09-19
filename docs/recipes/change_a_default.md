@@ -2,7 +2,7 @@
 
 Every timeout and limit is a constant in
 [multiplexer/defaults.h](../../multiplexer/defaults.h), listed with its
-meaning in [guarantees.md](../guarantees.md).
+meaning in [semantics.md](../semantics.md).
 
 1. **Decide who has to agree.** The heartbeat constants
    (`HEARTBIT_INTERVAL`, the two `NO_HEARTBIT_*` intervals) are a contract
@@ -15,7 +15,7 @@ meaning in [guarantees.md](../guarantees.md).
    `multiplexer._native`, so there is one place.
 3. **Rebuild everything** that embeds it: the multiplexer, every C++ peer,
    and the Python extension.
-4. **Update the numbers in the docs**: [guarantees.md](../guarantees.md),
+4. **Update the numbers in the docs**: [semantics.md](../semantics.md),
    and the handshake page's frames in `docs/diagrams/generate.py` if a
    heartbeat interval changed; `./format.sh` regenerates the page.
 5. **Run the slow tests** as well, `bazel test //...`: `idle_client` and

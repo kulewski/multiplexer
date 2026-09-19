@@ -35,20 +35,24 @@ error rather than misrouting it.
 
 ## Restarting one
 
-Restart multiplexers one at a time. During the restart:
+Restart multiplexers one at a time. With the others up, the restart costs
+nothing: a request in flight on the dead connection goes out again through
+another at once, and every peer is back on the restarted multiplexer within
+about 3 s. Messages the multiplexer held for delivery at that moment are
+lost.
 
-- backends lose that connection and get it back within about 3 s of the
-  multiplexer being up again;
-- a client's next call notices the dead connection, waits inside the call
-  for the reconnect, about 3 s, and sends the request again with a fresh
-  id; with several multiplexers it uses another connection at once and the
-  restart costs nothing;
-- a threaded client sends its in-flight requests again as soon as it is
-  reconnected;
-- messages queued on the multiplexer for delivery are lost.
+With a single multiplexer there is nothing to fall back to. A threaded
+client sends its in-flight requests again as soon as it is reconnected, a
+synchronous client's current call waits for the reconnect and sends again,
+and the request is then answered if its backend is back on the fresh
+multiplexer first, or fails with `OperationFailed` if the client got there
+first, since a multiplexer with nobody of the type reports a delivery
+error. Both reconnects are scheduled 3 s after the drop, so the order is
+chance. This is the reason to run at least two.
 
-The `mx_restarts` and `rolling_restart` scenarios in `tests/scenarios/`
-record exactly what a backend and a client see across a restart.
+The `mx_restarts`, `threaded_mx_restarts` and `rolling_restart` scenarios
+in `tests/scenarios/` record exactly what a backend and a client see
+across a restart.
 
 ## Restarting backends
 

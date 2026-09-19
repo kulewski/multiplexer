@@ -87,7 +87,10 @@ describe each.
 
 Every client and every backend is connected to every multiplexer. Any one
 multiplexer can go away and nothing stops; any one backend can go away and
-requests move to the others.
+requests move to the others. Every page here assumes this deployment: two
+multiplexers at least. One multiplexer works, for development or a small
+installation, but its restart is visible to whoever has a request in
+flight; [semantics](semantics.md) says how.
 
 ```mermaid
 graph LR
@@ -182,7 +185,7 @@ Each page is one fixed picture whose arrows light up one step at a time.
   and driving a recording.
 - [The wire format](wire_format.md): frames, the envelope, the handshake and
   the protocol's own messages, for peers written without the library.
-- [Guarantees, failure modes and defaults](guarantees.md): what is promised,
+- [Semantics: delivery, failures and defaults](semantics.md): what is promised,
   what happens when things die, and every timeout and limit in one table.
 - [Building](building.md): the packages a clean machine needs, bringing
   your own protobuf, the build configurations, the Docker check, and the
