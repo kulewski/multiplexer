@@ -193,9 +193,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Packaging](packaging.md): what a release ships, the static mxcontrol,
   the container image, the Debian packages, the wheels, and how a release
   is cut.
-- [Operations](operations.md): several multiplexers, restarts, logs, the
-  peers file, recording what was routed and driving it on a running
-  cluster, sizing.
+- [Operations](operations.md): several multiplexers, on Kubernetes,
+  restarts, logs, the peers file, recording what was routed and driving
+  it on a running cluster, sizing.
 - [Questions people ask](faq.md): why it is built this way.
 - [Code map](code_map.md): one line per source file and where each
   mechanism lives, generated from the files' header comments.

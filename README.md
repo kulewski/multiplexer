@@ -232,6 +232,23 @@ type {
 This means: every messages of type `PYTHON_TEST_REQUEST` will be sent to one of the connected `PYTHON_TEST_SERVER` peers (round-robin).
 If you need the message to be sent to all peers of a particular type, use `whom: ALL`. [docs/rules.md](docs/rules.md) describes every field.
 
+## Getting it
+
+Two ways, and the choice is only whether you build it:
+
+- **A release.** Every release on GitHub ships the same set, built from
+  one commit: a static `mxcontrol` for any x86_64 Linux, the container
+  image `ghcr.io/kulewski/multiplexer:<version>` with nothing in it but
+  the binary, a Debian package per Debian and Ubuntu release with
+  `mxcontrol`, the C++ library, its headers and a pkg-config file, and
+  manylinux wheels of the Python package for every CPython from 3.10.
+  [docs/packaging.md](docs/packaging.md) says how to use each;
+  [docs/operations.md](docs/operations.md#on-kubernetes) how to run the
+  image on Kubernetes.
+- **From source**, with Bazel, which is how the repository is developed
+  and tested and how another Bazel workspace consumes it, or with `make`
+  from the distribution's own packages. The two sections below.
+
 ## Building with Bazel
 
 Prerequisites, verified on clean Debian 12, Ubuntu 24.04 and Debian 13
@@ -282,16 +299,6 @@ make RULES=your.rules -j     # the constants from your rules file
 [docs/building.md](docs/building.md#without-bazel) lists the packages and
 what a program links and imports. The test roles, the scenarios, the
 examples and the sanitizer builds stay with Bazel.
-
-## Installing a release
-
-Every release on GitHub ships the same set, built from one commit: a
-static `mxcontrol` for any Linux, a container image
-`ghcr.io/kulewski/multiplexer:<version>` with nothing in it but the
-binary, a Debian package per Debian and Ubuntu release with `mxcontrol`,
-the C++ library, its headers and a pkg-config file, and manylinux wheels
-of the Python package for every CPython from 3.10.
-[docs/packaging.md](docs/packaging.md) says how to use each.
 
 ## Using it from another Bazel workspace
 

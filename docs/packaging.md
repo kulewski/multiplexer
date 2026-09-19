@@ -47,7 +47,8 @@ docker run --rm -p 1980:1980 -v /etc/mx/deployment.rules:/etc/mx/multiplexer.rul
 ```
 
 Any other subcommand goes after the image name, `... multiplexer:<version>
-help` for the list. Locally, `bazel run //docker:load` puts the image into
+help` for the list. [Operations](operations.md#on-kubernetes) has the
+StatefulSet that runs several of them on Kubernetes. Locally, `bazel run //docker:load` puts the image into
 Docker as `multiplexer:dev`; `bazel run //docker:push` publishes it. The
 targets are tagged `manual`, so a wildcard build never fetches the rules or
 the base image, and rules_oci is declared in our WORKSPACE only, never for

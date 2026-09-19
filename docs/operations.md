@@ -16,6 +16,106 @@ Two multiplexers on one host, on two ports, protect against a multiplexer
 process dying but not against the host going, and they double every
 `whom: ALL` fan-out's cost, so prefer one per host.
 
+## On Kubernetes
+
+Nothing special is needed: no operator, no leader, no shared state. Each
+multiplexer is an independent process that listens on a port, and the
+redundancy comes from every peer being connected to all of them. What that
+asks of Kubernetes is one thing: an address per instance that always
+resolves and never changes. Every peer gets the list, and the libraries
+connect to the one address a name resolves to, so a Service that
+load-balances over the instances would give a peer one connection where
+it needs all. And two details of the libraries decide the shape: a name
+that does not resolve fails `connect()`, and thus the peer's startup, while
+a port that refuses is retried every 3 s; and the reconnect goes to the
+IP address resolved at startup, not to the name. A pod's own address, as
+a headless Service publishes it, exists only while the pod runs and
+changes when it is rescheduled; a ClusterIP Service per pod has an
+address that always resolves and stays, so that is the shape: a
+StatefulSet, and one Service per pod selecting it by name.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: mx-rules}
+data:
+  multiplexer.rules: |
+    # your rules file, the one the peers' constants were generated from
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mx}
+spec:
+  clusterIP: None            # the StatefulSet's governing Service; peers never use it
+  selector: {app: mx}
+  ports: [{name: mx, port: 1980}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mx-0}     # one per pod: a stable address that always resolves
+spec:
+  selector: {statefulset.kubernetes.io/pod-name: mx-0}
+  ports: [{name: mx, port: 1980}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mx-1}
+spec:
+  selector: {statefulset.kubernetes.io/pod-name: mx-1}
+  ports: [{name: mx, port: 1980}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: mx}
+spec:
+  serviceName: mx
+  replicas: 2
+  selector: {matchLabels: {app: mx}}
+  template:
+    metadata: {labels: {app: mx}}
+    spec:
+      affinity:
+        podAntiAffinity:     # one per node: a node going away costs one multiplexer
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: {matchLabels: {app: mx}}
+      containers:
+        - name: mx
+          image: ghcr.io/kulewski/multiplexer:<version>
+          args: [run_multiplexer, --rules, /etc/mx/multiplexer.rules, --address, "0.0.0.0:1980"]
+          ports: [{containerPort: 1980}]
+          readinessProbe: {tcpSocket: {port: 1980}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: 1980}, periodSeconds: 10}
+          resources: {requests: {cpu: 100m, memory: 64Mi}}
+          volumeMounts: [{name: rules, mountPath: /etc/mx, readOnly: true}]
+      volumes:
+        - name: rules
+          configMap: {name: mx-rules}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: mx}
+spec:
+  maxUnavailable: 1          # a drain takes them one at a time, as a restart should
+  selector: {matchLabels: {app: mx}}
+```
+
+Peers in the same namespace get `mx-0:1980,mx-1:1980`; from another
+namespace the names carry it, `mx-0.<namespace>:1980`. A rolling update
+of the StatefulSet restarts the pods one at a time and waits for each to
+be ready, which is the procedure under "Restarting one" below; with the
+peers on both, it costs nothing. Scaling up is one more replica, its
+Service, and its name in the peers' lists. The readiness probe matters
+for the per-pod Services too: while a pod is not ready its Service has no
+endpoint, connects are refused, and the peers keep retrying.
+
+The image runs as `nonroot` and holds only the binary, so there is no
+shell to `kubectl exec` into; the logs go to stderr, and
+`MX_LOG_VERBOSITY` in `env` sets their level. A recording directory or a
+peers file, if you use them, want a volume of their own, `emptyDir` for a
+recording nobody keeps or a `volumeClaimTemplate` for one somebody does.
+[Packaging](packaging.md) describes the image.
+
 ## Starting one
 
 ```
