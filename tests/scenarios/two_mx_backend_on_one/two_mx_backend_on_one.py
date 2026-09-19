@@ -39,7 +39,7 @@ class TwoMxBackendOnOne(unittest.TestCase):
             responses = client.events_of("response")
             self.assertEqual(QUERIES, len(responses))
             self.assertEqual(["Q%d" % i for i in range(QUERIES)], [r["payload"] for r in responses])
-            self.assertEqual(QUERIES, len(backend.events_of("request")))
+            self.assertEqual(QUERIES, len(backend.wait_for_count("request", QUERIES)))
 
 
 if __name__ == "__main__":

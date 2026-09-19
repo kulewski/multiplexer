@@ -48,7 +48,7 @@ class BackendRaises(unittest.TestCase):
                     self.assertEqual(C.types.BACKEND_ERROR, outcome["type"])
                     self.assertIn("handler failed on purpose", outcome["payload"])
                 self.assertLess(outcome["ms"], 2000, "reported at once, not by timeout")
-            self.assertEqual(2, len(backend.events_of("request")), "the backend served both")
+            self.assertEqual(2, len(backend.wait_for_count("request", 2)), "the backend served both")
             self.assertEqual(0, backend.stop())
 
     def test_exception_can_end_the_backend(self):

@@ -40,7 +40,7 @@ class ConcurrentClients(unittest.TestCase):
             self.assertEqual(WORKERS * ROUNDS, len(responses))
             for r in responses:
                 self.assertEqual("W%d-R%d" % (r["worker"], r["round"]), r["payload"])
-            self.assertEqual(WORKERS * ROUNDS, len(backend.events_of("request")))
+            self.assertEqual(WORKERS * ROUNDS, len(backend.wait_for_count("request", WORKERS * ROUNDS)))
             self.assertEqual(0, backend.stop())
 
 

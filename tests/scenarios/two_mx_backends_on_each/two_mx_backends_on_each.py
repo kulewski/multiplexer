@@ -3,7 +3,7 @@
 import unittest
 
 from tests import harness
-from tests.harness import Cluster, constants as C, spawn
+from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
 QUERIES = 10
 
@@ -44,7 +44,7 @@ class TwoMxBackendsOnEach(unittest.TestCase):
             self.assertEqual(QUERIES, len(responses))
             for r in responses:
                 self.assertIn(r["from_"], ids)
-            handled = sum(len(b.events_of("request")) for b in backends)
+            handled = wait_for_total(backends, "request", QUERIES)
             self.assertEqual(QUERIES, handled)
 
 

@@ -51,8 +51,8 @@ class TwoRequestTypes(unittest.TestCase):
                 self.assertEqual((b_id, "abc"), (r["from_"], r["payload"]))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_A)))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_B)))
-            self.assertEqual(3, len(a.events_of("request")))
-            self.assertEqual(3, len(b.events_of("request")))
+            self.assertEqual(3, len(a.wait_for_count("request", 3)))
+            self.assertEqual(3, len(b.wait_for_count("request", 3)))
 
 
 if __name__ == "__main__":

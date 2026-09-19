@@ -12,7 +12,7 @@ import time
 import unittest
 
 from tests import harness
-from tests.harness import Cluster, constants as C, spawn
+from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
 MULTIPLEXERS = 3
 QUERIES = 60
@@ -56,7 +56,7 @@ class RollingRestart(unittest.TestCase):
         slow = [(r["round"], round(r["ms"])) for r in responses if r["ms"] > FAST_ENOUGH_MS]
         self.assertEqual([], slow, "queries that had to wait for a reconnect instead of using another connection")
         self.assertEqual(MULTIPLEXERS, client.events_of("done")[0]["connections"], "the client is back on all of them")
-        self.assertEqual(QUERIES, sum(len(b.events_of("request")) for b in backends))
+        self.assertEqual(QUERIES, wait_for_total(backends, "request", QUERIES))
         for backend in backends:
             self.assertEqual(0, backend.stop())
 

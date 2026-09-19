@@ -51,7 +51,7 @@ class ThreadedWorkers(unittest.TestCase):
             dones = client.events_of("done")
             self.assertEqual(WORKERS, len(dones))
             self.assertEqual({connected[0]["instance_id"]}, {d["instance_id"] for d in dones})
-            self.assertEqual(WORKERS * QUERIES, len(backend.events_of("request")))
+            self.assertEqual(WORKERS * QUERIES, len(backend.wait_for_count("request", WORKERS * QUERIES)))
             self.assertEqual(0, backend.stop())
 
 

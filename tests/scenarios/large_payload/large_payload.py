@@ -37,7 +37,7 @@ class LargePayload(unittest.TestCase):
             responses = client.events_of("response")
             self.assertEqual(1, len(responses))
             self.assertEqual(SIZE, responses[0]["size"])
-            self.assertEqual(SIZE, backend.events_of("request")[0]["size"])
+            self.assertEqual(SIZE, backend.wait_for_count("request", 1)[0]["size"])
 
 
 if __name__ == "__main__":

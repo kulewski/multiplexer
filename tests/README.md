@@ -14,8 +14,11 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   starts n multiplexers on ephemeral ports through `--address 127.0.0.1:0
   --port-file`, `spawn(role, lang, ...)` launches a role and collects its
   Event events, `Role.wait_for(event, **fields)` waits for one,
-  `Cluster.wait_for_peer(type)` and `wait_for_peer_gone(type)` wait on the
-  multiplexers' peers files,
+  `Role.wait_for_count(event, n)` and `wait_for_total(roles, event, n)`
+  return the events once n have arrived (a count of another process's
+  events, taken right after the client finished, may otherwise miss lines
+  still in the pipe), `Cluster.wait_for_peer(type)` and
+  `wait_for_peer_gone(type)` wait on the multiplexers' peers files,
   `wait_until(predicate, timeout, what)` on anything else. Every process's
   stderr and events land in the test's undeclared outputs directory.
   `harness/` here re-exports it with the constants of `testing.rules`.

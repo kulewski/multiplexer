@@ -51,7 +51,7 @@ class MxRestarts(unittest.TestCase):
             self.assertLess(second["ms"], 5000, "the second query waits for the reconnect, not for its timeout")
             self.assertEqual(
                 3,
-                len(backend.events_of("request")),
+                len(backend.wait_for_count("request", 3)),
             )
 
 

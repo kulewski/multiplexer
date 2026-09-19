@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 import unittest
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from google.protobuf import text_format
 
@@ -572,6 +572,23 @@ class Role:
         with self._cond:
             return [event for event in self.events if self._matches(event, name, match)]
 
+    def wait_for_count(self, name: str, count: int, timeout: float = 5, **match: Any) -> list[Event]:
+        """The `name` events whose fields include `match`, once at least
+        `count` have arrived, the process has exited, or `timeout` passed.
+        For counting this process's events right after another process
+        finished, a backend's requests once the client is done: the last
+        lines may still be on their way through the pipe. Returns whatever
+        there is, so an assertEqual on the length reports a shortfall or a
+        surplus alike."""
+        deadline = time.time() + timeout
+        with self._cond:
+            while True:
+                found = [event for event in self.events if self._matches(event, name, match)]
+                remaining = deadline - time.time()
+                if len(found) >= count or self._eof or remaining <= 0:
+                    return found
+                self._cond.wait(min(remaining, 0.5))
+
     def wait_for(self, name: str, timeout: float = 15, **match: Any) -> Event:
         """Block until a `name` event with fields `match` has arrived and
         return it. Raises if the process exits first or `timeout` passes,
@@ -670,6 +687,19 @@ def mxcontrol(*args: str, timeout: float = 30, expect: int | None = 0) -> subpro
             result.stderr,
         )
     return result
+
+
+def wait_for_total(roles: Iterable[Role], name: str, count: int, timeout: float = 5, **match: Any) -> int:
+    """The number of `name` events with fields `match` across `roles`, once
+    at least `count` have arrived or `timeout` passed: Role.wait_for_count
+    for a count split between processes in an unknown way, such as queries
+    over two backends."""
+    deadline = time.time() + timeout
+    while True:
+        total = sum(len(role.events_of(name, **match)) for role in roles)
+        if total >= count or time.time() > deadline:
+            return total
+        time.sleep(0.02)
 
 
 def wait_until(predicate: Callable[[], Any], timeout: float, what: str, interval: float = 0.02) -> Any:

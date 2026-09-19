@@ -36,7 +36,7 @@ class QueryOne(unittest.TestCase):
             self.assertEqual(1, len(responses))
             self.assertEqual(C.types.TEST_RESPONSE, responses[0]["type"])
             self.assertEqual("HELLO MULTIPLEXER", responses[0]["payload"])
-            self.assertEqual(1, len(backend.events_of("request", type=C.types.TEST_REQUEST_A)))
+            self.assertEqual(1, len(backend.wait_for_count("request", 1, type=C.types.TEST_REQUEST_A)))
             self.assertEqual(0, backend.stop(), "backend exits cleanly on SIGTERM")
 
 

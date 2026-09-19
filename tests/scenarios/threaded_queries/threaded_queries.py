@@ -7,7 +7,7 @@ passive; here it uses the active TEST_ACTIVE_CLIENT type.
 import unittest
 
 from tests import harness
-from tests.harness import Cluster, constants as C, spawn
+from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
 QUERIES = 30
 IN_FLIGHT = 8
@@ -40,7 +40,7 @@ class ThreadedQueries(unittest.TestCase):
         responses = client.events_of("response")
         self.assertEqual(QUERIES, len(responses))
         self.assertEqual(sorted("Q%d" % i for i in range(QUERIES)), sorted(r["payload"] for r in responses))
-        self.assertEqual(QUERIES, sum(len(b.events_of("request")) for b in backends))
+        self.assertEqual(QUERIES, wait_for_total(backends, "request", QUERIES))
         for b in backends:
             self.assertEqual(0, b.stop())
 
