@@ -1,0 +1,25 @@
+# The Debian package of this checkout on one release, via packaging/deb.sh;
+# packaging/build_debs.sh runs it for every supported release. The build
+# dependencies are the Makefile's from docs/building.md, plus dpkg-dev.
+#
+#   docker build -f docker/Dockerfile.deb --build-arg BASE=ubuntu:24.04 -t mx-deb .
+#   docker run --rm -v "$PWD/build/dist:/out" mx-deb
+ARG BASE=debian:12
+FROM ${BASE}
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        g++ \
+        make \
+        protobuf-compiler \
+        libprotobuf-dev \
+        libasio-dev \
+        python3-dev \
+        python3-protobuf \
+        pybind11-dev \
+        python3-pybind11 \
+        libgtest-dev \
+        dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY . /work
+CMD packaging/deb.sh /out

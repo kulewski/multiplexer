@@ -132,3 +132,33 @@ maybe_strip_cc_binary(
         "//lib:program",
     ],
 )
+
+# The same binary linked statically: one file that runs on any Linux and
+# in an empty container, for the release asset and the image. The one
+# thing static glibc cannot do everywhere is resolve host names, which
+# needs the host's own name-service modules: the multiplexer listens on an
+# address and never resolves, and the client subcommands take addresses
+# too. Built only when named; the release workflow does.
+cc_binary(
+    name = "mxcontrol_static",
+    srcs = ["main.cc"],
+    data = ["//:multiplexer_rules"],
+    linkopts = [
+        "-static",
+        "-Wl,--whole-archive,-lpthread,--no-whole-archive",
+    ],
+    linkstatic = True,
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":driver",
+        ":dump_recording",
+        ":help",
+        ":receive_logs",
+        ":recording_control",
+        ":start_multiplexer_server",
+        ":stream_logs",
+        "//lib:core_dump",
+        "//lib:program",
+    ],
+)

@@ -15,6 +15,7 @@ refresh_compile_commands(
     # Entries for Asio's and protobuf's own headers are not useful in the
     # editor and make the file two hundred times bigger.
     exclude_headers = "external",
+    tags = ["manual"],  # only when named: a wildcard build fetches nothing for it
     targets = {
         "//lib:kwargs_test": "--config=debug",
         "//multiplexer:_native_with_debug_symbols.so": "--config=debug",

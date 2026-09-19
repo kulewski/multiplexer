@@ -45,7 +45,7 @@ bazel build //...                          # every configuration works without f
 bazel test //...                           # unit and integration tests
 bazel test --test_tag_filters=-slow //...  # the fast ones, a few seconds
 ./examples/test_all.sh                     # the example workspaces
-./format.sh                                # black, clang-format-18, buildifier, docs
+./format.sh                                # black, clang-format-18, buildifier, docs; --check also parses the YAML
 ./format.sh --check                        # what CI runs
 bazel build --config=clang //...           # clang thread-safety analysis (lib/thread_annotations.h)
 bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only

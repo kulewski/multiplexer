@@ -7,7 +7,8 @@
 #   make -j            build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 #   make check         the C++ and Python unit tests, against what was built
 #   make wheel         build/dist/multiplexer-<VERSION>-*.whl, for pip
-#   make install       mxcontrol, the library and the headers under PREFIX
+#   make install       mxcontrol, generate_constants, the library, the headers and
+#                      a pkg-config file under PREFIX
 #   make RULES=your.rules ...   generate the constants from your rules file
 #
 # Debian and Ubuntu packages: g++ make protobuf-compiler libprotobuf-dev
@@ -63,7 +64,8 @@ GENERATE_CONSTANTS := $(BUILD)/bin/generate_constants
 # and __init__.py where Bazel needed none.
 PY_PACKAGE := $(patsubst %,$(PY)/%,$(PY_FILES)) $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PY)) \
               $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py \
-              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so
+              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so \
+              $(PY)/multiplexer/testing/multiplexer.rules
 PY_TESTS := $(patsubst %,$(PY)/%,$(PY_TEST_FILES))
 
 .PHONY: all python check check-cc check-py wheel install clean
@@ -96,10 +98,17 @@ $(GEN)/multiplexer/multiplexer_constants.py: $(RULES) $(GENERATE_CONSTANTS)
 	@mkdir -p $(dir $@)
 	$(GENERATE_CONSTANTS) $< $@
 
+# The test harness's default rules file travels with the package, next to
+# this module, so that a wheel works wherever it is installed.
 $(GEN)/multiplexer/testing/rules_path.py: $(RULES)
 	@mkdir -p $(dir $@)
-	@echo '"""Generated: the rules file this build used."""' > $@
-	@echo 'RULES = "$(abspath $(RULES))"' >> $@
+	@echo '"""Generated: the rules file this build used, shipped next to this module."""' > $@
+	@echo 'import os' >> $@
+	@echo 'RULES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "multiplexer.rules")' >> $@
+
+$(PY)/multiplexer/testing/multiplexer.rules: $(RULES)
+	@mkdir -p $(dir $@)
+	cp $< $@
 
 # Objects. Every object of the library and the tool waits for the
 # generated headers it may include; the tool's own objects only for the
@@ -125,7 +134,7 @@ $(NATIVE_OBJ): ALL_CPPFLAGS += $(shell $(PYTHON) -m pybind11 --includes)
 
 $(GENERATE_CONSTANTS): $(GENERATE_CONSTANTS_OBJS)
 	@mkdir -p $(dir $@)
-	$(CXX) $(ALL_CXXFLAGS) -o $@ $^ $(ALL_LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) $(LDFLAGS) -o $@ $^ $(ALL_LDLIBS)
 
 $(LIBRARY): $(LIB_OBJS)
 	@mkdir -p $(dir $@)
@@ -135,11 +144,11 @@ $(LIBRARY): $(LIB_OBJS)
 # are linked as objects, not from the library, which would drop them.
 $(MXCONTROL): $(MXCONTROL_OBJS) $(LIBRARY)
 	@mkdir -p $(dir $@)
-	$(CXX) $(ALL_CXXFLAGS) -o $@ $(MXCONTROL_OBJS) $(LIBRARY) $(ALL_LDLIBS)
+	$(CXX) $(ALL_CXXFLAGS) $(LDFLAGS) -o $@ $(MXCONTROL_OBJS) $(LIBRARY) $(ALL_LDLIBS)
 
 $(PY)/multiplexer/_native.so: $(NATIVE_OBJ) $(LIBRARY)
 	@mkdir -p $(dir $@)
-	$(CXX) -shared $(ALL_CXXFLAGS) -o $@ $(NATIVE_OBJ) $(LIBRARY) $(ALL_LDLIBS)
+	$(CXX) -shared $(ALL_CXXFLAGS) $(LDFLAGS) -o $@ $(NATIVE_OBJ) $(LIBRARY) $(ALL_LDLIBS)
 
 # The Python package.
 
@@ -191,10 +200,12 @@ wheel: python
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .
 	@ls $(BUILD)/dist/*.whl
 
-install: $(MXCONTROL) $(LIBRARY)
-	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib
-	install -m 755 $(MXCONTROL) $(DESTDIR)$(PREFIX)/bin/
+install: $(MXCONTROL) $(LIBRARY) $(GENERATE_CONSTANTS)
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/pkgconfig
+	install -m 755 $(MXCONTROL) $(GENERATE_CONSTANTS) $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(LIBRARY) $(DESTDIR)$(PREFIX)/lib/
+	sed -e 's|@PREFIX@|$(PREFIX)|' -e 's/@VERSION@/$(VERSION)/' make/multiplexer.pc.in \
+	    > $(DESTDIR)$(PREFIX)/lib/pkgconfig/multiplexer.pc
 	@for header in $(HEADERS); do install -D -m 644 $$header $(DESTDIR)$(PREFIX)/include/mx/$$header; done
 	@for header in $(GEN_H); do install -D -m 644 $$header $(DESTDIR)$(PREFIX)/include/mx/$${header#$(GEN)/}; done
 

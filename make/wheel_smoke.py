@@ -1,9 +1,16 @@
 """Run from a Python that has the wheel installed and MXCONTROL pointing at
 a built multiplexer: a Cluster, a FakePeer answering and a TestClient
-asking, through the installed package alone."""
+asking, through the installed package alone. It runs from an empty
+directory, so that nothing of the source tree can stand in for what the
+wheel must carry, such as the harness's default rules file."""
 
-from multiplexer.multiplexer_constants import peers, types
-from multiplexer.testing import Cluster, FakePeer, TestClient
+import os
+import tempfile
+
+os.chdir(tempfile.mkdtemp())
+
+from multiplexer.multiplexer_constants import peers, types  # noqa: E402
+from multiplexer.testing import Cluster, FakePeer, TestClient  # noqa: E402
 
 with (
     Cluster(1) as cluster,

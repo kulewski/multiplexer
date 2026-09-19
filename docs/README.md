@@ -190,6 +190,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Building](building.md): the packages a clean machine needs, bringing
   your own protobuf, the build configurations, the Docker check, and the
   build without Bazel.
+- [Packaging](packaging.md): what a release ships, the static mxcontrol,
+  the container image, the Debian packages, the wheels, and how a release
+  is cut.
 - [Operations](operations.md): several multiplexers, restarts, logs, the
   peers file, recording what was routed and driving it on a running
   cluster, sizing.

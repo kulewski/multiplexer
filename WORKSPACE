@@ -38,3 +38,34 @@ hedron_compile_commands_setup_transitive_transitive()
 load("@hedron_compile_commands//:workspace_setup_transitive_transitive_transitive.bzl", "hedron_compile_commands_setup_transitive_transitive_transitive")
 
 hedron_compile_commands_setup_transitive_transitive_transitive()
+
+# The container image: bazel run //docker:load (see docker/BUILD). Release
+# tooling, development only, and the image targets are tagged manual, so
+# neither a consumer of @mx nor a plain `bazel build //...` touches it.
+http_archive(
+    name = "rules_oci",
+    sha256 = "46ce9edcff4d3d7b3a550774b82396c0fa619cc9ce9da00c1b09a08b45ea5a14",
+    strip_prefix = "rules_oci-1.8.0",
+    url = "https://github.com/bazel-contrib/rules_oci/releases/download/v1.8.0/rules_oci-v1.8.0.tar.gz",
+)
+
+load("@rules_oci//oci:dependencies.bzl", "rules_oci_dependencies")
+
+rules_oci_dependencies()
+
+load("@rules_oci//oci:repositories.bzl", "LATEST_CRANE_VERSION", "oci_register_toolchains")
+
+oci_register_toolchains(
+    name = "oci",
+    crane_version = LATEST_CRANE_VERSION,
+)
+
+load("@rules_oci//oci:pull.bzl", "oci_pull")
+
+# gcr.io/distroless/static-debian12:nonroot for linux/amd64, by digest: no
+# libc, no shell, a nonroot user, /tmp, time zones and certificates.
+oci_pull(
+    name = "distroless_static",
+    digest = "sha256:52dcfbabb7457ea47c82f6e13af8c8a4a1d9f7b0145142b3ecab20f2b888411d",
+    image = "gcr.io/distroless/static-debian12",
+)

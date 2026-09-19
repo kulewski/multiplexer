@@ -3,6 +3,7 @@
 #   Python  -> black  (settings in pyproject.toml: 120 columns, py311)
 #   C++     -> clang-format-18 (settings in .clang-format: LLVM, 120 columns)
 #   Bazel   -> buildifier (BUILD, WORKSPACE, *.bzl)
+#   YAML    -> parsed with PyYAML in --check (the workflow files), no rewriting
 #   docs    -> docs/diagrams/generate.py regenerates the protocol pages,
 #              docs/code_map.py regenerates the code map from header comments,
 #              docs/check_mermaid.py --fast catches Mermaid syntax slips
@@ -21,6 +22,7 @@ prune=(-path ./bazel-\* -prune -o -path ./build -prune -o)
 mapfile -t py < <(find . "${prune[@]}" -name '*.py' -print | sort)
 mapfile -t cc < <(find . "${prune[@]}" \( -name '*.h' -o -name '*.cc' \) -print | sort)
 mapfile -t bzl < <(find . "${prune[@]}" \( -name BUILD -o -name WORKSPACE -o -name '*.bzl' \) -print | sort)
+mapfile -t yml < <(find . "${prune[@]}" \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
 
 status=0
 if (( check )); then
@@ -31,7 +33,12 @@ if (( check )); then
   black --check --quiet "${py[@]}" || status=1
   clang-format-18 --dry-run --Werror "${cc[@]}" || status=1
   buildifier -mode=check "${bzl[@]}" || status=1
-  (( status == 0 )) && echo "format: all ${#py[@]} Python, ${#cc[@]} C++ and ${#bzl[@]} Bazel files are clean"
+  # Every YAML file parses: a workflow with a syntax slip fails on GitHub before any job starts.
+  python3 -c 'import sys, yaml
+for path in sys.argv[1:]:
+    with open(path) as f:
+        yaml.safe_load(f)' "${yml[@]}" || status=1
+  (( status == 0 )) && echo "format: all ${#py[@]} Python, ${#cc[@]} C++, ${#bzl[@]} Bazel and ${#yml[@]} YAML files are clean"
 else
   python3 docs/diagrams/generate.py
   python3 docs/code_map.py

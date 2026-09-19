@@ -102,7 +102,7 @@ What comes out, and how a program uses it:
 | Output | Use |
 |---|---|
 | `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
-| `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles with `-std=c++17 -I/usr/local/include/mx` and links `-lmultiplexer -lprotobuf -pthread`; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
+| `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles and links with `$(pkg-config --cflags --libs multiplexer)`, which `make install` also puts under `PREFIX/lib/pkgconfig`, together with `generate_constants` for your own rules file; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
 | `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension included |
 | `build/dist/*.whl` | `pip install` it; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
 
@@ -124,9 +124,9 @@ examples, the sanitizer and analysis configurations. Those are Bazel's.
 ## Development tools
 
 Only for working on the repository, never for building it: `clang-format-18`,
-`black` and `buildifier` for `./format.sh`; `clang-18` for the thread-safety
-analysis build (`--config=clang`); mermaid-cli, through `npx`, for the
-diagram check; Docker for [docker/check.sh](../docker/check.sh).
+`black`, `buildifier` and `python3-yaml` for `./format.sh`; `clang-18` for
+the thread-safety analysis build (`--config=clang`); mermaid-cli, through
+`npx`, for the diagram check; Docker for [docker/check.sh](../docker/check.sh).
 [AGENTS.md](../AGENTS.md) lists the commands.
 
 ## Checking on a clean machine

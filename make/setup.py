@@ -21,7 +21,7 @@ setup(
     url="https://github.com/kulewski/multiplexer",
     license="MIT",
     packages=find_packages(),
-    package_data={"multiplexer": ["_native.so"]},
+    package_data={"multiplexer": ["_native.so"], "multiplexer.testing": ["multiplexer.rules"]},
     install_requires=["protobuf"],
     python_requires=">=3.10",
 )

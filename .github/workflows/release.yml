@@ -1,0 +1,95 @@
+# The release: on a version tag, every artifact from the same commit, each
+# checked the way the tree is checked, then attached to the GitHub release
+# and the image pushed to ghcr.io. docs/packaging.md describes the
+# artifacts; the scripts under packaging/ build them the same way locally.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  # By hand, from the Actions tab or `gh workflow run release.yml -f tag=v2.1.0`:
+  # the same build from the chosen branch, its files named after `tag`, and
+  # the release step skipped, so that a run can be tried before tagging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: the version tag the files are named after, such as v2.1.0
+        required: true
+permissions:
+  contents: write
+  packages: write
+env:
+  VERSION: ${{ inputs.tag || github.ref_name }}
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
+      - run: bazel test //...
+
+  static:
+    # mxcontrol linked statically: one file for any Linux, and the image.
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
+      - run: bazel build //mxcontrol:mxcontrol_static
+      - run: |
+          mkdir -p dist
+          cp bazel-bin/mxcontrol/mxcontrol_static dist/mxcontrol-${VERSION#v}-linux-amd64
+          (cd dist && sha256sum mxcontrol-* > mxcontrol-${VERSION#v}-linux-amd64.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static
+          path: dist/
+      - name: image to ghcr.io
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          bazel run //docker:push -- --tag "${VERSION#v}" --tag latest
+
+  debs:
+    # One package per release, built against that release's protobuf.
+    needs: tests
+    strategy:
+      matrix:
+        base: ["debian:12", "debian:13", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04"]
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.base }}
+    steps:
+      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git g++ make protobuf-compiler libprotobuf-dev libasio-dev python3-dev python3-protobuf pybind11-dev python3-pybind11 libgtest-dev dpkg-dev ca-certificates
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$PWD" && packaging/deb.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ strategy.job-index }}
+          path: dist/*.deb
+
+  wheels:
+    # manylinux wheels for every CPython from 3.10, protobuf built in.
+    needs: tests
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$PWD" && packaging/wheels.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: dist/*.whl
+
+  release:
+    needs: [static, debs, wheels]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: false

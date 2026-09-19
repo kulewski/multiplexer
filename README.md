@@ -283,6 +283,16 @@ make RULES=your.rules -j     # the constants from your rules file
 what a program links and imports. The test roles, the scenarios, the
 examples and the sanitizer builds stay with Bazel.
 
+## Installing a release
+
+Every release on GitHub ships the same set, built from one commit: a
+static `mxcontrol` for any Linux, a container image
+`ghcr.io/kulewski/multiplexer:<version>` with nothing in it but the
+binary, a Debian package per Debian and Ubuntu release with `mxcontrol`,
+the C++ library, its headers and a pkg-config file, and manylinux wheels
+of the Python package for every CPython from 3.10.
+[docs/packaging.md](docs/packaging.md) says how to use each.
+
 ## Using it from another Bazel workspace
 
 Declare this repository as `mx`, then two calls in your `WORKSPACE`:

@@ -1,0 +1,13 @@
+# pkg-config file for the multiplexer C++ library, installed by `make install`:
+#   g++ -std=c++17 $(pkg-config --cflags --libs multiplexer) ...
+prefix=@PREFIX@
+includedir=${prefix}/include/mx
+libdir=${prefix}/lib
+
+Name: multiplexer
+Description: Client and backend library for the multiplexer message broker
+Version: @VERSION@
+URL: https://github.com/kulewski/multiplexer
+Requires: protobuf
+Cflags: -I${includedir} -DASIO_STANDALONE
+Libs: -L${libdir} -lmultiplexer -pthread
