@@ -26,30 +26,31 @@
 #include "multiplexer/connections_manager.h"
 #include "multiplexer/defaults.h"
 #include "multiplexer/io/connection.h"
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/logic/tribool.hpp>
-#include <boost/logic/tribool_io.hpp>
-#include <boost/shared_ptr.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
+#include <cstdint>
 #include <deque>
 #include <memory>
 
 namespace multiplexer {
 
 struct BasicClientTraits {
-  typedef boost::asio::deadline_timer Timer;
-  typedef boost::shared_ptr<Timer> TimerPointer;
-  typedef boost::asio::ip::tcp::endpoint Endpoint;
+  typedef asio::steady_timer Timer;
+  typedef std::shared_ptr<Timer> TimerPointer;
+  typedef asio::ip::tcp::endpoint Endpoint;
 };
 
 class BasicClient;
 class Client;
 
+// A queued frame's fate: not written yet, written to the socket, or lost
+// with its connection.
+enum class SendState : unsigned char { QUEUED, SENT, LOST };
+
 // How the client's connections queue messages and report on them. Each queue
-// entry pairs the frame with a tribool: indeterminate while queued, true once
-// written to the socket, false if the connection died first. The entry holds
-// the tribool weakly and the tracker handed to the caller holds it strongly,
+// entry pairs the frame with a SendState: QUEUED while queued, SENT once
+// written to the socket, LOST if the connection died first. The entry holds
+// the state weakly and the tracker handed to the caller holds it strongly,
 // so a caller that does not keep the tracker costs nothing.
 template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerTraits {
 
@@ -58,18 +59,17 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
   struct MessagesBufferTraits : public Base::MessagesBufferTraits {
     typedef ConnectionsManagerTraits::Base::MessagesBufferTraits Base;
 
-    typedef std::pair<boost::shared_ptr<boost::tribool>, boost::shared_ptr<const RawMessage>> temporary_value_type;
-    typedef std::pair<boost::weak_ptr<boost::tribool>, boost::shared_ptr<const RawMessage>> value_type;
+    typedef std::pair<std::shared_ptr<SendState>, std::shared_ptr<const RawMessage>> temporary_value_type;
+    typedef std::pair<std::weak_ptr<SendState>, std::shared_ptr<const RawMessage>> value_type;
 
     typedef mx::SecondFromPairExtractor<value_type> ToRawMessagePointerConverter;
 
     struct ToBufferRepresentationConverter
-        : public std::function<temporary_value_type(boost::shared_ptr<const RawMessage>)> {
+        : public std::function<temporary_value_type(std::shared_ptr<const RawMessage>)> {
 
-      temporary_value_type operator()(boost::shared_ptr<const RawMessage> raw) const {
+      temporary_value_type operator()(std::shared_ptr<const RawMessage> raw) const {
 
-        return temporary_value_type(temporary_value_type::first_type(new boost::tribool(boost::logic::indeterminate)),
-                                    raw);
+        return temporary_value_type(temporary_value_type::first_type(new SendState(SendState::QUEUED)), raw);
       }
     };
     typedef mx::FirstFromPairExtractor<temporary_value_type> SchedulingResultFunctor;
@@ -79,15 +79,15 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
       void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType &qe) const {
 
-        if (temporary_value_type::first_type tbp = qe.first.lock())
-          *tbp = true;
+        if (temporary_value_type::first_type state = qe.first.lock())
+          *state = SendState::SENT;
       }
 
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
       void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType &qe) const {
 
-        if (temporary_value_type::first_type tbp = qe.first.lock())
-          *tbp = false;
+        if (temporary_value_type::first_type state = qe.first.lock())
+          *state = SendState::LOST;
       }
     };
   };
@@ -245,34 +245,34 @@ struct ExceptionDefinitions {
 // See the file comment. Created through Client; always held by shared_ptr
 // because connections keep weak references to their manager.
 class BasicClient : public ConnectionsManager<BasicClient>,
-                    public boost::enable_shared_from_this<BasicClient>,
+                    public std::enable_shared_from_this<BasicClient>,
                     public BasicClientTraits,
                     public ExceptionDefinitions {
 
 private:
-  BasicClient(boost::asio::io_service &io_service, boost::uint32_t client_type);
+  BasicClient(asio::io_service &io_service, std::uint32_t client_type);
 
 public:
   // definitions
   typedef ConnectionsManager<BasicClient> Base;
 
   typedef std::deque<
-      mx::triple<boost::shared_ptr<const RawMessage>, ConnectionWrapper, boost::shared_ptr<MultiplexerMessage>>>
+      mx::triple<std::shared_ptr<const RawMessage>, ConnectionWrapper, std::shared_ptr<MultiplexerMessage>>>
       IncomingMessagesBuffer;
   typedef MessagesBufferTraits::SchedulingResultFunctor::result_type BasicScheduledMessageTracker;
 
   // public constructor-like function
-  typedef boost::shared_ptr<BasicClient> pointer;
-  typedef boost::weak_ptr<BasicClient> weak_pointer;
+  typedef std::shared_ptr<BasicClient> pointer;
+  typedef std::weak_ptr<BasicClient> weak_pointer;
 
   // The only way to make one: connections keep weak references to their
   // manager, so it must live in a shared_ptr.
-  static pointer Create(boost::asio::io_service &io_service, unsigned short port) {
+  static pointer Create(asio::io_service &io_service, unsigned short port) {
     return pointer(new BasicClient(io_service, port));
   }
 
   // ConnectionsManager interface: what a Connection needs from its manager.
-  boost::shared_ptr<const RawMessage> get_welcome_message() {
+  std::shared_ptr<const RawMessage> get_welcome_message() {
     if (!welcome_message_) {
       welcome_message_ = create_welcome_message(client_type_);
     }
@@ -281,8 +281,8 @@ public:
 
   // Called by a Connection with every parsed message: drops ones without an
   // id or seen before, then queues or hands to the sink.
-  void handle_message(Connection::pointer conn, boost::shared_ptr<const RawMessage> raw,
-                      boost::shared_ptr<MultiplexerMessage> mxmsg);
+  void handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
+                      std::shared_ptr<MultiplexerMessage> mxmsg);
 
   // Connectivity. async_connect returns at once; connect runs the loop until
   // the handshake completed or `timeout` passed, and returns the wrapper
@@ -309,7 +309,7 @@ public:
   bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const; // run the loop until registered
   ConnectionWrapper connect(const Endpoint &peer_endpoint, float timeout);   // async_connect + wait
   void connection_destroyed(Connection *conn); // a connection ended; schedule the reconnect
-  void reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint, const boost::system::error_code &);
+  void reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint, const asio::error_code &);
 
 public:
   // A deadline `timeout` seconds from now on this client's io_service;
@@ -318,7 +318,7 @@ public:
 
 public:
   // The only peer a client accepts a welcome from is a multiplexer.
-  bool accept_peer_type(boost::uint32_t peer_type) const {
+  bool accept_peer_type(std::uint32_t peer_type) const {
     return peer_type == peers::MULTIPLEXER && Base::accept_peer_type(peer_type);
   }
 
@@ -416,7 +416,7 @@ public:
 
   // Outgoing messages. schedule_all queues the frame on every live connection
   // with room and returns how many; the receivers drop the copies by id.
-  unsigned int schedule_all(boost::shared_ptr<const RawMessage> raw) {
+  unsigned int schedule_all(std::shared_ptr<const RawMessage> raw) {
     MX_DCHECK_RUN_ON(&owner_thread());
     unsigned int c = 0;
     for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
@@ -435,7 +435,7 @@ public:
   // the connection used is moved to the back of the list, and connections
   // that are dead or full are skipped. Returns a null tracker when none took
   // it.
-  BasicScheduledMessageTracker schedule_one(boost::shared_ptr<const RawMessage> raw, ConnectionWrapper *used = NULL) {
+  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper *used = NULL) {
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::pointer conn;
     ConnectionsList &connections = connections_by_type_[peers::MULTIPLEXER];
@@ -483,7 +483,7 @@ public:
   // Queues the frame on a specific connection, the one a request arrived on
   // or a reply came from. If that connection is gone, reconnects to its
   // endpoint within `timeout` and tries once more; with no timeout, throws.
-  BasicScheduledMessageTracker schedule_one(boost::shared_ptr<const RawMessage> raw, ConnectionWrapper wrapper,
+  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper wrapper,
                                             float timeout) {
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::pointer conn;
@@ -509,13 +509,13 @@ public:
   template <typename MessagesBuffer> void inline handle_orphaned_outgoing_messages(MessagesBuffer &outgoing_messages) {
     MX_DCHECK_RUN_ON(&owner_thread());
     std::list<Connection::pointer> working_connections;
-    BOOST_FOREACH (Connection::weak_pointer connwp, connections_by_type_[peers::MULTIPLEXER])
+    for (Connection::weak_pointer connwp : connections_by_type_[peers::MULTIPLEXER])
 
       if (Connection::pointer conn = connwp.lock())
         if (conn->living())
           working_connections.push_back(conn);
 
-    BOOST_FOREACH (typename MessagesBuffer::value_type &message, outgoing_messages) {
+    for (typename MessagesBuffer::value_type &message : outgoing_messages) {
       if (message.second->pinned())
         continue;
 
@@ -532,14 +532,14 @@ public:
     }
   }
 
-  mx::Random64::result_type random64() { return random_(); }          // a message id
-  boost::uint32_t inline client_type() const { return client_type_; } // this peer's type
+  mx::Random64::result_type random64() { return random_(); }        // a message id
+  std::uint32_t inline client_type() const { return client_type_; } // this peer's type
 
 private:
   typedef std::map<Endpoint, Connection::weak_pointer> ConnectionByEndpoint;
 
   /* instance properties */
-  boost::uint32_t client_type_;
+  std::uint32_t client_type_;
   bool shuts_down_;
 
   // received messages
@@ -551,12 +551,12 @@ private:
   ConnectionByEndpoint connection_by_endpoint_;
   const unsigned int fork_generation_at_creation_;
 
-  boost::shared_ptr<const RawMessage> welcome_message_;
+  std::shared_ptr<const RawMessage> welcome_message_;
 
   // Ids of the last 2048 messages received, across all connections. An event
   // sent through every multiplexer arrives once per multiplexer; the copies
   // are dropped here so the caller sees each id once.
-  mx::SpanSet<boost::uint64_t, 2048> last_seen_message_ids_;
+  mx::SpanSet<std::uint64_t, 2048> last_seen_message_ids_;
 };
 
 }; // namespace multiplexer

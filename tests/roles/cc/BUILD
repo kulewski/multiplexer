@@ -7,9 +7,9 @@ cc_library(
     hdrs = ["common.h"],
     deps = [
         "//lib:memory",
+        "//lib:options",
         "//multiplexer:client",
         "//multiplexer/testing:events_cc_proto",
-        "@boost//:program_options",
     ],
 )
 

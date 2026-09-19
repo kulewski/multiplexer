@@ -3,7 +3,7 @@
 #define MX_LIB_ASSERTION_H_
 
 #include "lib/exception.h"
-#include <boost/preprocessor/stringize.hpp>
+#include "lib/preproc/common.h"
 
 // Assert and AssertMsg are always compiled in, and they throw
 // mx::AssertionError rather than abort, after printing the site to stderr.
@@ -13,13 +13,13 @@
 #define Assert(w)                                                                                                      \
   do {                                                                                                                 \
     if (!(w))                                                                                                          \
-      ::mx::_AssertionFailed(__FILE__, __LINE__, __PRETTY_FUNCTION__, BOOST_PP_STRINGIZE(w));                          \
+      ::mx::_AssertionFailed(__FILE__, __LINE__, __PRETTY_FUNCTION__, MX_PP_STRINGIZE(w));                             \
   } while (0)
 
 #define AssertMsg(w, args...)                                                                                          \
   do {                                                                                                                 \
     if (!(w))                                                                                                          \
-      ::mx::_AssertionFailed(__FILE__, __LINE__, __PRETTY_FUNCTION__, BOOST_PP_STRINGIZE(w), args);                    \
+      ::mx::_AssertionFailed(__FILE__, __LINE__, __PRETTY_FUNCTION__, MX_PP_STRINGIZE(w), args);                       \
   } while (0)
 
 #ifndef NDEBUG

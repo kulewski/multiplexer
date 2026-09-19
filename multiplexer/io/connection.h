@@ -23,21 +23,14 @@
 #include <deque>
 #include <string>
 
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/placeholders.hpp>
-#include <boost/asio/read.hpp>
-#include <boost/asio/streambuf.hpp>
-#include <boost/asio/write.hpp>
-#include <boost/bind/bind.hpp>
-#include <boost/enable_shared_from_this.hpp>
-#include <boost/foreach.hpp>
-#include <boost/numeric/conversion/cast.hpp>
-#include <boost/random/linear_congruential.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/weak_ptr.hpp>
+#include <asio/io_service.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/streambuf.hpp>
+#include <asio/write.hpp>
 #include <google/protobuf/message.h>
+#include <memory>
 
 #include "lib/functors.h"
 #include "lib/logging/logging.h"
@@ -63,7 +56,7 @@ template <typename ConnectionsManagerImplementation> struct ConnectionsManagerTr
 // handle_orphaned_outgoing_messages(). See connections_manager.h for the
 // shared implementation of most of them.
 template <class ConnectionsManagerImplementation>
-class Connection : public boost::enable_shared_from_this<Connection<ConnectionsManagerImplementation>> {
+class Connection : public std::enable_shared_from_this<Connection<ConnectionsManagerImplementation>> {
 
 public:
   typedef multiplexer::ConnectionsManagerTraits<ConnectionsManagerImplementation> ConnectionsManagerTraits;
@@ -82,16 +75,16 @@ public:
 
   /* instance members */
 private:
-  Connection(boost::asio::io_service &io_service, boost::shared_ptr<ConnectionsManagerImplementation> manager)
+  Connection(asio::io_service &io_service, std::shared_ptr<ConnectionsManagerImplementation> manager)
       : socket_(io_service), peer_type_(0), peer_id_(0), is_passive_(false), is_living_(false), shuts_down_(false),
         is_registered_(false), manager_(manager), should_send_heartbit_(true),
         outgoing_channel_state_(ChannelState::FREE), outgoing_queue_max_size_(1), incoming_message_(new RawMessage()),
         incoming_channel_state_(ChannelState::FREE), send_heartbit_timer_(io_service),
         require_heartbit_timer_(io_service)
   //, send_heartbit_timer_(io_service,
-  // boost::posix_time::microseconds(HEARTBIT_INTERVAL * 1000000)) ,
+  // std::chrono::microseconds(HEARTBIT_INTERVAL * 1000000)) ,
   // require_heartbit_timer_(io_service,
-  // boost::posix_time::microseconds(NO_HEARTBIT_SO_DROP_INTERVAL * 1000000))
+  // std::chrono::microseconds(NO_HEARTBIT_SO_DROP_INTERVAL * 1000000))
   {
     MX_DCHECK_RUN_ON(&io_thread_);
     // The heartbeat frame never changes, so it is serialized once per
@@ -104,9 +97,9 @@ private:
   }
 
 public:
-  typedef boost::shared_ptr<Connection> pointer;
-  typedef boost::weak_ptr<Connection> weak_pointer;
-  typedef boost::shared_ptr<ConnectionsManagerImplementation> ManagerPointer;
+  typedef std::shared_ptr<Connection> pointer;
+  typedef std::weak_ptr<Connection> weak_pointer;
+  typedef std::shared_ptr<ConnectionsManagerImplementation> ManagerPointer;
 
   /**
    * Create
@@ -114,8 +107,7 @@ public:
    * shared_ptr, so that having a shared_ptr is always equal to having living
    * instance.
    */
-  static pointer Create(boost::asio::io_service &io_service,
-                        boost::shared_ptr<ConnectionsManagerImplementation> manager) {
+  static pointer Create(asio::io_service &io_service, std::shared_ptr<ConnectionsManagerImplementation> manager) {
     pointer created(new Connection(io_service, manager));
     MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("created new Connection " + repr((void *)created.get())));
     return created;
@@ -127,7 +119,7 @@ public:
       shutdown();
   }
 
-  boost::asio::ip::tcp::socket &socket() { return socket_; }
+  asio::ip::tcp::socket &socket() { return socket_; }
 
 public:
   // A client starts reading and sends its welcome at once. The multiplexer
@@ -148,8 +140,8 @@ public:
     // Every write is one whole frame, so Nagle's algorithm has nothing to
     // coalesce and only delays a small frame sent right after another one
     // until the peer's ACK arrives. Off on both sides.
-    boost::system::error_code ignored;
-    socket_.set_option(boost::asio::ip::tcp::no_delay(true), ignored);
+    asio::error_code ignored;
+    socket_.set_option(asio::ip::tcp::no_delay(true), ignored);
     _start_read();
   }
 
@@ -207,9 +199,9 @@ public:
     // The socket may never have been opened (a connection created for an
     // accept that was cancelled) or may already be closed, so none of these
     // may throw. Cancelling the timers lets the io loop drain after shutdown.
-    boost::system::error_code ignored;
+    asio::error_code ignored;
     socket_.cancel(ignored);
-    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored);
+    socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
     send_heartbit_timer_.cancel(ignored);
     require_heartbit_timer_.cancel(ignored);
     incoming_message_.reset();
@@ -228,7 +220,7 @@ public:
   // only back-pressure there is; `force` bypasses that for protocol messages
   // (welcome, heartbeat) and `asap` puts them right behind the frame being
   // written so that a long queue cannot delay the handshake or a heartbeat.
-  typename MessagesBufferTraits::SchedulingResultFunctor::result_type schedule(boost::shared_ptr<const RawMessage> msg,
+  typename MessagesBufferTraits::SchedulingResultFunctor::result_type schedule(std::shared_ptr<const RawMessage> msg,
                                                                                bool force = false, bool asap = false) {
     MX_DCHECK_RUN_ON(&io_thread_);
 
@@ -283,8 +275,8 @@ public:
     return true;
   }
 
-  inline boost::uint32_t peer_type() const { return peer_type_; }
-  inline boost::uint64_t peer_id() const { return peer_id_; }
+  inline std::uint32_t peer_type() const { return peer_type_; }
+  inline std::uint64_t peer_id() const { return peer_id_; }
   inline bool registered() const { return is_registered_; }
 
   inline void set_outgoing_queue_max_size(unsigned int ms) { outgoing_queue_max_size_ = ms; }
@@ -306,24 +298,22 @@ private:
    * read and drops the connection in two phases, NO_HEARTBIT_SO_PREPARE_DROP
    * then NO_HEARTBIT_SO_REALLY_DROP, when nothing arrives. Both are off for
    * passive peers, in the sense described at set_is_passive(). */
-  template <typename WaitHandler>
-  void _do_later(boost::asio::deadline_timer &timer, const float seconds, WaitHandler handler) {
+  template <typename WaitHandler> void _do_later(asio::steady_timer &timer, const float seconds, WaitHandler handler) {
     // timer.cancel();
-    timer.expires_from_now(boost::posix_time::microseconds(boost::numeric_cast<long>(seconds * 1e6)));
+    timer.expires_after(std::chrono::microseconds(static_cast<long>(seconds * 1e6)));
     timer.async_wait(handler);
   }
 
   void _send_heartbit_later() {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (outgoing_queue_.empty())
-      _do_later(
-          send_heartbit_timer_, HEARTBIT_INTERVAL,
-          boost::bind(&Connection::_send_heartbit_now, this->shared_from_this(), boost::asio::placeholders::error));
+      _do_later(send_heartbit_timer_, HEARTBIT_INTERVAL,
+                [self = this->shared_from_this()](const asio::error_code &error) { self->_send_heartbit_now(error); });
   }
 
-  void _send_heartbit_now(const boost::system::error_code &error) {
+  void _send_heartbit_now(const asio::error_code &error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == boost::asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_)
       return;
     // To a passive peer, at most one heartbeat per frame received: it reads
     // only inside calls, and a stream of heartbeats would fill its socket
@@ -353,24 +343,23 @@ private:
 
     _do_later(
         require_heartbit_timer_, NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL,
-        boost::bind(&Connection::_require_heartbit_soon, this->shared_from_this(), boost::asio::placeholders::error));
+        [self = this->shared_from_this()](const asio::error_code &error) { self->_require_heartbit_soon(error); });
   }
 
-  void _require_heartbit_soon(const boost::system::error_code &error) {
+  void _require_heartbit_soon(const asio::error_code &error) {
     MX_DCHECK_RUN_ON(&io_thread_);
     // First phase of the drop: nothing arrived for the prepare interval. Wait
     // once more before really closing, so that a short stall on a busy peer
     // does not cost it the connection.
-    if (error == boost::asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_)
       return;
-    _do_later(
-        require_heartbit_timer_, NO_HEARTBIT_SO_REALLY_DROP_INTERVAL,
-        boost::bind(&Connection::_require_heartbit_now, this->shared_from_this(), boost::asio::placeholders::error));
+    _do_later(require_heartbit_timer_, NO_HEARTBIT_SO_REALLY_DROP_INTERVAL,
+              [self = this->shared_from_this()](const asio::error_code &error) { self->_require_heartbit_now(error); });
   }
 
-  void _require_heartbit_now(const boost::system::error_code &error) {
+  void _require_heartbit_now(const asio::error_code &error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == boost::asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_)
       return;
     // TODO logger.error << "no received messages for " <<
     // NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL +
@@ -392,12 +381,12 @@ private:
     Assert(incoming_channel_state_ == ChannelState::FREE);
 
     incoming_channel_state_ = ChannelState::READING_HEADER;
-    boost::asio::async_read(socket_, boost::asio::buffer(incoming_message_->get_header_buffer()),
-                            boost::bind(&Connection::_handle_read_header, this->shared_from_this(),
-                                        boost::asio::placeholders::error,
-                                        boost::asio::placeholders::bytes_transferred));
+    asio::async_read(socket_, asio::buffer(incoming_message_->get_header_buffer()),
+                     [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                       self->_handle_read_header(error, bytes);
+                     });
   }
-  void _handle_read_header(const boost::system::error_code &error, size_t bytes_transferred) {
+  void _handle_read_header(const asio::error_code &error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (incoming_channel_state_ == ChannelState::BROKEN)
       return;
@@ -427,12 +416,12 @@ private:
 
     incoming_channel_state_ = ChannelState::READING_BODY;
     _require_heartbit_later();
-    boost::asio::async_read(socket_, boost::asio::buffer(incoming_message_->get_body_buffer()),
-                            boost::bind(&Connection::_handle_read_body, this->shared_from_this(),
-                                        boost::asio::placeholders::error,
-                                        boost::asio::placeholders::bytes_transferred));
+    asio::async_read(socket_, asio::buffer(incoming_message_->get_body_buffer()),
+                     [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                       self->_handle_read_body(error, bytes);
+                     });
   }
-  void _handle_read_body(const boost::system::error_code &error, size_t bytes_transferred) {
+  void _handle_read_body(const asio::error_code &error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     should_send_heartbit_ = true;
     if (incoming_channel_state_ == ChannelState::BROKEN)
@@ -465,7 +454,7 @@ private:
     MX_DCHECK_RUN_ON(&io_thread_);
     // The frame is passed on as the RawMessage it arrived in, so that the
     // multiplexer can forward it to other connections without re-serializing.
-    boost::shared_ptr<const RawMessage> message = incoming_message_;
+    std::shared_ptr<const RawMessage> message = incoming_message_;
     incoming_message_.reset(new RawMessage());
 
     ManagerPointer manager = manager_.lock();
@@ -475,7 +464,7 @@ private:
       return;
     }
 
-    boost::shared_ptr<MultiplexerMessage> mxmsg(new MultiplexerMessage());
+    std::shared_ptr<MultiplexerMessage> mxmsg(new MultiplexerMessage());
     if (!mxmsg->ParseFromString(message->get_message())) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
              TEXT("received invalid message on " + repr((void *)this) + "(maybe id=" + repr(mxmsg->id()) + ")"));
@@ -562,14 +551,14 @@ private:
       // start writing
       outgoing_channel_state_ = ChannelState::BUSY;
       Assert(raw->get_message_buffer().size());
-      boost::asio::async_write(
-          socket_, raw->get_message_buffer(),
-          boost::bind(&Connection::_handle_write, this->shared_from_this(), /* making shared_ptr we ensure *this is
-                                                                               not GCed in the middle */
-                      boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
+      // The handler holds a shared_ptr to this, so the connection outlives the write.
+      asio::async_write(socket_, raw->get_message_buffer(),
+                        [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                          self->_handle_write(error, bytes);
+                        });
     }
   }
-  void _handle_write(const boost::system::error_code &error, size_t bytes_transferred) {
+  void _handle_write(const asio::error_code &error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (error) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
@@ -627,7 +616,7 @@ private:
     MX_LOG(WARNING, HIGHVERBOSITY,
            TEXT("Connection shutdown on " + repr((void *)this) + ", dropping about " + repr(outgoing_queue_.size()) +
                 " outgoing messages"));
-    BOOST_FOREACH (typename MessagesBuffer::value_type &entry, outgoing_queue_)
+    for (typename MessagesBuffer::value_type &entry : outgoing_queue_)
       message_sending_notifier_.notify_error(manager_, entry);
     outgoing_queue_.clear();
   }
@@ -642,15 +631,15 @@ public:
 
   /* members */
 private:
-  boost::asio::ip::tcp::socket socket_;
-  boost::uint32_t peer_type_;
-  boost::uint64_t peer_id_;
+  asio::ip::tcp::socket socket_;
+  std::uint32_t peer_type_;
+  std::uint64_t peer_id_;
   bool is_passive_;
 
   bool is_living_;
   bool shuts_down_;
   bool is_registered_;
-  boost::weak_ptr<ConnectionsManagerImplementation> manager_;
+  std::weak_ptr<ConnectionsManagerImplementation> manager_;
   bool should_send_heartbit_;
 
 public:
@@ -667,16 +656,16 @@ private:
   /* outgoing channel */
   MessagesBuffer outgoing_queue_ MX_GUARDED_BY(io_thread_);
   ChannelStateT outgoing_channel_state_ MX_GUARDED_BY(io_thread_);
-  boost::uint32_t outgoing_queue_max_size_;
+  std::uint32_t outgoing_queue_max_size_;
 
   /* incoming channel */
-  boost::shared_ptr<RawMessage> incoming_message_ MX_GUARDED_BY(io_thread_);
+  std::shared_ptr<RawMessage> incoming_message_ MX_GUARDED_BY(io_thread_);
   ChannelStateT incoming_channel_state_ MX_GUARDED_BY(io_thread_);
 
   /* heartbiting */
-  boost::asio::deadline_timer send_heartbit_timer_;
-  boost::asio::deadline_timer require_heartbit_timer_;
-  boost::shared_ptr<const RawMessage> heartbit_message_;
+  asio::steady_timer send_heartbit_timer_;
+  asio::steady_timer require_heartbit_timer_;
+  std::shared_ptr<const RawMessage> heartbit_message_;
 
   /* Manager's data pool */
   typename ConnectionsManagerTraits::ConnectionManagerPrivateDataInConnection managers_private_data_;

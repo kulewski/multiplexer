@@ -109,7 +109,7 @@ struct Requester {
   explicit Requester(unsigned short port) : client(multiplexer::peers::WEBSITE) {
     client.connect("127.0.0.1", port, 5);
   }
-  multiplexer::MultiplexerMessage message(const std::string &payload, boost::uint32_t type) {
+  multiplexer::MultiplexerMessage message(const std::string &payload, std::uint32_t type) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
     msg.set_from(client.instance_id());
@@ -124,7 +124,7 @@ struct Requester {
     return client.query(message(payload, multiplexer::types::PYTHON_TEST_REQUEST), 10, lane).third->message();
   }
   // The search clients use to find a backend: PING back, or a timeout.
-  boost::uint32_t search(float timeout) {
+  std::uint32_t search(float timeout) {
     multiplexer::BackendForPacketSearch search;
     search.set_packet_type(multiplexer::types::PYTHON_TEST_REQUEST);
     multiplexer::MultiplexerMessage msg =

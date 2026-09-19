@@ -9,15 +9,14 @@
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
 #include "multiplexer/multiplexer.constants.h"
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/foreach.hpp>
+#include <chrono>
 
 using namespace mx;
 using namespace multiplexer;
 using mx::SimpleTimer;
 using std::cerr;
 
-BasicClient::BasicClient(boost::asio::io_service &io_service, boost::uint32_t client_type)
+BasicClient::BasicClient(asio::io_service &io_service, std::uint32_t client_type)
     : Base(io_service), client_type_(client_type), shuts_down_(false),
       incoming_queue_max_size_(DEFAULT_INCOMING_QUEUE_MAX_SIZE), fork_generation_at_creation_(mx::fork_generation()) {}
 
@@ -39,8 +38,8 @@ void BasicClient::orphan_close_descriptors() {
   }
 }
 
-void BasicClient::handle_message(Connection::pointer conn, boost::shared_ptr<const RawMessage> raw,
-                                 boost::shared_ptr<MultiplexerMessage> mxmsg) {
+void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
+                                 std::shared_ptr<MultiplexerMessage> mxmsg) {
   MX_DCHECK_RUN_ON(&owner_thread());
 
   // Every message must carry an id: replies are matched by the id they
@@ -69,7 +68,7 @@ void BasicClient::handle_message(Connection::pointer conn, boost::shared_ptr<con
 }
 
 // BasicClient::async_connect() helper function
-static inline void handle_connect(BasicClient::Connection::pointer conn, const boost::system::error_code &error) {
+static inline void handle_connect(BasicClient::Connection::pointer conn, const asio::error_code &error) {
   if (!error) {
     conn->start();
   } else {
@@ -117,14 +116,15 @@ void BasicClient::connection_destroyed(Connection *conn) {
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
                                    repr(conn->managers_private_data().expected_endpoint)));
-    TimerPointer timer(new Timer(io_service_, boost::posix_time::seconds(AUTO_RECONNECT_TIME)));
-    timer->async_wait(boost::bind(&BasicClient::reconnect_after_timeout, this->shared_from_this(), timer,
-                                  conn->managers_private_data().expected_endpoint, boost::asio::placeholders::error));
+    TimerPointer timer(new Timer(io_service_, std::chrono::seconds(AUTO_RECONNECT_TIME)));
+    Endpoint endpoint = conn->managers_private_data().expected_endpoint;
+    timer->async_wait([self = this->shared_from_this(), timer, endpoint](const asio::error_code &error) {
+      self->reconnect_after_timeout(timer, endpoint, error);
+    });
   }
 }
 
-void BasicClient::reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint,
-                                          const boost::system::error_code &error) {
+void BasicClient::reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint, const asio::error_code &error) {
   if (!error) {
     if (connection_by_endpoint_.find(peer_endpoint) == connection_by_endpoint_.end())
       async_connect(peer_endpoint);
@@ -141,7 +141,7 @@ void BasicClient::reconnect_after_timeout(TimerPointer, Endpoint peer_endpoint,
 // once the socket connects (Connection::start). Connecting twice to one
 // endpoint replaces the earlier connection, which is also how the reconnect
 // timer behaves if the caller connected again in the meantime.
-ConnectionWrapper BasicClient::async_connect(const boost::asio::ip::tcp::endpoint &peer_endpoint) {
+ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint &peer_endpoint) {
   MX_DCHECK_RUN_ON(&owner_thread());
 
   // close any previous connections with the same endpoint
@@ -169,8 +169,8 @@ ConnectionWrapper BasicClient::async_connect(const boost::asio::ip::tcp::endpoin
   connection_by_endpoint_.insert(std::make_pair(peer_endpoint, new_connection));
 
   // start connection asynchronously
-  new_connection->socket().async_connect(peer_endpoint,
-                                         boost::bind(handle_connect, new_connection, boost::placeholders::_1));
+  new_connection->socket().async_connect(
+      peer_endpoint, [new_connection](const asio::error_code &error) { handle_connect(new_connection, error); });
 
   return ConnectionWrapper(new_connection, new_connection->managers_private_data().expected_endpoint);
 }
@@ -206,7 +206,7 @@ bool BasicClient::wait_for_connection(ConnectionWrapper connwrap, float timeout)
   return false;
 }
 
-ConnectionWrapper BasicClient::connect(const boost::asio::ip::tcp::endpoint &peer_endpoint, float timeout) {
+ConnectionWrapper BasicClient::connect(const asio::ip::tcp::endpoint &peer_endpoint, float timeout) {
 
   ConnectionWrapper connwrap = async_connect(peer_endpoint);
   wait_for_connection(connwrap, timeout);

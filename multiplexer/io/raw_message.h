@@ -10,7 +10,7 @@
 #ifndef MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 #define MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 
-#include <boost/asio/buffer.hpp>
+#include <asio/buffer.hpp>
 #include <google/protobuf/message.h>
 #include <list>
 #include <string>
@@ -31,11 +31,11 @@ namespace multiplexer {
 class RawMessage {
 public:
   enum Usability { READING, WRITING, NONE, PRE_WRITING };
-  static const boost::uint32_t HEADER_LENGTH = 8; // for length_ and crc32_
+  static const std::uint32_t HEADER_LENGTH = 8; // for length_ and crc32_
 
   // construct message suitable for reading input with ASIO
   inline RawMessage() : usability_(READING), length_(0), crc32_(0), header_(HEADER_LENGTH, 0) {
-    BOOST_STATIC_ASSERT((HEADER_LENGTH == sizeof(length_) + sizeof(crc32_)));
+    static_assert(HEADER_LENGTH == sizeof(length_) + sizeof(crc32_), "the header is the length and the CRC");
   }
 
   // construct message suitable for writing output with ASIO
@@ -77,16 +77,16 @@ public:
 
   /* ASIO reading buffers (for reading RawMessage from channel) */
   // returns buffer for reading-in RawMessage header
-  inline boost::asio::mutable_buffer get_header_buffer() {
+  inline asio::mutable_buffer get_header_buffer() {
     Assert(usability_ == READING);
-    return boost::asio::buffer((void *)(header_.size() ? &header_[0] : NULL), header_.size());
+    return asio::buffer((void *)(header_.size() ? &header_[0] : NULL), header_.size());
   }
   inline size_t get_header_length() const { return header_.size(); }
 
   // returns buffer for reading-in RawMessage body
-  inline boost::asio::mutable_buffer get_body_buffer() {
+  inline asio::mutable_buffer get_body_buffer() {
     Assert(usability_ == READING);
-    return boost::asio::buffer((void *)(contents_.size() ? &contents_[0] : NULL), contents_.size());
+    return asio::buffer((void *)(contents_.size() ? &contents_[0] : NULL), contents_.size());
   }
 
   // returns RawMessage body length
@@ -97,7 +97,7 @@ public:
 
   /* ASIO writing buffers (for writing RawMessage to channel) */
   // returns buffer for writing-out whole RawMessage (header + body)
-  inline const std::list<boost::asio::const_buffer> &get_message_buffer() const {
+  inline const std::list<asio::const_buffer> &get_message_buffer() const {
     Assert(usability_ == WRITING);
     Assert(writing_buffers_.size());
     return writing_buffers_;
@@ -113,17 +113,17 @@ public:
   bool verify();
 
 private:
-  static boost::uint32_t Crc32(const std::string &message);
+  static std::uint32_t Crc32(const std::string &message);
   void initialize_header();
   void switch_to_writing();
 
 private:
   Usability usability_;
-  boost::uint32_t length_, crc32_;
+  std::uint32_t length_, crc32_;
   std::string header_;
   std::string contents_;
   mutable bool pinned_ = false;
-  std::list<boost::asio::const_buffer> writing_buffers_; // buffers that can be used in write operations
+  std::list<asio::const_buffer> writing_buffers_; // buffers that can be used in write operations
 };
 
 }; // namespace multiplexer

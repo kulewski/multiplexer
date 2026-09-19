@@ -1,6 +1,7 @@
 // Runtime behind logging.h: the level and verbosity tables, should_log(),
-// emit_log() and the process context. Included by logging.h at the end;
-// nothing includes it directly.
+// the Entry that MX_LOG builds and emits, emit_log() for entries built
+// elsewhere (the Python binding), and the process context. Included by
+// logging.h at the end; nothing includes it directly.
 #ifndef MX_LIB_LOGGING_IMPL_H_
 #define MX_LIB_LOGGING_IMPL_H_
 
@@ -8,10 +9,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <boost/cstdint.hpp>
-#include <boost/preprocessor/array/elem.hpp>
-#include <boost/type_traits/is_base_of.hpp>
-#include <boost/utility/enable_if.hpp>
+#include <cstdint>
+#include <google/protobuf/message.h>
 #include <google/protobuf/text_format.h>
 #include <iostream>
 #include <sstream>
@@ -23,195 +22,42 @@
 #include "lib/preproc/common.h"
 #include "lib/release.h"
 
-#/*
-#  * MX_SHOULD_LOG(level, verbosity, context)
-#  *	Checks if the current (level, verbosity) is logged from context.
-#  *	Use this and don't call mx::logging::should_log directly,
-#  *	as context parameter may be not used.
-#  */
-#define MX_SHOULD_LOG(level, verbosity, context) (::mx::logging::impl::should_log(level, verbosity))
-
-#/*
-#  * MX_LOGGING_EMIT_LOG(level, verbosity, type, type_str, data_type_str,
-#  *        context, log_msg, data_msg)
-#  *	Emit log with parameters.
-#  *	Use this and don't call emit_log directly. Obviously.
-#  */
-#define MX_LOGGING_EMIT_LOG(log_msg, data_msg, level, verbosity, log_flags)                                            \
-  (::mx::logging::impl::emit_log(level, log_msg, data_msg, log_flags))
-
-#/*
-#  * MX_LOGGING_CURRENT__FILE__
-#  *	Where the MX_LOG originated from.
-#  */
-// #if defined(__BASE_FILE__)
-// # define MX_LOGGING_CURRENT__FILE__() (__FILE__ ":" __BASE_FILE__)
-// #else
-#define MX_LOGGING_CURRENT__FILE__() (__FILE__)
-// #endif
-
-#/*
-#  * __MX_LOG
-#  *	    MX_LOG (implementation)
-#  */
-#define __MX_LOG(log_msg, data_msg, contexttmp, level, verbosity, tokens)                                              \
-  /* start MX_LOG */                                                                                                   \
-  do {                                                                                                                 \
-    const ::mx::logging::NoneType &data_msg = ::mx::logging::None;                                                     \
-    /* Fool a compiler that `data_msg' is always used. */                                                              \
-    ::mx::logging::impl::do_nothing(data_msg);                                                                         \
-    bool __mx_log_mustlog = false;                                                                                     \
-    __MX_LOG_PROCESS_TOKENS_BEFORE_CHECK((5, (log_msg, data_msg, contexttmp, level, verbosity)), tokens)               \
-    if (__mx_log_mustlog || ::mx::logging::impl::should_log(level, verbosity)) {                                       \
-      __MX_EMIT_LOG(log_msg, data_msg, contexttmp, level, verbosity, tokens);                                          \
-    }                                                                                                                  \
-  } while (0) // end MX_LOG
-
-/*
- * __MX_EMIT_LOG
- *      Not-so-thin wrapper around MX_LOGGING_EMIT_LOG
- *      (logging::impl::emit_log).
- *
- *      Called, when we already known that logging should be performed. Used in
- *      __MX_LOG, __MX_ENTER and maybe other.
- */
-#define __MX_EMIT_LOG(log_msg, data_msg, contexttmp, level, verbosity, tokens)                                         \
-  /* __MX_EMIT_LOG */                                                                                                  \
-  ::std::string contexttmp = ::mx::logging::process_context();                                                         \
-  unsigned int __mx_log_flags = ::mx::logging::impl::NO_FLAGS;                                                         \
-  __MX_EMIT_PROCESS_TOKENS_AFTER_CHECK((5, (log_msg, data_msg, contexttmp, level, verbosity)), tokens)                 \
-  MX_CREATE_MESSAGE(::mx::logging::LogEntry, log_msg,                                                                  \
-                    (set_id(::mx::logging::create_log_id()))(set_pid(getpid()))(set_level(level))(set_verbosity(       \
-                        verbosity))(set_context(contexttmp))(set_timestamp(::mx::logging::impl::current_timestamp()))( \
-                        set_version(::mx::release::version))(set_source_file(MX_LOGGING_CURRENT__FILE__()))(           \
-                        set_source_line(__LINE__))(set_compilation_datetime(__DATE__ " " __TIME__)));                  \
-  __MX_EMIT_PROCESS_TOKENS_BEFORE_EMIT((5, (log_msg, data_msg, contexttmp, level, verbosity)), tokens)                 \
-  MX_LOGGING_EMIT_LOG(log_msg, data_msg, level, verbosity, __mx_log_flags);                                            \
-  // end __MX_EMIT_LOG
-
-/*
- * __MX_ENTER
- *      MX_ENTER implementation
- */
-#define __MX_ENTER(tokens)                                                                                             \
-  /* start MX_ENTER */                                                                                                 \
-  unsigned int __mx_log_call_level = ::mx::logging::consts::DEBUG;                                                     \
-  unsigned int __mx_log_call_verbosity = ::mx::logging::consts::CHATTERBOX;                                            \
-  ::std::string __mx_log_call_context; /* filled in only when the entry is emitted: a copy per call otherwise */       \
-  __MX_ENTER_PROCESS_TOKENS_BEFORE_CHECK((3, (__mx_log_call_level, __mx_log_call_verbosity, __mx_log_call_context)),   \
-                                         tokens)                                                                       \
-  const bool __mx_log_call_should_log =                                                                                \
-      MX_SHOULD_LOG(__mx_log_call_level, __mx_log_call_verbosity, __mx_log_call_context);                              \
-  if (__mx_log_call_should_log) {                                                                                      \
-    if (__mx_log_call_context.empty())                                                                                 \
-      __mx_log_call_context = ::mx::logging::process_context();                                                        \
-    /* TODO(findepi) */                                                                                                \
-    const ::mx::logging::NoneType &__mx_log_call_data_msg = ::mx::logging::None;                                       \
-    {                                                                                                                  \
-      __MX_EMIT_LOG(__mx_log_call_log_msg, __mx_log_call_data_msg, __mx_log_call_context, __mx_log_call_level,         \
-                    __mx_log_call_verbosity,                                                                           \
-                    TEXT(std::string("ENTER ") + __PRETTY_FUNCTION__) CONTEXT(__mx_log_call_context) tokens);          \
-    }                                                                                                                  \
-  }                                                                                                                    \
-  // end MX_ENTER
-
-#define __MX_RETURN(return, value)                                                                                     \
-  /* start MX_RETURN */                                                                                                \
-  do {                                                                                                                 \
-    if (__mx_log_call_should_log) {                                                                                    \
-      /* TODO(findepi) */                                                                                              \
-      const ::mx::logging::NoneType &__mx_log_call_data_msg = ::mx::logging::None;                                     \
-      {                                                                                                                \
-        __MX_EMIT_LOG(__mx_log_call_log_msg, __mx_log_call_data_msg, __mx_log_call_context, __mx_log_call_level,       \
-                      __mx_log_call_verbosity,                                                                         \
-                      TEXT(std::string("LEAVE ") + __PRETTY_FUNCTION__) CONTEXT(__mx_log_call_context));               \
-      }                                                                                                                \
-    }                                                                                                                  \
-    return (value);                                                                                                    \
-  } while (0);                                                                                                         \
-  // end MX_RETURN
-
 namespace mx {
 namespace logging {
 
-struct NoneType {};
-extern NoneType None;
-
 namespace consts {
 
-/*
- * defintions of levels
- *	    static const unsigned int DEBUG = ...;
- *
- * and specializations logging_level_name<L>
- *	    logging_level_name<DEBUG>::name() { return "DEBUG"; }
- */
-#define MX_define_logging_level(r, d, tup)                                                                             \
-  static const unsigned int BOOST_PP_TUPLE_ELEM(2, 0, tup) = BOOST_PP_TUPLE_ELEM(2, 1, tup);                           \
-  template <> struct logging_level_name<BOOST_PP_TUPLE_ELEM(2, 0, tup)> {                                              \
-    static inline const char *name() MX_ATTRIBUTE_ALWAYS_INLINE {                                                      \
-      return BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(2, 0, tup));                                                         \
-    }                                                                                                                  \
-  };
-
-BOOST_PP_SEQ_FOR_EACH(MX_define_logging_level, ~, MX_LOGGING_LEVELS_SEQ);
-
-#undef MX_define_logging_level
-
-/*
- * definition of logging_get_level_name
- */
 static inline const char *logging_get_level_name(const unsigned int level) {
   switch (level) {
-    /* generate the switch:
-     *	    case DEBUG: return "DEBUG";
-     *	    ...
-     */
-#define MX_get_logging_level_name(r, d, tup)                                                                           \
-  case BOOST_PP_TUPLE_ELEM(2, 0, tup):                                                                                 \
-    return BOOST_PP_STRINGIZE( \
-                                BOOST_PP_TUPLE_ELEM(2, 0, tup));
-    BOOST_PP_SEQ_FOR_EACH(MX_get_logging_level_name, ~, MX_LOGGING_LEVELS_SEQ)
-#undef MX_get_logging_level_name
+  case DEBUG:
+    return "DEBUG";
+  case INFO:
+    return "INFO";
+  case OK:
+    return "OK";
+  case WARNING:
+    return "WARNING";
+  case ERROR:
+    return "ERROR";
+  case CRITICAL:
+    return "CRITICAL";
   default:
     return "UNKNOWN";
   }
 }
 
-/*
- * defintions of verbosities
- *	    static const unsigned int LOWVERBOSITY = ...;
- *
- * and specializations logging_verbosity_name<L>
- *	    logging_verbosity_name<LOWVERBOSITY>::name()
- *	    { return "LOWVERBOSITY"; }
- */
-#define MX_define_logging_verbosity(r, d, tup)                                                                         \
-  static const unsigned int BOOST_PP_TUPLE_ELEM(2, 0, tup) = BOOST_PP_TUPLE_ELEM(2, 1, tup);                           \
-  template <> struct logging_verbosity_name<BOOST_PP_TUPLE_ELEM(2, 0, tup)> {                                          \
-    static inline const char *name() MX_ATTRIBUTE_ALWAYS_INLINE {                                                      \
-      return BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(2, 0, tup));                                                         \
-    }                                                                                                                  \
-  };
-
-BOOST_PP_SEQ_FOR_EACH(MX_define_logging_verbosity, ~, MX_LOGGING_VERBOSITIES_SEQ)
-#undef MX_define_logging_verbosity
-
-/*
- * definition of logging_get_verbosity_name
- */
 static inline const char *logging_get_verbosity_name(const unsigned int verbosity) {
   switch (verbosity) {
-    /* generate the switch:
-     *	    case LOWVERBOSITY: return "LOWVERBOSITY";
-     *	    ...
-     */
-#define MX_get_logging_verbosity_name(r, d, tup)                                                                       \
-  case BOOST_PP_TUPLE_ELEM(2, 0, tup):                                                                                 \
-    return BOOST_PP_STRINGIZE( \
-                                BOOST_PP_TUPLE_ELEM(2, 0, tup));
-    BOOST_PP_SEQ_FOR_EACH(MX_get_logging_verbosity_name, ~, MX_LOGGING_VERBOSITIES_SEQ)
-#undef MX_get_logging_verbosity_name
+  case ZEROVERBOSITY:
+    return "ZEROVERBOSITY";
+  case LOWVERBOSITY:
+    return "LOWVERBOSITY";
+  case MEDIUMVERBOSITY:
+    return "MEDIUMVERBOSITY";
+  case HIGHVERBOSITY:
+    return "HIGHVERBOSITY";
+  case CHATTERBOX:
+    return "CHATTERBOX";
   default:
     return "UNKNOWN";
   }
@@ -225,13 +71,6 @@ namespace impl {
 static const unsigned int NO_FLAGS = 0;
 static const unsigned int SKIP_LOGGING_TO_STREAM = 1;
 
-/*
- * do_nothing
- *	Function to fool compiler that a variable is used even if it's
- *	not.
- */
-template <typename T> inline void do_nothing(const T &) {}
-
 extern std::string process_context_;
 extern unsigned int maximal_logging_verbosity[];
 
@@ -239,12 +78,12 @@ extern unsigned int maximal_logging_verbosity[];
  * current_timestamp()
  *	-> current timestamp as uint64_t
  */
-static inline boost::uint64_t current_timestamp() MX_ATTRIBUTE_ALWAYS_INLINE;
-static inline boost::uint64_t current_timestamp() { return time(NULL); }
+static inline std::uint64_t current_timestamp() MX_ATTRIBUTE_ALWAYS_INLINE;
+static inline std::uint64_t current_timestamp() { return time(NULL); }
 
 /*
  * should_log
- *	Invoked from MX_SHOULD_LOG and __MX_LOG.
+ *	The check MX_LOG makes before building anything: one array load.
  */
 inline bool should_log(unsigned int level, unsigned int verbosity) MX_ATTRIBUTE_ALWAYS_INLINE;
 inline bool should_log(unsigned int level, unsigned int verbosity) {
@@ -259,14 +98,8 @@ inline bool should_log(unsigned int level, unsigned int verbosity) {
  */
 void _emit_log(const LogEntry &log_msg);
 
-/*
- * emit_log
- *  Write log_msg to cerr and logging stream.
- *	Invoked from MX_LOGGING_EMIT_LOG.
- */
-
-// shortcut for writing an (already initialized) LogEntry on cerr
-// and on binary logging stream
+// Writes an (already initialized) LogEntry on cerr and on the binary
+// logging stream; the Python binding's entry point.
 static inline void emit_log(const unsigned int level, const LogEntry &log_msg, unsigned int flags = 0) {
   if (!(flags & SKIP_LOGGING_TO_STREAM))
     _emit_log(log_msg);
@@ -289,27 +122,71 @@ static inline void emit_log(const LogEntry &log_msg, unsigned int flags = 0) {
   return emit_log(log_msg.level(), log_msg, flags);
 }
 
-// specialization for DataType being NoneType (MX_LOG called
-// without DATA kwarg)
-inline void emit_log(const unsigned int level, const LogEntry &log_msg, const mx::logging::NoneType &,
-                     unsigned int flags = 0) {
-  return emit_log(level, log_msg, flags);
-}
-
-// specialization for DataType being a ProtoBuf Message
-template <typename DataType>
-inline typename boost::enable_if_c<boost::is_base_of<google::protobuf::Message, DataType>::value, void>::type
-emit_log(const unsigned int level, LogEntry &log_msg, DataType &data_msg, unsigned int flags = 0) {
-  data_msg.SerializeToString(log_msg.mutable_data());
-  std::string text_format;
-  google::protobuf::TextFormat::PrintToString(data_msg, &text_format);
-
-  emit_log(level, log_msg, None, flags);
-  std::cerr << text_format << "\n"
-            << "\n";
-}
-
 }; // namespace impl
+
+// One entry under construction: what MX_LOG builds once the check passed,
+// each token a call, then emit(). Built only when the entry is emitted, so
+// the context copy and the protobuf cost nothing on a disabled line.
+class Entry {
+public:
+  Entry(unsigned int level, unsigned int verbosity, const char *file, unsigned int line)
+      : level_(level), context_(impl::process_context_), flags_(impl::NO_FLAGS) {
+    entry_.set_id(create_log_id());
+    entry_.set_pid(getpid());
+    entry_.set_level(level);
+    entry_.set_verbosity(verbosity);
+    entry_.set_timestamp(impl::current_timestamp());
+    entry_.set_version(::mx::release::version);
+    entry_.set_source_file(file);
+    entry_.set_source_line(line);
+    entry_.set_compilation_datetime(__DATE__ " " __TIME__);
+  }
+  Entry &text(const std::string &text) {
+    entry_.set_text(text);
+    return *this;
+  }
+  Entry &flow(const std::string &flow) {
+    entry_.set_workflow(flow);
+    return *this;
+  }
+  Entry &ctx(const std::string &context) {
+    context_.append(".").append(context);
+    return *this;
+  }
+  Entry &context(const std::string &context) {
+    context_ = context;
+    return *this;
+  }
+  // A protocol buffer message attached as the entry's data, tagged with
+  // `type_id` and its class name, and printed after the entry on stderr.
+  Entry &data(unsigned int type_id, const google::protobuf::Message &message) {
+    message.SerializeToString(entry_.mutable_data());
+    entry_.set_data_type(type_id);
+    entry_.set_data_class(message.GetDescriptor()->name());
+    google::protobuf::TextFormat::PrintToString(message, &data_text_);
+    has_data_ = true;
+    return *this;
+  }
+  Entry &skip_file_if(bool skip) {
+    if (skip)
+      flags_ |= impl::SKIP_LOGGING_TO_STREAM;
+    return *this;
+  }
+  void emit() {
+    entry_.set_context(context_);
+    impl::emit_log(level_, entry_, flags_);
+    if (has_data_)
+      std::cerr << data_text_ << "\n\n";
+  }
+
+private:
+  unsigned int level_;
+  LogEntry entry_;
+  std::string context_;
+  unsigned int flags_;
+  std::string data_text_;
+  bool has_data_ = false;
+};
 
 static inline const std::string &process_context() { return impl::process_context_; }
 

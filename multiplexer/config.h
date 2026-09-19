@@ -11,8 +11,7 @@
 #ifndef MX_MULTIPLEXER_CONFIG_H_
 #define MX_MULTIPLEXER_CONFIG_H_
 
-#include <boost/cstdint.hpp>
-#include <boost/foreach.hpp>
+#include <cstdint>
 #include <fstream>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/text_format.h>
@@ -101,9 +100,9 @@ public:
     typedef map_template_<Key, Data, std::less<Key>, std::allocator<std::pair<const Key, Data>>> type;
   };
 
-  typedef typename map_template<boost::uint32_t, MultiplexerMessageDescription>::type MessageDescriptionById;
+  typedef typename map_template<std::uint32_t, MultiplexerMessageDescription>::type MessageDescriptionById;
   typedef typename map_template<std::string, MultiplexerPeerDescription>::type PeerDescriptionByName;
-  typedef typename map_template<boost::uint32_t, MultiplexerPeerDescription>::type PeerDescriptionById;
+  typedef typename map_template<std::uint32_t, MultiplexerPeerDescription>::type PeerDescriptionById;
 
   // The three indexes: message types by number, peer types by name and by number.
   const MessageDescriptionById &message_description_by_id() const { return message_description_by_id_; }
@@ -112,26 +111,26 @@ public:
 
   /* shortcuts */
   // you must know this type is valid
-  const std::string &message_name_by_type(boost::uint32_t type) const {
+  const std::string &message_name_by_type(std::uint32_t type) const {
     typename MessageDescriptionById::const_iterator entry = message_description_by_id_.find(type);
     Assert(!initialized() || entry != message_description_by_id_.end());
     return entry != message_description_by_id_.end() ? entry->second.name() : unknown_;
   }
 
   // you must know this type is valid
-  const std::string &peer_name_by_type(boost::uint32_t type) const {
+  const std::string &peer_name_by_type(std::uint32_t type) const {
     typename PeerDescriptionById::const_iterator entry = peer_by_type_.find(type);
     // The type may come from a peer's override_rrules, so it can be unknown.
     return entry != peer_by_type_.end() ? entry->second.name() : unknown_;
   }
 
   // Config's ownership
-  const MultiplexerPeerDescription *peer_description(boost::uint32_t type) const {
+  const MultiplexerPeerDescription *peer_description(std::uint32_t type) const {
     return _valueptr_or_null(peer_by_type_, type);
   }
 
   // Config's ownership
-  const MultiplexerMessageDescription *message_description(boost::uint32_t type) const {
+  const MultiplexerMessageDescription *message_description(std::uint32_t type) const {
     return _valueptr_or_null(message_description_by_id_, type);
   }
 
@@ -163,8 +162,8 @@ private:
   // that does not start than one that silently drops a type.
   void read_configuration(const MultiplexerRules &rules) {
     // validate the rules
-    BOOST_FOREACH (const MultiplexerMessageDescription &message_type, rules.type()) {
-      BOOST_FOREACH (const MultiplexerMessageDescription::RoutingRule &rule, message_type.to()) {
+    for (const MultiplexerMessageDescription &message_type : rules.type()) {
+      for (const MultiplexerMessageDescription::RoutingRule &rule : message_type.to()) {
         if (!rule.has_peer()) {
           std::cerr << "ERROR: MultiplexerMessageDescription::RoutingRule "
                        "without peer name\n";
@@ -173,19 +172,19 @@ private:
       }
     }
 
-    BOOST_FOREACH (const MultiplexerPeerDescription &description, rules.peer()) {
+    for (const MultiplexerPeerDescription &description : rules.peer()) {
       /* Multiplexer peer description */
       peer_by_type_.insert(std::make_pair(description.type(), description));
       peer_by_name_.insert(std::make_pair(description.name(), description));
     }
 
-    BOOST_FOREACH (const MultiplexerMessageDescription &message_type, rules.type()) {
+    for (const MultiplexerMessageDescription &message_type : rules.type()) {
       /* package descirption with routing rules definitions */
       MultiplexerMessageDescription &description =
           __insert(message_description_by_id_, message_type.type(), message_type);
 
       /* routing rules */
-      BOOST_FOREACH (MultiplexerMessageDescription::RoutingRule &rule, *description.mutable_to()) {
+      for (MultiplexerMessageDescription::RoutingRule &rule : *description.mutable_to()) {
         std::map<std::string, MultiplexerPeerDescription>::iterator peer_entry = peer_by_name_.find(rule.peer());
         if (peer_entry == peer_by_name_.end())
           MXTHROW(typename Config::Exception("Unknown peer definition: '" + rule.peer() + "'"));

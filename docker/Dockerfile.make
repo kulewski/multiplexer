@@ -11,8 +11,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         make \
         protobuf-compiler \
         libprotobuf-dev \
-        libboost-dev \
-        libboost-program-options-dev \
+        libasio-dev \
         python3-dev \
         python3-protobuf \
         pybind11-dev \

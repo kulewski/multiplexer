@@ -5,11 +5,7 @@
 
 #include <vector>
 
-#include <boost/asio/placeholders.hpp>
-#include <boost/bind/bind.hpp>
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/foreach.hpp>
-#include <boost/lexical_cast.hpp>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 
@@ -24,16 +20,15 @@ using mx::repr;
 
 // `host` must be an IP address; names are not resolved. Port 0 lets the
 // system choose, see local_port().
-Server::Server(boost::asio::io_service &io_service, const std::string &host, unsigned short port)
-    : Base(io_service),
-      acceptor_(io_service, boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port)),
+Server::Server(asio::io_service &io_service, const std::string &host, unsigned short port)
+    : Base(io_service), acceptor_(io_service, asio::ip::tcp::endpoint(asio::ip::address::from_string(host), port)),
       io_service_(io_service), session_timer_(io_service) {}
 
 void Server::start() { _start_accept(); }
 
 void Server::stop() {
   MX_DCHECK_RUN_ON(&owner_thread());
-  boost::system::error_code ignored;
+  asio::error_code ignored;
   acceptor_.close(ignored);
   std::vector<Connection::pointer> live;
   for (ConnectionById::iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry)
@@ -45,11 +40,12 @@ void Server::stop() {
 
 void Server::_start_accept() {
   Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
-  acceptor_.async_accept(new_connection->socket(),
-                         boost::bind(&Server::_handle_accept, this, new_connection, boost::asio::placeholders::error));
+  acceptor_.async_accept(new_connection->socket(), [this, new_connection](const asio::error_code &error) {
+    _handle_accept(new_connection, error);
+  });
 }
 
-void Server::_handle_accept(Connection::pointer new_connection, const boost::system::error_code &error) {
+void Server::_handle_accept(Connection::pointer new_connection, const asio::error_code &error) {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (!acceptor_.is_open()) {
     // stop() closed the acceptor: do not re-arm, just drop the connection
@@ -67,8 +63,8 @@ void Server::_handle_accept(Connection::pointer new_connection, const boost::sys
   }
 }
 
-void Server::handle_message(Connection::pointer conn, boost::shared_ptr<const RawMessage> raw,
-                            boost::shared_ptr<MultiplexerMessage> msg) {
+void Server::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
+                            std::shared_ptr<MultiplexerMessage> msg) {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (msg->from() == instance_id_) {
     MX_LOG(ERROR, MEDIUMVERBOSITY,
@@ -82,12 +78,12 @@ void Server::handle_message(Connection::pointer conn, boost::shared_ptr<const Ra
 // ---------------------------------------------------------------------------
 // MessageMetaHandler
 
-void Server::MessageMetaHandler::failed(const MultiplexerMessageDescription::RoutingRule &rule, boost::uint32_t type) {
+void Server::MessageMetaHandler::failed(const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t type) {
   __create_delivery_error_message(rule.include_original_packet_in_report());
   delivery_error_message->add_failed_type(type);
 }
 
-void Server::MessageMetaHandler::failed(const boost::uint64_t to) {
+void Server::MessageMetaHandler::failed(const std::uint64_t to) {
   __create_delivery_error_message(msg.include_original_packet_in_report());
   delivery_error_message->set_failed_to(to);
 }
@@ -116,16 +112,24 @@ void Server::MessageMetaHandler::__create_delivery_error_message(bool include_or
 // The routing path
 
 void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage &msg,
-                             boost::shared_ptr<const RawMessage> raw) {
-  MX_ENTER(VERBOSITY(CHATTERBOX) DEFAULT); // per message: off unless MX_LOG_VERBOSITY or --verbosity says CHATTERBOX
-
-  MX_LOG(DEBUG, CHATTERBOX,
-         CTX("multiplexer.server") FLOW(msg.workflow())
-             TEXT("handle_message(id=" + repr(msg.id()) + ", type=" + repr(msg.type()) + ")")
-                 DATA(type_id_constants::MXSERVER_INCOMING_MULTIPLEXER_MESSAGE, MultiplexerMessage,
-                      (set_id(msg.id()))(set_from(msg.from()))(set_to(msg.to()))(set_type(msg.type()))(set_timestamp(
-                          msg.timestamp()))(set_references(msg.references()))(set_workflow(msg.workflow())))
-                     SKIPFILEIF(!(msg.logging_method() & multiplexer::LoggingMethod::FILE)));
+                             std::shared_ptr<const RawMessage> raw) {
+  // Per message: off unless MX_LOG_VERBOSITY or --verbosity says CHATTERBOX.
+  // The entry's data is the envelope without the payload.
+  if (mx::logging::impl::should_log(DEBUG, CHATTERBOX)) {
+    MultiplexerMessage envelope;
+    envelope.set_id(msg.id());
+    envelope.set_from(msg.from());
+    envelope.set_to(msg.to());
+    envelope.set_type(msg.type());
+    envelope.set_timestamp(msg.timestamp());
+    envelope.set_references(msg.references());
+    envelope.set_workflow(msg.workflow());
+    MX_LOG(DEBUG, CHATTERBOX,
+           CTX("multiplexer.server") FLOW(msg.workflow())
+               TEXT("handle_message(id=" + repr(msg.id()) + ", type=" + repr(msg.type()) + ")")
+                   DATA(type_id_constants::MXSERVER_INCOMING_MULTIPLEXER_MESSAGE, envelope)
+                       SKIPFILEIF(!(msg.logging_method() & multiplexer::LoggingMethod::FILE)));
+  }
 
   if (memory_log_every_ && ++routed_messages_ % memory_log_every_ == 0)
     MX_LOG(INFO, LOWVERBOSITY,
@@ -171,8 +175,6 @@ void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage 
   } while (0);
 
   _handle_delivery_errors(meta_handler);
-
-  MX_LEAVE();
 }
 
 // Sends the collected DeliveryError to the message's `from`, as a message
@@ -202,7 +204,7 @@ void Server::_handle_delivery_errors(MessageMetaHandler &meta_handler) {
   meta_handler.delivery_error_message->SerializeToString(mxmsg.mutable_message());
   mxmsg.set_references(meta_handler.msg.id());
   mxmsg.set_workflow(meta_handler.msg.workflow());
-  boost::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+  std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   _handle_message(meta_handler.conn, mxmsg, raw);
   meta_handler.delivery_error_message.reset();
 }
@@ -297,7 +299,7 @@ bool Server::_handle_meta_message(MessageMetaHandler &meta_handler) {
     rule.set_include_original_packet_in_report(false);
 
     if (rule.peer_type() == peers::ALL_TYPES) {
-      BOOST_FOREACH (ConnectionsByType::value_type &by_type, connections_by_type_)
+      for (ConnectionsByType::value_type &by_type : connections_by_type_)
         _schedule(meta_handler, by_type.second, rule, by_type.first);
     } else {
       _schedule(meta_handler, connections_by_type_[rule.peer_type()], rule);
@@ -324,7 +326,7 @@ unsigned int
 Server::_schedule(MessageMetaHandler &meta_handler,
                   const ::google::protobuf::RepeatedPtrField<MultiplexerMessageDescription::RoutingRule> &rules) {
   unsigned int scheduled = 0;
-  BOOST_FOREACH (const MultiplexerMessageDescription::RoutingRule &rule, rules)
+  for (const MultiplexerMessageDescription::RoutingRule &rule : rules)
     scheduled += _schedule(meta_handler, rule);
   return scheduled;
 }
@@ -333,7 +335,7 @@ unsigned int Server::_schedule(MessageMetaHandler &meta_handler,
                                const MultiplexerMessageDescription::RoutingRule &rule) {
   unsigned int scheduled = 0;
   if (rule.peer_type() == peers::ALL_TYPES) {
-    BOOST_FOREACH (ConnectionsByType::value_type &by_type, connections_by_type_)
+    for (ConnectionsByType::value_type &by_type : connections_by_type_)
       scheduled += _schedule(meta_handler, by_type.second, rule, by_type.first);
   } else {
     scheduled += _schedule(meta_handler, connections_by_type_[rule.peer_type()], rule);
@@ -355,7 +357,7 @@ unsigned int Server::_schedule(MessageMetaHandler &meta_handler, ConnectionsList
 }
 
 unsigned int Server::_schedule(MessageMetaHandler &meta_handler, ConnectionsList &connections,
-                               const MultiplexerMessageDescription::RoutingRule &rule, boost::uint32_t peer_type) {
+                               const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t peer_type) {
   unsigned int scheduled = (unsigned int)-1;
   switch (rule.whom()) {
   case MultiplexerMessageDescription::RoutingRule::ALL:
@@ -365,7 +367,7 @@ unsigned int Server::_schedule(MessageMetaHandler &meta_handler, ConnectionsList
     scheduled = send_to_one(meta_handler, connections);
     break;
   }
-  AssertMsg(scheduled != (unsigned int)-1, "unhandled Whom type " + boost::lexical_cast<std::string>(rule.whom()));
+  AssertMsg(scheduled != (unsigned int)-1, "unhandled Whom type " + mx::repr(rule.whom()));
 
   if (!scheduled) {
     if (rule.report_delivery_error())
@@ -441,7 +443,7 @@ void Server::_write_peers_file(Connection *leaving) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT("cannot rename peers file to " + peers_file_));
 }
 
-std::string Server::_peer_name(boost::uint32_t peer_type) const {
+std::string Server::_peer_name(std::uint32_t peer_type) const {
   if (peer_type == RECORDING_CONTROLLER)
     return "RECORDING_CONTROLLER";
   return config_.peer_name_by_type(peer_type);
@@ -450,7 +452,7 @@ std::string Server::_peer_name(boost::uint32_t peer_type) const {
 // Recording.
 
 bool Server::start_recording(const std::string &path, const std::string &label, unsigned int payload_limit,
-                             boost::uint64_t max_bytes, unsigned int max_seconds, std::string *error) {
+                             std::uint64_t max_bytes, unsigned int max_seconds, std::string *error) {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (recorder_) {
     *error = "already recording " + recorder_->path();
@@ -461,9 +463,9 @@ bool Server::start_recording(const std::string &path, const std::string &label, 
     *error = "cannot open " + path;
     return false;
   }
-  recorder->header(instance_id_, rules_sha1_, label);
+  recorder->header(instance_id_, rules_fingerprint_, label);
   // The peers connected right now, so that the file stands on its own.
-  const boost::uint64_t now = recording::now_us();
+  const std::uint64_t now = recording::now_us();
   for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
     Connection::pointer connection = entry->second.lock();
     if (!connection || !connection->living())
@@ -480,9 +482,10 @@ bool Server::start_recording(const std::string &path, const std::string &label, 
   session_.started_us = now;
   session_.max_bytes = max_bytes;
   if (max_seconds) {
-    session_timer_.expires_from_now(boost::posix_time::seconds(max_seconds));
-    session_timer_.async_wait(
-        boost::bind(&Server::_on_session_deadline, weak_pointer(shared_from_this()), boost::placeholders::_1));
+    session_timer_.expires_after(std::chrono::seconds(max_seconds));
+    session_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code &error) {
+      _on_session_deadline(weak, error);
+    });
   }
   MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("recording to " + path));
   return true;
@@ -502,14 +505,14 @@ void Server::stop_recording(const std::string &reason) {
                                         repr(session_.records) + " records, " + repr(session_.bytes) + " bytes)"));
 }
 
-void Server::_on_session_deadline(weak_pointer server, const boost::system::error_code &error) {
+void Server::_on_session_deadline(weak_pointer server, const asio::error_code &error) {
   if (error)
     return; // cancelled: the session ended first
   if (pointer self = server.lock())
     self->stop_recording("max_seconds reached");
 }
 
-void Server::_emit_peer(PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type) {
+void Server::_emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type) {
   if (!recorder_ && taps_.empty())
     return;
   Record record;
@@ -545,7 +548,7 @@ void Server::_emit(Record &record) {
       recording::truncate(record, tap.payload_limit).SerializeToString(mxmsg.mutable_message());
     else
       record.SerializeToString(mxmsg.mutable_message());
-    boost::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+    std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
     if (!connection->schedule(raw))
       tap.dropped += 1;
     ++index;
@@ -581,7 +584,7 @@ void Server::_handle_recording_control(MessageMetaHandler &meta_handler) {
       } else if (!recording::valid_label(control.label())) {
         status.set_error("label must be 1 to 64 letters, digits, '-' or '_'");
       } else {
-        const boost::uint64_t max_bytes =
+        const std::uint64_t max_bytes =
             control.has_max_bytes() ? control.max_bytes() : DEFAULT_REMOTE_RECORDING_MAX_BYTES;
         const std::string path =
             recording::session_path(recording_dir_, control.label(), instance_id_, recording::now_us());
@@ -640,7 +643,7 @@ void Server::_fill_status(RecordingStatus &status, const Connection *requester) 
   }
 }
 
-void Server::_reply(const MessageMetaHandler &meta_handler, boost::uint32_t type,
+void Server::_reply(const MessageMetaHandler &meta_handler, std::uint32_t type,
                     const ::google::protobuf::Message &payload) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random_());
@@ -650,7 +653,7 @@ void Server::_reply(const MessageMetaHandler &meta_handler, boost::uint32_t type
   mxmsg.set_references(meta_handler.msg.id());
   mxmsg.set_workflow(meta_handler.msg.workflow());
   payload.SerializeToString(mxmsg.mutable_message());
-  boost::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+  std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   meta_handler.conn->schedule(raw);
 }
 

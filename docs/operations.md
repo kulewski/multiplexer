@@ -156,7 +156,7 @@ passes through: who sent it, who received it or why nobody did, its type,
 its ids and its payload, plus every peer arriving and leaving. The file is a
 stream of length-prefixed `Record` protocol buffers
 ([multiplexer/Recording.proto](../multiplexer/Recording.proto)); its header
-carries the multiplexer's instance id and the SHA-1 of the rules file, so a
+carries the multiplexer's instance id and a fingerprint of the rules file, so a
 reader knows which numbering the types are in. Messages the protocol
 exchanges for itself, heartbeats and welcomes, are not routed and are not
 recorded.

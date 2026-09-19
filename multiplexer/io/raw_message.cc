@@ -1,7 +1,5 @@
 // RawMessage: header encoding, size check and CRC. See the header for the
 // object's life cycle.
-#include <boost/crc.hpp>
-#include <boost/static_assert.hpp>
 
 #include "lib/assertion.h"
 #include "lib/encoding/decode_from_range.h"
@@ -9,6 +7,8 @@
 #include "lib/encoding/little_endian.h"
 
 #include "multiplexer/io/raw_message.h"
+
+#include "lib/crc32.h"
 
 using namespace multiplexer;
 
@@ -59,12 +59,7 @@ bool RawMessage::verify() {
 }
 
 // Standard CRC-32 (the zlib one), so peers in any language can compute it.
-boost::uint32_t RawMessage::Crc32(const std::string &message) {
-  boost::crc_32_type crc;
-  if (!message.empty())
-    crc.process_bytes(message.data(), message.size());
-  return crc.checksum();
-}
+std::uint32_t RawMessage::Crc32(const std::string &message) { return mx::crc32(message.data(), message.size()); }
 
 void RawMessage::initialize_header() {
   mx::encoders::EncodeToRange<std::string::iterator, mx::encodings::LittleEndian> encoder(header_.begin(),

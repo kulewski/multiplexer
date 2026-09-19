@@ -8,10 +8,10 @@ cc_library(
     hdrs = ["task.h"],
     visibility = ["//tests:__subpackages__"],
     deps = [
+        "//lib:options",
         "//lib/logging",
         "//multiplexer:client",
-        "@boost//:asio",
-        "@boost//:program_options",
+        "@asio",
     ],
 )
 
@@ -33,7 +33,6 @@ cc_library(
     visibility = ["//tests:__subpackages__"],
     deps = [
         ":tasks_holder",
-        "@boost//:foreach",
     ],
     alwayslink = 1,
 )
@@ -56,10 +55,10 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
-        "//lib:sha1",
+        "//lib:fingerprint",
         "//multiplexer:recorder",
         "//multiplexer:server",
-        "@boost//:asio",
+        "@asio",
     ],
     alwayslink = 1,
 )
@@ -87,8 +86,7 @@ cc_library(
         "//multiplexer:client",
         "//multiplexer:multiplexer_cc_proto",
         "//multiplexer:recording_cc_proto",
-        "@boost//:asio",
-        "@boost//:optional",
+        "@asio",
     ],
     alwayslink = 1,
 )
@@ -112,9 +110,8 @@ cc_library(
     deps = [
         ":tasks_holder",
         "//lib:assert",
+        "//lib:options",
         "//lib/logging",
-        "@boost//:foreach",
-        "@boost//:program_options",
     ],
 )
 

@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
   std::string::size_type colon = address.rfind(':');
 
   multiplexer::Client client(multiplexer::peers::ECHO_CLIENT);
-  client.connect(address.substr(0, colon), static_cast<boost::uint16_t>(std::stoi(address.substr(colon + 1))));
+  client.connect(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1))));
 
   // query() sends the request through one connection and returns the reply;
   // it throws when there is none: OperationFailed when no backend of the

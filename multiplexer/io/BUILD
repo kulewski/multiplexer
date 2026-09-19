@@ -18,12 +18,11 @@ cc_library(
     deps = [
         "//:protobuf_runtime",
         "//lib:assert",
+        "//lib:crc32",
         "//lib/encoding:decode_from_range",
         "//lib/encoding:encode_to_range",
         "//lib/encoding:little_endian",
         "//multiplexer:defaults",
-        "@boost//:array",
-        "@boost//:asio",
-        "@boost//:crc",
+        "@asio",
     ],
 )

@@ -1,16 +1,12 @@
 // Logging runtime: the verbosity table, the stderr text form, the optional
 // binary stream (length-prefixed LogEntry records via lib/protobuf/stream.h),
 // and the process context (hostname.program[.suffix]).
-#include <boost/lexical_cast.hpp>
-#include <boost/preprocessor/arithmetic/inc.hpp>
-#include <boost/preprocessor/facilities/intercept.hpp>
-#include <boost/preprocessor/repetition/enum_params.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -31,16 +27,20 @@ namespace mx {
 namespace logging {
 
 bool module_is_initialized = false;
-NoneType None;
 
 namespace impl {
 
-boost::scoped_ptr<mx::protobuf::MessageOutputStream> message_output_stream_;
+std::unique_ptr<mx::protobuf::MessageOutputStream> message_output_stream_;
 
 std::string process_context_;
 
-unsigned int maximal_logging_verbosity[MAX_LEVEL + 1] = {
-    BOOST_PP_ENUM_PARAMS(BOOST_PP_INC(__MX_LOGGING_MAX_LEVEL()), MX_LOGGING_DEFAULT_VERBOSITY() BOOST_PP_INTERCEPT)};
+// One entry per level, index 0 unused; constant-initialized so that a log
+// line during another translation unit's static initialization is safe.
+static_assert(MAX_LEVEL == 6, "the table below has one entry per level");
+unsigned int maximal_logging_verbosity[MAX_LEVEL + 1] = {MX_LOGGING_DEFAULT_VERBOSITY(), MX_LOGGING_DEFAULT_VERBOSITY(),
+                                                         MX_LOGGING_DEFAULT_VERBOSITY(), MX_LOGGING_DEFAULT_VERBOSITY(),
+                                                         MX_LOGGING_DEFAULT_VERBOSITY(), MX_LOGGING_DEFAULT_VERBOSITY(),
+                                                         MX_LOGGING_DEFAULT_VERBOSITY()};
 
 static std::string hostname;
 static std::string process_name;
@@ -77,7 +77,7 @@ static inline void initialize_hostname() {
 MX_TRIGGER_STATIC_INITIALIZATION(initialize_hostname(), hostname.empty());
 
 static inline void initialize_process_name() {
-  std::string proc = "/proc/" + boost::lexical_cast<std::string>(getpid()) + "/cmdline";
+  std::string proc = "/proc/" + mx::repr(getpid()) + "/cmdline";
   std::ifstream cmdline(proc.c_str(), std::ofstream::binary);
   if (!cmdline) {
     std::cerr << "logging::impl::initialize_process_context_all_defaults: " << proc << ": No such file or directory\n";
@@ -282,7 +282,7 @@ void set_logging_file(const std::string &file) {
   }
 }
 
-boost::uint64_t create_log_id() {
+std::uint64_t create_log_id() {
   // One generator per thread: logging happens from every thread there is,
   // and a shared generator would be a data race (ThreadSanitizer found it).
   static thread_local mx::Random64 generator;
@@ -290,7 +290,7 @@ boost::uint64_t create_log_id() {
 }
 
 void die(const std::string &text) {
-  MX_LOG(ERROR, LOWVERBOSITY, TEXT(text) MUSTLOG);
+  MX_LOG_ALWAYS(ERROR, LOWVERBOSITY, TEXT(text));
   exit(1);
 }
 

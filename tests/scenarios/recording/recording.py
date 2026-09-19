@@ -66,7 +66,7 @@ class Recording(unittest.TestCase):
             records = list(recording.read(cluster.mx[0].record_file, constants=C))
             kinds = [record.WhichOneof("event") for record in records]
             self.assertEqual("header", kinds[0])
-            self.assertEqual(C.RULES_SHA1, records[0].header.rules_sha1)
+            self.assertEqual(C.RULES_FINGERPRINT, records[0].header.rules_fingerprint)
 
             peers = [(record.peer.kind, record.peer.peer_id) for record in records if record.HasField("peer")]
             self.assertIn((PeerEvent.CONNECTED, backend_id), peers)

@@ -237,7 +237,7 @@ If you need the message to be sent to all peers of a particular type, use `whom:
 Prerequisites, verified on clean Debian 12, Ubuntu 24.04 and Debian 13
 installations: Bazel 6.2 through Bazelisk, a C++17 compiler,
 `protobuf-compiler` with `libprotobuf-dev`, Python 3.10 or newer with
-`python3-dev` and `python3-protobuf`. Boost and pybind11 are fetched by
+`python3-dev` and `python3-protobuf`. Asio and pybind11 are fetched by
 Bazel. [docs/building.md](docs/building.md) has the exact packages, how to
 bring your own protobuf, and `docker/check.sh`, which proves the list on a
 clean container.
@@ -269,7 +269,7 @@ When this repository is consumed as an external Bazel repository named `mx`, the
 ## Building without Bazel
 
 For a machine that will not have Bazel, a `Makefile` builds the same things
-from the distribution's own compiler, protobuf, Boost and pybind11:
+from the distribution's own compiler, protobuf, Asio and pybind11:
 
 ```
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a with headers, build/python/

@@ -23,22 +23,19 @@ public:
   virtual int run();
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
-    options.add_options()("file", po::value(&files_)->composing(),
-                          "a recording; several are merged by time, each record marked with its multiplexer")(
-        "rules", po::value(&rules_file_), "the rules file the multiplexer ran with, for peer and message type names")(
-        "type", po::value(&type_)->default_value(0), "only routed messages of this type (number)")(
-        "peer", po::value(&peer_)->default_value(0), "only records involving this instance id");
-  }
-  virtual void _initialize_positional_options_description(po::positional_options_description &positional) {
-    positional.add("file", -1);
+  virtual void _initialize_options(mx::options::Options &options) {
+    options.add("file", &files_, "a recording; several are merged by time, each record marked with its multiplexer")
+        .positional("file", -1);
+    options.add("rules", &rules_file_, "the rules file the multiplexer ran with, for peer and message type names");
+    options.add("type", &type_, 0, "only routed messages of this type (number)");
+    options.add("peer", &peer_, 0, "only records involving this instance id");
   }
 
 private:
   std::vector<std::string> files_;
   std::string rules_file_;
-  boost::uint32_t type_;
-  boost::uint64_t peer_;
+  std::uint32_t type_;
+  std::uint64_t peer_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(dump_recording, DumpRecording);
@@ -47,7 +44,7 @@ namespace {
 
 typedef multiplexer::Config<std::multimap> Rules;
 
-std::string peer_name(const Rules *rules, boost::uint32_t peer_type) {
+std::string peer_name(const Rules *rules, std::uint32_t peer_type) {
   if (!peer_type)
     return "-";
   if (peer_type == multiplexer::RECORDING_CONTROLLER)
@@ -60,7 +57,7 @@ std::string peer_name(const Rules *rules, boost::uint32_t peer_type) {
   return std::to_string(peer_type);
 }
 
-std::string type_name(const Rules *rules, boost::uint32_t type) {
+std::string type_name(const Rules *rules, std::uint32_t type) {
   if (rules) {
     Rules::MessageDescriptionById::const_iterator entry = rules->message_description_by_id().find(type);
     if (entry != rules->message_description_by_id().end())
@@ -69,7 +66,7 @@ std::string type_name(const Rules *rules, boost::uint32_t type) {
   return std::to_string(type);
 }
 
-bool involves(const multiplexer::Record &record, boost::uint64_t peer) {
+bool involves(const multiplexer::Record &record, std::uint64_t peer) {
   if (record.has_peer())
     return record.peer().peer_id() == peer;
   if (record.has_routed())
@@ -77,7 +74,7 @@ bool involves(const multiplexer::Record &record, boost::uint64_t peer) {
   return false;
 }
 
-std::string when(boost::uint64_t timestamp_us) {
+std::string when(std::uint64_t timestamp_us) {
   char text[32];
   std::snprintf(text, sizeof(text), "%llu.%06llu", (unsigned long long)(timestamp_us / 1000000),
                 (unsigned long long)(timestamp_us % 1000000));
@@ -99,7 +96,7 @@ struct Stream {
   }
   mx::protobuf::FileMessageInputStream input;
   multiplexer::Record record;
-  boost::uint64_t multiplexer_id;
+  std::uint64_t multiplexer_id;
   bool pending;
 };
 
@@ -136,13 +133,13 @@ int DumpRecording::run() {
         !(type_ && !(record.has_routed() && record.routed().type() == type_)) && !(peer_ && !involves(record, peer_));
     if (wanted) {
       std::cout << when(record.timestamp_us()) << " ";
-      const boost::uint64_t multiplexer_id =
-          record.multiplexer_id() ? record.multiplexer_id() : earliest->multiplexer_id;
+      const std::uint64_t multiplexer_id = record.multiplexer_id() ? record.multiplexer_id() : earliest->multiplexer_id;
       if ((several || record.multiplexer_id()) && multiplexer_id)
         std::cout << "mx=" << multiplexer_id << " ";
       if (record.has_header()) {
         const multiplexer::RecordingHeader &header = record.header();
-        std::cout << "header multiplexer=" << header.multiplexer_id() << " rules=" << header.rules_sha1().substr(0, 12)
+        std::cout << "header multiplexer=" << header.multiplexer_id()
+                  << " rules=" << header.rules_fingerprint().substr(0, 12)
                   << " payload_limit=" << header.payload_limit();
         if (header.has_label())
           std::cout << " label=" << header.label();

@@ -54,19 +54,4 @@ template <typename T> T raise(T e, const char *file, int line, const char *funct
 
 }; // namespace mx
 
-#ifdef BOOST_NO_EXCEPTIONS
-#include <iostream>
-namespace boost {
-template <typename T> void throw_exception(const T &t) {
-  std::cerr << "gotta throw: " << t.what() << "\n";
-  abort();
-}
-
-inline void throw_exception(const std::exception &t) {
-  std::cerr << "gotta throw: " << t.what() << "\n";
-  abort();
-}
-}; // namespace boost
-#endif
-
 #endif // MX_LIB_EXCEPTION_H_

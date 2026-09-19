@@ -28,19 +28,19 @@
 #include "lib/vector.h"
 #include "multiplexer/basic_client.h"
 #include "multiplexer/defaults.h"
-#include <boost/asio/io_service.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/shared_ptr.hpp>
+#include <asio/io_service.hpp>
+#include <cstdint>
+#include <memory>
 #include <utility>
 
 namespace multiplexer {
 
-using boost::shared_ptr;
 using mx::contains;
 using mx::repr;
 using mx::triple;
+using std::shared_ptr;
 
-typedef mx::triple<boost::shared_ptr<const RawMessage>, ConnectionWrapper, boost::shared_ptr<MultiplexerMessage>>
+typedef mx::triple<std::shared_ptr<const RawMessage>, ConnectionWrapper, std::shared_ptr<MultiplexerMessage>>
     IncomingMessage;
 
 // See the file comment. Exceptions: NotConnected, OperationTimedOut,
@@ -58,15 +58,15 @@ public:
     inline operator bool() const { return (bool)basic_tracker_; }
     bool inline in_queue() const {
       Assert(*this);
-      return (bool)boost::logic::indeterminate(*basic_tracker_);
+      return *basic_tracker_ == SendState::QUEUED;
     }
     bool inline is_sent() const {
       Assert(*this);
-      return (bool)*basic_tracker_;
+      return *basic_tracker_ == SendState::SENT;
     }
     bool inline is_lost() const {
       Assert(*this);
-      return (bool)!*basic_tracker_;
+      return *basic_tracker_ == SendState::LOST;
     }
 
   private:
@@ -74,9 +74,9 @@ public:
   };
 
   // With its own io_service, sharing one, or borrowing one that outlives it.
-  Client(boost::uint32_t client_type);
-  Client(shared_ptr<boost::asio::io_service> io_service, boost::uint32_t client_type);
-  Client(boost::asio::io_service &io_service, boost::uint32_t client_type);
+  Client(std::uint32_t client_type);
+  Client(shared_ptr<asio::io_service> io_service, std::uint32_t client_type);
+  Client(asio::io_service &io_service, std::uint32_t client_type);
   ~Client(); // shutdown(), on whichever thread destroys the client
 
   // Connectivity; see BasicClient for the semantics.
@@ -93,7 +93,7 @@ public:
     basic_client_->check_not_orphaned();
     basic_client_->bind_to_current_thread();
   }
-  ConnectionWrapper async_connect(const boost::asio::ip::tcp::endpoint &peer_endpoint) {
+  ConnectionWrapper async_connect(const asio::ip::tcp::endpoint &peer_endpoint) {
     basic_client_->check_not_orphaned();
     return basic_client_->async_connect(peer_endpoint);
   }
@@ -101,30 +101,30 @@ public:
     basic_client_->check_not_orphaned();
     return basic_client_->wait_for_connection(connwrap, timeout);
   }
-  ConnectionWrapper connect(const boost::asio::ip::tcp::endpoint &peer_endpoint, float timeout = DEFAULT_TIMEOUT) {
+  ConnectionWrapper connect(const asio::ip::tcp::endpoint &peer_endpoint, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
     return basic_client_->connect(peer_endpoint, timeout);
   }
 
   // IPv4 in nnn.nnn... form or IPv6 in hhh:hhh:... form
-  ConnectionWrapper async_connect(const std::string &host, boost::uint16_t port) {
-    return async_connect(boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(host), port));
+  ConnectionWrapper async_connect(const std::string &host, std::uint16_t port) {
+    return async_connect(asio::ip::tcp::endpoint(asio::ip::address::from_string(host), port));
   }
   // IPv4 in nnn.nnn... form or IPv6 in hhh:hhh:... form
-  ConnectionWrapper connect(const std::string &host, boost::uint16_t port, float timeout = DEFAULT_TIMEOUT) {
+  ConnectionWrapper connect(const std::string &host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
-    boost::asio::ip::tcp::resolver resolver(io_service_);
+    asio::ip::tcp::resolver resolver(io_service_);
     std::string port_str = std::to_string(port);
-    boost::asio::ip::tcp::resolver::query query(host, port_str);
-    boost::asio::ip::tcp::resolver::iterator iter = resolver.resolve(query);
-    boost::asio::ip::tcp::endpoint endpoint = *iter;
+    asio::ip::tcp::resolver::query query(host, port_str);
+    asio::ip::tcp::resolver::iterator iter = resolver.resolve(query);
+    asio::ip::tcp::endpoint endpoint = *iter;
     MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
     return connect(endpoint, timeout);
   }
 
   unsigned int inline connections_count() { return basic_client_->connections_count(true); } // live ones
-  boost::uint64_t inline instance_id() const { return basic_client_->instance_id(); }        // our `from`
-  boost::uint32_t inline client_type() const { return basic_client_->client_type(); }        // our peer type
+  std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }          // our `from`
+  std::uint32_t inline client_type() const { return basic_client_->client_type(); }          // our peer type
 
   // Incoming messages: the next one in arrival order, waiting up to
   // `timeout` (negative: forever). Throws OperationTimedOut, NotConnected.
@@ -267,7 +267,7 @@ public:
     return _query(*mxmsg, timeout, lane, probe);
   }
 
-  IncomingMessage query(const std::string &message, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT,
+  IncomingMessage query(const std::string &message, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
                         LanePtr lane = LanePtr()) {
     basic_client_->check_not_orphaned();
 
@@ -299,12 +299,12 @@ protected:
   IncomingMessage _query(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _query_addressed(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _send_and_receive(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, bool schedule_all = false,
-                                    bool handle_delivery_errors = false, boost::uint64_t accept_id = 0,
-                                    boost::uint32_t ignore_type = 0, boost::uint64_t ignore_id = -1,
+                                    bool handle_delivery_errors = false, std::uint64_t accept_id = 0,
+                                    std::uint32_t ignore_type = 0, std::uint64_t ignore_id = -1,
                                     ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr());
   IncomingMessage _send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer &timer,
-                                        std::vector<uint64_t> accept_ids, boost::uint32_t ignore_type,
-                                        boost::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane);
+                                        std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
+                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane);
   ConnectionWrapper _send_one(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, ConnectionWrapper preferred,
                               LanePtr lane = LanePtr());
   MultiplexerMessage _probe_for(const MultiplexerMessage &query, Probe probe);
@@ -323,10 +323,10 @@ protected:
   shared_ptr<const RawMessage> _serialize(shared_ptr<const RawMessage> raw) { return raw; }
 
 private:
-  shared_ptr<boost::asio::io_service> io_service_ptr_;
+  shared_ptr<asio::io_service> io_service_ptr_;
 
 protected:
-  boost::asio::io_service &io_service_;
+  asio::io_service &io_service_;
   shared_ptr<BasicClient> basic_client_;
 };
 

@@ -14,16 +14,14 @@
 #include <utility>
 #include <vector>
 
-#include <boost/cstdint.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/program_options.hpp>
+#include <cstdint>
 
+#include "lib/options.h"
 #include "multiplexer/client.h"
 #include "multiplexer/testing/events.pb.h"
 
 namespace mxtestroles {
 
-namespace po = boost::program_options;
 using multiplexer::Client;
 using mxtesting::Event;
 
@@ -53,16 +51,16 @@ struct CommonOptions {
   unsigned type;
   std::string name;
 
-  void add(po::options_description &options);
+  void add(mx::options::Options &options);
   std::unique_ptr<Client> connect() const;
   // The "connected" event with instance_id, connections and name filled in.
   Event connected_event(Client &client) const;
 };
 
 // "201=203" pairs, as --serves takes them.
-std::map<boost::uint32_t, boost::uint32_t> kv_ints(const std::vector<std::string> &items);
+std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string> &items);
 // "201:payload" pairs, as --query and --send take them.
-std::vector<std::pair<boost::uint32_t, std::string>> typed_payloads(const std::vector<std::string> &items);
+std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string> &items);
 std::string replace_all(std::string text, const std::string &from, const std::string &to);
 std::string upper(std::string text);
 

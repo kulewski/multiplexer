@@ -8,7 +8,6 @@ cc_library(
         "//lib:exception",
         "//lib:kwargs",
         "//multiplexer:client",
-        "@boost//:foreach",
     ],
 )
 

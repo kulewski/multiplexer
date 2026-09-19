@@ -17,14 +17,10 @@
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/enable_shared_from_this.hpp>
-#include <boost/noncopyable.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
-#include <boost/weak_ptr.hpp>
+#include <asio/io_service.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
+#include <memory>
 
 #include <memory>
 #include <string>
@@ -48,7 +44,7 @@ class Server; // forward
 template <> struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits {
 
   struct MessagesBufferTraits : public DefaultConnectionsManagerTraits::MessagesBufferTraits {
-    typedef boost::shared_ptr<const RawMessage> value_type;
+    typedef std::shared_ptr<const RawMessage> value_type;
     typedef mx::ReferencingFunctor<value_type> ToRawMessagePointerConverter;
     typedef mx::ReferencingFunctor<value_type> ToBufferRepresentationConverter;
 
@@ -60,21 +56,21 @@ template <> struct ConnectionsManagerTraits<Server> : public DefaultConnectionsM
 
 // See the file comment. Created with Create(), started with start(),
 // driven by io_service.run() in mxcontrol/start_multiplexer_server.cc.
-class Server : public ConnectionsManager<Server>, public boost::enable_shared_from_this<Server> {
+class Server : public ConnectionsManager<Server>, public std::enable_shared_from_this<Server> {
 
 private:
-  Server(boost::asio::io_service &io_service, const std::string &host, unsigned short port);
+  Server(asio::io_service &io_service, const std::string &host, unsigned short port);
 
 public:
   typedef ConnectionsManager<Server> Base;
-  typedef boost::shared_ptr<Server> pointer;
-  typedef boost::weak_ptr<Server> weak_pointer;
-  static pointer Create(boost::asio::io_service &io_service, const std::string &host, unsigned short port) {
+  typedef std::shared_ptr<Server> pointer;
+  typedef std::weak_ptr<Server> weak_pointer;
+  static pointer Create(asio::io_service &io_service, const std::string &host, unsigned short port) {
     return pointer(new Server(io_service, host, port));
   }
 
   // ConnectionsManager interface
-  boost::shared_ptr<const RawMessage> get_welcome_message() {
+  std::shared_ptr<const RawMessage> get_welcome_message() {
     if (!welcome_message_) {
       welcome_message_ = create_welcome_message(multiplexer::peers::MULTIPLEXER);
     }
@@ -84,8 +80,8 @@ public:
   // Entry point for every routed message, called by a Connection once the
   // frame is parsed. Drops messages that claim to come from this multiplexer
   // and hands the rest to _handle_message.
-  void handle_message(Connection::pointer conn, boost::shared_ptr<const RawMessage> raw,
-                      boost::shared_ptr<MultiplexerMessage> msg);
+  void handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
+                      std::shared_ptr<MultiplexerMessage> msg);
 
   // Starts accepting connections.
   void start();
@@ -100,8 +96,9 @@ public:
   // nothing per message. A file session is opened by start_recording(), at
   // start for --record, or by a peer's RECORDING_CONTROL START once
   // --recording-dir names where such sessions go; a peer taps in with TAP
-  // once --allow-tap is set. The rules file's SHA-1 goes into every header.
-  void set_rules_sha1(const std::string &sha1) { rules_sha1_ = sha1; }
+  // once --allow-tap is set. The rules file's fingerprint goes into the
+  // header record that opens every recording session.
+  void set_rules_fingerprint(const std::string &fingerprint) { rules_fingerprint_ = fingerprint; }
   void set_recording_dir(const std::string &dir) { recording_dir_ = dir; }
   void set_allow_tap(bool allow) { allow_tap_ = allow; }
   bool remote_recording_enabled() const { return !recording_dir_.empty() || allow_tap_; }
@@ -112,7 +109,7 @@ public:
   // header and the status; `max_bytes` and `max_seconds` close it on their
   // own, 0 means never.
   bool start_recording(const std::string &path, const std::string &label, unsigned int payload_limit,
-                       boost::uint64_t max_bytes, unsigned int max_seconds, std::string *error);
+                       std::uint64_t max_bytes, unsigned int max_seconds, std::string *error);
   // Closes the file session, if one is open, noting `reason` for the status.
   void stop_recording(const std::string &reason);
   bool recording() const { return recorder_ != nullptr; }
@@ -132,7 +129,7 @@ public:
   // Peers may not announce a reserved type (1 to 99), and must be in the
   // rules file; the one exception is a recording controller, accepted when
   // remote recording is on.
-  bool inline accept_peer_type(boost::uint32_t peer_type) const {
+  bool inline accept_peer_type(std::uint32_t peer_type) const {
     if (peer_type == RECORDING_CONTROLLER)
       return remote_recording_enabled();
     return peer_type > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE && Base::accept_peer_type(peer_type);
@@ -158,20 +155,22 @@ public:
 
 private:
   void _start_accept();
-  void _handle_accept(Connection::pointer new_connection, const boost::system::error_code &error);
+  void _handle_accept(Connection::pointer new_connection, const asio::error_code &error);
 
   // Everything about the message being routed, passed down the _schedule
   // calls. Collects the delivery failures as they happen; at the end,
   // _handle_delivery_errors turns them into one DELIVERY_ERROR if any.
-  struct MessageMetaHandler : boost::noncopyable {
+  struct MessageMetaHandler {
+    MessageMetaHandler(const MessageMetaHandler &) = delete;
+    MessageMetaHandler &operator=(const MessageMetaHandler &) = delete;
     MessageMetaHandler(const MultiplexerMessage &message, Connection::pointer connection,
-                       boost::shared_ptr<const RawMessage> raw_message)
+                       std::shared_ptr<const RawMessage> raw_message)
         : msg(message), conn(connection), raw(raw_message) {}
 
     // Nobody of `type` received it under `rule`.
-    void failed(const MultiplexerMessageDescription::RoutingRule &rule, boost::uint32_t type);
+    void failed(const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t type);
     // The instance id `to` is not connected, or could not take it.
-    void failed(boost::uint64_t to);
+    void failed(std::uint64_t to);
     // The message type has no entry in the rules file.
     void unknown();
     // The message type has an entry but no routing rule, and no `to`.
@@ -181,15 +180,14 @@ private:
     void __create_delivery_error_message(bool include_original_packet_in_report);
 
   public:
-    boost::scoped_ptr<DeliveryError> delivery_error_message;
+    std::unique_ptr<DeliveryError> delivery_error_message;
     const MultiplexerMessage &msg;
     const Connection::pointer conn;
-    const boost::shared_ptr<const RawMessage> raw;
+    const std::shared_ptr<const RawMessage> raw;
   };
 
   // The per-message path; see the file comment for the order of the cases.
-  void _handle_message(Connection::pointer conn, const MultiplexerMessage &msg,
-                       boost::shared_ptr<const RawMessage> raw);
+  void _handle_message(Connection::pointer conn, const MultiplexerMessage &msg, std::shared_ptr<const RawMessage> raw);
   void _handle_delivery_errors(MessageMetaHandler &meta_handler);
   bool _handle_message_inlined_rules(MessageMetaHandler &meta_handler);
   bool _handle_meta_message(MessageMetaHandler &meta_handler);
@@ -205,7 +203,7 @@ private:
   unsigned int _schedule(MessageMetaHandler &meta_handler, ConnectionsList &connections,
                          const MultiplexerMessageDescription::RoutingRule &rule);
   unsigned int _schedule(MessageMetaHandler &meta_handler, ConnectionsList &connections,
-                         const MultiplexerMessageDescription::RoutingRule &rule, boost::uint32_t peer_type);
+                         const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t peer_type);
 
   // whom: ALL and whom: ANY over one peer type's connections.
   unsigned int send_to_all(MessageMetaHandler &meta_handler, ConnectionsList &connections);
@@ -213,20 +211,20 @@ private:
 
   // Recording. A record is built once and goes to the file session and to
   // every tap; nothing is built while neither exists.
-  void _record(const MessageMetaHandler &meta_handler, boost::uint64_t recipient, boost::uint32_t recipient_type,
+  void _record(const MessageMetaHandler &meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,
                RoutedMessage::Disposition disposition, bool error_reported) {
     if (!recorder_ && taps_.empty())
       return;
     // A message of the multiplexer's own, a DELIVERY_ERROR, is routed
     // through the connection of the peer it answers; it is still ours.
-    const boost::uint32_t from_peer_type =
+    const std::uint32_t from_peer_type =
         meta_handler.msg.from() == instance_id_ ? peers::MULTIPLEXER : meta_handler.conn->peer_type();
     Record record;
     recording::fill_routed(record, meta_handler.msg, from_peer_type, recipient, recipient_type, disposition,
                            error_reported);
     _emit(record);
   }
-  void _emit_peer(PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type);
+  void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
   // Stamps `record`, writes it to the file session, closing the session at
   // its cap, and streams it to every tap.
   void _emit(Record &record);
@@ -234,9 +232,9 @@ private:
   // A peer receiving every record as RECORDING_RECORD messages.
   struct Tap {
     Connection::weak_pointer conn;
-    boost::uint64_t peer_id;
+    std::uint64_t peer_id;
     unsigned int payload_limit;
-    boost::uint64_t dropped; // records its full outgoing queue lost
+    std::uint64_t dropped; // records its full outgoing queue lost
   };
   typedef std::vector<Tap> Taps;
   Taps::iterator _find_tap(const Connection *conn);
@@ -246,10 +244,10 @@ private:
   struct Session {
     std::string label;
     std::string path;
-    boost::uint64_t started_us = 0;
-    boost::uint64_t max_bytes = 0;
-    boost::uint64_t bytes = 0;
-    boost::uint64_t records = 0;
+    std::uint64_t started_us = 0;
+    std::uint64_t max_bytes = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t records = 0;
     std::string stopped; // why it ended; empty while open or before the first
   };
 
@@ -258,27 +256,27 @@ private:
   void _fill_status(RecordingStatus &status, const Connection *requester);
   // Queues `payload` as a message of `type` on the sender's connection,
   // referencing the message being handled.
-  void _reply(const MessageMetaHandler &meta_handler, boost::uint32_t type, const ::google::protobuf::Message &payload);
-  static void _on_session_deadline(weak_pointer server, const boost::system::error_code &error);
+  void _reply(const MessageMetaHandler &meta_handler, std::uint32_t type, const ::google::protobuf::Message &payload);
+  static void _on_session_deadline(weak_pointer server, const asio::error_code &error);
 
   // The peers file, if configured; `leaving` is excluded, since it is
   // written before the indexes drop it.
   void _write_peers_file(Connection *leaving = NULL);
   // A peer type's name for the peers file: from the rules, or the reserved name.
-  std::string _peer_name(boost::uint32_t peer_type) const;
+  std::string _peer_name(std::uint32_t peer_type) const;
 
 private:
-  boost::asio::ip::tcp::acceptor acceptor_;
-  boost::shared_ptr<const RawMessage> welcome_message_;
-  boost::asio::io_service &io_service_;
+  asio::ip::tcp::acceptor acceptor_;
+  std::shared_ptr<const RawMessage> welcome_message_;
+  asio::io_service &io_service_;
   unsigned int memory_log_every_ = 0;
   unsigned long routed_messages_ = 0;
-  std::string rules_sha1_;
+  std::string rules_fingerprint_;
   std::string recording_dir_;
   bool allow_tap_ = false;
   std::unique_ptr<Recorder> recorder_;
   Session session_;
-  boost::asio::deadline_timer session_timer_;
+  asio::steady_timer session_timer_;
   Taps taps_;
   std::string peers_file_;
 }; // class Server

@@ -19,7 +19,7 @@ Request::~Request() {
                     " dropped without a reply or no_response()"));
 }
 
-void Request::reply(const std::string &payload, boost::uint32_t type) { reply(client_->new_message(type, payload)); }
+void Request::reply(const std::string &payload, std::uint32_t type) { reply(client_->new_message(type, payload)); }
 
 void Request::reply(MultiplexerMessage msg) {
   answered_ = true;

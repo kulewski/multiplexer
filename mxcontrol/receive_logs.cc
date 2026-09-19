@@ -28,9 +28,7 @@ public:
   virtual void print_help(std::ostream &out) { out << "Start a Multiplexer backend that does something with logs.\n"; }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &generic) {
-    _add_multiplexer_client_options(generic);
-  }
+  virtual void _initialize_options(mx::options::Options &options) { _add_multiplexer_client_options(options); }
 
 private:
 };

@@ -22,9 +22,17 @@ void TasksHolder::register_(const std::string &name, TaskProxy *task_proxy) thro
 }
 
 int TasksHolder::__run(TasksMap::iterator ti, std::vector<std::string> &args) {
-  boost::shared_ptr<Task> task = ti->second->task();
+  std::shared_ptr<Task> task = ti->second->task();
   Assert(task);
-  task->parse_options(args);
+  try {
+    task->parse_options(args);
+  } catch (const mx::options::Error &error) {
+    std::cerr << ti->first << ": " << error.what() << "\n";
+    std::cerr << "Usage: " << (original_argc_ ? original_argv_[0] : "program") << " <general-options> " << ti->first
+              << " " << task->short_synopsis(ti->first) << "\n";
+    task->print_help(std::cerr);
+    return 1;
+  }
   return task->run();
 }
 

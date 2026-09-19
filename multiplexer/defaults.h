@@ -6,7 +6,7 @@
 #ifndef MX_MULTIPLEXER_DEFAULTS_H_
 #define MX_MULTIPLEXER_DEFAULTS_H_
 
-#include <boost/cstdint.hpp>
+#include <cstdint>
 
 namespace multiplexer {
 
@@ -30,7 +30,7 @@ static const float NO_HEARTBIT_SO_REALLY_DROP_INTERVAL = 60;
 
 // A recording session started over the protocol closes itself at this
 // size unless the request says otherwise (RecordingControl.max_bytes).
-static const boost::uint64_t DEFAULT_REMOTE_RECORDING_MAX_BYTES = 1024ULL * 1024 * 1024;
+static const std::uint64_t DEFAULT_REMOTE_RECORDING_MAX_BYTES = 1024ULL * 1024 * 1024;
 
 }; // namespace multiplexer
 

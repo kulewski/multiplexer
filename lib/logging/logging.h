@@ -1,33 +1,33 @@
-// Structured logging: MX_LOG(level, verbosity, tokens...) and MX_ENTER /
-// MX_LEAVE. Each entry is a LogEntry protocol buffer (Logging.proto),
-// written as text to stderr and, when set_logging_fd/file was called, as a
-// binary stream that mxcontrol streamlogs can forward. The Python library
-// logs through the same functions via the _native binding, so both languages
-// share one stream and one filter.
+// Structured logging: MX_LOG(level, verbosity, tokens...). Each entry is a
+// LogEntry protocol buffer (Logging.proto), written as text to stderr and,
+// when set_logging_fd/file was called, as a binary stream that mxcontrol
+// streamlogs can forward. The Python library logs through the same
+// functions via the _native binding, so both languages share one stream
+// and one filter.
 //
 // Levels (DEBUG .. CRITICAL) and verbosities (ZERO .. CHATTERBOX) are
 // separate axes: set_maximal_logging_verbosity(level, verbosity) says how
 // chatty each level may be. MX_LOG checks that first and builds nothing when
-// the entry would be dropped, which is what keeps HIGHVERBOSITY logging on
-// the per-message path affordable.
+// the entry would be dropped, which is what keeps per-message logging on
+// the wire path affordable: a disabled entry is one comparison.
 //
 // The token syntax (TEXT(...) FLOW(...) DATA(...) CTX(...) ...) is a small
 // preprocessor language; lib/preproc/kwargs.h walks the tokens and
-// log_tokens.h says what each does at each stage. impl.h holds the runtime.
+// log_tokens.h turns each into a call on the Entry being built. impl.h
+// holds the runtime.
 #ifndef MX_LIB_LOGGING_LOGGING_H_
 #define MX_LIB_LOGGING_LOGGING_H_
 
-#include <boost/cstdint.hpp>
-#include <boost/preprocessor/selection/max.hpp>
-#include <boost/preprocessor/stringize.hpp>
+#include <cstdint>
 #include <string>
 
-#include "lib/preproc/create_message.h"
+#include "lib/preproc/common.h"
 
 #/*
 #  * MX_LOG(level, verbosity, tokens)
-#  *	Emit log message with proper parameters runnin as little code as
-#  *    possible it the message finally wounldn't be emitted.
+#  *	Emit a log entry, running as little code as possible when the entry
+#  *	would not be emitted: the tokens are evaluated only after the
+#  *	level's verbosity allowed it.
 #  *
 #  *	`tokens' is a non empty list of:
 #  *
@@ -38,8 +38,8 @@
 #  *	    TEXT(text)				add human readable textual
 #  *                                            information
 #  *
-#  *	    DATA(type_id, type, setters)	add data_type(type_id) information and generate inner data msg using setters
-#  *						MX_CREATE_MESSAGE(type, x, setters) must be valid
+#  *	    DATA(type_id, message)		attach a protocol buffer message
+#  *						as the entry's data, tagged type_id
 #  *
 #  *	    CTX(context)			add context to process_context
 #  *
@@ -48,62 +48,37 @@
 #  *	    SKIPFILEIF(b)			don't emit log to logging stream if `b'
 #  *
 #  *
-#  *	Examples (see lib/repr.h for information how to shorten lexical_cast):
+#  *	Examples (see lib/repr.h for repr()):
 #  *
 #  *	    MX_LOG(DEBUG, VERBOSE, CONTEXT("mx.multiplexer"));
 #  *
 #  *	    MX_LOG(DEBUG, VERBOSE, CTX("multiplexer") FLOW(mxmsg.workflow())
 #  *		    TEXT("received a message with id " +
-#  *                        boost::lexical_cast<std::string>(mxmsg.id))
+#  *                        mx::repr(mxmsg.id))
 #  *		);
 #  *
 #  *	    MX_LOG(DEBUG, VERBOSE, CONTEXT("mx.multiplexer")
 #  *                FLOW(mxmsg.workflow())
-#  *		    DATA(MALFORMED_MESSAGE_SO_SHUTDOWN, PeerCharacteristics,
-#  *                    (set_peer_id(conn->peer_id()))
-#  *                        (set_peer_type(conn->peer_type())))
-#  *		);
-#  *
+#  *		    DATA(MALFORMED_MESSAGE_SO_SHUTDOWN, characteristics));
 #  */
-#define MX_LOG(tokens...)                                                                                              \
-  __MX_LOG(MX_UNIQUE_NAME(_log_msg_), MX_UNIQUE_NAME(_data_msg_), MX_UNIQUE_NAME(_context_), tokens)
+#define MX_LOG(level, verbosity, tokens...)                                                                            \
+  do {                                                                                                                 \
+    if (::mx::logging::impl::should_log(level, verbosity)) {                                                           \
+      MX_LOG_ALWAYS(level, verbosity, tokens);                                                                         \
+    }                                                                                                                  \
+  } while (0)
 
 #/*
-#  * helper for extracting maximal LEVEL or VERBOSITY
+#  * MX_LOG_ALWAYS(level, verbosity, tokens)
+#  *	MX_LOG without the verbosity check: for an entry that must reach
+#  *	the log whatever the setting, the report of a fatal error.
 #  */
-#define __MX_LOGGING_MAX_OF_2ND_OR_PAIR_OP(s, state, t) BOOST_PP_MAX(state, BOOST_PP_TUPLE_ELEM(2, 1, t))
-#define __MX_LOGGING_MAX_LEVEL() BOOST_PP_SEQ_FOLD_LEFT(__MX_LOGGING_MAX_OF_2ND_OR_PAIR_OP, 0, MX_LOGGING_LEVELS_SEQ)
-#define __MX_LOGGING_MAX_VERBOSITY()                                                                                   \
-  BOOST_PP_SEQ_FOLD_LEFT(__MX_LOGGING_MAX_OF_2ND_OR_PAIR_OP, 0, MX_LOGGING_VERBOSITIES_SEQ)
-
-#/*
-#  * MX_ENTER(tokens...)
-#  *    Logging macro used when entering a function.
-#  *
-#  *	`tokens' is a non empty list of:
-#  *
-#  *	    DEFAULT				no-op
-#  *
-#  *        LEVEL(level)                        set logging level of the
-#  *                                            underlying MX_LOG call
-#  *
-#  *        VERBOSITY(verbosity)                set logging verbosity of the
-#  *                                            underlying MX_LOG call
-#  *
-#  *	    CTX(context)			add context to process_context
-#  *
-#  *	    CONTEXT(context)			override process_context with
-#  *                                            `context`
-#  *
-#  *	    FLOW(flow)				add workflow information
-#  *
-#  */
-#define MX_ENTER(tokens...) __MX_ENTER(tokens)
-
-#define MX_RETURN(value) __MX_RETURN(return, value)
-#define MX_LEAVE() __MX_RETURN(__MX_LOG_CALL_return_void, '<void>')
-
-#define __MX_LOG_CALL_return_void(void) return;
+#define MX_LOG_ALWAYS(level, verbosity, tokens...)                                                                     \
+  do {                                                                                                                 \
+    ::mx::logging::Entry __mx_log_entry(level, verbosity, __FILE__, __LINE__);                                         \
+    __MX_LOG_PROCESS_TOKENS(__mx_log_entry, tokens)                                                                    \
+    __mx_log_entry.emit();                                                                                             \
+  } while (0)
 
 namespace mx {
 namespace logging {
@@ -114,57 +89,32 @@ namespace consts {
 /*
  * logging levels
  */
-#define MX_LOGGING_LEVELS_SEQ ((DEBUG, 1))((INFO, 2))((OK, 3))((WARNING, 4))((ERROR, 5))((CRITICAL, 6)) /**/
-
-const static unsigned int MAX_LEVEL = __MX_LOGGING_MAX_LEVEL();
+static const unsigned int DEBUG = 1;
+static const unsigned int INFO = 2;
+static const unsigned int OK = 3;
+static const unsigned int WARNING = 4;
+static const unsigned int ERROR = 5;
+static const unsigned int CRITICAL = 6;
+const static unsigned int MAX_LEVEL = CRITICAL;
 
 /*
- * verbosities
+ * verbosities: how chatty a level may be, set per level with
+ * set_maximal_logging_verbosity(LEVEL, verbosity); ZEROVERBOSITY silences
+ * the level entirely.
  */
-#define MX_LOGGING_VERBOSITIES_SEQ                                                                                     \
-  /* allows to completely disable logging of specific LEVEL */                                                         \
-  /* with set_maximal_logging_verbosity(LEVEL, ZEROVERBOSITY) */                                                       \
-  ((ZEROVERBOSITY, 0))                                                                                                 \
-                                                                                                                       \
-      /* messages that appear very rarely */                                                                           \
-      ((LOWVERBOSITY, 1))                                                                                              \
-                                                                                                                       \
-      /* messages that appear sometimes */                                                                             \
-      ((MEDIUMVERBOSITY, 2))                                                                                           \
-                                                                                                                       \
-      /* messages that are usually quite numerous */                                                                   \
-      ((HIGHVERBOSITY, 3))                                                                                             \
-                                                                                                                       \
-      /* messages that can flood you */                                                                                \
-      ((CHATTERBOX, 4)) /**/
+static const unsigned int ZEROVERBOSITY = 0;
+static const unsigned int LOWVERBOSITY = 1;    // messages that appear very rarely
+static const unsigned int MEDIUMVERBOSITY = 2; // messages that appear sometimes
+static const unsigned int HIGHVERBOSITY = 3;   // messages that are usually quite numerous
+static const unsigned int CHATTERBOX = 4;      // messages that can flood you
+const static unsigned int MAX_VERBOSITY = CHATTERBOX;
 #define MX_LOGGING_DEFAULT_VERBOSITY() (::mx::logging::consts::HIGHVERBOSITY)
 
-const static unsigned int MAX_VERBOSITY = __MX_LOGGING_MAX_VERBOSITY();
-
 /*
- * logging_level_name<L>::name()
- *	    Returns the level name known at compile time.
- *	    Checks that the level L really is defined.
- */
-template <int> struct logging_level_name;
-
-/*
- * logging_get_level_name(level)
- *	    Returns the level name not known at compile time.
+ * logging_get_level_name(level), logging_get_verbosity_name(verbosity)
+ *	    The name of a level or verbosity, "UNKNOWN" for none.
  */
 static inline const char *logging_get_level_name(const unsigned int level) MX_ATTRIBUTE_ALWAYS_INLINE;
-
-/*
- * logging_verbosity_name<L>::name()
- *	    Returns the verbosity name known at compile time.
- *	    Checks that the verbosity L really is defined.
- */
-template <int> struct logging_verbosity_name;
-
-/*
- * logging_get_verbosity_name(verbosity)
- *	    Returns the verbosity name not known at compile time.
- */
 static inline const char *logging_get_verbosity_name(const unsigned int verbosity) MX_ATTRIBUTE_ALWAYS_INLINE;
 
 }; // namespace consts
@@ -205,7 +155,7 @@ void set_logging_fd(unsigned int logging_fd, bool close_on_delete = false, bool 
 
 void set_logging_file(const std::string &file);
 
-boost::uint64_t create_log_id();
+std::uint64_t create_log_id();
 
 static inline const std::string &process_context();
 static inline void set_process_context(const std::string &s);

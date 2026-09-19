@@ -6,7 +6,7 @@
 #include <set>
 #include <string>
 
-#include <boost/any.hpp>
+#include <any>
 
 #include "lib/exception.h"
 
@@ -19,15 +19,15 @@ struct KeyError : mx::Exception {};
 struct Kwargs;
 struct KwargsKeys;
 
-// Keyword arguments for C++: a map from name to boost::any, so that a call
+// Keyword arguments for C++: a map from name to std::any, so that a call
 // with many optional parameters (BaseMultiplexerServer::send_message) reads
 // like Python. Values keep their static type: get<T> throws bad_any_cast on
 // a mismatch, so callers must pass exactly the type the callee expects, e.g.
-// boost::uint32_t rather than int. A Kwargs is a value: a copy is
+// std::uint32_t rather than int. A Kwargs is a value: a copy is
 // independent of the original.
 struct Kwargs {
 
-  typedef std::map<std::string, boost::any> KwValuesMap;
+  typedef std::map<std::string, std::any> KwValuesMap;
   typedef KwValuesMap::value_type KwValue;
 
   Kwargs() {}
@@ -75,7 +75,7 @@ struct Kwargs {
 
   // Store `value` under `key` only if nothing is there yet; chainable.
   template <typename T> Kwargs &set_default(const std::string &key, const T &value) {
-    __values.insert(KwValue(key, boost::any(value)));
+    __values.insert(KwValue(key, std::any(value)));
     return *this;
   }
 
@@ -83,7 +83,7 @@ struct Kwargs {
   bool check_keys(const KwargsKeys &keys);
 
 private:
-  template <typename T> T inline __cast(KwValuesMap::const_iterator pos) { return boost::any_cast<T>(pos->second); }
+  template <typename T> T inline __cast(KwValuesMap::const_iterator pos) { return std::any_cast<T>(pos->second); }
 
 private:
   KwValuesMap __values;

@@ -6,11 +6,13 @@
 LIB_SRCS := \
   lib/assertion.cc \
   lib/core_dump.cc \
+  lib/crc32.cc \
   lib/exception.cc \
   lib/fork.cc \
   lib/kwargs.cc \
   lib/logging/logging.cc \
   lib/memory.cc \
+  lib/options.cc \
   lib/random.cc \
   lib/release.cc \
   multiplexer/backend/base_multiplexer_server.cc \
@@ -41,6 +43,7 @@ MXCONTROL_SRCS := \
 # What generate_constants needs; none of it depends on the constants it generates.
 GENERATE_CONSTANTS_SRCS := \
   lib/assertion.cc \
+  lib/crc32.cc \
   lib/exception.cc \
   lib/logging/logging.cc \
   lib/random.cc \
@@ -52,6 +55,7 @@ GENERATE_CONSTANTS_SRCS := \
 HEADERS := \
   lib/assertion.h \
   lib/core_dump.h \
+  lib/crc32.h \
   lib/encoding/base_decoder.h \
   lib/encoding/base_encoder.h \
   lib/encoding/decode_from_range.h \
@@ -59,26 +63,24 @@ HEADERS := \
   lib/encoding/little_endian.h \
   lib/exception.h \
   lib/fd.h \
+  lib/fingerprint.h \
   lib/fork.h \
   lib/functors.h \
   lib/initialization.h \
-  lib/intrusive_value.h \
   lib/kwargs.h \
   lib/logging/impl.h \
   lib/logging/log_tokens.h \
   lib/logging/logging.h \
   lib/memory.h \
   lib/mutex.h \
+  lib/options.h \
   lib/preproc/common.h \
-  lib/preproc/create_message.h \
-  lib/preproc/create_message_detail.h \
   lib/preproc/kwargs.h \
   lib/program.h \
   lib/protobuf/stream.h \
   lib/random.h \
   lib/release.h \
   lib/repr.h \
-  lib/sha1.h \
   lib/spanset.h \
   lib/thread_annotations.h \
   lib/thread_checker.h \
@@ -135,8 +137,10 @@ PY_FILES := \
 
 # Unit tests: one binary per C++ test file, one unittest module per Python one.
 CC_TEST_SRCS := \
+  lib/digest_test.cc \
   lib/kwargs_test.cc \
   lib/logging/verbosity_test.cc \
+  lib/options_test.cc \
   lib/thread_checker_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \

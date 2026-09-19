@@ -11,8 +11,7 @@
 #include <memory>
 #include <string>
 
-#include <boost/cstdint.hpp>
-#include <boost/noncopyable.hpp>
+#include <cstdint>
 
 #include "lib/protobuf/stream.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
@@ -22,17 +21,16 @@ namespace multiplexer {
 namespace recording {
 
 // Microseconds since the epoch, the clock every record is stamped with.
-boost::uint64_t now_us();
+std::uint64_t now_us();
 
 // A peer registered (CONNECTED) or left (DISCONNECTED).
-void fill_peer(Record &record, PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type);
+void fill_peer(Record &record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
 
 // One delivery attempt of `msg`: to `recipient` of `recipient_type` (either
 // may be 0 when routing found nobody), with the outcome. The whole payload
 // is kept; truncate() cuts it for a sink with a limit.
-void fill_routed(Record &record, const MultiplexerMessage &msg, boost::uint32_t from_peer_type,
-                 boost::uint64_t recipient, boost::uint32_t recipient_type, RoutedMessage::Disposition disposition,
-                 bool error_reported);
+void fill_routed(Record &record, const MultiplexerMessage &msg, std::uint32_t from_peer_type, std::uint64_t recipient,
+                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported);
 
 // `record` with its payload cut to `payload_limit` bytes (`truncated` set)
 // when it is a routed message longer than that; 0 means no limit.
@@ -44,13 +42,16 @@ bool valid_label(const std::string &label);
 
 // The file of a session: "<dir>/<label>.<UTC time>.<multiplexer id>.rec",
 // unique across multiplexers sharing a directory and across sessions.
-std::string session_path(const std::string &dir, const std::string &label, boost::uint64_t multiplexer_id,
-                         boost::uint64_t started_us);
+std::string session_path(const std::string &dir, const std::string &label, std::uint64_t multiplexer_id,
+                         std::uint64_t started_us);
 
 } // namespace recording
 
 // One recording file. Counts what it wrote, for the status.
-class Recorder : boost::noncopyable {
+class Recorder {
+  Recorder(const Recorder &) = delete;
+  Recorder &operator=(const Recorder &) = delete;
+
 public:
   // Opens `path` for appending. `payload_limit` bytes of each payload are
   // kept, all of it when 0. ok() says whether the file could be opened.
@@ -59,11 +60,11 @@ public:
 
   const std::string &path() const { return path_; }
   unsigned int payload_limit() const { return payload_limit_; }
-  boost::uint64_t bytes() const { return bytes_; }
-  boost::uint64_t records() const { return records_; }
+  std::uint64_t bytes() const { return bytes_; }
+  std::uint64_t records() const { return records_; }
 
   // The first record: who wrote the file, with which rules, under which label.
-  void header(boost::uint64_t multiplexer_id, const std::string &rules_sha1, const std::string &label);
+  void header(std::uint64_t multiplexer_id, const std::string &rules_fingerprint, const std::string &label);
   // Any other record, already stamped with the time, its payload cut to
   // the limit.
   void write(const Record &record);
@@ -76,8 +77,8 @@ private:
   mx::protobuf::OstreamMessageOutputStream stream_;
   const unsigned int payload_limit_;
   bool failed_;
-  boost::uint64_t bytes_;
-  boost::uint64_t records_;
+  std::uint64_t bytes_;
+  std::uint64_t records_;
 };
 
 } // namespace multiplexer

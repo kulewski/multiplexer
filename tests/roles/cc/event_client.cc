@@ -23,7 +23,7 @@ public:
   virtual int run() {
     std::unique_ptr<Client> client = common_.connect();
     emit(common_.connected_event(*client));
-    std::vector<std::pair<boost::uint32_t, std::string>> sends = typed_payloads(send_);
+    std::vector<std::pair<std::uint32_t, std::string>> sends = typed_payloads(send_);
     int sent_count = 0;
     for (size_t index = 0; index < sends.size(); ++index) {
       MultiplexerMessage message;
@@ -76,19 +76,20 @@ public:
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
+  virtual void _initialize_options(mx::options::Options &options) {
     common_.add(options);
-    options.add_options()("send", po::value(&send_)->composing(), "TYPE:payload, repeatable, sent in order")(
-        "to", po::value(&to_)->default_value(0), "direct to this instance id")(
-        "all", po::bool_switch(&all_), "send through every connection")("no-flush", po::bool_switch(&no_flush_), "")(
-        "interval", po::value(&interval_)->default_value(0.0), "pause between sends")(
-        "linger", po::value(&linger_)->default_value(0.0), "stay connected this long after sending");
+    options.add("send", &send_, "TYPE:payload, repeatable, sent in order");
+    options.add("to", &to_, 0, "direct to this instance id");
+    options.add_switch("all", &all_, "send through every connection");
+    options.add_switch("no-flush", &no_flush_, "");
+    options.add("interval", &interval_, 0.0, "pause between sends");
+    options.add("linger", &linger_, 0.0, "stay connected this long after sending");
   }
 
 private:
   CommonOptions common_;
   std::vector<std::string> send_;
-  boost::uint64_t to_;
+  std::uint64_t to_;
   bool all_;
   bool no_flush_;
   double interval_;

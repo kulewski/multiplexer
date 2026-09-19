@@ -34,7 +34,7 @@ protected:
     for (char &character : payload)
       character = std::toupper(static_cast<unsigned char>(character));
     send_message(
-        Kwargs().set("message", payload).set("type", static_cast<boost::uint32_t>(multiplexer::types::ECHO_RESPONSE)));
+        Kwargs().set("message", payload).set("type", static_cast<std::uint32_t>(multiplexer::types::ECHO_RESPONSE)));
   }
 
   // Runs after every iteration: start draining once the signal flag is set.
@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
   std::string::size_type colon = address.rfind(':');
   MultiplexerAddresses addresses;
   addresses.push_back(
-      std::make_pair(address.substr(0, colon), static_cast<boost::uint16_t>(std::stoi(address.substr(colon + 1)))));
+      std::make_pair(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1)))));
   EchoBackend backend(addresses, multiplexer::peers::ECHO_BACKEND);
   std::cout << "ready" << std::endl;
   // Drain for five seconds once asked: searches are declined so no retried

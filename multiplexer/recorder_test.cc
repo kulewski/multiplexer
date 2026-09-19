@@ -25,7 +25,7 @@ TEST(RecordingLabel, RefusesAnythingThatCouldBeAPath) {
 
 TEST(SessionPath, NamesTheMultiplexerAndTheTime) {
   // 2026-09-10T18:30:12.123456Z
-  const boost::uint64_t started_us = 1789065012123456ULL;
+  const std::uint64_t started_us = 1789065012123456ULL;
   EXPECT_EQ("/var/recordings/session.20260910T183012.123456Z.42.rec",
             session_path("/var/recordings", "session", 42, started_us));
   EXPECT_EQ("/var/recordings/session.20260910T183012.123456Z.42.rec",
@@ -33,7 +33,7 @@ TEST(SessionPath, NamesTheMultiplexerAndTheTime) {
 }
 
 TEST(SessionPath, DiffersPerMultiplexerAndPerSession) {
-  const boost::uint64_t started_us = 1789065012123456ULL;
+  const std::uint64_t started_us = 1789065012123456ULL;
   EXPECT_NE(session_path("d", "s", 1, started_us), session_path("d", "s", 2, started_us));
   EXPECT_NE(session_path("d", "s", 1, started_us), session_path("d", "s", 1, started_us + 1));
 }

@@ -4,6 +4,7 @@
 
 #include "lib/assertion.h"
 #include "lib/initialization.h"
+#include "lib/preproc/common.h"
 #include "mxcontrol/task.h"
 #include <iostream>
 #include <string>
@@ -24,15 +25,15 @@ public:
     virtual ~TaskProxy() {}
 
     // get the Task pointer by TaskProxy
-    virtual boost::shared_ptr<Task> operator()() = 0;
+    virtual std::shared_ptr<Task> operator()() = 0;
 
     // alias
-    inline boost::shared_ptr<Task> task() { return (*this)(); }
+    inline std::shared_ptr<Task> task() { return (*this)(); }
   };
 
   TasksHolder() : original_argc_(0), original_argv_(NULL), general_options("General options") {}
 
-  typedef std::map<std::string, boost::shared_ptr<TaskProxy>> TasksMap;
+  typedef std::map<std::string, std::shared_ptr<TaskProxy>> TasksMap;
 
   // takes ownership
   void register_(const std::string &name, TaskProxy *task_proxy) throw();
@@ -73,7 +74,7 @@ private:
   const char *const *original_argv_;
 
 public:
-  boost::program_options::options_description general_options;
+  mx::options::Options general_options;
 };
 
 namespace tasks_holder_detail {
@@ -81,7 +82,7 @@ namespace tasks_holder_detail {
 TasksHolder &tasks_holder();
 
 template <typename subcommand> struct TaskProxyImpl : TasksHolder::TaskProxy {
-  virtual boost::shared_ptr<Task> operator()() { return boost::shared_ptr<subcommand>(new subcommand()); }
+  virtual std::shared_ptr<Task> operator()() { return std::shared_ptr<subcommand>(new subcommand()); }
 };
 
 }; // namespace tasks_holder_detail
@@ -94,8 +95,8 @@ using tasks_holder_detail::tasks_holder;
 #define REGISTER_MXCONTROL_SUBCOMMAND(name, subcommand)                                                                \
   MX_TRIGGER_STATIC_INITIALIZATION_CODE(                                                                               \
       (::mxcontrol::tasks_holder_detail::tasks_holder().register_(                                                     \
-           BOOST_PP_STRINGIZE(name), new ::mxcontrol::tasks_holder_detail::TaskProxyImpl<subcommand>());),             \
-       true);
+          MX_PP_STRINGIZE(name), new ::mxcontrol::tasks_holder_detail::TaskProxyImpl<subcommand>());),                 \
+      true);
 
 }; // namespace mxcontrol
 

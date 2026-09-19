@@ -60,10 +60,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include <boost/asio/deadline_timer.hpp>
-#include <boost/asio/io_service.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/shared_ptr.hpp>
+#include <asio/io_service.hpp>
+#include <asio/steady_timer.hpp>
+#include <cstdint>
+#include <memory>
 
 #include "lib/mutex.h"
 #include "lib/random.h"
@@ -93,7 +93,7 @@ public:
   // `on_message` receives, on the io thread, every message that is not a
   // reply to a query or one of the protocol's own (see the file comment);
   // without it such messages are logged and dropped.
-  explicit ThreadedClient(boost::uint32_t peer_type, MessageSink on_message = MessageSink());
+  explicit ThreadedClient(std::uint32_t peer_type, MessageSink on_message = MessageSink());
   ~ThreadedClient(); // shutdown() if not done, then joins the io thread
 
   // A backend built on this client answers the search clients use to find
@@ -106,14 +106,14 @@ public:
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
 
-  boost::uint64_t instance_id() const { return instance_id_; }
-  boost::uint32_t peer_type() const { return peer_type_; }
-  boost::uint64_t random64(); // thread-safe
+  std::uint64_t instance_id() const { return instance_id_; }
+  std::uint32_t peer_type() const { return peer_type_; }
+  std::uint64_t random64(); // thread-safe
 
   // Connects and waits up to `timeout` for the handshake; true when the
   // connection is registered. False is not final: the io thread keeps
   // reconnecting every AUTO_RECONNECT_TIME seconds on its own.
-  bool connect(const std::string &host, boost::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  bool connect(const std::string &host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
   unsigned int connections_count();
 
   // Sending. The message must carry its id and from; new_message() fills
@@ -155,7 +155,7 @@ public:
   typedef std::function<void(unsigned int)> SendCallback;
   void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                      LanePtr lane = LanePtr());
-  MultiplexerMessage new_message(boost::uint32_t type, const std::string &payload);
+  MultiplexerMessage new_message(std::uint32_t type, const std::string &payload);
 
   // A request with a reply, see the file comment. The callback runs on the
   // io thread. The blocking form throws std::logic_error when called on the
@@ -166,9 +166,9 @@ public:
   // and the lane adopts the connection the reply came through, a pinned
   // lane allowing no other; with a connection, through that one while it
   // is live.
-  void query(const std::string &payload, boost::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
+  void query(const std::string &payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr());
-  Result query(const std::string &payload, boost::uint32_t type, float timeout = DEFAULT_TIMEOUT,
+  Result query(const std::string &payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
                LanePtr lane = LanePtr());
   void query(const MultiplexerMessage &msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH);
@@ -191,14 +191,13 @@ private:
   struct PendingSend;
   typedef std::shared_ptr<PendingSend> PendingSendPtr;
   void _orphan_teardown();
-  void _submit_send(boost::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
+  void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
                     LanePtr lane);
   void _attempt_send(const PendingSendPtr &pending) MX_RUN_ON(io_thread_);
   void _advance_sends() MX_RUN_ON(io_thread_);
-  BasicClient::BasicScheduledMessageTracker _schedule(const boost::shared_ptr<const RawMessage> &raw,
-                                                      const LanePtr &lane, ConnectionWrapper *used, bool *refused)
-      MX_RUN_ON(io_thread_);
-  typedef boost::shared_ptr<InFlight> InFlightPtr;
+  BasicClient::BasicScheduledMessageTracker _schedule(const std::shared_ptr<const RawMessage> &raw, const LanePtr &lane,
+                                                      ConnectionWrapper *used, bool *refused) MX_RUN_ON(io_thread_);
+  typedef std::shared_ptr<InFlight> InFlightPtr;
 
   void _io_thread_main();
   template <typename F> void _post(F function);
@@ -214,40 +213,40 @@ private:
   void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
   float _stage_timeout(const InFlightPtr &in_flight) const MX_RUN_ON(io_thread_);
-  void _on_deadline(InFlightPtr in_flight, unsigned int generation, const boost::system::error_code &error)
+  void _on_deadline(InFlightPtr in_flight, unsigned int generation, const asio::error_code &error)
       MX_RUN_ON(io_thread_);
   void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage *reply) MX_RUN_ON(io_thread_);
-  void _track(InFlightPtr in_flight, boost::uint64_t id) MX_RUN_ON(io_thread_);
-  void _remember_finished(boost::uint64_t id) MX_RUN_ON(io_thread_);
+  void _track(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
+  void _remember_finished(std::uint64_t id) MX_RUN_ON(io_thread_);
   void _on_unmatched(const IncomingMessage &incoming) MX_RUN_ON(io_thread_);
 
-  const boost::uint32_t peer_type_;
+  const std::uint32_t peer_type_;
   // Held by pointer so that an orphan (a client inherited across a fork,
   // see BasicClient::orphaned) can leak it instead of running asio's
   // destructors with the parent's locks in an unknown state.
-  std::unique_ptr<boost::asio::io_service> io_service_holder_;
-  boost::asio::io_service &io_service_;
-  std::unique_ptr<boost::asio::io_service::work> work_;
-  boost::shared_ptr<BasicClient> basic_client_;
-  const boost::uint64_t instance_id_;
+  std::unique_ptr<asio::io_service> io_service_holder_;
+  asio::io_service &io_service_;
+  std::unique_ptr<asio::io_service::work> work_;
+  std::shared_ptr<BasicClient> basic_client_;
+  const std::uint64_t instance_id_;
 
   mx::ThreadChecker io_thread_{mx::ThreadChecker::BIND_LATER};
-  std::unordered_map<boost::uint64_t, InFlightPtr> by_id_ MX_GUARDED_BY(io_thread_);
+  std::unordered_map<std::uint64_t, InFlightPtr> by_id_ MX_GUARDED_BY(io_thread_);
   std::vector<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_); // every query, tracked by id or waiting
   // The ids of recently finished queries, so that a late reply to one is
   // recognised and dropped instead of reaching on_message: a bounded ring,
   // small because a late reply arrives within a timeout of its query, and
   // one that slips through only costs on_message an unexpected message.
   static const std::size_t REMEMBERED_FINISHED_IDS = 1024;
-  std::deque<boost::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
-  std::unordered_set<boost::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
+  std::deque<std::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
+  std::unordered_set<std::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
   const MessageSink on_message_;
   SearchPolicy search_policy_ MX_GUARDED_BY(io_thread_);
   // Sends not yet written: waiting for a connection, or flushing ones
   // waiting for their write. Polled every few milliseconds by
   // send_timer_ while any exist, and on every connection coming up.
   std::vector<PendingSendPtr> pending_sends_ MX_GUARDED_BY(io_thread_);
-  std::unique_ptr<boost::asio::deadline_timer> send_timer_ MX_GUARDED_BY(io_thread_);
+  std::unique_ptr<asio::steady_timer> send_timer_ MX_GUARDED_BY(io_thread_);
   bool shut_down_ MX_GUARDED_BY(io_thread_) = false;
 
   mx::Mutex random_mutex_;

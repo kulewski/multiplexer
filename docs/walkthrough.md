@@ -8,7 +8,7 @@ the multiplexer the way your own project would.
 You need Bazel 6.2 (through Bazelisk), a C++17 compiler,
 `protobuf-compiler`, `libprotobuf-dev`, Python 3.10 or newer with
 `python3-dev` and `python3-protobuf`; [building.md](building.md) has the
-exact packages. Boost and pybind11 are fetched by Bazel on the first build,
+exact packages. Asio and pybind11 are fetched by Bazel on the first build,
 which takes a few minutes; every later build is quick.
 
 Open three terminals in `examples/echo`.

@@ -64,7 +64,7 @@ public:
   // it has seen answered; a follow-up that is not the reply goes through
   // the server's client() with `to` set and no `references`, correlated
   // in the payload.
-  void reply(const std::string &payload, boost::uint32_t type);
+  void reply(const std::string &payload, std::uint32_t type);
   void reply(MultiplexerMessage msg);
   // The message needs no reply, as an event does.
   void no_response() { answered_ = true; }
@@ -128,7 +128,7 @@ public:
   std::size_t pending() const;
   std::size_t dropped() const { return dropped_.load(); }
 
-  boost::uint64_t instance_id() const { return client_.instance_id(); }
+  std::uint64_t instance_id() const { return client_.instance_id(); }
   ThreadedClient &client() { return client_; } // for messages that are not replies
 
 protected:

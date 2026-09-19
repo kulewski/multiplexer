@@ -10,21 +10,20 @@
 namespace multiplexer {
 namespace recording {
 
-boost::uint64_t now_us() {
+std::uint64_t now_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
 
-void fill_peer(Record &record, PeerEvent::Kind kind, boost::uint64_t peer_id, boost::uint32_t peer_type) {
+void fill_peer(Record &record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type) {
   PeerEvent *event = record.mutable_peer();
   event->set_kind(kind);
   event->set_peer_id(peer_id);
   event->set_peer_type(peer_type);
 }
 
-void fill_routed(Record &record, const MultiplexerMessage &msg, boost::uint32_t from_peer_type,
-                 boost::uint64_t recipient, boost::uint32_t recipient_type, RoutedMessage::Disposition disposition,
-                 bool error_reported) {
+void fill_routed(Record &record, const MultiplexerMessage &msg, std::uint32_t from_peer_type, std::uint64_t recipient,
+                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported) {
   RoutedMessage *routed = record.mutable_routed();
   routed->set_id(msg.id());
   routed->set_from(msg.from());
@@ -66,8 +65,8 @@ bool valid_label(const std::string &label) {
   return true;
 }
 
-std::string session_path(const std::string &dir, const std::string &label, boost::uint64_t multiplexer_id,
-                         boost::uint64_t started_us) {
+std::string session_path(const std::string &dir, const std::string &label, std::uint64_t multiplexer_id,
+                         std::uint64_t started_us) {
   std::time_t seconds = static_cast<std::time_t>(started_us / 1000000);
   struct tm utc;
   gmtime_r(&seconds, &utc);
@@ -90,11 +89,11 @@ Recorder::Recorder(const std::string &path, unsigned int payload_limit)
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.recorder") TEXT("cannot open " + path + "; not recording"));
 }
 
-void Recorder::header(boost::uint64_t multiplexer_id, const std::string &rules_sha1, const std::string &label) {
+void Recorder::header(std::uint64_t multiplexer_id, const std::string &rules_fingerprint, const std::string &label) {
   Record record;
   RecordingHeader *header = record.mutable_header();
   header->set_multiplexer_id(multiplexer_id);
-  header->set_rules_sha1(rules_sha1);
+  header->set_rules_fingerprint(rules_fingerprint);
   header->set_started_us(recording::now_us());
   header->set_payload_limit(payload_limit_);
   if (!label.empty())
@@ -119,7 +118,7 @@ void Recorder::_write(const Record &record) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.recorder") TEXT("write failed; recording stopped"));
     return;
   }
-  bytes_ = static_cast<boost::uint64_t>(out_.tellp());
+  bytes_ = static_cast<std::uint64_t>(out_.tellp());
   records_ += 1;
 }
 

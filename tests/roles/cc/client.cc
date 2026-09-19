@@ -7,6 +7,7 @@
 #include <queue>
 #include <thread>
 
+#include "lib/repr.h"
 #include "multiplexer/threaded_client.h"
 #include "mxcontrol/task.h"
 #include "mxcontrol/tasks_holder.h"
@@ -44,28 +45,26 @@ public:
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
+  virtual void _initialize_options(mx::options::Options &options) {
     common_.add(options);
-    options.add_options()("query", po::value(&query_)->composing(), "TYPE:payload, repeatable, sent in order")(
-        "count", po::value(&count_)->default_value(1), "repeat the list N times")(
-        "parallel", po::value(&parallel_)->default_value(1),
-        "workers, each with its own client")("timeout", po::value(&timeout_)->default_value(10.0), "")(
-        "payload-size", po::value(&payload_size_)->default_value(0), "replace payloads with N bytes")(
-        "sleep-before", po::value(&sleep_before_)->default_value(0.0), "idle after connecting")(
-        "sleep-between", po::value(&sleep_between_)->default_value(0.0), "idle between queries")(
-        "threaded", po::bool_switch(&threaded_), "use ThreadedClient (an io thread of its own)")(
-        "async", po::value(&async_)->default_value(0),
-        "with --threaded: keep up to N queries in flight at once, through callbacks")(
-        "workers", po::value(&workers_)->default_value(0),
-        "N threads sharing one ThreadedClient, each with its own reply queue")(
-        "memory-every", po::value(&memory_every_)->default_value(0), "emit a memory event every N answered queries");
+    options.add("query", &query_, "TYPE:payload, repeatable, sent in order");
+    options.add("count", &count_, 1, "repeat the list N times");
+    options.add("parallel", &parallel_, 1, "workers, each with its own client");
+    options.add("timeout", &timeout_, 10.0, "");
+    options.add("payload-size", &payload_size_, 0, "replace payloads with N bytes");
+    options.add("sleep-before", &sleep_before_, 0.0, "idle after connecting");
+    options.add("sleep-between", &sleep_between_, 0.0, "idle between queries");
+    options.add_switch("threaded", &threaded_, "use ThreadedClient (an io thread of its own)");
+    options.add("async", &async_, 0, "with --threaded: keep up to N queries in flight at once, through callbacks");
+    options.add("workers", &workers_, 0, "N threads sharing one ThreadedClient, each with its own reply queue");
+    options.add("memory-every", &memory_every_, 0, "emit a memory event every N answered queries");
   }
 
 private:
   // One query of a worker's list, with the payload already expanded.
   struct Query {
     int round, index;
-    boost::uint32_t type;
+    std::uint32_t type;
     std::string payload;
   };
 
@@ -87,14 +86,14 @@ private:
 
   // The worker's whole list: --count rounds of --query, payloads expanded.
   std::vector<Query> queries_for(int worker_index) const {
-    std::vector<std::pair<boost::uint32_t, std::string>> list = typed_payloads(query_);
+    std::vector<std::pair<std::uint32_t, std::string>> list = typed_payloads(query_);
     std::vector<Query> out;
     for (int round = 0; round < count_; ++round)
       for (size_t query_index = 0; query_index < list.size(); ++query_index) {
         std::string payload = payload_size_ ? std::string(payload_size_, 'x') : list[query_index].second;
-        payload = replace_all(payload, "{worker}", boost::lexical_cast<std::string>(worker_index));
-        payload = replace_all(payload, "{round}", boost::lexical_cast<std::string>(round));
-        payload = replace_all(payload, "{i}", boost::lexical_cast<std::string>(query_index));
+        payload = replace_all(payload, "{worker}", mx::repr(worker_index));
+        payload = replace_all(payload, "{round}", mx::repr(round));
+        payload = replace_all(payload, "{i}", mx::repr(query_index));
         Query query = {round, (int)query_index, list[query_index].first, payload};
         out.push_back(query);
       }
@@ -129,7 +128,7 @@ private:
   }
 
   static void report_done(int worker_index, int responses, int errors, unsigned connections,
-                          boost::uint64_t instance_id) {
+                          std::uint64_t instance_id) {
     Event done = event("done");
     done.set_worker(worker_index);
     done.set_responses(responses);
@@ -165,7 +164,7 @@ private:
     for (size_t index = 0; index < common_.mx.size(); ++index) {
       std::string::size_type colon = common_.mx[index].rfind(':');
       client->connect(common_.mx[index].substr(0, colon),
-                      boost::lexical_cast<boost::uint16_t>(common_.mx[index].substr(colon + 1)));
+                      mx::from_string<std::uint16_t>(common_.mx[index].substr(colon + 1)));
     }
     return client;
   }

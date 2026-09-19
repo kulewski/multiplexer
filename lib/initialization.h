@@ -34,7 +34,7 @@
 #  *	name seed (use when auto generation of name fails.
 #  */
 #define MX_TRIGGER_STATIC_INITIALIZATION_CODE_NAME(code, name, condition)                                              \
-  __MX_TRIGGER_STATIC_INITIALIZATION_CODE(MX_UNIQUE_NAME(BOOST_PP_CAT(name, _trigger_static_initialization)), code,    \
+  __MX_TRIGGER_STATIC_INITIALIZATION_CODE(MX_UNIQUE_NAME(MX_PP_CAT(name, _trigger_static_initialization)), code,       \
                                           condition)
 
 #/*
@@ -47,13 +47,13 @@
 #  */
 #define __MX_TRIGGER_STATIC_INITIALIZATION_CODE(name, code, condition)                                                 \
   namespace {                                                                                                          \
-  struct BOOST_PP_CAT(name, _struct) {                                                                                 \
-    BOOST_PP_CAT(name, _struct)() {                                                                                    \
+  struct MX_PP_CAT(name, _struct) {                                                                                    \
+    MX_PP_CAT(name, _struct)() {                                                                                       \
       if (condition) {                                                                                                 \
         MX_PP_REMOVE_BRACES code;                                                                                      \
       }                                                                                                                \
     }                                                                                                                  \
-  } BOOST_PP_CAT(name, _instance);                                                                                     \
+  } MX_PP_CAT(name, _instance);                                                                                        \
   }
 
 #endif // MX_LIB_INITIALIZATION_H_

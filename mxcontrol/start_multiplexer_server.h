@@ -22,29 +22,24 @@ public:
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &generic) {
-    generic.add_options()("rules", po::value(&rules_file_)->default_value("multiplexer.rules"),
-                          "file from which routing rules will be read")(
-        "address,M", po::value(&host_port_)->default_value("0.0.0.0:1980"),
-        "local address to listen on")("port-file", po::value(&port_file_),
-                                      "once listening, write the bound address as host:port to this file "
-                                      "(use with --address host:0 to let the system pick a port)")(
-        "memory-log-every", po::value(&memory_log_every_)->default_value(0),
-        "log the C heap in use after every N routed messages (soak tests)")(
-        "record", po::value(&record_file_),
-        "append every peer event and delivery attempt to this file (Recording.proto records)")(
-        "record-payload-bytes", po::value(&record_payload_bytes_)->default_value(0),
-        "keep only the first N bytes of each recorded payload; 0 keeps all")(
-        "recording-dir", po::value(&recording_dir_),
-        "let peers start and stop recording sessions over the protocol, written to this directory")(
-        "allow-tap", po::bool_switch(&allow_tap_),
-        "let peers receive every record over their connection (RECORDING_CONTROL TAP)")(
-        "peers-file", po::value(&peers_file_),
-        "rewrite this file with the connected peers on every registration and unregistration");
-  }
-
-  virtual void _initialize_positional_options_description(po::positional_options_description &positional) {
-    positional.add("address", 1);
+  virtual void _initialize_options(mx::options::Options &options) {
+    options.add("rules", &rules_file_, "multiplexer.rules", "file from which routing rules will be read");
+    options.add("address,M", &host_port_, "0.0.0.0:1980", "local address to listen on").positional("address");
+    options.add("port-file", &port_file_,
+                "once listening, write the bound address as host:port to this file "
+                "(use with --address host:0 to let the system pick a port)");
+    options.add("memory-log-every", &memory_log_every_, 0,
+                "log the C heap in use after every N routed messages (soak tests)");
+    options.add("record", &record_file_,
+                "append every peer event and delivery attempt to this file (Recording.proto records)");
+    options.add("record-payload-bytes", &record_payload_bytes_, 0,
+                "keep only the first N bytes of each recorded payload; 0 keeps all");
+    options.add("recording-dir", &recording_dir_,
+                "let peers start and stop recording sessions over the protocol, written to this directory");
+    options.add_switch("allow-tap", &allow_tap_,
+                       "let peers receive every record over their connection (RECORDING_CONTROL TAP)");
+    options.add("peers-file", &peers_file_,
+                "rewrite this file with the connected peers on every registration and unregistration");
   }
 
 private:

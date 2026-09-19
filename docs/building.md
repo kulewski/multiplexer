@@ -15,7 +15,7 @@ Docker. The commands themselves are in the [README](../README.md#building-with-b
 | protoc and libprotobuf, the same version | the wire format and the recording are protocol buffers; the generated code must match the runtime it links | `protobuf-compiler libprotobuf-dev` |
 | the Python protobuf runtime | the generated Python modules | `python3-protobuf` |
 | Python 3.10 or newer with headers | the extension (`pybind11`) and the Python library | `python3-dev` |
-| network access on the first build | Bazel fetches Boost, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
+| network access on the first build | Bazel fetches Asio, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
 
 On Debian or Ubuntu, that is:
 
@@ -25,7 +25,7 @@ sudo curl -fsSL -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/r
 sudo chmod +x /usr/local/bin/bazel
 ```
 
-Nothing else: no Boost, pybind11 or googletest packages, no JDK, no
+Nothing else: no Asio, pybind11 or googletest packages, no JDK, no
 `unzip`. glibc 2.33 or newer gives exact heap statistics (`mallinfo2`);
 older ones fall back to `mallinfo`, which only affects the memory numbers
 in the soak tests.
@@ -83,11 +83,11 @@ thread-safety analysis). `./check.sh` runs what CI should.
 A `Makefile` at the root builds the same things from the distribution's own
 packages, for a machine that will not have Bazel: no fetching, no JDK, no
 sandbox. It needs the compiler and protobuf from the table above, plus
-Boost, pybind11 (2.9, Ubuntu 22.04's, is the oldest tested) and, for the
-tests, googletest:
+Asio (standalone, header-only), pybind11 (2.9, Ubuntu 22.04's, is the
+oldest tested) and, for the tests, googletest:
 
 ```
-sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libboost-dev libboost-program-options-dev \
+sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libasio-dev \
     python3-dev python3-protobuf pybind11-dev python3-pybind11 libgtest-dev \
     python3-pip python3-setuptools python3-wheel
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a, build/python/
@@ -102,7 +102,7 @@ What comes out, and how a program uses it:
 | Output | Use |
 |---|---|
 | `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
-| `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles with `-std=c++17 -I/usr/local/include/mx` and links `-lmultiplexer -lprotobuf -lboost_program_options -pthread`; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
+| `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles with `-std=c++17 -I/usr/local/include/mx` and links `-lmultiplexer -lprotobuf -pthread`; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
 | `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension included |
 | `build/dist/*.whl` | `pip install` it; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
 

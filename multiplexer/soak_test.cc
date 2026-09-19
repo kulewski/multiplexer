@@ -39,7 +39,7 @@ struct InProcessMultiplexer {
     io_service.post([this] { server->stop(); });
     thread.join();
   }
-  boost::asio::io_service io_service;
+  asio::io_service io_service;
   multiplexer::Server::pointer server;
   unsigned short port = 0;
   std::thread thread;
@@ -49,14 +49,14 @@ struct InProcessMultiplexer {
 struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
   EchoBackend(const multiplexer::backend::MultiplexerAddresses &addresses)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
-  boost::uint64_t instance_id() const { return conn->instance_id(); }
+  std::uint64_t instance_id() const { return conn->instance_id(); }
   void handle_message(multiplexer::MultiplexerMessage &mxmsg) override {
     std::string payload = mxmsg.message();
     for (char &character : payload)
       character = std::toupper(static_cast<unsigned char>(character));
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", payload)
-                     .set("type", static_cast<boost::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
   }
 };
 
@@ -88,7 +88,7 @@ void run_queries(ThreadedClient &client, int count) {
 // The same through lanes and by address: typed queries on one lane,
 // addressed queries on it with either probe, a lane made and dropped per
 // query, a flushing send per query, and the reply's connection preferred.
-void run_lane_queries(ThreadedClient &client, boost::uint64_t backend_id, int count) {
+void run_lane_queries(ThreadedClient &client, std::uint64_t backend_id, int count) {
   multiplexer::LanePtr lane(new multiplexer::Lane());
   for (int index = 0; index < count; ++index) {
     ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 10, lane);
@@ -115,7 +115,7 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   addresses.push_back(std::make_pair(std::string("127.0.0.1"), mx.port));
   // The backend is built and driven on one thread, as the library requires.
   std::atomic<bool> keep_serving{true};
-  std::promise<boost::uint64_t> backend_ready;
+  std::promise<std::uint64_t> backend_ready;
   std::thread backend_thread([&] {
     EchoBackend backend(addresses);
     backend_ready.set_value(backend.instance_id());
@@ -126,7 +126,7 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
       }
     }
   });
-  boost::uint64_t backend_id = backend_ready.get_future().get();
+  std::uint64_t backend_id = backend_ready.get_future().get();
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 

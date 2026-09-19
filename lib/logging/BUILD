@@ -37,8 +37,11 @@ cc_library(
     name = "impl",
     hdrs = ["impl.h"],
     deps = [
+        ":log_tokens",
         ":logging_cc_proto",
+        "//lib:assert",
         "//lib:release",
+        "//lib/preproc:common",
     ],
 )
 
@@ -60,9 +63,8 @@ cc_library(
         "//lib:initialization",
         "//lib:random",
         "//lib:repr",
-        "//lib/preproc:create_message",
+        "//lib/preproc:common",
         "//lib/protobuf:stream",
-        "@boost//:lexical_cast",
     ],
 )
 

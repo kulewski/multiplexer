@@ -6,6 +6,7 @@
 #include <thread>
 #include <unistd.h>
 
+#include "lib/repr.h"
 #include "multiplexer/backend/base_multiplexer_server.h"
 #include "mxcontrol/task.h"
 #include "mxcontrol/tasks_holder.h"
@@ -33,7 +34,7 @@ struct LeaveOptions {
 // unexpected, crash, draining, stopped.
 class BackendServer : public multiplexer::backend::BaseMultiplexerServer {
 public:
-  BackendServer(Client *client, unsigned type, const std::map<boost::uint32_t, boost::uint32_t> &serves,
+  BackendServer(Client *client, unsigned type, const std::map<std::uint32_t, std::uint32_t> &serves,
                 const std::string &behaviour, int crash_after, int memory_every, const LeaveOptions &leave)
       : BaseMultiplexerServer(client, type), serves_(serves), behaviour_(behaviour), crash_after_(crash_after),
         memory_every_(memory_every), leave_(leave), handled_(0) {}
@@ -53,7 +54,7 @@ protected:
     request.set_size(mxmsg.message().size());
     emit(request);
 
-    std::map<boost::uint32_t, boost::uint32_t>::const_iterator served = serves_.find(mxmsg.type());
+    std::map<std::uint32_t, std::uint32_t>::const_iterator served = serves_.find(mxmsg.type());
     if (served == serves_.end()) {
       Event unexpected = event("unexpected");
       unexpected.set_type(mxmsg.type());
@@ -68,9 +69,9 @@ protected:
       throw std::runtime_error("handler failed on purpose");
     } else {
       if (behaviour_.compare(0, 6, "sleep:") == 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(boost::lexical_cast<int>(behaviour_.substr(6))));
+        std::this_thread::sleep_for(std::chrono::milliseconds(mx::from_string<int>(behaviour_.substr(6))));
       std::string payload = behaviour_ == "upper" ? upper(mxmsg.message()) : mxmsg.message();
-      send_message(Kwargs().set("message", payload).set("type", static_cast<boost::uint32_t>(served->second)));
+      send_message(Kwargs().set("message", payload).set("type", static_cast<std::uint32_t>(served->second)));
     }
     if (crash_after_ && handled_ >= crash_after_) {
       Event crash = event("crash");
@@ -105,7 +106,7 @@ protected:
   bool on_handler_exception(const std::exception &) override { return !leave_.exit_on_exception; }
 
 private:
-  std::map<boost::uint32_t, boost::uint32_t> serves_;
+  std::map<std::uint32_t, std::uint32_t> serves_;
   std::string behaviour_;
   int crash_after_;
   int memory_every_;
@@ -138,19 +139,17 @@ public:
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
+  virtual void _initialize_options(mx::options::Options &options) {
     common_.add(options);
-    options.add_options()("serves", po::value(&serves_)->composing(), "REQUEST_TYPE=RESPONSE_TYPE, repeatable")(
-        "behaviour", po::value(&behaviour_)->default_value("upper"), "upper | echo | drop | raise | sleep:MS")(
-        "crash-after", po::value(&crash_after_)->default_value(0), "exit(3) after N handled requests")(
-        "memory-every", po::value(&memory_every_)->default_value(0), "emit a memory event every N requests")(
-        "drain-seconds", po::value(&leave_.drain_seconds)->default_value(0.0),
-        "when asked to leave, decline searches but keep serving this long, then exit")(
-        "drain-file", po::value(&leave_.drain_file)->default_value(""),
-        "a file whose appearance asks the backend to leave")("drain-min-handled",
-                                                             po::value(&leave_.drain_min_handled)->default_value(0),
-                                                             "do not leave before N requests were served")(
-        "exit-on-exception", po::bool_switch(&leave_.exit_on_exception), "a handler exception ends the process (4)");
+    options.add("serves", &serves_, "REQUEST_TYPE=RESPONSE_TYPE, repeatable");
+    options.add("behaviour", &behaviour_, "upper", "upper | echo | drop | raise | sleep:MS");
+    options.add("crash-after", &crash_after_, 0, "exit(3) after N handled requests");
+    options.add("memory-every", &memory_every_, 0, "emit a memory event every N requests");
+    options.add("drain-seconds", &leave_.drain_seconds, 0.0,
+                "when asked to leave, decline searches but keep serving this long, then exit");
+    options.add("drain-file", &leave_.drain_file, "", "a file whose appearance asks the backend to leave");
+    options.add("drain-min-handled", &leave_.drain_min_handled, 0, "do not leave before N requests were served");
+    options.add_switch("exit-on-exception", &leave_.exit_on_exception, "a handler exception ends the process (4)");
   }
 
 private:

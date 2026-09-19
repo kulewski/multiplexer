@@ -65,10 +65,10 @@ public:
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
+  virtual void _initialize_options(mx::options::Options &options) {
     common_.add(options);
-    options.add_options()("until", po::value(&until_)->default_value(0), "exit after N messages")(
-        "for", po::value(&duration_)->default_value(0.0), "exit after S seconds");
+    options.add("until", &until_, 0, "exit after N messages");
+    options.add("for", &duration_, 0.0, "exit after S seconds");
   }
 
 private:

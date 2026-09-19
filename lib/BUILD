@@ -7,7 +7,7 @@ cc_library(
     visibility = ["//:__subpackages__"],
     deps = [
         ":exception",
-        "@boost//:preprocessor",
+        "//lib/preproc:common",
     ],
 )
 
@@ -47,10 +47,17 @@ cc_test(
 )
 
 cc_library(
-    name = "sha1",
-    hdrs = ["sha1.h"],
+    name = "fingerprint",
+    hdrs = ["fingerprint.h"],
     visibility = ["//visibility:public"],
-    deps = ["@boost//:uuid"],
+    deps = [":crc32"],
+)
+
+cc_library(
+    name = "crc32",
+    srcs = ["crc32.cc"],
+    hdrs = ["crc32.h"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -101,19 +108,12 @@ cc_library(
 )
 
 cc_library(
-    name = "intrusive_value",
-    hdrs = ["intrusive_value.h"],
-)
-
-cc_library(
     name = "kwargs",
     srcs = ["kwargs.cc"],
     hdrs = ["kwargs.h"],
     visibility = ["//multiplexer/backend:__pkg__"],
     deps = [
         ":exception",
-        "@boost//:any",
-        "@boost//:foreach",
     ],
 )
 
@@ -136,10 +136,6 @@ cc_library(
     srcs = ["random.cc"],
     hdrs = ["random.h"],
     visibility = ["//visibility:public"],
-    deps = [
-        ":assert",
-        "@boost//:random",
-    ],
 )
 
 cc_library(
@@ -156,6 +152,24 @@ cc_library(
 )
 
 cc_library(
+    name = "options",
+    srcs = ["options.cc"],
+    hdrs = ["options.h"],
+    visibility = ["//:__subpackages__"],
+    deps = [":repr"],
+)
+
+cc_test(
+    name = "options_test",
+    size = "small",
+    srcs = ["options_test.cc"],
+    deps = [
+        ":options",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "spanset",
     hdrs = ["spanset.h"],
     visibility = ["//multiplexer:__pkg__"],
@@ -165,7 +179,12 @@ cc_library(
     name = "timer",
     hdrs = ["timer.h"],
     visibility = ["//multiplexer:__pkg__"],
-    deps = [":intrusive_value"],
+    deps = [
+        ":assert",
+        ":repr",
+        "//lib/logging",
+        "@asio",
+    ],
 )
 
 cc_library(
@@ -192,6 +211,17 @@ cc_test(
     srcs = ["kwargs_test.cc"],
     deps = [
         ":kwargs",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "digest_test",
+    size = "small",
+    srcs = ["digest_test.cc"],
+    deps = [
+        ":crc32",
+        ":fingerprint",
         "@com_google_googletest//:gtest_main",
     ],
 )

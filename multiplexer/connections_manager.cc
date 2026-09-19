@@ -8,7 +8,7 @@
 namespace multiplexer {
 namespace impl {
 
-boost::shared_ptr<const RawMessage> create_welcome_message(boost::uint32_t peer_type, boost::uint64_t instance_id) {
+std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id) {
 
   // prepare WelcomeMessage
   WelcomeMessage welcome;
@@ -23,7 +23,7 @@ boost::shared_ptr<const RawMessage> create_welcome_message(boost::uint32_t peer_
   welcome.SerializeToString(msg.mutable_message());
 
   // serialize
-  return boost::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
+  return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
 }
 
 }; // namespace impl

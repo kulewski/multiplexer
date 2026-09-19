@@ -6,7 +6,7 @@
 #include <future>
 #include <thread>
 
-#include <boost/asio/io_service.hpp>
+#include <asio/io_service.hpp>
 #include <gtest/gtest.h>
 
 #include "multiplexer/client.h"
@@ -41,9 +41,9 @@ TEST(ThreadedClient, QueryWithNoMultiplexerIsNotConnected) {
 // A synchronous Client next to the threaded one, to send it messages by
 // instance id and read what comes back.
 struct Peer {
-  explicit Peer(unsigned short port, boost::uint32_t type) : client(type) { client.connect("127.0.0.1", port, 5); }
-  multiplexer::MultiplexerMessage message(boost::uint32_t type, const std::string &payload, boost::uint64_t to,
-                                          boost::uint64_t references = 0) {
+  explicit Peer(unsigned short port, std::uint32_t type) : client(type) { client.connect("127.0.0.1", port, 5); }
+  multiplexer::MultiplexerMessage message(std::uint32_t type, const std::string &payload, std::uint64_t to,
+                                          std::uint64_t references = 0) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
     msg.set_from(client.instance_id());

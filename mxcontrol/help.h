@@ -18,11 +18,8 @@ public:
   }
 
 protected:
-  virtual void _initialize_hidden_options_description(po::options_description &hidden) {
-    hidden.add_options()("_subcommand_", po::value(&subcommand_));
-  }
-  virtual void _initialize_positional_options_description(po::positional_options_description &positional) {
-    positional.add("_subcommand_", 1);
+  virtual void _initialize_options(mx::options::Options &options) {
+    options.add("_subcommand_", &subcommand_, "").hidden().positional("_subcommand_");
   }
 
 private:

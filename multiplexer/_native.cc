@@ -124,11 +124,11 @@ public:
   // The io_service is owned here, not by a Python attribute: CPython clears
   // an instance's attributes before the base type's deallocator runs, so a
   // Client that only borrowed it would shut down on freed memory.
-  explicit PythonClient(boost::uint32_t client_type) : Client(client_type) {}
+  explicit PythonClient(std::uint32_t client_type) : Client(client_type) {}
 
   pybind11::object read_message(float timeout) {
-    BOOST_STATIC_ASSERT(
-        (boost::is_same<BasicClient::IncomingMessagesBuffer ::value_type::second_type, ConnectionWrapper>::value));
+    static_assert(std::is_same<BasicClient::IncomingMessagesBuffer::value_type::second_type, ConnectionWrapper>::value,
+                  "a reply carries the connection it came on");
     BasicClient::IncomingMessagesBuffer::value_type next;
     {
       GilRelease release;
@@ -194,7 +194,7 @@ public:
 
 // The probe an addressed query locates its addressee with, as the Python
 // side names it: the message type it sends.
-static Probe probe_from_type(boost::uint32_t type) {
+static Probe probe_from_type(std::uint32_t type) {
   if (type == types::PING)
     return PROBE_PING;
   if (type == types::BACKEND_FOR_PACKET_SEARCH)
@@ -223,7 +223,7 @@ static pybind11::object exception_for(ThreadedClient::Outcome outcome) {
 struct PythonThreadedClient {
   // `on_message` is a Python callable, or None; it runs on the io thread with
   // the GIL, as query callbacks do, and receives (bytes, connection).
-  PythonThreadedClient(boost::uint32_t peer_type, pybind11::object on_message)
+  PythonThreadedClient(std::uint32_t peer_type, pybind11::object on_message)
       : client(peer_type, on_message.is_none() ? ThreadedClient::MessageSink() : sink_for(on_message)) {}
   static ThreadedClient::MessageSink sink_for(pybind11::object callback) {
     std::shared_ptr<pybind11::object> held(new pybind11::object(callback), [](pybind11::object *object) {
@@ -278,7 +278,7 @@ struct PythonThreadedClient {
     client.set_search_policy(policy);
   }
 
-  bool connect(const std::string &host, boost::uint16_t port, float timeout) {
+  bool connect(const std::string &host, std::uint16_t port, float timeout) {
     GilRelease release;
     return client.connect(host, port, timeout);
   }
@@ -329,7 +329,7 @@ struct PythonThreadedClient {
       throw std::invalid_argument("not a serialized MultiplexerMessage");
     return msg;
   }
-  pybind11::tuple query(std::string serialized, float timeout, boost::uint32_t probe, LanePtr lane) {
+  pybind11::tuple query(std::string serialized, float timeout, std::uint32_t probe, LanePtr lane) {
     MultiplexerMessage msg = parse(serialized);
     Probe how = probe_from_type(probe);
     ThreadedClient::Result result;
@@ -340,7 +340,7 @@ struct PythonThreadedClient {
     result.check(); // throws the C++ exception, translated below
     return pybind11::make_tuple((pybind11::bytes)result.reply.first->get_message(), result.reply.second);
   }
-  void query_with_callback(std::string serialized, pybind11::function callback, float timeout, boost::uint32_t probe,
+  void query_with_callback(std::string serialized, pybind11::function callback, float timeout, std::uint32_t probe,
                            LanePtr lane) {
     MultiplexerMessage msg = parse(serialized);
     Probe how = probe_from_type(probe);
@@ -403,31 +403,39 @@ PYBIND11_MODULE(_native, module) {
   module.def("set_process_context_program_name", &mx::logging::set_process_context_program_name);
   module.def("set_maximal_logging_verbosity", &mx::logging::set_maximal_logging_verbosity);
 
-#define export_constant_level_or_verbosity(r, d, tup)                                                                  \
-  module.attr(BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(2, 0, tup))) = BOOST_PP_TUPLE_ELEM(2, 1, tup);
+  module.attr("DEBUG") = DEBUG;
+  module.attr("INFO") = INFO;
+  module.attr("OK") = OK;
+  module.attr("WARNING") = WARNING;
+  module.attr("ERROR") = ERROR;
+  module.attr("CRITICAL") = CRITICAL;
+  module.attr("ZEROVERBOSITY") = ZEROVERBOSITY;
+  module.attr("LOWVERBOSITY") = LOWVERBOSITY;
+  module.attr("MEDIUMVERBOSITY") = MEDIUMVERBOSITY;
+  module.attr("HIGHVERBOSITY") = HIGHVERBOSITY;
+  module.attr("CHATTERBOX") = CHATTERBOX;
 
-  BOOST_PP_SEQ_FOR_EACH(export_constant_level_or_verbosity, ~, MX_LOGGING_LEVELS_SEQ);
-  BOOST_PP_SEQ_FOR_EACH(export_constant_level_or_verbosity, ~, MX_LOGGING_VERBOSITIES_SEQ);
-
+  // LogEntry for the Python logger: each numeric field as a property with
+  // has_/clear_, each string field likewise with a copying getter.
+#define MX_EXPORT_NUM_FIELD(name)                                                                                      \
+  .def("has_" #name, &mx::logging::LogEntry::has_##name)                                                               \
+      .def("clear_" #name, &mx::logging::LogEntry::clear_##name)                                                       \
+      .def_property(#name, &mx::logging::LogEntry::name, &mx::logging::LogEntry::set_##name)
+#define MX_EXPORT_STR_FIELD(name)                                                                                      \
+  .def("has_" #name, &mx::logging::LogEntry::has_##name)                                                               \
+      .def("clear_" #name, &mx::logging::LogEntry::clear_##name)                                                       \
+      .def_property(#name, pybind11::cpp_function(&mx::logging::LogEntry::name, pybind11::return_value_policy::copy),  \
+                    pybind11::cpp_function((void(mx::logging::LogEntry::*)(const std::string &)) &                     \
+                                           mx::logging::LogEntry::set_##name))
   pybind11::class_<mx::logging::LogEntry>(module, "LogEntry")
-      .def(pybind11::init<>())
-#define export_a_method(class, name) .def(BOOST_PP_STRINGIZE(name), &class ::name)
-#define export_field_ctl(class, name)                                                                                  \
-  export_a_method(class, BOOST_PP_CAT(has_, name)) export_a_method(class, BOOST_PP_CAT(clear_, name))
-
-#define export_num_field(r, class, name)                                                                               \
-  export_field_ctl(class, name).def_property(BOOST_PP_STRINGIZE(name), &class ::name, &class ::BOOST_PP_CAT(set_, name))
-
-#define export_str_field(r, class, name)                                                                               \
-  export_field_ctl(class, name)                                                                                        \
-      .def_property(BOOST_PP_STRINGIZE(name), pybind11::cpp_function(&class ::name, pybind11::return_value_policy::copy),                           \
-          pybind11::cpp_function((void(class ::*)(const std::string &)) & class ::BOOST_PP_CAT(set_, name)))
-
-          BOOST_PP_SEQ_FOR_EACH(export_num_field, mx::logging::LogEntry,
-                                (id)(timestamp)(level)(verbosity)(data_type)(source_line)(pid))
-              BOOST_PP_SEQ_FOR_EACH(
-                  export_str_field, mx::logging::LogEntry,
-                  (context)(text)(workflow)(data_class)(data)(source_file)(compilation_datetime)(version));
+      .def(pybind11::init<>()) MX_EXPORT_NUM_FIELD(id) MX_EXPORT_NUM_FIELD(timestamp) MX_EXPORT_NUM_FIELD(level)
+          MX_EXPORT_NUM_FIELD(verbosity) MX_EXPORT_NUM_FIELD(data_type) MX_EXPORT_NUM_FIELD(source_line)
+              MX_EXPORT_NUM_FIELD(pid) MX_EXPORT_STR_FIELD(context) MX_EXPORT_STR_FIELD(text)
+                  MX_EXPORT_STR_FIELD(workflow) MX_EXPORT_STR_FIELD(data_class) MX_EXPORT_STR_FIELD(data)
+                      MX_EXPORT_STR_FIELD(source_file) MX_EXPORT_STR_FIELD(compilation_datetime)
+                          MX_EXPORT_STR_FIELD(version);
+#undef MX_EXPORT_NUM_FIELD
+#undef MX_EXPORT_STR_FIELD
 
   pybind11::class_<multiplexer::Client::NotConnected>(module, "Client_NotConnected");
 
@@ -497,18 +505,18 @@ PYBIND11_MODULE(_native, module) {
 
   module.def("test_connection_wrapper", test_connection_wrapper);
 
-  pybind11::class_<multiplexer::PythonClient /*, boost::shared_ptr<PythonClient>*/>(
+  pybind11::class_<multiplexer::PythonClient /*, std::shared_ptr<PythonClient>*/>(
       module, "Client", "The synchronous client; see multiplexer.mxclient.Client for the Python API.")
-      .def(pybind11::init<boost::uint32_t>())
+      .def(pybind11::init<std::uint32_t>())
 
       .def("_get_instance_id", &multiplexer::PythonClient::instance_id)
 
       .def("async_connect",
-           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, boost::uint16_t)) &
+           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, std::uint16_t)) &
                multiplexer::PythonClient::async_connect)
 
       .def("connect",
-           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, boost::uint16_t, float)) &
+           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, std::uint16_t, float)) &
                multiplexer::PythonClient::connect)
 
       .def("wait_for_connection", &multiplexer::PythonClient::wait_for_connection)
@@ -543,7 +551,7 @@ PYBIND11_MODULE(_native, module) {
   pybind11::class_<multiplexer::PythonThreadedClient>(
       module, "ThreadedClient",
       "A client with an io thread of its own; see multiplexer.threaded_client for the Python API.")
-      .def(pybind11::init<boost::uint32_t, pybind11::object>())
+      .def(pybind11::init<std::uint32_t, pybind11::object>())
       .def("instance_id", [](const multiplexer::PythonThreadedClient &client) { return client.client.instance_id(); })
       .def("random", [](multiplexer::PythonThreadedClient &client) { return client.client.random64(); })
       .def("connect", &multiplexer::PythonThreadedClient::connect)

@@ -5,9 +5,8 @@
 
 #include "lib/assertion.h"
 #include "lib/logging/logging.h"
+#include "lib/options.h"
 #include "mxcontrol/tasks_holder.h"
-#include <boost/foreach.hpp>
-#include <boost/program_options.hpp>
 #include <cstdlib>
 #include <deque>
 #include <iostream>
@@ -27,23 +26,26 @@ int run_tasks(int argc, char **argv) {
 
   // build program options
   bool show_help;
+  std::uint16_t logging_fd = 0;
+  std::string logging_file;
   std::string verbosity_name;
-  tasks_holder().general_options.add_options()("help", po::bool_switch(&show_help), "produce help message")(
-      "logging-fd", po::value<boost::uint16_t>(), "descriptor, to which binary logging stream is sent")(
-      "logging-file", po::value<std::string>(), "binary logging stream file (if --logging-fd not set)")(
-      "verbosity", po::value<std::string>(&verbosity_name)->default_value("MEDIUMVERBOSITY"),
-      "most verbose DEBUG entries emitted: ZEROVERBOSITY, LOWVERBOSITY, MEDIUMVERBOSITY, HIGHVERBOSITY or CHATTERBOX");
+  mx::options::Options &general = tasks_holder().general_options;
+  general.add_switch("help", &show_help, "produce help message");
+  general.add("logging-fd", &logging_fd, "descriptor, to which binary logging stream is sent");
+  general.add("logging-file", &logging_file, "binary logging stream file (if --logging-fd not set)");
+  general.add("verbosity", &verbosity_name, "MEDIUMVERBOSITY",
+              "most verbose DEBUG entries emitted: ZEROVERBOSITY, LOWVERBOSITY, MEDIUMVERBOSITY, HIGHVERBOSITY or "
+              "CHATTERBOX");
 
-  // parse the commandline
-  po::options_description cmdline_options;
-  cmdline_options.add(tasks_holder().general_options);
-
-  po::parsed_options parsed = po::command_line_parser(argc, argv).options(cmdline_options).allow_unregistered().run();
-  po::variables_map vm;
-  po::store(parsed, vm);
-  po::notify(vm);
-
-  std::vector<std::string> unrecognized_ = po::collect_unrecognized(parsed.options, po::include_positional);
+  // parse the commandline: what is not a general option is the subcommand
+  // and its own options
+  std::vector<std::string> unrecognized_;
+  try {
+    unrecognized_ = general.parse(args, true);
+  } catch (const mx::options::Error &error) {
+    cerr << argv[0] << ": " << error.what() << "\n";
+    return EXIT_FAILURE;
+  }
   std::deque<std::string> unrecognized(unrecognized_.begin(), unrecognized_.end());
   std::vector<std::string>().swap(unrecognized_); // free all memory
 
@@ -63,7 +65,7 @@ int run_tasks(int argc, char **argv) {
     // print what commands are available
     if (tasks_holder().tasks().size()) {
       cerr << "Available commands:\n";
-      BOOST_FOREACH (const TasksHolder::TasksMap::value_type &te, tasks_holder().tasks())
+      for (const TasksHolder::TasksMap::value_type &te : tasks_holder().tasks())
         cerr << "\t" << te.first << "\n";
     } else {
       cerr << "There are no available commands.\n";
@@ -73,10 +75,10 @@ int run_tasks(int argc, char **argv) {
   }
 
   // initialize env
-  if (vm.count("logging-fd")) {
-    mx::logging::set_logging_fd(vm["logging-fd"].as<boost::uint16_t>());
-  } else if (vm.count("logging-file")) {
-    mx::logging::set_logging_file(vm["logging-file"].as<std::string>());
+  if (general.given("logging-fd")) {
+    mx::logging::set_logging_fd(logging_fd);
+  } else if (general.given("logging-file")) {
+    mx::logging::set_logging_file(logging_file);
   }
 
   // The cap on DEBUG entries; the other levels are always emitted. The
@@ -86,7 +88,7 @@ int run_tasks(int argc, char **argv) {
   const char *from_environment = getenv(mx::logging::VERBOSITY_ENVIRONMENT_VARIABLE);
   for (unsigned int verbosity = 0; verbosity <= mx::logging::consts::MAX_VERBOSITY; ++verbosity) {
     if (verbosity_name == mx::logging::consts::logging_get_verbosity_name(verbosity)) {
-      if (!vm["verbosity"].defaulted() || !from_environment || !*from_environment)
+      if (general.given("verbosity") || !from_environment || !*from_environment)
         mx::logging::set_maximal_logging_verbosity(DEBUG, verbosity);
       verbosity_known = true;
     }

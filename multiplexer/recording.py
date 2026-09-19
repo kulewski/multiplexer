@@ -58,7 +58,7 @@ class RulesMismatch(Exception):
 
 def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
     """Yield every Record in the file, in order. With `check_rules`, the
-    first record's rules hash must match RULES_SHA1 of `constants`, the
+    first record's rules fingerprint must match RULES_FINGERPRINT of `constants`, the
     generated constants module of the rules file the multiplexer ran with."""
     with open(path, "rb") as recording:
         data = recording.read()
@@ -71,10 +71,14 @@ def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -
         position += size
         if first:
             first = False
-            if check_rules and record.HasField("header") and record.header.rules_sha1 != constants.RULES_SHA1:
+            if (
+                check_rules
+                and record.HasField("header")
+                and record.header.rules_fingerprint != constants.RULES_FINGERPRINT
+            ):
                 raise RulesMismatch(
                     "recorded with rules %s, these constants are from %s"
-                    % (record.header.rules_sha1, constants.RULES_SHA1)
+                    % (record.header.rules_fingerprint, constants.RULES_FINGERPRINT)
                 )
         yield record
 
@@ -131,7 +135,7 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
         return "%s header multiplexer=%d rules=%s payload_limit=%d" % (
             when,
             header.multiplexer_id,
-            header.rules_sha1[:12],
+            header.rules_fingerprint[:12],
             header.payload_limit,
         )
     if kind == "peer":

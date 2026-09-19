@@ -20,10 +20,8 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":config",
-        "//lib:sha1",
+        "//lib:fingerprint",
         "//lib:type_utils",
-        "@boost//:foreach",
-        "@boost//:lexical_cast",
     ],
 )
 
@@ -47,7 +45,6 @@ cc_library(
     name = "multiplexer_cc_constants",
     hdrs = [":generate_cc_multiplexer_constants"],
     visibility = ["//visibility:public"],
-    deps = ["@boost//:cstdint"],
 )
 
 py_library(
@@ -186,10 +183,7 @@ cc_library(
         "//lib:random",
         "//lib:thread_checker",
         "//multiplexer/io:raw_message",
-        "@boost//:asio",
-        "@boost//:random",
-        "@boost//:shared_ptr",
-        "@boost//:smart_ptr",
+        "@asio",
     ],
 )
 
@@ -208,8 +202,7 @@ cc_library(
         "//lib:random",
         "//lib:thread_checker",
         "//lib/logging",
-        "@boost//:asio",
-        "@boost//:date_time",
+        "@asio",
     ],
 )
 
@@ -289,10 +282,7 @@ cc_library(
         "//lib:triple",
         "//lib/logging",
         "//multiplexer/io:connection",
-        "@boost//:asio",
-        "@boost//:date_time",
-        "@boost//:foreach",
-        "@boost//:tribool",
+        "@asio",
     ],
 )
 
@@ -305,10 +295,7 @@ cc_library(
         ":basic_client",
         ":multiplexer_cc_proto",
         "//lib:vector",
-        "@boost//:asio",
-        "@boost//:shared_ptr",
-        "@boost//:smart_ptr",
-        "@boost//:tribool",
+        "@asio",
     ],
 )
 
@@ -326,9 +313,7 @@ cc_library(
         "//lib/logging",
         "//multiplexer/io:connection",
         "//multiplexer/mxlog:cc_type_id_constants",
-        "@boost//:asio",
-        "@boost//:foreach",
-        "@boost//:random",
+        "@asio",
     ],
 )
 

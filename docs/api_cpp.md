@@ -5,11 +5,11 @@ is the client; `multiplexer::backend::BaseMultiplexerServer` in
 [multiplexer/backend/base_multiplexer_server.h](../multiplexer/backend/base_multiplexer_server.h)
 is the base class for backends. The constants generated from the
 [rules file](rules.md) are in `multiplexer/multiplexer.constants.h`, as
-`multiplexer::peers::*` and `multiplexer::types::*`, both `boost::uint32_t`.
+`multiplexer::peers::*` and `multiplexer::types::*`, both `std::uint32_t`.
 
 Bazel targets: `@mx//multiplexer:client`,
 `@mx//multiplexer/backend:base_multiplexer_server` and
-`@mx//multiplexer:multiplexer_cc_constants`. The library uses Boost.Asio and
+`@mx//multiplexer:multiplexer_cc_constants`. The library uses standalone Asio and
 protocol buffers; a consuming workspace gets both through `mx_dependencies()`
 and `mx_setup()`, see [examples/README.md](../examples/README.md). The
 complete example is [examples/echo](../examples/echo).
@@ -40,7 +40,7 @@ client.shutdown();
 ```
 
 - The constructor takes the peer type and creates its own `io_service`; the
-  overloads taking a `boost::asio::io_service` share yours. The client runs
+  overloads taking an `asio::io_service` share yours. The client runs
   that service only inside its calls, so the peer type must be `is_passive`;
   this is the one class that needs the mark, every other runs the loop
   all the time
@@ -167,14 +167,14 @@ optional fields. Keys and their exact types:
 | Key | Type | Default while handling a request |
 |---|---|---|
 | `message` | `std::string`, `const std::string *`, or `const MultiplexerMessage *` for a message you built yourself | required |
-| `type` | `boost::uint32_t` | required unless `message` is a whole message |
-| `to` | `boost::uint64_t` | the requester's instance id |
-| `references` | `boost::uint64_t` | the request's id |
+| `type` | `std::uint32_t` | required unless `message` is a whole message |
+| `to` | `std::uint64_t` | the requester's instance id |
+| `references` | `std::uint64_t` | the request's id |
 | `workflow` | `std::string` or `const std::string *` | the request's workflow |
 | `multiplexer` | `int` `BaseMultiplexerServer::ONE` or `ALL`, or a `ConnectionWrapper` | the connection the request arrived on |
 
 `Kwargs` stores each value by its static type, so pass exactly the type in
-the table: the generated constants already are `boost::uint32_t`, but a
+the table: the generated constants already are `std::uint32_t`, but a
 literal or an `int` needs a cast. A wrong type fails an assertion in a debug
 build.
 

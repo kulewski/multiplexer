@@ -1,5 +1,5 @@
 # Building without Bazel: the multiplexer, the C++ library and the Python
-# package from the system's compiler, protobuf, Boost and pybind11. See
+# package from the system's compiler, protobuf, Asio and pybind11. See
 # docs/building.md. The source lists in make/sources.mk are generated from
 # the BUILD files by ./format.sh, so the two builds never disagree about
 # which files exist; everything else about the build is in this file.
@@ -11,7 +11,7 @@
 #   make RULES=your.rules ...   generate the constants from your rules file
 #
 # Debian and Ubuntu packages: g++ make protobuf-compiler libprotobuf-dev
-# libboost-dev libboost-program-options-dev python3-dev python3-protobuf
+# libasio-dev python3-dev python3-protobuf
 # pybind11-dev python3-pybind11; libgtest-dev for `make check`;
 # python3-pip python3-setuptools python3-wheel for `make wheel`.
 
@@ -31,9 +31,9 @@ GEN := $(BUILD)/gen
 OBJ := $(BUILD)/obj
 PY := $(BUILD)/python
 
-ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread
+ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread -DASIO_STANDALONE
 ALL_CPPFLAGS := -I. -I$(GEN) $(CPPFLAGS)
-ALL_LDLIBS := -lprotobuf -lboost_program_options -pthread $(LDLIBS)
+ALL_LDLIBS := -lprotobuf -pthread $(LDLIBS)
 
 include make/sources.mk
 

@@ -1,19 +1,19 @@
-// Seeding: 8 bytes from /dev/urandom, falling back to the pid if the read
-// comes up short.
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+// Seeding: 8 bytes from /dev/urandom, mixed with the pid and the time in
+// case the read comes up short.
 #include <unistd.h>
 
+#include <chrono>
 #include <fstream>
 
 #include "lib/random.h"
 
 using namespace mx;
 
-AutoSeedingRand48::AutoSeedingRand48() {
-  std::ifstream rf("/dev/urandom", std::ifstream::binary | std::ifstream::in);
-  boost::uint64_t seed = getpid();
-  rf.read((char *)&seed, sizeof(seed));
-  this->seed(seed);
+Random64::Random64() {
+  std::ifstream urandom("/dev/urandom", std::ifstream::binary | std::ifstream::in);
+  std::uint64_t seed = 0;
+  urandom.read(reinterpret_cast<char *>(&seed), sizeof(seed));
+  seed ^= static_cast<std::uint64_t>(getpid()) << 32;
+  seed ^= static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  engine_.seed(seed);
 }

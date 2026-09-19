@@ -16,8 +16,8 @@ runs first wins, ours or yours, in either order.
 What this repository needs from each: rules_python only for
 py_repositories() (the targets use Bazel's native py_* rules), so any
 rules_python from 0.1.0 on works, and mx_setup(python = False) skips the
-call when another ruleset already made it; rules_boost for Boost.Asio and
-friends; pybind11 and pybind11_bazel for the Python extension; bazel_skylib
+call when another ruleset already made it; standalone Asio for the io layer;
+pybind11 and pybind11_bazel for the Python extension; bazel_skylib
 for the build flags in the root BUILD. protoc and libprotobuf are not
 declared here: they come from the system by default, or from the targets
 //:protoc and //:protobuf_runtime are pointed at.
@@ -26,9 +26,9 @@ declared here: they come from the system by default, or from the targets
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
-RULES_BOOST_TAG = "079d472d88411fc2f8728bb15326092affadf8c7"
 PYBIND11_BAZEL_TAG = "c65db0ac44ff3cd790a803e4a804e2cc806cf641"
 PYBIND11_TAG = "b389ae77cb8a872d62e96d5f38ce020480140033"
+ASIO_TAG = "asio-1-30-2"
 
 def mx_dependencies():
     maybe(
@@ -44,17 +44,18 @@ def mx_dependencies():
         strip_prefix = "rules_python-1.6.3",
         url = "https://github.com/bazel-contrib/rules_python/releases/download/1.6.3/rules_python-1.6.3.tar.gz",
     )
+
+    # Standalone Asio: the io layer of the library, header-only. Label()
+    # resolves against this file's repository, so the build file is found
+    # whether we are the main workspace or @mx.
     maybe(
         http_archive,
-        name = "com_github_nelhage_rules_boost",
-        canonical_id = RULES_BOOST_TAG,
-        patch_args = ["-p1"],
-        # Label() resolves against this file's repository, so the patch is
-        # found whether we are the main workspace or @mx.
-        patches = [Label("//bazel:patches/boost.patch")],
-        sha256 = "667d7488f3fe70c4fd240513258f1c28ce0e3d66f346f54e1e52bdf5f437291a",
-        strip_prefix = "rules_boost-{tag}".format(tag = RULES_BOOST_TAG),
-        urls = ["https://github.com/nelhage/rules_boost/archive/{tag}.tar.gz".format(tag = RULES_BOOST_TAG)],
+        name = "asio",
+        build_file = Label("//bazel:asio.BUILD"),
+        canonical_id = ASIO_TAG,
+        sha256 = "755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8",
+        strip_prefix = "asio-{tag}".format(tag = ASIO_TAG),
+        urls = ["https://github.com/chriskohlhoff/asio/archive/refs/tags/{tag}.tar.gz".format(tag = ASIO_TAG)],
     )
     maybe(
         http_archive,

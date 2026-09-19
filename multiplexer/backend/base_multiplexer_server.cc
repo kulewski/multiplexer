@@ -1,7 +1,6 @@
 // BaseMultiplexerServer: the loop, the reply defaults and the protocol
 // messages a backend answers itself. See the header for the design.
-#include <boost/foreach.hpp>
-#include <boost/scoped_ptr.hpp>
+#include <memory>
 
 #include "multiplexer/backend/base_multiplexer_server.h"
 
@@ -10,7 +9,7 @@ namespace backend {
 
 BaseMultiplexerServer::BaseMultiplexerServer(const MultiplexerAddresses &addresses, PeerType type)
     : working(true), _has_sent_response(false), __conn(new multiplexer::Client(type)), conn(__conn.get()) {
-  BOOST_FOREACH (const MultiplexerAddress &address, addresses) {
+  for (const MultiplexerAddress &address : addresses) {
     conn->connect(address.first, address.second);
   }
 }
@@ -23,7 +22,7 @@ BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client *conn_, PeerTyp
 BaseMultiplexerServer::~BaseMultiplexerServer() {}
 
 void BaseMultiplexerServer::loop_iter(float timeout) {
-  std::pair<boost::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received = conn->receive_message(timeout);
+  std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received = conn->receive_message(timeout);
   last_mxmsg = received.first;
   last_connwrap = received.second;
   __handle_message();
@@ -64,17 +63,17 @@ bool BaseMultiplexerServer::drained() const {
 // Builds and queues a message. While a request is being handled the
 // defaults make it the reply: addressed to the requester, referencing the
 // request, on the connection the request arrived on. Kwargs is typed by
-// boost::any, so a key must hold exactly the type documented in the header.
-boost::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
+// std::any, so a key must hold exactly the type documented in the header.
+std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   _has_sent_response = true;
 
   DbgAssert(kwargs.check_keys(KwargsKeys()("message")("to")("type")("references")("workflow")));
   Assert(kwargs.has_key("message"));
   DbgAssert(kwargs.unsafe_is<const MultiplexerMessage *>("message") ||
             kwargs.unsafe_is<const std::string *>("message") || kwargs.unsafe_is<std::string>("message"));
-  DbgAssert(kwargs.empty_or<boost::uint32_t>("type"));
-  DbgAssert(kwargs.empty_or<boost::uint64_t>("references"));
-  DbgAssert(kwargs.empty_or<boost::uint64_t>("to"));
+  DbgAssert(kwargs.empty_or<std::uint32_t>("type"));
+  DbgAssert(kwargs.empty_or<std::uint64_t>("references"));
+  DbgAssert(kwargs.empty_or<std::uint64_t>("to"));
   DbgAssert(kwargs.empty_or<std::string>("workflow") || kwargs.unsafe_is<const std::string *>("workflow"));
 
   // defaults
@@ -83,7 +82,7 @@ boost::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   kwargs.set_default("to", last_mxmsg->from());
   kwargs.set_default("multiplexer", last_connwrap);
 
-  boost::scoped_ptr<MultiplexerMessage> _mxmsg;
+  std::unique_ptr<MultiplexerMessage> _mxmsg;
   const MultiplexerMessage *mxmsg;
   if (!kwargs.unsafe_is<const MultiplexerMessage *>("message")) {
     // Construct new MultiplexerMessage using some info from kwargs.
@@ -101,11 +100,11 @@ boost::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
     else
       AssertMsg(false, "impossible");
     // type
-    _mxmsg->set_type(kwargs.get<boost::uint32_t>("type"));
+    _mxmsg->set_type(kwargs.get<std::uint32_t>("type"));
     // to
-    _mxmsg->set_to(kwargs.get<boost::uint64_t>("to"));
+    _mxmsg->set_to(kwargs.get<std::uint64_t>("to"));
     // references
-    _mxmsg->set_references(kwargs.get<boost::uint64_t>("references"));
+    _mxmsg->set_references(kwargs.get<std::uint64_t>("references"));
     // workflow
     if (kwargs.unsafe_is<const std::string *>("workflow"))
       _mxmsg->set_workflow(*kwargs.get<const std::string *>("workflow"));

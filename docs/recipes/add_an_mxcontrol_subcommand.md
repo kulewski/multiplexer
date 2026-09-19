@@ -5,8 +5,9 @@
 
 1. **Write a `Task` subclass** in `mxcontrol/<name>.cc`: override `run()`,
    `short_description()` (shown by `mxcontrol help`), and
-   `_initialize_options_description()` to declare options with
-   `boost::program_options`. Call `_add_multiplexer_client_options()` there
+   `_initialize_options()` to declare options on an `mx::options::Options`
+   (`lib/options.h`: `add()`, `add_switch()`, `positional()`, `hidden()`,
+   `required()`). Call `_add_multiplexer_client_options()` there
    if the command is itself a peer, then `_multiplexer_client(peer_type)`
    in `run()` returns a `Client` connected to every `--multiplexer` given.
    `receive_logs.cc` is the smallest complete example, `stream_logs.cc` the

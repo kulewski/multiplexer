@@ -20,9 +20,8 @@
 #include <utility>
 #include <vector>
 
-#include <boost/cstdint.hpp>
-#include <boost/scoped_ptr.hpp>
-#include <boost/shared_ptr.hpp>
+#include <cstdint>
+#include <memory>
 
 #include "lib/exception.h"
 #include "lib/kwargs.h"
@@ -32,9 +31,9 @@
 namespace multiplexer {
 namespace backend {
 
-typedef std::pair<std::string, boost::uint16_t> MultiplexerAddress;
+typedef std::pair<std::string, std::uint16_t> MultiplexerAddress;
 typedef std::vector<MultiplexerAddress> MultiplexerAddresses;
-typedef boost::uint32_t PeerType;
+typedef std::uint32_t PeerType;
 
 using mx::util::kwargs::Kwargs;
 using mx::util::kwargs::KwargsKeys;
@@ -133,9 +132,9 @@ protected:
    *			const std::string* OR
    *			std::string
    * possible kwargs:
-   *	    to:		boost::uint64_t
-   *	    references: boost::uint64_t
-   *	    type:	boost::uint32_t
+   *	    to:		std::uint64_t
+   *	    references: std::uint64_t
+   *	    type:	std::uint32_t
    *	    workflow:	std::string OR
    *			const std::string*
    *	    multiplexer:    int OR
@@ -146,7 +145,7 @@ protected:
    * returns
    *	    TODO add doc on return type
    */
-  boost::any send_message(Kwargs kwargs);
+  std::any send_message(Kwargs kwargs);
 
   void no_response() { _has_sent_response = true; }
 
@@ -172,11 +171,11 @@ protected:
   std::chrono::steady_clock::time_point draining_since_;
 
 private:
-  boost::scoped_ptr<multiplexer::Client> __conn;
+  std::unique_ptr<multiplexer::Client> __conn;
 
 protected:
   multiplexer::Client *conn;
-  boost::shared_ptr<MultiplexerMessage> last_mxmsg;
+  std::shared_ptr<MultiplexerMessage> last_mxmsg;
   ConnectionWrapper last_connwrap;
 
 private:

@@ -6,15 +6,15 @@
 using namespace multiplexer;
 using std::cerr;
 
-Client::Client(boost::uint32_t client_type)
-    : io_service_ptr_(new boost::asio::io_service()), io_service_(*io_service_ptr_),
+Client::Client(std::uint32_t client_type)
+    : io_service_ptr_(new asio::io_service()), io_service_(*io_service_ptr_),
       basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
-Client::Client(boost::shared_ptr<boost::asio::io_service> io_service, boost::uint32_t client_type)
+Client::Client(std::shared_ptr<asio::io_service> io_service, std::uint32_t client_type)
     : io_service_ptr_(io_service), io_service_(*io_service_ptr_),
       basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
-Client::Client(boost::asio::io_service &io_service, boost::uint32_t client_type)
+Client::Client(asio::io_service &io_service, std::uint32_t client_type)
     : io_service_(io_service), basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
 // The thread that destroys the client owns it from here on, whichever
@@ -31,7 +31,7 @@ Client::~Client() {
     basic_client_->orphan_close_descriptors();
     new shared_ptr<BasicClient>(basic_client_); // leaked: keeps the object alive forever
     if (io_service_ptr_)
-      new shared_ptr<boost::asio::io_service>(io_service_ptr_); // leaked likewise
+      new shared_ptr<asio::io_service>(io_service_ptr_); // leaked likewise
     return;
   }
   basic_client_->bind_to_current_thread();
@@ -105,9 +105,12 @@ IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, L
   // and through the connection its PING came on. A late reply to the
   // original request is accepted too (accept_id); a late PING from another
   // backend is ignored (ignore_id).
-  MX_CREATE_MESSAGE(MultiplexerMessage, direct_query,
-                    (set_from(instance_id()))(set_id(random64()))(set_to(result.third->from()))(set_type(query.type()))(
-                        set_message(query.message())));
+  MultiplexerMessage direct_query;
+  direct_query.set_from(instance_id());
+  direct_query.set_id(random64());
+  direct_query.set_to(result.third->from());
+  direct_query.set_type(query.type());
+  direct_query.set_message(query.message());
 
   timer = basic_client_->create_timer(timeout);
   result = _send_and_receive(direct_query, *timer, false, false, query.id(), types::REQUEST_RECEIVED, mxmsg.id(),
@@ -203,8 +206,8 @@ MultiplexerMessage Client::_probe_for(const MultiplexerMessage &query, Probe pro
 // skipped; others that reference ignore_id are skipped silently, the rest
 // are logged and dropped.
 IncomingMessage Client::_send_and_receive(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, bool schedule_all,
-                                          bool handle_delivery_errors, boost::uint64_t accept_id,
-                                          boost::uint32_t ignore_type, boost::uint64_t ignore_id,
+                                          bool handle_delivery_errors, std::uint64_t accept_id,
+                                          std::uint32_t ignore_type, std::uint64_t ignore_id,
                                           ConnectionWrapper connection, LanePtr lane) {
 
   IncomingMessage result;
@@ -244,8 +247,8 @@ IncomingMessage Client::_send_and_receive(const MultiplexerMessage &mxmsg, mx::S
 // prefer (a reply's origin); any other is used if it is gone. Through a
 // pinned lane there is no other: the loss is NotConnected.
 IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer &timer,
-                                              std::vector<uint64_t> accept_ids, boost::uint32_t ignore_type,
-                                              boost::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane) {
+                                              std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
+                                              std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane) {
   for (;;) {
     ConnectionWrapper used = _send_one(mxmsg, timer, connection, lane);
     bool lost = false;

@@ -12,7 +12,7 @@ load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile
 
 refresh_compile_commands(
     name = "compdb",
-    # Entries for Boost's and protobuf's own headers are not useful in the
+    # Entries for Asio's and protobuf's own headers are not useful in the
     # editor and make the file two hundred times bigger.
     exclude_headers = "external",
     targets = {

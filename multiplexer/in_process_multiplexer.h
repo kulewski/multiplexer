@@ -9,7 +9,7 @@
 #include <string>
 #include <thread>
 
-#include <boost/asio/io_service.hpp>
+#include <asio/io_service.hpp>
 
 #include "multiplexer/server.h"
 
@@ -37,7 +37,7 @@ struct InProcessMultiplexer {
     io_service.post([this] { server->stop(); });
     thread.join();
   }
-  boost::asio::io_service io_service;
+  asio::io_service io_service;
   multiplexer::Server::pointer server;
   unsigned short port = 0;
   std::thread thread;

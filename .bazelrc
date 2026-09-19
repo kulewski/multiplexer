@@ -4,7 +4,7 @@ build --cxxopt=-std=c++17
 
 # Warnings are errors for our own code and the generated protobuf sources.
 # External code is compiled silently and its headers are system headers, so
-# nothing in Boost, pybind11 or zstd can fail a build. One-off escape hatch:
+# nothing in Asio, pybind11 or zstd can fail a build. One-off escape hatch:
 #   bazel build --per_file_copt=.*@-Wno-error //...
 build --copt=-Wall
 build --copt=-Wextra

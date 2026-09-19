@@ -11,15 +11,14 @@
 // pulling in the logging library, so this tool stays small and builds early.
 #define IS_GENERATE_CONSTANTS 1
 
-#include <boost/foreach.hpp>
-#include <boost/lexical_cast.hpp>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <set>
 #include <unordered_set>
 
-#include "lib/sha1.h"
+#include "lib/fingerprint.h"
+#include "lib/repr.h"
 #include "lib/type_utils.h"
 #include "multiplexer/config.h"
 
@@ -40,10 +39,9 @@ bool endswith(const std::string &str, const std::string &with) {
 }
 
 template <typename ValueType> struct RepeatedKeyException : mx::Exception {
-  RepeatedKeyException(const ValueType &value)
-      : mx::Exception("value of '" + boost::lexical_cast<std::string>(value) + "' repeats") {}
+  RepeatedKeyException(const ValueType &value) : mx::Exception("value of '" + mx::repr(value) + "' repeats") {}
   RepeatedKeyException(const ValueType &value, const std::string &hint)
-      : mx::Exception("value of '" + boost::lexical_cast<std::string>(value) + "' repeats (" + hint + ")") {}
+      : mx::Exception("value of '" + mx::repr(value) + "' repeats (" + hint + ")") {}
 };
 
 template <typename SetType, typename ValueType> void __set_checked_add(SetType &values, const ValueType &value) {
@@ -59,9 +57,9 @@ void __set_checked_add(SetType &values, const ValueType &value, const std::strin
 
 template <typename Map> void check_map_values_name_type_uniqueness(const Map &entry) {
   std::set<std::string> names;
-  std::unordered_set<boost::uint32_t> ids;
+  std::unordered_set<std::uint32_t> ids;
 
-  BOOST_FOREACH (const typename Map::value_type &value, entry) {
+  for (const typename Map::value_type &value : entry) {
     __set_checked_add(names, value.second.name());
     __set_checked_add(ids, value.second.type(), "somewhere about " + value.second.name());
   }
@@ -88,12 +86,12 @@ template <typename Map>
 void __write_python_name_to_type_mapping(ostream &out, const Map &map, const std::string &set_name) {
   out << "class " << set_name << ":\n";
   out << "\n";
-  BOOST_FOREACH (const typename Map::value_type &entry, map)
+  for (const typename Map::value_type &entry : map)
     out << "\t" << entry.second.name() << " = " << entry.second.type() << "\n";
   out << "\n";
   out << "\t"
       << "idtoname = {}\n";
-  BOOST_FOREACH (const typename Map::value_type &entry, map)
+  for (const typename Map::value_type &entry : map)
     out << "\t"
         << "idtoname[" << entry.second.name() << "] = '" << entry.second.name() << "'\n";
   out << "\t"
@@ -103,16 +101,16 @@ void __write_python_name_to_type_mapping(ostream &out, const Map &map, const std
 
 // The SHA-1 of the rules file's text, so that a recording made by a
 // multiplexer running with a different rules file can be told apart.
-std::string rules_sha1(const std::string &source_file) {
+std::string rules_fingerprint(const std::string &source_file) {
   ifstream in(source_file.c_str(), ifstream::binary);
   std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  return mx::sha1_hex(text);
+  return mx::fingerprint(text);
 }
 
 int write_python(Config &config, ostream &out, const std::string &source_file) {
   write_signature("#", out, source_file);
   out << "# SHA-1 of the rules file these constants were generated from; a recording's header carries the same.\n"
-      << "RULES_SHA1 = \"" << rules_sha1(source_file) << "\"\n\n";
+      << "RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\"\n\n";
   out << "class _constants_base:\n"
       << "\t"
       << "idtoname = None # dict defined by a subclass\n"
@@ -154,19 +152,19 @@ void __write_cxx_name_to_type_mapping(ostream &out, const Map &map, const std::s
   const char *const PREF = "\t";
 
   out << PREF << "namespace " << set_name << " {\n";
-  BOOST_FOREACH (const typename Map::value_type &entry, map)
+  for (const typename Map::value_type &entry : map)
     out << PREF << "\t"
-        << "static const boost::uint32_t " << entry.second.name() << " = " << entry.second.type() << ";\n";
+        << "static const std::uint32_t " << entry.second.name() << " = " << entry.second.type() << ";\n";
 
   // generate get_name() function using great switch() statement
   out << "\n"
       << PREF << "\t"
-      << "static inline const char* get_name(const boost::uint32_t t, const "
+      << "static inline const char* get_name(const std::uint32_t t, const "
          "char* default_ = \"UNKNOWN\") {\n"
       << PREF << "\t"
       << "\t"
       << "switch(t) {\n";
-  BOOST_FOREACH (const typename Map::value_type &entry, map)
+  for (const typename Map::value_type &entry : map)
     out << PREF << "\t"
         << "\t"
         << "\t"
@@ -189,13 +187,13 @@ int write_cxx(Config &config, ostream &out, const std::string &source_file) {
   out << "#ifndef GENERATED_" << identifier << "\n"
       << "#define GENERATED_" << identifier << "\n"
       << "\n"
-      << "#include <boost/cstdint.hpp>\n"
+      << "#include <cstdint>\n"
       << "\n";
 
   write_signature("//", out, source_file);
   out << "namespace multiplexer {\n"
       << "\t// SHA-1 of the rules file these constants were generated from.\n"
-      << "\tstatic const char *const RULES_SHA1 = \"" << rules_sha1(source_file) << "\";\n\n";
+      << "\tstatic const char *const RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\";\n\n";
   __write_cxx_name_to_type_mapping(out, config.message_description_by_id(), "types");
   __write_cxx_name_to_type_mapping(out, config.peer_by_type(), "peers");
 

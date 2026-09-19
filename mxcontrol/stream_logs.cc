@@ -26,14 +26,13 @@ public:
            "stdin\n"
         << "and send collected records in chunks to a Log Collector.\n"
         << "\n"
-        << _options_description();
+        << _options();
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &generic) {
-    generic.add_options()("chunksize", po::value(&chunksize_)->default_value(32),
-                          "how many LogEntries send at a time; 0 for unlimited");
-    _add_multiplexer_client_options(generic);
+  virtual void _initialize_options(mx::options::Options &options) {
+    options.add("chunksize", &chunksize_, 32, "how many LogEntries send at a time; 0 for unlimited");
+    _add_multiplexer_client_options(options);
   }
 
 private:

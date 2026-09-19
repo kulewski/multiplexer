@@ -17,11 +17,9 @@
 
 #include <string>
 
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/foreach.hpp>
-#include <boost/random.hpp>
-#include <boost/shared_ptr.hpp>
+#include <asio/io_service.hpp>
+#include <asio/ip/tcp.hpp>
+#include <memory>
 
 #include "lib/logging/logging.h"
 #include "lib/random.h"
@@ -54,14 +52,14 @@ struct DefaultConnectionsManagerTraits {
 template <typename ConnectionsManagerImplementation> struct ConnectionsManagerTraits;
 
 namespace impl {
-boost::shared_ptr<const RawMessage> create_welcome_message(boost::uint32_t peer_type, boost::uint64_t instance_id);
+std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id);
 };
 
 template <typename ConnectionsManagerImplementation> class ConnectionsManager {
 protected:
   // The instance id is drawn once here; it is what the peer announces in its
   // welcome and what `from` and `to` fields refer to.
-  ConnectionsManager(boost::asio::io_service &io_service) : io_service_(io_service), instance_id_(random_()) {
+  ConnectionsManager(asio::io_service &io_service) : io_service_(io_service), instance_id_(random_()) {
     MX_LOG(DEBUG, HIGHVERBOSITY,
            CTX("ConnectionsManager") TEXT("created new ConnectionsManager with id " + repr(instance_id_)));
   }
@@ -76,17 +74,17 @@ public:
   // Per peer type, first list ordered for round robin: send_to_one and the
   // client's schedule_one move the connection they used to the back.
   typedef std::list<typename Connection::weak_pointer> ConnectionsList;
-  typedef std::map<boost::uint32_t, ConnectionsList> ConnectionsByType;
-  typedef std::map<boost::uint64_t, typename Connection::weak_pointer> ConnectionById;
+  typedef std::map<std::uint32_t, ConnectionsList> ConnectionsByType;
+  typedef std::map<std::uint64_t, typename Connection::weak_pointer> ConnectionById;
 
   typedef ::multiplexer::Config<std::map> Config;
 
-  ///*virtual*/ boost::shared_ptr<const RawMessage> get_welcome_message() = 0;
+  ///*virtual*/ std::shared_ptr<const RawMessage> get_welcome_message() = 0;
 
   // A peer type is acceptable when the rules file names it; the derived
   // classes narrow this further (only multiplexers for first client, no reserved
   // types for first multiplexer).
-  bool inline accept_peer_type(boost::uint32_t peer_type) const {
+  bool inline accept_peer_type(std::uint32_t peer_type) const {
     return !config_.initialized() || config_.peer_by_type().find(peer_type) != config_.peer_by_type().end();
   }
 
@@ -161,9 +159,9 @@ public:
   // noticed dead, so the same host may replace its own id. Another host
   // claiming first live id is refused (see register_connection).
   static bool same_remote_address(Connection &first, Connection &second) {
-    boost::system::error_code first_error, second_error;
-    boost::asio::ip::tcp::endpoint first_endpoint = first.socket().remote_endpoint(first_error);
-    boost::asio::ip::tcp::endpoint second_endpoint = second.socket().remote_endpoint(second_error);
+    asio::error_code first_error, second_error;
+    asio::ip::tcp::endpoint first_endpoint = first.socket().remote_endpoint(first_error);
+    asio::ip::tcp::endpoint second_endpoint = second.socket().remote_endpoint(second_error);
     if (first_error || second_error)
       return true; // one side is already gone: let the newcomer replace it
     return first_endpoint.address() == second_endpoint.address();
@@ -243,7 +241,7 @@ public:
   unsigned int connections_count(bool exact) const {
     if (exact) {
       unsigned int c = 0;
-      BOOST_FOREACH (const typename ConnectionById::value_type &current, connection_by_id_)
+      for (const typename ConnectionById::value_type &current : connection_by_id_)
         if (current.second.lock())
           ++c;
         else
@@ -286,7 +284,7 @@ public:
   void read_rules(const std::string &file) { config_.read_configuration(file); }
   // The queue_size the rules file gives `peer_type`, or the default for a
   // type it does not name (a reserved one the derived class accepted).
-  unsigned int outgoing_queue_max_size(boost::uint32_t peer_type) const {
+  unsigned int outgoing_queue_max_size(std::uint32_t peer_type) const {
     if (config_.initialized()) {
       typename Config::PeerDescriptionById::const_iterator entry = config_.peer_by_type().find(peer_type);
       if (entry != config_.peer_by_type().end())
@@ -295,7 +293,7 @@ public:
     return DEFAULT_OUT_QUEUE_SIZE;
   }
 
-  boost::uint64_t instance_id() const { return instance_id_; }
+  std::uint64_t instance_id() const { return instance_id_; }
 
   // The thread that runs the io_service and owns the connections. Binds to
   // the first thread that checks it, so an object may be constructed on one
@@ -307,14 +305,14 @@ public:
 
 protected:
   /* optional helpers */
-  inline boost::shared_ptr<const RawMessage> create_welcome_message(boost::uint32_t peer_type) const {
+  inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type) const {
     return impl::create_welcome_message(peer_type, instance_id_);
   }
 
 protected:
-  boost::asio::io_service &io_service_;
+  asio::io_service &io_service_;
   mx::Random64 random_;
-  boost::uint64_t instance_id_;
+  std::uint64_t instance_id_;
   Config config_;
   // unsigned int living_count_;
   ConnectionsByType connections_by_type_;

@@ -1,5 +1,6 @@
 // See common.h.
 #include "tests/roles/cc/common.h"
+#include "lib/repr.h"
 
 #include <cstdio>
 #include <iostream>
@@ -55,10 +56,10 @@ void install_signal_handlers() {
   std::signal(SIGINT, on_signal);
 }
 
-void CommonOptions::add(po::options_description &options) {
-  options.add_options()("mx", po::value(&mx)->composing(), "host:port of a multiplexer, repeatable")(
-      "type", po::value(&type)->required(), "peer type id")("name", po::value(&name)->default_value(""),
-                                                            "label used in events");
+void CommonOptions::add(mx::options::Options &options) {
+  options.add("mx", &mx, "host:port of a multiplexer, repeatable");
+  options.add("type", &type, "peer type id").required();
+  options.add("name", &name, "", "label used in events");
 }
 
 std::unique_ptr<Client> CommonOptions::connect() const {
@@ -66,7 +67,7 @@ std::unique_ptr<Client> CommonOptions::connect() const {
   for (size_t index = 0; index < mx.size(); ++index) {
     std::string::size_type colon = mx[index].rfind(':');
     std::string host = mx[index].substr(0, colon);
-    boost::uint16_t port = boost::lexical_cast<boost::uint16_t>(mx[index].substr(colon + 1));
+    std::uint16_t port = mx::from_string<std::uint16_t>(mx[index].substr(colon + 1));
     client->connect(host, port);
   }
   return client;
@@ -80,22 +81,22 @@ Event CommonOptions::connected_event(Client &client) const {
   return connected;
 }
 
-std::map<boost::uint32_t, boost::uint32_t> kv_ints(const std::vector<std::string> &items) {
-  std::map<boost::uint32_t, boost::uint32_t> out;
+std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string> &items) {
+  std::map<std::uint32_t, std::uint32_t> out;
   for (size_t index = 0; index < items.size(); ++index) {
     std::string::size_type eq = items[index].find('=');
-    out[boost::lexical_cast<boost::uint32_t>(items[index].substr(0, eq))] =
-        boost::lexical_cast<boost::uint32_t>(items[index].substr(eq + 1));
+    out[mx::from_string<std::uint32_t>(items[index].substr(0, eq))] =
+        mx::from_string<std::uint32_t>(items[index].substr(eq + 1));
   }
   return out;
 }
 
-std::vector<std::pair<boost::uint32_t, std::string>> typed_payloads(const std::vector<std::string> &items) {
-  std::vector<std::pair<boost::uint32_t, std::string>> out;
+std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string> &items) {
+  std::vector<std::pair<std::uint32_t, std::string>> out;
   for (size_t index = 0; index < items.size(); ++index) {
     std::string::size_type colon = items[index].find(':');
-    out.push_back(std::make_pair(boost::lexical_cast<boost::uint32_t>(items[index].substr(0, colon)),
-                                 items[index].substr(colon + 1)));
+    out.push_back(
+        std::make_pair(mx::from_string<std::uint32_t>(items[index].substr(0, colon)), items[index].substr(colon + 1)));
   }
   return out;
 }

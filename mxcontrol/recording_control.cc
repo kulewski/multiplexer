@@ -10,10 +10,8 @@
 #include <iostream>
 #include <set>
 
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/foreach.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/optional.hpp>
+#include <asio/ip/tcp.hpp>
+#include <optional>
 
 #include "lib/protobuf/stream.h"
 #include "lib/repr.h"
@@ -95,34 +93,31 @@ public:
         << "A host name resolves to all its addresses, one connection each. --stay keeps\n"
         << "start running, restarting the session on replicas that come back, until SIGINT,\n"
         << "which then stops every session.\n\n"
-        << _options_description();
+        << _options();
   }
 
 protected:
-  virtual void _initialize_options_description(po::options_description &options) {
-    options.add_options()("action", po::value(&action_), "start, stop, status or tap")(
-        "multiplexer,M", po::value(&multiplexers_)->composing(),
-        "multiplexer address as host:port; a name resolves to every address; may be repeated")(
-        "type", po::value(&peer_type_)->default_value(multiplexer::RECORDING_CONTROLLER),
-        "peer type to connect as (default: the reserved recording controller)")(
-        "label", po::value(&label_)->default_value("session"), "start: the session's name in the file name")(
-        "payload-bytes", po::value(&payload_bytes_)->default_value(0),
-        "start, tap: keep only the first N bytes of each payload; 0 keeps all")(
-        "max-bytes", po::value(&max_bytes_), "start: close the session at this size; default 1 GiB, 0 for no cap")(
-        "max-seconds", po::value(&max_seconds_)->default_value(0), "start: close the session after this long")(
-        "stay", po::bool_switch(&stay_), "start: keep running and restart the session on replicas that come back")(
-        "out", po::value(&out_), "tap: write the records to this file instead of stdout")(
-        "timeout", po::value(&timeout_)->default_value(5.0), "seconds to wait for connections and answers");
-  }
-  virtual void _initialize_positional_options_description(po::positional_options_description &positional) {
-    positional.add("action", 1);
+  virtual void _initialize_options(mx::options::Options &options) {
+    options.add("action", &action_, "start, stop, status or tap").positional("action");
+    options.add("multiplexer,M", &multiplexers_,
+                "multiplexer address as host:port; a name resolves to every address; may be repeated");
+    options.add("type", &peer_type_, multiplexer::RECORDING_CONTROLLER,
+                "peer type to connect as (default: the reserved recording controller)");
+    options.add("label", &label_, "session", "start: the session's name in the file name");
+    options.add("payload-bytes", &payload_bytes_, 0,
+                "start, tap: keep only the first N bytes of each payload; 0 keeps all");
+    options.add("max-bytes", &max_bytes_text_, "start: close the session at this size; default 1 GiB, 0 for no cap");
+    options.add("max-seconds", &max_seconds_, 0, "start: close the session after this long");
+    options.add_switch("stay", &stay_, "start: keep running and restart the session on replicas that come back");
+    options.add("out", &out_, "tap: write the records to this file instead of stdout");
+    options.add("timeout", &timeout_, 5.0, "seconds to wait for connections and answers");
   }
 
 private:
   // Every address of every --multiplexer, resolved; returns how many connected.
   unsigned int _connect(Client &client);
   // Queues `control` on every connection; returns the request id.
-  boost::uint64_t _send(Client &client, const RecordingControl &control);
+  std::uint64_t _send(Client &client, const RecordingControl &control);
   // Queues `control` on one connection.
   void _send(Client &client, const RecordingControl &control, multiplexer::ConnectionWrapper connection);
   // Sends `control` everywhere and collects one status per connection,
@@ -133,10 +128,11 @@ private:
 
   std::string action_;
   std::vector<std::string> multiplexers_;
-  boost::uint32_t peer_type_;
+  std::uint32_t peer_type_;
   std::string label_;
   unsigned int payload_bytes_;
-  boost::optional<boost::uint64_t> max_bytes_;
+  std::string max_bytes_text_; // --max-bytes as typed; empty when not given
+  std::optional<std::uint64_t> max_bytes_;
   unsigned int max_seconds_;
   bool stay_;
   std::string out_;
@@ -147,7 +143,7 @@ REGISTER_MXCONTROL_SUBCOMMAND(recording, mxcontrol::RecordingControlTask);
 
 unsigned int RecordingControlTask::_connect(Client &client) {
   unsigned int connected = 0;
-  BOOST_FOREACH (const std::string &address, multiplexers_) {
+  for (const std::string &address : multiplexers_) {
     std::string::size_type colon = address.rfind(':');
     if (colon == std::string::npos) {
       std::cerr << "invalid multiplexer address " << address << " (host:port expected)\n";
@@ -157,12 +153,12 @@ unsigned int RecordingControlTask::_connect(Client &client) {
     if (host.empty())
       host = "127.0.0.1";
     const std::string port = address.substr(colon + 1);
-    boost::asio::ip::tcp::resolver resolver(io_service());
-    boost::asio::ip::tcp::resolver::iterator end;
+    asio::ip::tcp::resolver resolver(io_service());
+    asio::ip::tcp::resolver::iterator end;
     try {
-      boost::asio::ip::tcp::resolver::query query(host, port);
-      for (boost::asio::ip::tcp::resolver::iterator entry = resolver.resolve(query); entry != end; ++entry) {
-        const boost::asio::ip::tcp::endpoint endpoint = *entry;
+      asio::ip::tcp::resolver::query query(host, port);
+      for (asio::ip::tcp::resolver::iterator entry = resolver.resolve(query); entry != end; ++entry) {
+        const asio::ip::tcp::endpoint endpoint = *entry;
         if (client.connect(endpoint, timeout_)) {
           ++connected;
         } else {
@@ -176,7 +172,7 @@ unsigned int RecordingControlTask::_connect(Client &client) {
   return connected;
 }
 
-boost::uint64_t RecordingControlTask::_send(Client &client, const RecordingControl &control) {
+std::uint64_t RecordingControlTask::_send(Client &client, const RecordingControl &control) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(client.random64());
   mxmsg.set_from(client.instance_id());
@@ -202,12 +198,12 @@ bool RecordingControlTask::_control(Client &client, const RecordingControl &cont
     std::cerr << "not connected to any multiplexer\n";
     return false;
   }
-  const boost::uint64_t request = _send(client, control);
-  std::set<boost::uint64_t> answered;
+  const std::uint64_t request = _send(client, control);
+  std::set<std::uint64_t> answered;
   bool ok = true;
   Deadline timer(timeout_);
   while (answered.size() < expected) {
-    std::pair<boost::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
+    std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
     try {
       incoming = client.receive_message(timer.remaining() > 0 ? timer.remaining() : 0.01f);
     } catch (const Client::OperationTimedOut &) {
@@ -235,6 +231,8 @@ bool RecordingControlTask::_control(Client &client, const RecordingControl &cont
 }
 
 int RecordingControlTask::run() {
+  if (!max_bytes_text_.empty())
+    max_bytes_ = mx::from_string<std::uint64_t>(max_bytes_text_);
   if (action_ != "start" && action_ != "stop" && action_ != "status" && action_ != "tap") {
     std::cerr << "action must be start, stop, status or tap\n";
     return 2;
@@ -292,7 +290,7 @@ int RecordingControlTask::_stay(Client &client) {
     Deadline timer(POLL_SECONDS);
     _send(client, status_request);
     while (!stop_requested && !timer.expired()) {
-      std::pair<boost::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
+      std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
       try {
         incoming = client.receive_message(std::min(timer.remaining(), 0.5f));
       } catch (const Client::OperationTimedOut &) {
@@ -343,13 +341,13 @@ int RecordingControlTask::_tap(Client &client) {
   tap.set_payload_limit(payload_bytes_);
   RecordingControl status_request;
   status_request.set_action(RecordingControl::STATUS);
-  std::set<boost::uint64_t> tapped;
-  boost::uint64_t records = 0;
+  std::set<std::uint64_t> tapped;
+  std::uint64_t records = 0;
   _send(client, tap);
   while (!stop_requested) {
     Deadline timer(POLL_SECONDS);
     while (!stop_requested && !timer.expired()) {
-      std::pair<boost::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
+      std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
       try {
         incoming = client.receive_message(std::min(timer.remaining(), 0.5f));
       } catch (const Client::OperationTimedOut &) {

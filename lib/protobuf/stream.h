@@ -7,8 +7,6 @@
 #include "lib/fd.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
-#include <boost/noncopyable.hpp>
-#include <boost/scoped_ptr.hpp>
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/message.h>
@@ -44,7 +42,7 @@ struct MessageInputStream {
 
   // helper
   static inline bool Read(google::protobuf::Message &m, google::protobuf::io::CodedInputStream &cis) {
-    boost::uint64_t length;
+    std::uint64_t length;
     if (!cis.ReadVarint64(&length))
       return false;
     google::protobuf::io::CodedInputStream::Limit limit = cis.PushLimit(length);
@@ -75,7 +73,9 @@ private:
   bool own_ostream_;
 };
 
-struct FileMessageOutputStream : MessageOutputStream, boost::noncopyable {
+struct FileMessageOutputStream : MessageOutputStream {
+  FileMessageOutputStream(const FileMessageOutputStream &) = delete;
+  FileMessageOutputStream &operator=(const FileMessageOutputStream &) = delete;
   explicit FileMessageOutputStream(int fd, bool own_fd = false) : fd_(fd, own_fd) {}
 
   virtual bool write(const google::protobuf::Message &m) {
@@ -88,7 +88,7 @@ struct FileMessageOutputStream : MessageOutputStream, boost::noncopyable {
 
 private:
   util::Fd fd_;
-  boost::scoped_ptr<google::protobuf::io::FileOutputStream> file_output_stream_;
+  std::unique_ptr<google::protobuf::io::FileOutputStream> file_output_stream_;
 };
 
 struct FileMessageInputStream : MessageInputStream {
@@ -100,8 +100,8 @@ struct FileMessageInputStream : MessageInputStream {
 
 private:
   util::Fd fd_;
-  boost::scoped_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
-  boost::scoped_ptr<google::protobuf::io::CodedInputStream> coded_input_stream_;
+  std::unique_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
+  std::unique_ptr<google::protobuf::io::CodedInputStream> coded_input_stream_;
 };
 
 }; // namespace protobuf
