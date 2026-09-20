@@ -4,15 +4,17 @@
 #ifndef MX_LIB_PROTOBUF_STREAM_H_
 #define MX_LIB_PROTOBUF_STREAM_H_
 
-#include "lib/fd.h"
-#include "lib/logging/logging.h"
-#include "lib/repr.h"
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/stubs/common.h>
-#include <memory>
 #include <unistd.h>
+
+#include <memory>
+
+#include "lib/fd.h"
+#include "lib/logging/logging.h"
+#include "lib/repr.h"
 
 namespace mx {
 namespace protobuf {
@@ -22,11 +24,11 @@ namespace protobuf {
 // mxcontrol streamlogs reads.
 struct MessageOutputStream {
   virtual ~MessageOutputStream() {}
-  virtual bool write(const google::protobuf::Message &m) = 0;
+  virtual bool write(const google::protobuf::Message& m) = 0;
   virtual void flush() {}
 
   // helper
-  static inline bool Write(const google::protobuf::Message &m, google::protobuf::io::ZeroCopyOutputStream &zcos) {
+  static inline bool Write(const google::protobuf::Message& m, google::protobuf::io::ZeroCopyOutputStream& zcos) {
     google::protobuf::io::CodedOutputStream coded(&zcos);
     coded.WriteVarint64(m.ByteSizeLong());
     m.SerializeToCodedStream(&coded);
@@ -38,13 +40,14 @@ struct MessageOutputStream {
 // on a truncated message.
 struct MessageInputStream {
   virtual ~MessageInputStream() {}
-  virtual bool read(google::protobuf::Message &m) = 0;
+  virtual bool read(google::protobuf::Message& m) = 0;
 
   // helper
-  static inline bool Read(google::protobuf::Message &m, google::protobuf::io::CodedInputStream &cis) {
+  static inline bool Read(google::protobuf::Message& m, google::protobuf::io::CodedInputStream& cis) {
     std::uint64_t length;
-    if (!cis.ReadVarint64(&length))
+    if (!cis.ReadVarint64(&length)) {
       return false;
+    }
     google::protobuf::io::CodedInputStream::Limit limit = cis.PushLimit(length);
     bool ok = m.ParseFromCodedStream(&cis) && cis.ConsumedEntireMessage();
     cis.PopLimit(limit);
@@ -53,9 +56,9 @@ struct MessageInputStream {
 };
 
 struct OstreamMessageOutputStream : MessageOutputStream {
-  OstreamMessageOutputStream(std::ostream *output, bool own_ostream) : output_(output), own_ostream_(own_ostream) {}
+  OstreamMessageOutputStream(std::ostream* output, bool own_ostream) : output_(output), own_ostream_(own_ostream) {}
 
-  virtual bool write(const google::protobuf::Message &m) {
+  virtual bool write(const google::protobuf::Message& m) {
     google::protobuf::io::OstreamOutputStream oos(output_);
     return Write(m, oos);
   }
@@ -68,43 +71,45 @@ struct OstreamMessageOutputStream : MessageOutputStream {
     }
   }
 
-private:
-  std::ostream *output_;
+ private:
+  std::ostream* output_;
   bool own_ostream_;
 };
 
 struct FileMessageOutputStream : MessageOutputStream {
-  FileMessageOutputStream(const FileMessageOutputStream &) = delete;
-  FileMessageOutputStream &operator=(const FileMessageOutputStream &) = delete;
+  FileMessageOutputStream(const FileMessageOutputStream&) = delete;
+  FileMessageOutputStream& operator=(const FileMessageOutputStream&) = delete;
   explicit FileMessageOutputStream(int fd, bool own_fd = false) : fd_(fd, own_fd) {}
 
-  virtual bool write(const google::protobuf::Message &m) {
-    if (!file_output_stream_)
+  virtual bool write(const google::protobuf::Message& m) {
+    if (!file_output_stream_) {
       file_output_stream_.reset(new google::protobuf::io ::FileOutputStream(fd_.fd()));
+    }
     return Write(m, *file_output_stream_);
   }
 
   virtual void flush() { file_output_stream_.reset(); }
 
-private:
+ private:
   util::Fd fd_;
   std::unique_ptr<google::protobuf::io::FileOutputStream> file_output_stream_;
 };
 
 struct FileMessageInputStream : MessageInputStream {
   explicit FileMessageInputStream(int fd, bool own_fd = false)
-      : fd_(fd, own_fd), file_input_stream_(new google::protobuf::io ::FileInputStream(fd_.fd())),
+      : fd_(fd, own_fd),
+        file_input_stream_(new google::protobuf::io ::FileInputStream(fd_.fd())),
         coded_input_stream_(new google::protobuf::io ::CodedInputStream(file_input_stream_.get())) {}
 
-  virtual bool read(google::protobuf::Message &m) { return Read(m, *coded_input_stream_); }
+  virtual bool read(google::protobuf::Message& m) { return Read(m, *coded_input_stream_); }
 
-private:
+ private:
   util::Fd fd_;
   std::unique_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
   std::unique_ptr<google::protobuf::io::CodedInputStream> coded_input_stream_;
 };
 
-}; // namespace protobuf
-}; // namespace mx
+};  // namespace protobuf
+};  // namespace mx
 
-#endif // MX_LIB_PROTOBUF_STREAM_H_
+#endif  // MX_LIB_PROTOBUF_STREAM_H_

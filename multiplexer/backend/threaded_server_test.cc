@@ -2,13 +2,13 @@
 // order with one worker, four requests at once with four, a reply from
 // another thread later, the search answered while busy unless told to
 // decline, a full queue dropping, a handler that throws, draining.
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <future>
 #include <mutex>
 #include <thread>
-
-#include <gtest/gtest.h>
 
 #include "multiplexer/backend/base_threaded_multiplexer_server.h"
 #include "multiplexer/client.h"
@@ -28,10 +28,10 @@ namespace {
 // "wait" joins a barrier of four, "later" is kept for the test to answer,
 // "throw" throws, "event..." gets no reply, anything else is upper-cased.
 struct Scripted : BaseThreadedMultiplexerServer {
-  Scripted(unsigned short port, const ThreadedServerOptions &options = ThreadedServerOptions())
+  Scripted(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
       : BaseThreadedMultiplexerServer({{"127.0.0.1", port}}, multiplexer::peers::PYTHON_TEST_SERVER, options) {}
 
-  void handle_message(const RequestPtr &request) override {
+  void handle_message(const RequestPtr& request) override {
     const std::string payload = request->mxmsg().message();
     {
       std::lock_guard<std::mutex> lock(mutex);
@@ -43,10 +43,11 @@ struct Scripted : BaseThreadedMultiplexerServer {
       request->no_response();
     } else if (payload == "wait") {
       std::unique_lock<std::mutex> lock(mutex);
-      if (++waiting == 4)
+      if (++waiting == 4) {
         released_cv.notify_all();
-      else
+      } else {
         released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return waiting >= 4; });
+      }
       request->reply("passed", multiplexer::types::PYTHON_TEST_RESPONSE);
     } else if (payload == "later") {
       std::lock_guard<std::mutex> lock(mutex);
@@ -54,17 +55,18 @@ struct Scripted : BaseThreadedMultiplexerServer {
     } else if (payload == "throw") {
       throw std::runtime_error("as asked");
     } else if (payload == "close") {
-      close(); // from a worker: an error, not a deadlock
+      close();  // from a worker: an error, not a deadlock
     } else if (payload.rfind("event", 0) == 0) {
       request->no_response();
     } else {
       std::string upper = payload;
-      for (char &character : upper)
+      for (char& character : upper) {
         character = std::toupper(static_cast<unsigned char>(character));
+      }
       request->reply(upper, multiplexer::types::PYTHON_TEST_RESPONSE);
     }
   }
-  bool on_handler_exception(const std::exception &) override { return keep_serving; }
+  bool on_handler_exception(const std::exception&) override { return keep_serving; }
 
   void release() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -87,7 +89,7 @@ struct Scripted : BaseThreadedMultiplexerServer {
 
 // A Scripted served on its own thread, as a program would.
 struct Served {
-  explicit Served(unsigned short port, const ThreadedServerOptions &options = ThreadedServerOptions())
+  explicit Served(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
       : server(port, options), thread([this] {
           try {
             server.serve_forever(0.05f);
@@ -109,7 +111,7 @@ struct Requester {
   explicit Requester(unsigned short port) : client(multiplexer::peers::WEBSITE) {
     client.connect("127.0.0.1", port, 5);
   }
-  multiplexer::MultiplexerMessage message(const std::string &payload, std::uint32_t type) {
+  multiplexer::MultiplexerMessage message(const std::string& payload, std::uint32_t type) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
     msg.set_from(client.instance_id());
@@ -117,10 +119,10 @@ struct Requester {
     msg.set_message(payload);
     return msg;
   }
-  void send(const std::string &payload, multiplexer::LanePtr lane = multiplexer::LanePtr()) {
+  void send(const std::string& payload, multiplexer::LanePtr lane = multiplexer::LanePtr()) {
     client.send(message(payload, multiplexer::types::PYTHON_TEST_REQUEST), 5, lane);
   }
-  std::string query(const std::string &payload, multiplexer::LanePtr lane = multiplexer::LanePtr()) {
+  std::string query(const std::string& payload, multiplexer::LanePtr lane = multiplexer::LanePtr()) {
     return client.query(message(payload, multiplexer::types::PYTHON_TEST_REQUEST), 10, lane).third->message();
   }
   // The search clients use to find a backend: PING back, or a timeout.
@@ -132,25 +134,28 @@ struct Requester {
     client.flush(client.schedule_one(msg), 5);
     for (;;) {
       multiplexer::IncomingMessage got = client.read_raw_message(timeout);
-      if (got.third->references() == msg.id())
+      if (got.third->references() == msg.id()) {
         return got.third->type();
+      }
     }
   }
   multiplexer::Client client;
 };
 
-template <typename Predicate> bool eventually(Predicate predicate, float seconds = 10) {
+template <typename Predicate>
+bool eventually(Predicate predicate, float seconds = 10) {
   std::chrono::steady_clock::time_point deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long>(seconds * 1000));
   while (!predicate()) {
-    if (std::chrono::steady_clock::now() > deadline)
+    if (std::chrono::steady_clock::now() > deadline) {
       return false;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return true;
 }
 
-} // namespace
+}  // namespace
 
 TEST(ThreadedServer, OneWorkerHandlesInArrivalOrderAndAnswers) {
   InProcessMultiplexer mx;
@@ -176,10 +181,11 @@ TEST(ThreadedServer, FourWorkersHandleFourRequestsAtOnce) {
   ThreadedClient client(multiplexer::peers::PYTHON_TEST_CLIENT);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   std::vector<std::future<ThreadedClient::Result>> results;
-  for (int index = 0; index < 4; ++index)
+  for (int index = 0; index < 4; ++index) {
     results.push_back(std::async(std::launch::async,
                                  [&] { return client.query("wait", multiplexer::types::PYTHON_TEST_REQUEST, 10); }));
-  for (auto &result : results) {
+  }
+  for (auto& result : results) {
     ThreadedClient::Result r = result.get();
     ASSERT_EQ(ThreadedClient::REPLIED, r.outcome) << "the four were not handled at once";
     EXPECT_EQ("passed", r.reply.third->message());
@@ -237,8 +243,9 @@ TEST(ThreadedServer, AFullQueueDropsAndTheRestIsHandledInOrder) {
   multiplexer::LanePtr lane(new multiplexer::Lane());
   requester.send("block", lane);
   ASSERT_TRUE(eventually([&] { return served.server.pending() == 1; }));
-  for (int index = 0; index < 5; ++index)
+  for (int index = 0; index < 5; ++index) {
     requester.send("event-" + std::to_string(index), lane);
+  }
   // A flushing send only says the bytes left; the drops say the rest arrived.
   ASSERT_TRUE(eventually([&] { return served.server.pending() == 3 && served.server.dropped() == 3; }));
   served.server.release();
@@ -258,8 +265,8 @@ TEST(ThreadedServer, AThrowingHandlerReportsBackendErrorAndServesOn) {
   served.server.keep_serving = false;
   reply = requester.client.query(requester.message("throw", multiplexer::types::PYTHON_TEST_REQUEST), 10);
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
-  served.thread.join();               // serve_forever() returned on its own, rethrowing
-  served.thread = std::thread([] {}); // the destructor joins again
+  served.thread.join();                // serve_forever() returned on its own, rethrowing
+  served.thread = std::thread([] {});  // the destructor joins again
   EXPECT_TRUE(served.failure) << "serve_forever() should have rethrown";
 }
 
@@ -279,12 +286,13 @@ TEST(ThreadedServer, DrainingDeclinesSearchesAndFinishesTheQueue) {
   Scripted server(mx.port);
   Requester requester(mx.port);
   requester.send("block");
-  for (int index = 0; index < 3; ++index)
+  for (int index = 0; index < 3; ++index) {
     requester.send("event-" + std::to_string(index));
+  }
   ASSERT_TRUE(eventually([&] { return server.pending() == 4; }));
   server.start_draining();
   EXPECT_THROW(requester.search(1), multiplexer::Client::OperationTimedOut);
   server.release();
-  server.serve_forever(0.05f); // drained at once: finishes the queue and returns
+  server.serve_forever(0.05f);  // drained at once: finishes the queue and returns
   EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "event-2"}), server.snapshot());
 }

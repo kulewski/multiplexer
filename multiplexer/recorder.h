@@ -7,11 +7,10 @@
 #ifndef MX_MULTIPLEXER_RECORDER_H_
 #define MX_MULTIPLEXER_RECORDER_H_
 
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <string>
-
-#include <cstdint>
 
 #include "lib/protobuf/stream.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
@@ -24,53 +23,53 @@ namespace recording {
 std::uint64_t now_us();
 
 // A peer registered (CONNECTED) or left (DISCONNECTED).
-void fill_peer(Record &record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
+void fill_peer(Record& record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
 
 // One delivery attempt of `msg`: to `recipient` of `recipient_type` (either
 // may be 0 when routing found nobody), with the outcome. The whole payload
 // is kept; truncate() cuts it for a sink with a limit.
-void fill_routed(Record &record, const MultiplexerMessage &msg, std::uint32_t from_peer_type, std::uint64_t recipient,
+void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t from_peer_type, std::uint64_t recipient,
                  std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported);
 
 // `record` with its payload cut to `payload_limit` bytes (`truncated` set)
 // when it is a routed message longer than that; 0 means no limit.
-Record truncate(const Record &record, unsigned int payload_limit);
+Record truncate(const Record& record, unsigned int payload_limit);
 
 // Whether `label` may name a session: letters, digits, '-' and '_', one to
 // 64 characters, so that it is safe as part of a file name.
-bool valid_label(const std::string &label);
+bool valid_label(const std::string& label);
 
 // The file of a session: "<dir>/<label>.<UTC time>.<multiplexer id>.rec",
 // unique across multiplexers sharing a directory and across sessions.
-std::string session_path(const std::string &dir, const std::string &label, std::uint64_t multiplexer_id,
+std::string session_path(const std::string& dir, const std::string& label, std::uint64_t multiplexer_id,
                          std::uint64_t started_us);
 
-} // namespace recording
+}  // namespace recording
 
 // One recording file. Counts what it wrote, for the status.
 class Recorder {
-  Recorder(const Recorder &) = delete;
-  Recorder &operator=(const Recorder &) = delete;
+  Recorder(const Recorder&) = delete;
+  Recorder& operator=(const Recorder&) = delete;
 
-public:
+ public:
   // Opens `path` for appending. `payload_limit` bytes of each payload are
   // kept, all of it when 0. ok() says whether the file could be opened.
-  Recorder(const std::string &path, unsigned int payload_limit);
+  Recorder(const std::string& path, unsigned int payload_limit);
   bool ok() const { return !failed_; }
 
-  const std::string &path() const { return path_; }
+  const std::string& path() const { return path_; }
   unsigned int payload_limit() const { return payload_limit_; }
   std::uint64_t bytes() const { return bytes_; }
   std::uint64_t records() const { return records_; }
 
   // The first record: who wrote the file, with which rules, under which label.
-  void header(std::uint64_t multiplexer_id, const std::string &rules_fingerprint, const std::string &label);
+  void header(std::uint64_t multiplexer_id, const std::string& rules_fingerprint, const std::string& label);
   // Any other record, already stamped with the time, its payload cut to
   // the limit.
-  void write(const Record &record);
+  void write(const Record& record);
 
-private:
-  void _write(const Record &record);
+ private:
+  void _write(const Record& record);
 
   const std::string path_;
   std::ofstream out_;
@@ -81,6 +80,6 @@ private:
   std::uint64_t records_;
 };
 
-} // namespace multiplexer
+}  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_RECORDER_H_
+#endif  // MX_MULTIPLEXER_RECORDER_H_

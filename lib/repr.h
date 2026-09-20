@@ -16,7 +16,8 @@ namespace mx {
  * repr(value) -> the value streamed into a string
  * with string quoted
  */
-template <typename T> inline std::string repr(const T &value) {
+template <typename T>
+inline std::string repr(const T& value) {
   std::ostringstream out;
   out << value;
   return out.str();
@@ -24,26 +25,30 @@ template <typename T> inline std::string repr(const T &value) {
 
 // The number `text` holds, as T; std::invalid_argument when it is not one
 // or has anything after it.
-template <typename T> inline T from_string(const std::string &text) {
+template <typename T>
+inline T from_string(const std::string& text) {
   std::istringstream in(text);
   T value;
-  if (!(in >> value) || !in.eof())
+  if (!(in >> value) || !in.eof()) {
     throw std::invalid_argument("not a number: '" + text + "'");
+  }
   return value;
 }
 
-static inline std::string repr(const std::string &value) { return "'" + value + "'"; }
+static inline std::string repr(const std::string& value) { return "'" + value + "'"; }
 
-template <typename T, typename Alloc> static inline std::string repr(const std::vector<T, Alloc> &vec) {
+template <typename T, typename Alloc>
+static inline std::string repr(const std::vector<T, Alloc>& vec) {
   std::string out = "[";
   for (unsigned int index = 0; index < vec.size(); ++index) {
-    if (index)
+    if (index) {
       out += ", ";
+    }
     out += repr(vec[index]);
   }
   return out;
 }
 
-}; // namespace mx
+};  // namespace mx
 
-#endif // MX_LIB_REPR_H_
+#endif  // MX_LIB_REPR_H_

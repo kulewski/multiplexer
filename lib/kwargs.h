@@ -2,11 +2,10 @@
 #ifndef MX_LIB_KWARGS_H_
 #define MX_LIB_KWARGS_H_
 
+#include <any>
 #include <map>
 #include <set>
 #include <string>
-
-#include <any>
 
 #include "lib/exception.h"
 
@@ -26,29 +25,31 @@ struct KwargsKeys;
 // std::uint32_t rather than int. A Kwargs is a value: a copy is
 // independent of the original.
 struct Kwargs {
-
   typedef std::map<std::string, std::any> KwValuesMap;
   typedef KwValuesMap::value_type KwValue;
 
   Kwargs() {}
 
   // Store `value` under `key`, replacing any earlier value; chainable.
-  template <typename T> Kwargs &set(const std::string &key, const T &value) {
+  template <typename T>
+  Kwargs& set(const std::string& key, const T& value) {
     __values[key] = value;
     return *this;
   }
 
   // The value under `key` as T, or `default_` when absent.
-  template <typename T> T get(const std::string &key, const T &default_) {
+  template <typename T>
+  T get(const std::string& key, const T& default_) {
     try {
       return get<T>(key);
-    } catch (const KeyError &) {
+    } catch (const KeyError&) {
       return default_;
     }
   }
 
   // The value under `key` as T; KeyError when absent, bad_any_cast on a type mismatch.
-  template <typename T> T get(const std::string &key) {
+  template <typename T>
+  T get(const std::string& key) {
     KwValuesMap::const_iterator pos = __values.find(key);
     if (pos != __values.end()) {
       return __cast<T>(pos);
@@ -58,34 +59,45 @@ struct Kwargs {
   }
 
   // get<T> without the presence check: the key must exist.
-  template <typename T> T inline unsafe_get(const std::string &key) { return __cast<T>(__values.find(key)); }
+  template <typename T>
+  T inline unsafe_get(const std::string& key) {
+    return __cast<T>(__values.find(key));
+  }
 
-  bool has_key(const std::string &key) {
+  bool has_key(const std::string& key) {
     KwValuesMap::const_iterator pos = __values.find(key);
     return (pos != __values.end());
   }
 
   // Absent, or present with exactly type T.
-  template <typename T> bool empty_or(const std::string &key) { return !has_key(key) || unsafe_is<T>(key); }
+  template <typename T>
+  bool empty_or(const std::string& key) {
+    return !has_key(key) || unsafe_is<T>(key);
+  }
 
   // Present with exactly type T; the key must exist.
-  template <typename T> bool unsafe_is(const std::string &key) {
+  template <typename T>
+  bool unsafe_is(const std::string& key) {
     return __values.find(key)->second.type() == typeid(T);
   }
 
   // Store `value` under `key` only if nothing is there yet; chainable.
-  template <typename T> Kwargs &set_default(const std::string &key, const T &value) {
+  template <typename T>
+  Kwargs& set_default(const std::string& key, const T& value) {
     __values.insert(KwValue(key, std::any(value)));
     return *this;
   }
 
   // Whether every key present is one of `keys`, for debug assertions.
-  bool check_keys(const KwargsKeys &keys);
+  bool check_keys(const KwargsKeys& keys);
 
-private:
-  template <typename T> T inline __cast(KwValuesMap::const_iterator pos) { return std::any_cast<T>(pos->second); }
+ private:
+  template <typename T>
+  T inline __cast(KwValuesMap::const_iterator pos) {
+    return std::any_cast<T>(pos->second);
+  }
 
-private:
+ private:
   KwValuesMap __values;
 };
 
@@ -94,20 +106,20 @@ private:
 struct KwargsKeys {
   KwargsKeys() {}
 
-  KwargsKeys(const std::string &key) { (*this)(key); }
+  KwargsKeys(const std::string& key) { (*this)(key); }
 
-  KwargsKeys &operator()(const std::string &key) {
+  KwargsKeys& operator()(const std::string& key) {
     __keys.insert(key);
     return *this;
   }
 
-private:
+ private:
   std::set<std::string> __keys;
   friend struct Kwargs;
 };
 
-}; // namespace kwargs
-}; // namespace util
-}; // namespace mx
+};  // namespace kwargs
+};  // namespace util
+};  // namespace mx
 
-#endif // MX_LIB_KWARGS_H_
+#endif  // MX_LIB_KWARGS_H_

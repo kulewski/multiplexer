@@ -5,13 +5,13 @@
 #ifndef MX_LIB_LOGGING_IMPL_H_
 #define MX_LIB_LOGGING_IMPL_H_
 
+#include <google/protobuf/message.h>
+#include <google/protobuf/text_format.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <cstdint>
-#include <google/protobuf/message.h>
-#include <google/protobuf/text_format.h>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -27,43 +27,43 @@ namespace logging {
 
 namespace consts {
 
-static inline const char *logging_get_level_name(const unsigned int level) {
+static inline const char* logging_get_level_name(const unsigned int level) {
   switch (level) {
-  case DEBUG:
-    return "DEBUG";
-  case INFO:
-    return "INFO";
-  case OK:
-    return "OK";
-  case WARNING:
-    return "WARNING";
-  case ERROR:
-    return "ERROR";
-  case CRITICAL:
-    return "CRITICAL";
-  default:
-    return "UNKNOWN";
+    case DEBUG:
+      return "DEBUG";
+    case INFO:
+      return "INFO";
+    case OK:
+      return "OK";
+    case WARNING:
+      return "WARNING";
+    case ERROR:
+      return "ERROR";
+    case CRITICAL:
+      return "CRITICAL";
+    default:
+      return "UNKNOWN";
   }
 }
 
-static inline const char *logging_get_verbosity_name(const unsigned int verbosity) {
+static inline const char* logging_get_verbosity_name(const unsigned int verbosity) {
   switch (verbosity) {
-  case ZEROVERBOSITY:
-    return "ZEROVERBOSITY";
-  case LOWVERBOSITY:
-    return "LOWVERBOSITY";
-  case MEDIUMVERBOSITY:
-    return "MEDIUMVERBOSITY";
-  case HIGHVERBOSITY:
-    return "HIGHVERBOSITY";
-  case CHATTERBOX:
-    return "CHATTERBOX";
-  default:
-    return "UNKNOWN";
+    case ZEROVERBOSITY:
+      return "ZEROVERBOSITY";
+    case LOWVERBOSITY:
+      return "LOWVERBOSITY";
+    case MEDIUMVERBOSITY:
+      return "MEDIUMVERBOSITY";
+    case HIGHVERBOSITY:
+      return "HIGHVERBOSITY";
+    case CHATTERBOX:
+      return "CHATTERBOX";
+    default:
+      return "UNKNOWN";
   }
 }
 
-}; // namespace consts
+};  // namespace consts
 
 namespace impl {
 
@@ -96,13 +96,14 @@ inline bool should_log(unsigned int level, unsigned int verbosity) {
  * _emit_log
  *	Emit log to logging stream (no cerr).
  */
-void _emit_log(const LogEntry &log_msg);
+void _emit_log(const LogEntry& log_msg);
 
 // Writes an (already initialized) LogEntry on cerr and on the binary
 // logging stream; the Python binding's entry point.
-static inline void emit_log(const unsigned int level, const LogEntry &log_msg, unsigned int flags = 0) {
-  if (!(flags & SKIP_LOGGING_TO_STREAM))
+static inline void emit_log(const unsigned int level, const LogEntry& log_msg, unsigned int flags = 0) {
+  if (!(flags & SKIP_LOGGING_TO_STREAM)) {
     _emit_log(log_msg);
+  }
   std::ostringstream cerr;
   cerr << "[" << logging_get_level_name(level) << "]"
        << "  ts=" << log_msg.timestamp() << "  pid=" << log_msg.pid() << "  ctx=" << log_msg.context() << "  flw=\""
@@ -110,26 +111,27 @@ static inline void emit_log(const unsigned int level, const LogEntry &log_msg, u
        << "  txt=\"" << log_msg.text() << "\"";
   if (log_msg.has_source_file()) {
     cerr << "  from=" << log_msg.source_file();
-    if (log_msg.has_source_line())
+    if (log_msg.has_source_line()) {
       cerr << ":" << log_msg.source_line();
+    }
   }
   cerr << "\n";
   std::cerr << cerr.str();
 }
 
 // as the above but without level->str optimization
-static inline void emit_log(const LogEntry &log_msg, unsigned int flags = 0) {
+static inline void emit_log(const LogEntry& log_msg, unsigned int flags = 0) {
   return emit_log(log_msg.level(), log_msg, flags);
 }
 
-}; // namespace impl
+};  // namespace impl
 
 // One entry under construction: what MX_LOG builds once the check passed,
 // each token a call, then emit(). Built only when the entry is emitted, so
 // the context copy and the protobuf cost nothing on a disabled line.
 class Entry {
-public:
-  Entry(unsigned int level, unsigned int verbosity, const char *file, unsigned int line)
+ public:
+  Entry(unsigned int level, unsigned int verbosity, const char* file, unsigned int line)
       : level_(level), context_(impl::process_context_), flags_(impl::NO_FLAGS) {
     entry_.set_id(create_log_id());
     entry_.set_pid(getpid());
@@ -141,25 +143,25 @@ public:
     entry_.set_source_line(line);
     entry_.set_compilation_datetime(__DATE__ " " __TIME__);
   }
-  Entry &text(const std::string &text) {
+  Entry& text(const std::string& text) {
     entry_.set_text(text);
     return *this;
   }
-  Entry &flow(const std::string &flow) {
+  Entry& flow(const std::string& flow) {
     entry_.set_workflow(flow);
     return *this;
   }
-  Entry &ctx(const std::string &context) {
+  Entry& ctx(const std::string& context) {
     context_.append(".").append(context);
     return *this;
   }
-  Entry &context(const std::string &context) {
+  Entry& context(const std::string& context) {
     context_ = context;
     return *this;
   }
   // A protocol buffer message attached as the entry's data, tagged with
   // `type_id` and its class name, and printed after the entry on stderr.
-  Entry &data(unsigned int type_id, const google::protobuf::Message &message) {
+  Entry& data(unsigned int type_id, const google::protobuf::Message& message) {
     message.SerializeToString(entry_.mutable_data());
     entry_.set_data_type(type_id);
     entry_.set_data_class(message.GetDescriptor()->name());
@@ -167,19 +169,21 @@ public:
     has_data_ = true;
     return *this;
   }
-  Entry &skip_file_if(bool skip) {
-    if (skip)
+  Entry& skip_file_if(bool skip) {
+    if (skip) {
       flags_ |= impl::SKIP_LOGGING_TO_STREAM;
+    }
     return *this;
   }
   void emit() {
     entry_.set_context(context_);
     impl::emit_log(level_, entry_, flags_);
-    if (has_data_)
+    if (has_data_) {
       std::cerr << data_text_ << "\n\n";
+    }
   }
 
-private:
+ private:
   unsigned int level_;
   LogEntry entry_;
   std::string context_;
@@ -188,11 +192,11 @@ private:
   bool has_data_ = false;
 };
 
-static inline const std::string &process_context() { return impl::process_context_; }
+static inline const std::string& process_context() { return impl::process_context_; }
 
-static inline void set_process_context(const std::string &s) { impl::process_context_ = s; }
+static inline void set_process_context(const std::string& s) { impl::process_context_ = s; }
 
-}; // namespace logging
-}; // namespace mx
+};  // namespace logging
+};  // namespace mx
 
-#endif // MX_LIB_LOGGING_IMPL_H_
+#endif  // MX_LIB_LOGGING_IMPL_H_

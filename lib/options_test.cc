@@ -110,7 +110,7 @@ TEST(Options, Errors) {
   try {
     options.parse(missing_required);
     FAIL();
-  } catch (const Error &error) {
+  } catch (const Error& error) {
     EXPECT_EQ("the option '--type' is required but missing", std::string(error.what()));
   }
 }

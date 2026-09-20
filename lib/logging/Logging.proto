@@ -1,6 +1,8 @@
 // LogEntry: one record of the structured log, in both languages. The binary
 // log stream (--logging-file) is a sequence of these, each prefixed by its
 // length as a varint; see lib/protobuf/stream.h.
+syntax = "proto2";  // labels and defaults: the original dialect, said explicitly since protoc warns otherwise
+
 package mx.logging;
 
 message LogEntry {

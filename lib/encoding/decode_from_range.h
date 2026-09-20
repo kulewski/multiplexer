@@ -11,7 +11,6 @@ namespace encoders {
 
 template <typename InputIterator, template <typename> class Encoding>
 struct DecodeFromRange : public BaseDecoder<DecodeFromRange<InputIterator, Encoding>, Encoding> {
-
   DecodeFromRange(InputIterator begin, InputIterator end) : begin_(begin), end_(end) {}
 
   unsigned char read_byte() {
@@ -19,11 +18,11 @@ struct DecodeFromRange : public BaseDecoder<DecodeFromRange<InputIterator, Encod
     return *(begin_)++;
   }
 
-private:
+ private:
   InputIterator begin_, end_;
 };
 
-}; // namespace encoders
-}; // namespace mx
+};  // namespace encoders
+};  // namespace mx
 
-#endif // MX_LIB_ENCODING_DECODE_FROM_RANGE_H_
+#endif  // MX_LIB_ENCODING_DECODE_FROM_RANGE_H_

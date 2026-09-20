@@ -1,10 +1,11 @@
 // The `backend` role: a backend that serves request types, with knobs for
 // the failure scenarios. See tests/README.md for options and events.
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 #include <thread>
-#include <unistd.h>
 
 #include "lib/repr.h"
 #include "multiplexer/backend/base_multiplexer_server.h"
@@ -33,20 +34,26 @@ struct LeaveOptions {
 // requests, mid-run, for the failover scenarios. Events: request,
 // unexpected, crash, draining, stopped.
 class BackendServer : public multiplexer::backend::BaseMultiplexerServer {
-public:
-  BackendServer(Client *client, unsigned type, const std::map<std::uint32_t, std::uint32_t> &serves,
-                const std::string &behaviour, int crash_after, int memory_every, const LeaveOptions &leave)
-      : BaseMultiplexerServer(client, type), serves_(serves), behaviour_(behaviour), crash_after_(crash_after),
-        memory_every_(memory_every), leave_(leave), handled_(0) {}
+ public:
+  BackendServer(Client* client, unsigned type, const std::map<std::uint32_t, std::uint32_t>& serves,
+                const std::string& behaviour, int crash_after, int memory_every, const LeaveOptions& leave)
+      : BaseMultiplexerServer(client, type),
+        serves_(serves),
+        behaviour_(behaviour),
+        crash_after_(crash_after),
+        memory_every_(memory_every),
+        leave_(leave),
+        handled_(0) {}
 
   int handled() const { return handled_; }
 
-protected:
+ protected:
   // Report the request, then answer, drop, raise or crash as configured.
-  void handle_message(MultiplexerMessage &mxmsg) override {
+  void handle_message(MultiplexerMessage& mxmsg) override {
     ++handled_;
-    if (memory_every_ && handled_ % memory_every_ == 0)
+    if (memory_every_ && handled_ % memory_every_ == 0) {
       emit(memory_event(handled_));
+    }
     Event request = event("request");
     request.set_type(mxmsg.type());
     request.set_id(mxmsg.id());
@@ -68,8 +75,9 @@ protected:
     } else if (behaviour_ == "raise") {
       throw std::runtime_error("handler failed on purpose");
     } else {
-      if (behaviour_.compare(0, 6, "sleep:") == 0)
+      if (behaviour_.compare(0, 6, "sleep:") == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(mx::from_string<int>(behaviour_.substr(6))));
+      }
       std::string payload = behaviour_ == "upper" ? upper(mxmsg.message()) : mxmsg.message();
       send_message(Kwargs().set("message", payload).set("type", static_cast<std::uint32_t>(served->second)));
     }
@@ -84,16 +92,18 @@ protected:
   // Notice a request to leave, from SIGTERM or the drain file: stop at
   // once, or start draining when a drain was configured.
   void periodic_task() override {
-    if (draining())
+    if (draining()) {
       return;
+    }
     bool asked = stop_requested || (!leave_.drain_file.empty() && access(leave_.drain_file.c_str(), F_OK) == 0);
-    if (!asked)
+    if (!asked) {
       return;
+    }
     if (leave_.drain_seconds <= 0 && leave_.drain_min_handled <= 0) {
       working = false;
       return;
     }
-    start_draining(); // keep serving, but no longer answer searches
+    start_draining();  // keep serving, but no longer answer searches
     Event draining_event = event("draining");
     draining_event.set_drain_seconds(leave_.drain_seconds);
     emit(draining_event);
@@ -103,9 +113,9 @@ protected:
   bool drained() const override { return BaseMultiplexerServer::drained() && handled_ >= leave_.drain_min_handled; }
 
   // Keep serving, unless --exit-on-exception.
-  bool on_handler_exception(const std::exception &) override { return !leave_.exit_on_exception; }
+  bool on_handler_exception(const std::exception&) override { return !leave_.exit_on_exception; }
 
-private:
+ private:
   std::map<std::uint32_t, std::uint32_t> serves_;
   std::string behaviour_;
   int crash_after_;
@@ -116,7 +126,7 @@ private:
 
 // The `backend` subcommand: runs a BackendServer until asked to leave.
 class BackendRole : public mxcontrol::Task {
-public:
+ public:
   virtual std::string short_description() const { return "serve request types until stopped"; }
   virtual int run() {
     install_signal_handlers();
@@ -125,7 +135,7 @@ public:
     emit(common_.connected_event(*client));
     try {
       server.serve_forever(0.25f, static_cast<float>(leave_.drain_seconds));
-    } catch (std::exception &error) { // the handler's exception, let through by on_handler_exception
+    } catch (std::exception& error) {  // the handler's exception, let through by on_handler_exception
       Event failed = event("handler_exception");
       failed.set_kind(error.what());
       failed.set_handled(server.handled());
@@ -138,8 +148,8 @@ public:
     return 0;
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     common_.add(options);
     options.add("serves", &serves_, "REQUEST_TYPE=RESPONSE_TYPE, repeatable");
     options.add("behaviour", &behaviour_, "upper", "upper | echo | drop | raise | sleep:MS");
@@ -152,7 +162,7 @@ protected:
     options.add_switch("exit-on-exception", &leave_.exit_on_exception, "a handler exception ends the process (4)");
   }
 
-private:
+ private:
   CommonOptions common_;
   std::vector<std::string> serves_;
   std::string behaviour_;
@@ -163,4 +173,4 @@ private:
 
 REGISTER_MXCONTROL_SUBCOMMAND(backend, BackendRole);
 
-} // namespace mxtestroles
+}  // namespace mxtestroles

@@ -6,13 +6,15 @@ namespace mx {
 namespace util {
 namespace kwargs {
 
-bool Kwargs::check_keys(const KwargsKeys &keys) {
-  for (const KwValue &kw : __values)
-    if (!keys.__keys.count(kw.first))
+bool Kwargs::check_keys(const KwargsKeys& keys) {
+  for (const KwValue& kw : __values) {
+    if (!keys.__keys.count(kw.first)) {
       return false;
+    }
+  }
   return true;
 }
 
-}; // namespace kwargs
-}; // namespace util
-}; // namespace mx
+};  // namespace kwargs
+};  // namespace util
+};  // namespace mx

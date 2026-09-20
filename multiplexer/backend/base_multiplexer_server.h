@@ -16,12 +16,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <cstdint>
-#include <memory>
 
 #include "lib/exception.h"
 #include "lib/kwargs.h"
@@ -41,21 +40,20 @@ using mx::util::kwargs::KwargsKeys;
 // See the file comment. Subclass, implement handle_message(), and call
 // serve_forever(). Not thread-safe.
 class BaseMultiplexerServer {
-
-public:
+ public:
   // for use with send_message(..., multiplexer=(ONE|ALL|a ConnectionWrapper),
   // ...)
   static const int ONE = 1;
   static const int ALL = 2;
 
-protected:
+ protected:
   // Connects to every address as a peer of `type`. The second form uses a
   // Client the caller owns and keeps.
-  BaseMultiplexerServer(const MultiplexerAddresses &addresses, PeerType type);
+  BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type);
 
-  BaseMultiplexerServer(multiplexer::Client *conn, PeerType type);
+  BaseMultiplexerServer(multiplexer::Client* conn, PeerType type);
 
-public:
+ public:
   virtual ~BaseMultiplexerServer();
 
   // One step: wait up to `timeout` seconds for a message and handle it.
@@ -82,12 +80,12 @@ public:
   // poll, closes the connections and returns.
   void stop() { working = false; }
 
-protected:
+ protected:
   // Called with every message that is not the protocol's own. Reply with
   // send_message(); for a message that needs no reply call no_response(),
   // otherwise the missing reply is logged as a warning. While it runs,
   // last_mxmsg and last_connwrap are the message and its connection.
-  virtual void handle_message(MultiplexerMessage &) = 0;
+  virtual void handle_message(MultiplexerMessage&) = 0;
 
   // Called after every iteration of serve_forever(), message or not, so at
   // least once per `poll` seconds. Override for work on your own schedule
@@ -104,24 +102,26 @@ protected:
   // Called when handle_message() threw, after BACKEND_ERROR went to the
   // requester. Return true to keep serving (the default); return false and
   // the exception propagates out of serve_forever().
-  virtual bool on_handler_exception(const std::exception &) { return true; }
+  virtual bool on_handler_exception(const std::exception&) { return true; }
 
   // Whether to answer a client's search for a backend; override for your
   // own condition. False while draining.
   virtual bool should_respond_to_backend_for_packet_search() const { return !draining_; }
 
-protected:
-  template <typename Message> static Message inline parse_message(const MultiplexerMessage &mxmsg) {
+ protected:
+  template <typename Message>
+  static Message inline parse_message(const MultiplexerMessage& mxmsg) {
     return parse_message<Message>(mxmsg.message());
   }
 
-  template <typename Message> static Message inline parse_message(const std::string &from) {
+  template <typename Message>
+  static Message inline parse_message(const std::string& from) {
     Message message;
     message.ParseFromString(from);
     return message;
   }
 
-protected:
+ protected:
   // Tells the requester at once that its request is being worked on
   // (REQUEST_RECEIVED); call it first thing in handle_message.
   void notify_start();
@@ -155,33 +155,33 @@ protected:
 
   // Answers the current request with BACKEND_ERROR carrying `message`, so the
   // requester's query() fails at once instead of waiting out its timeout.
-  void report_error(const std::string &message);
+  void report_error(const std::string& message);
 
-private:
+ private:
   void __handle_message();
   void __handle_internal_message();
 
-public:
-  std::atomic<bool> working; // cleared by stop(), from any thread, or by the loop thread directly
+ public:
+  std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly
 
-protected:
+ protected:
   bool _has_sent_response;
   bool draining_ = false;
   float drain_seconds_ = 0.0f;
   std::chrono::steady_clock::time_point draining_since_;
 
-private:
+ private:
   std::unique_ptr<multiplexer::Client> __conn;
 
-protected:
-  multiplexer::Client *conn;
+ protected:
+  multiplexer::Client* conn;
   std::shared_ptr<MultiplexerMessage> last_mxmsg;
   ConnectionWrapper last_connwrap;
 
-private:
+ private:
 };
 
-}; // namespace backend
-}; // namespace multiplexer
+};  // namespace backend
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_BACKEND_BASE_MULTIPLEXER_SERVER_H_
+#endif  // MX_MULTIPLEXER_BACKEND_BASE_MULTIPLEXER_SERVER_H_

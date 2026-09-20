@@ -4,12 +4,11 @@
 #ifndef MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 #define MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 
+#include <asio/io_service.hpp>
 #include <cstdlib>
 #include <future>
 #include <string>
 #include <thread>
-
-#include <asio/io_service.hpp>
 
 #include "multiplexer/server.h"
 
@@ -22,7 +21,7 @@ struct InProcessMultiplexer {
     // creation: connections bind their thread checker where they are made.
     std::promise<unsigned short> bound;
     thread = std::thread([this, &bound] {
-      const char *srcdir = getenv("TEST_SRCDIR");
+      const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", 0);
       server->clear_rules();
@@ -43,7 +42,7 @@ struct InProcessMultiplexer {
   std::thread thread;
 };
 
-} // namespace testing
-} // namespace multiplexer
+}  // namespace testing
+}  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
+#endif  // MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_

@@ -3,33 +3,34 @@
 #define MX_MXCONTROL_HELP_H_
 
 #include "mxcontrol/task.h"
+#include "mxcontrol/tasks_holder.h"
 
 namespace mxcontrol {
 
 class Help : public Task {
-public:
+ public:
   virtual int run();
   virtual std::string short_description() const { return "get some help"; }
-  virtual std::string short_synopsis(const std::string &) { return "[subcommand]"; }
-  virtual void print_help(std::ostream &out) {
+  virtual std::string short_synopsis(const std::string&) { return "[subcommand]"; }
+  virtual void print_help(std::ostream& out) {
     out << "Get a list of available commands.\n";
     out << "If subcommand is given, get subcommand options and usage "
            "information insted.\n";
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     options.add("_subcommand_", &subcommand_, "").hidden().positional("_subcommand_");
   }
 
-private:
+ private:
   inline std::string _program_name() const {
     return tasks_holder().original_argc() ? tasks_holder().original_argv()[0] : "program";
   }
 
-private:
+ private:
   std::string subcommand_;
 };
-}; // namespace mxcontrol
+};  // namespace mxcontrol
 
-#endif // MX_MXCONTROL_HELP_H_
+#endif  // MX_MXCONTROL_HELP_H_

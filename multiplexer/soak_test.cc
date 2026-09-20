@@ -2,11 +2,11 @@
 // ThreadedClient, thousands of queries, and the C heap measured exactly
 // before and after. A leak per message in the core shows here in about a
 // second, without the integration harness.
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <future>
 #include <thread>
-
-#include <gtest/gtest.h>
 
 #include "lib/memory.h"
 #include "multiplexer/backend/base_multiplexer_server.h"
@@ -24,7 +24,7 @@ struct InProcessMultiplexer {
   InProcessMultiplexer() {
     std::promise<unsigned short> bound;
     thread = std::thread([this, &bound] {
-      const char *srcdir = getenv("TEST_SRCDIR");
+      const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", 0);
       server->clear_rules();
@@ -47,13 +47,14 @@ struct InProcessMultiplexer {
 
 // A PYTHON_TEST_SERVER that upper-cases, served from its own thread.
 struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
-  EchoBackend(const multiplexer::backend::MultiplexerAddresses &addresses)
+  EchoBackend(const multiplexer::backend::MultiplexerAddresses& addresses)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
   std::uint64_t instance_id() const { return conn->instance_id(); }
-  void handle_message(multiplexer::MultiplexerMessage &mxmsg) override {
+  void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
     std::string payload = mxmsg.message();
-    for (char &character : payload)
+    for (char& character : payload) {
       character = std::toupper(static_cast<unsigned char>(character));
+    }
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", payload)
                      .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
@@ -62,22 +63,23 @@ struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
 
 // The same backend on worker threads behind a heartbeating io thread.
 struct EchoThreadedBackend : multiplexer::backend::BaseThreadedMultiplexerServer {
-  EchoThreadedBackend(const multiplexer::backend::MultiplexerAddresses &addresses, unsigned int workers)
+  EchoThreadedBackend(const multiplexer::backend::MultiplexerAddresses& addresses, unsigned int workers)
       : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER, options_for(workers)) {}
   static Options options_for(unsigned int workers) {
     Options options;
     options.workers = workers;
     return options;
   }
-  void handle_message(const multiplexer::backend::RequestPtr &request) override {
+  void handle_message(const multiplexer::backend::RequestPtr& request) override {
     std::string payload = request->mxmsg().message();
-    for (char &character : payload)
+    for (char& character : payload) {
       character = std::toupper(static_cast<unsigned char>(character));
+    }
     request->reply(payload, multiplexer::types::PYTHON_TEST_RESPONSE);
   }
 };
 
-void run_queries(ThreadedClient &client, int count) {
+void run_queries(ThreadedClient& client, int count) {
   for (int index = 0; index < count; ++index) {
     ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 10);
     ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
@@ -88,7 +90,7 @@ void run_queries(ThreadedClient &client, int count) {
 // The same through lanes and by address: typed queries on one lane,
 // addressed queries on it with either probe, a lane made and dropped per
 // query, a flushing send per query, and the reply's connection preferred.
-void run_lane_queries(ThreadedClient &client, std::uint64_t backend_id, int count) {
+void run_lane_queries(ThreadedClient& client, std::uint64_t backend_id, int count) {
   multiplexer::LanePtr lane(new multiplexer::Lane());
   for (int index = 0; index < count; ++index) {
     ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 10, lane);
@@ -107,7 +109,7 @@ void run_lane_queries(ThreadedClient &client, std::uint64_t backend_id, int coun
   }
 }
 
-} // namespace
+}  // namespace
 
 TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   InProcessMultiplexer mx;
@@ -122,7 +124,7 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
     while (keep_serving) {
       try {
         backend.loop_iter(0.2f);
-      } catch (multiplexer::Client::OperationTimedOut &) {
+      } catch (multiplexer::Client::OperationTimedOut&) {
       }
     }
   });
@@ -130,11 +132,11 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 
-  run_queries(client, 2000); // warm-up: buffers, caches, the dedup window, the ring of finished query ids
+  run_queries(client, 2000);  // warm-up: buffers, caches, the dedup window, the ring of finished query ids
   run_lane_queries(client, backend_id, 200);
   size_t before = mx::heap_in_use_bytes();
   run_queries(client, 8000);
-  run_lane_queries(client, backend_id, 1000); // five thousand more, through lanes and by address
+  run_lane_queries(client, backend_id, 1000);  // five thousand more, through lanes and by address
   size_t after = mx::heap_in_use_bytes();
   // The three peers share this heap; a leak per message would be megabytes.
   EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after << " bytes over 13000 queries";
@@ -153,14 +155,16 @@ TEST(Soak, ThousandsOfRequestsThroughAThreadedBackendDoNotGrowTheHeap) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 
-  run_queries(client, 2000); // warm-up
+  run_queries(client, 2000);  // warm-up
   size_t before = mx::heap_in_use_bytes();
   run_queries(client, 8000);
-  std::vector<std::future<void>> at_once; // and from four threads at once, for the two workers
-  for (int thread = 0; thread < 4; ++thread)
+  std::vector<std::future<void>> at_once;  // and from four threads at once, for the two workers
+  for (int thread = 0; thread < 4; ++thread) {
     at_once.push_back(std::async(std::launch::async, [&] { run_queries(client, 1000); }));
-  for (auto &done : at_once)
+  }
+  for (auto& done : at_once) {
     done.get();
+  }
   size_t after = mx::heap_in_use_bytes();
   EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after
                                        << " bytes over 12000 requests through a threaded backend";

@@ -1,18 +1,18 @@
 // See common.h.
 #include "tests/roles/cc/common.h"
-#include "lib/repr.h"
+
+#include <google/protobuf/text_format.h>
 
 #include <cstdio>
 #include <iostream>
 #include <mutex>
 
-#include <google/protobuf/text_format.h>
-
 #include "lib/memory.h"
+#include "lib/repr.h"
 
 namespace mxtestroles {
 
-Event event(const std::string &name) {
+Event event(const std::string& name) {
   Event result;
   result.set_event(name);
   return result;
@@ -22,7 +22,7 @@ Event event(const std::string &name) {
 // thread), so lines are written under a lock.
 static std::mutex emit_mutex;
 
-void emit(const Event &event) {
+void emit(const Event& event) {
   google::protobuf::TextFormat::Printer printer;
   printer.SetSingleLineMode(true);
   std::string line;
@@ -31,10 +31,11 @@ void emit(const Event &event) {
   std::cout << line << "\n" << std::flush;
 }
 
-void set_payload(Event &event, const std::string &data) {
+void set_payload(Event& event, const std::string& data) {
   event.set_size(data.size());
-  if (data.size() <= 256)
+  if (data.size() <= 256) {
     event.set_payload(data);
+  }
 }
 
 Event memory_event(long after) {
@@ -44,7 +45,7 @@ Event memory_event(long after) {
   return memory;
 }
 
-double ms_since(const std::chrono::steady_clock::time_point &start) {
+double ms_since(const std::chrono::steady_clock::time_point& start) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
@@ -56,7 +57,7 @@ void install_signal_handlers() {
   std::signal(SIGINT, on_signal);
 }
 
-void CommonOptions::add(mx::options::Options &options) {
+void CommonOptions::add(mx::options::Options& options) {
   options.add("mx", &mx, "host:port of a multiplexer, repeatable");
   options.add("type", &type, "peer type id").required();
   options.add("name", &name, "", "label used in events");
@@ -73,7 +74,7 @@ std::unique_ptr<Client> CommonOptions::connect() const {
   return client;
 }
 
-Event CommonOptions::connected_event(Client &client) const {
+Event CommonOptions::connected_event(Client& client) const {
   Event connected = event("connected");
   connected.set_instance_id(client.instance_id());
   connected.set_connections(client.connections_count());
@@ -81,7 +82,7 @@ Event CommonOptions::connected_event(Client &client) const {
   return connected;
 }
 
-std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string> &items) {
+std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string>& items) {
   std::map<std::uint32_t, std::uint32_t> out;
   for (size_t index = 0; index < items.size(); ++index) {
     std::string::size_type eq = items[index].find('=');
@@ -91,7 +92,7 @@ std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string> &i
   return out;
 }
 
-std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string> &items) {
+std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string>& items) {
   std::vector<std::pair<std::uint32_t, std::string>> out;
   for (size_t index = 0; index < items.size(); ++index) {
     std::string::size_type colon = items[index].find(':');
@@ -101,16 +102,18 @@ std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vec
   return out;
 }
 
-std::string replace_all(std::string text, const std::string &from, const std::string &to) {
-  for (std::string::size_type pos = text.find(from); pos != std::string::npos; pos = text.find(from, pos + to.size()))
+std::string replace_all(std::string text, const std::string& from, const std::string& to) {
+  for (std::string::size_type pos = text.find(from); pos != std::string::npos; pos = text.find(from, pos + to.size())) {
     text.replace(pos, from.size(), to);
+  }
   return text;
 }
 
 std::string upper(std::string text) {
-  for (size_t index = 0; index < text.size(); ++index)
+  for (size_t index = 0; index < text.size(); ++index) {
     text[index] = std::toupper(static_cast<unsigned char>(text[index]));
+  }
   return text;
 }
 
-} // namespace mxtestroles
+}  // namespace mxtestroles

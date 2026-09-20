@@ -34,7 +34,7 @@
 namespace mx {
 
 class MX_CAPABILITY("thread") ThreadChecker {
-public:
+ public:
   enum Binding { BIND_NOW, BIND_LATER };
   explicit ThreadChecker(Binding binding = BIND_NOW)
       : owner_(binding == BIND_NOW ? std::this_thread::get_id() : std::thread::id()) {}
@@ -42,8 +42,9 @@ public:
   // True on the owning thread. An unbound checker binds to the caller.
   bool is_current() const {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (owner_ == std::thread::id())
+    if (owner_ == std::thread::id()) {
       owner_ = std::this_thread::get_id();
+    }
     return owner_ == std::this_thread::get_id();
   }
 
@@ -60,7 +61,7 @@ public:
     owner_ = std::this_thread::get_id();
   }
 
-private:
+ private:
   mutable std::mutex mutex_;
   mutable std::thread::id owner_;
 };
@@ -68,20 +69,20 @@ private:
 // Tells the static analysis that the checker's capability is held for the
 // rest of the scope; the run-time check is in the macro below.
 class MX_SCOPED_CAPABILITY ThreadCheckerScope {
-public:
-  explicit ThreadCheckerScope(const ThreadChecker *checker) MX_ACQUIRE(checker) { (void)checker; }
+ public:
+  explicit ThreadCheckerScope(const ThreadChecker* checker) MX_ACQUIRE(checker) { (void)checker; }
   ~ThreadCheckerScope() MX_RELEASE() {}
 };
 
-} // namespace mx
+}  // namespace mx
 
 // Use as the first statement of a function that must run on the checker's
 // thread. `x` is a pointer to a ThreadChecker.
-#define MX_DCHECK_RUN_ON(x)                                                                                            \
-  ::mx::ThreadCheckerScope MX_UNIQUE_NAME(_mx_run_on_)(x);                                                             \
+#define MX_DCHECK_RUN_ON(x)                                \
+  ::mx::ThreadCheckerScope MX_UNIQUE_NAME(_mx_run_on_)(x); \
   DbgAssertMsg((x)->is_current(), "called on a thread other than the one that owns this object")
 
 // On a function declaration: it may only be called on the checker's thread.
 #define MX_RUN_ON(x) MX_REQUIRES(x)
 
-#endif // MX_LIB_THREAD_CHECKER_H_
+#endif  // MX_LIB_THREAD_CHECKER_H_

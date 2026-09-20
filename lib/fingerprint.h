@@ -13,12 +13,12 @@
 
 namespace mx {
 
-inline std::string fingerprint(const std::string &text) {
+inline std::string fingerprint(const std::string& text) {
   char hex[9];
   std::snprintf(hex, sizeof hex, "%08x", crc32(text.data(), text.size()));
   return std::string(hex, 8);
 }
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_FINGERPRINT_H_
+#endif  // MX_LIB_FINGERPRINT_H_

@@ -51,6 +51,9 @@
 #ifndef MX_MULTIPLEXER_THREADED_CLIENT_H_
 #define MX_MULTIPLEXER_THREADED_CLIENT_H_
 
+#include <asio/io_service.hpp>
+#include <asio/steady_timer.hpp>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <future>
@@ -59,11 +62,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include <asio/io_service.hpp>
-#include <asio/steady_timer.hpp>
-#include <cstdint>
-#include <memory>
 
 #include "lib/mutex.h"
 #include "lib/random.h"
@@ -75,7 +73,7 @@
 namespace multiplexer {
 
 class ThreadedClient : public ExceptionDefinitions {
-public:
+ public:
   // How a query ended. REPLIED: `reply` holds the answer. TIMED_OUT: a stage
   // ran out of time. FAILED: every multiplexer reported no backend of the
   // type, or the backend found could not be reached. NOT_CONNECTED: no live
@@ -83,18 +81,18 @@ public:
   enum Outcome { REPLIED, TIMED_OUT, FAILED, NOT_CONNECTED, SHUT_DOWN };
   struct Result {
     Outcome outcome;
-    IncomingMessage reply; // set when outcome == REPLIED
+    IncomingMessage reply;  // set when outcome == REPLIED
     // The reply, or the exception the synchronous Client would have thrown.
-    const IncomingMessage &check() const;
+    const IncomingMessage& check() const;
   };
-  typedef std::function<void(const Result &)> Callback;
-  typedef std::function<void(const IncomingMessage &)> MessageSink;
+  typedef std::function<void(const Result&)> Callback;
+  typedef std::function<void(const IncomingMessage&)> MessageSink;
 
   // `on_message` receives, on the io thread, every message that is not a
   // reply to a query or one of the protocol's own (see the file comment);
   // without it such messages are logged and dropped.
   explicit ThreadedClient(std::uint32_t peer_type, MessageSink on_message = MessageSink());
-  ~ThreadedClient(); // shutdown() if not done, then joins the io thread
+  ~ThreadedClient();  // shutdown() if not done, then joins the io thread
 
   // A backend built on this client answers the search clients use to find
   // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
@@ -110,12 +108,12 @@ public:
 
   std::uint64_t instance_id() const { return instance_id_; }
   std::uint32_t peer_type() const { return peer_type_; }
-  std::uint64_t random64(); // thread-safe
+  std::uint64_t random64();  // thread-safe
 
   // Connects and waits up to `timeout` for the handshake; true when the
   // connection is registered. False is not final: the io thread keeps
   // reconnecting every AUTO_RECONNECT_TIME seconds on its own.
-  bool connect(const std::string &host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
   unsigned int connections_count();
 
   // Sending. The message must carry its id and from; new_message() fills
@@ -128,12 +126,12 @@ public:
   // chosen when it has none or lost its own; a pinned lane whose
   // connection is gone drops the message with a warning, the lane being
   // closed() for the caller to see.
-  void send(const MultiplexerMessage &msg);
-  void send(const MultiplexerMessage &msg, LanePtr lane);
-  void send_all(const MultiplexerMessage &msg);
+  void send(const MultiplexerMessage& msg);
+  void send(const MultiplexerMessage& msg, LanePtr lane);
+  void send_all(const MultiplexerMessage& msg);
   // Through `connection`, the one a reply came through, while it is live,
   // another when it is gone.
-  void send(const MultiplexerMessage &msg, const ConnectionWrapper &connection);
+  void send(const MultiplexerMessage& msg, const ConnectionWrapper& connection);
   // The flushing forms, from any thread but the io thread: wait until the
   // message reached the socket, on one connection (sent again through
   // another if the first dies under it, the way the synchronous Client's
@@ -141,10 +139,10 @@ public:
   // connection, or until `timeout` passes. Return the number of
   // connections it was written to; 0 means none in time, or a pinned lane
   // whose connection is gone.
-  unsigned int send(const MultiplexerMessage &msg, float timeout);
-  unsigned int send(const MultiplexerMessage &msg, LanePtr lane, float timeout);
-  unsigned int send(const MultiplexerMessage &msg, const ConnectionWrapper &connection, float timeout);
-  unsigned int send_all(const MultiplexerMessage &msg, float timeout);
+  unsigned int send(const MultiplexerMessage& msg, float timeout);
+  unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
+  unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
+  unsigned int send_all(const MultiplexerMessage& msg, float timeout);
   // The same for an already serialized MultiplexerMessage (the Python
   // side).
   void send_serialized(std::string serialized, LanePtr lane = LanePtr());
@@ -157,7 +155,7 @@ public:
   typedef std::function<void(unsigned int)> SendCallback;
   void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                      LanePtr lane = LanePtr());
-  MultiplexerMessage new_message(std::uint32_t type, const std::string &payload);
+  MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
 
   // A request with a reply, see the file comment. The callback runs on the
   // io thread. The blocking form throws std::logic_error when called on the
@@ -168,17 +166,17 @@ public:
   // and the lane adopts the connection the reply came through, a pinned
   // lane allowing no other; with a connection, through that one while it
   // is live.
-  void query(const std::string &payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
+  void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr());
-  Result query(const std::string &payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
+  Result query(const std::string& payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
                LanePtr lane = LanePtr());
-  void query(const MultiplexerMessage &msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
+  void query(const MultiplexerMessage& msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH);
-  Result query(const MultiplexerMessage &msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
+  Result query(const MultiplexerMessage& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
                Probe probe = PROBE_SEARCH);
-  void query(const MultiplexerMessage &msg, const ConnectionWrapper &connection, Callback callback,
+  void query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
              float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH);
-  Result query(const MultiplexerMessage &msg, const ConnectionWrapper &connection, float timeout = DEFAULT_TIMEOUT,
+  Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
                Probe probe = PROBE_SEARCH);
 
   // Ends every in-flight query with SHUT_DOWN, closes the connections and
@@ -188,53 +186,55 @@ public:
   // throws UsedAfterFork; see BasicClient::orphaned.
   bool orphaned() const { return basic_client_->orphaned(); }
 
-private:
+ private:
   struct InFlight;
   struct PendingSend;
   typedef std::shared_ptr<PendingSend> PendingSendPtr;
   void _orphan_teardown();
   void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
                     LanePtr lane);
-  void _attempt_send(const PendingSendPtr &pending) MX_RUN_ON(io_thread_);
+  void _attempt_send(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
   void _advance_sends() MX_RUN_ON(io_thread_);
-  BasicClient::BasicScheduledMessageTracker _schedule(const std::shared_ptr<const RawMessage> &raw, const LanePtr &lane,
-                                                      ConnectionWrapper *used, bool *refused) MX_RUN_ON(io_thread_);
+  BasicClient::BasicScheduledMessageTracker _schedule(const std::shared_ptr<const RawMessage>& raw, const LanePtr& lane,
+                                                      ConnectionWrapper* used, bool* refused) MX_RUN_ON(io_thread_);
   typedef std::shared_ptr<InFlight> InFlightPtr;
 
   void _io_thread_main();
-  template <typename F> void _post(F function);
-  template <typename F> auto _call(F function) -> decltype(function());
+  template <typename F>
+  void _post(F function);
+  template <typename F>
+  auto _call(F function) -> decltype(function());
 
-  void _on_incoming(const BasicClient::IncomingMessagesBuffer::value_type &incoming) MX_RUN_ON(io_thread_);
-  void _on_connection(const ConnectionWrapper &connection, bool up) MX_RUN_ON(io_thread_);
+  void _on_incoming(const BasicClient::IncomingMessagesBuffer::value_type& incoming) MX_RUN_ON(io_thread_);
+  void _on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
 
   void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
-  void _advance(InFlightPtr in_flight, const IncomingMessage &incoming) MX_RUN_ON(io_thread_);
+  void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
   void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
-  void _direct(InFlightPtr in_flight, const IncomingMessage &ping) MX_RUN_ON(io_thread_);
+  void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
   void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
-  float _stage_timeout(const InFlightPtr &in_flight) const MX_RUN_ON(io_thread_);
-  void _on_deadline(InFlightPtr in_flight, unsigned int generation, const asio::error_code &error)
+  float _stage_timeout(const InFlightPtr& in_flight) const MX_RUN_ON(io_thread_);
+  void _on_deadline(InFlightPtr in_flight, unsigned int generation, const asio::error_code& error)
       MX_RUN_ON(io_thread_);
-  void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage *reply) MX_RUN_ON(io_thread_);
+  void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage* reply) MX_RUN_ON(io_thread_);
   void _track(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
   void _remember_finished(std::uint64_t id) MX_RUN_ON(io_thread_);
-  void _on_unmatched(const IncomingMessage &incoming) MX_RUN_ON(io_thread_);
+  void _on_unmatched(const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
 
   const std::uint32_t peer_type_;
   // Held by pointer so that an orphan (a client inherited across a fork,
   // see BasicClient::orphaned) can leak it instead of running asio's
   // destructors with the parent's locks in an unknown state.
   std::unique_ptr<asio::io_service> io_service_holder_;
-  asio::io_service &io_service_;
+  asio::io_service& io_service_;
   std::unique_ptr<asio::io_service::work> work_;
   std::shared_ptr<BasicClient> basic_client_;
   const std::uint64_t instance_id_;
 
   mx::ThreadChecker io_thread_{mx::ThreadChecker::BIND_LATER};
   std::unordered_map<std::uint64_t, InFlightPtr> by_id_ MX_GUARDED_BY(io_thread_);
-  std::vector<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_); // every query, tracked by id or waiting
+  std::vector<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_);  // every query, tracked by id or waiting
   // The ids of recently finished queries, so that a late reply to one is
   // recognised and dropped instead of reaching on_message: a bounded ring,
   // small because a late reply arrives within a timeout of its query, and
@@ -265,6 +265,6 @@ private:
   }
 };
 
-} // namespace multiplexer
+}  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_THREADED_CLIENT_H_
+#endif  // MX_MULTIPLEXER_THREADED_CLIENT_H_

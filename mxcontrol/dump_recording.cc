@@ -1,8 +1,9 @@
 // dump_recording: prints a multiplexer's --record file, one line per
 // record (Recording.proto). With --rules the peer and message types are
 // shown by name; without, by number. --type and --peer filter.
-#include <cstdio>
 #include <fcntl.h>
+
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -17,13 +18,13 @@
 namespace mxcontrol {
 
 class DumpRecording : public Task {
-public:
+ public:
   virtual std::string short_description() const { return "print a recording made with run_multiplexer --record"; }
-  virtual std::string short_synopsis(const std::string &commandname) { return "<" + commandname + "-options> FILE..."; }
+  virtual std::string short_synopsis(const std::string& commandname) { return "<" + commandname + "-options> FILE..."; }
   virtual int run();
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     options.add("file", &files_, "a recording; several are merged by time, each record marked with its multiplexer")
         .positional("file", -1);
     options.add("rules", &rules_file_, "the rules file the multiplexer ran with, for peer and message type names");
@@ -31,7 +32,7 @@ protected:
     options.add("peer", &peer_, 0, "only records involving this instance id");
   }
 
-private:
+ private:
   std::vector<std::string> files_;
   std::string rules_file_;
   std::uint32_t type_;
@@ -44,33 +45,39 @@ namespace {
 
 typedef multiplexer::Config<std::multimap> Rules;
 
-std::string peer_name(const Rules *rules, std::uint32_t peer_type) {
-  if (!peer_type)
+std::string peer_name(const Rules* rules, std::uint32_t peer_type) {
+  if (!peer_type) {
     return "-";
-  if (peer_type == multiplexer::RECORDING_CONTROLLER)
+  }
+  if (peer_type == multiplexer::RECORDING_CONTROLLER) {
     return "RECORDING_CONTROLLER";
+  }
   if (rules) {
     Rules::PeerDescriptionById::const_iterator entry = rules->peer_by_type().find(peer_type);
-    if (entry != rules->peer_by_type().end())
+    if (entry != rules->peer_by_type().end()) {
       return entry->second.name();
+    }
   }
   return std::to_string(peer_type);
 }
 
-std::string type_name(const Rules *rules, std::uint32_t type) {
+std::string type_name(const Rules* rules, std::uint32_t type) {
   if (rules) {
     Rules::MessageDescriptionById::const_iterator entry = rules->message_description_by_id().find(type);
-    if (entry != rules->message_description_by_id().end())
+    if (entry != rules->message_description_by_id().end()) {
       return entry->second.name();
+    }
   }
   return std::to_string(type);
 }
 
-bool involves(const multiplexer::Record &record, std::uint64_t peer) {
-  if (record.has_peer())
+bool involves(const multiplexer::Record& record, std::uint64_t peer) {
+  if (record.has_peer()) {
     return record.peer().peer_id() == peer;
-  if (record.has_routed())
+  }
+  if (record.has_routed()) {
     return record.routed().from() == peer || record.routed().recipient() == peer || record.routed().to() == peer;
+  }
   return false;
 }
 
@@ -81,7 +88,7 @@ std::string when(std::uint64_t timestamp_us) {
   return text;
 }
 
-} // namespace
+}  // namespace
 
 // One recording being read: its stream, the record at its front, and the
 // multiplexer that wrote it, from its header.
@@ -90,8 +97,9 @@ struct Stream {
   bool next() {
     record.Clear();
     pending = input.read(record);
-    if (pending && record.has_header())
+    if (pending && record.has_header()) {
       multiplexer_id = record.header().multiplexer_id();
+    }
     return pending;
   }
   mx::protobuf::FileMessageInputStream input;
@@ -106,8 +114,9 @@ int DumpRecording::run() {
     return 1;
   }
   std::unique_ptr<Rules> rules;
-  if (!rules_file_.empty())
+  if (!rules_file_.empty()) {
     rules.reset(new Rules(rules_file_));
+  }
   std::vector<std::unique_ptr<Stream>> streams;
   for (std::vector<std::string>::const_iterator file = files_.begin(); file != files_.end(); ++file) {
     int fd = ::open(file->c_str(), O_RDONLY);
@@ -122,46 +131,55 @@ int DumpRecording::run() {
   for (;;) {
     // The earliest pending record across the files; a tap's stream may
     // carry its own multiplexer id, a file's comes from its header.
-    Stream *earliest = NULL;
-    for (std::vector<std::unique_ptr<Stream>>::iterator stream = streams.begin(); stream != streams.end(); ++stream)
-      if ((*stream)->pending && (!earliest || (*stream)->record.timestamp_us() < earliest->record.timestamp_us()))
+    Stream* earliest = NULL;
+    for (std::vector<std::unique_ptr<Stream>>::iterator stream = streams.begin(); stream != streams.end(); ++stream) {
+      if ((*stream)->pending && (!earliest || (*stream)->record.timestamp_us() < earliest->record.timestamp_us())) {
         earliest = stream->get();
-    if (!earliest)
+      }
+    }
+    if (!earliest) {
       break;
-    const multiplexer::Record &record = earliest->record;
+    }
+    const multiplexer::Record& record = earliest->record;
     const bool wanted =
         !(type_ && !(record.has_routed() && record.routed().type() == type_)) && !(peer_ && !involves(record, peer_));
     if (wanted) {
       std::cout << when(record.timestamp_us()) << " ";
       const std::uint64_t multiplexer_id = record.multiplexer_id() ? record.multiplexer_id() : earliest->multiplexer_id;
-      if ((several || record.multiplexer_id()) && multiplexer_id)
+      if ((several || record.multiplexer_id()) && multiplexer_id) {
         std::cout << "mx=" << multiplexer_id << " ";
+      }
       if (record.has_header()) {
-        const multiplexer::RecordingHeader &header = record.header();
+        const multiplexer::RecordingHeader& header = record.header();
         std::cout << "header multiplexer=" << header.multiplexer_id()
                   << " rules=" << header.rules_fingerprint().substr(0, 12)
                   << " payload_limit=" << header.payload_limit();
-        if (header.has_label())
+        if (header.has_label()) {
           std::cout << " label=" << header.label();
+        }
         std::cout << "\n";
       } else if (record.has_peer()) {
-        const multiplexer::PeerEvent &peer = record.peer();
+        const multiplexer::PeerEvent& peer = record.peer();
         std::cout << "peer " << multiplexer::PeerEvent::Kind_Name(peer.kind()) << " id=" << peer.peer_id()
                   << " type=" << peer_name(rules.get(), peer.peer_type()) << "\n";
       } else if (record.has_routed()) {
-        const multiplexer::RoutedMessage &routed = record.routed();
+        const multiplexer::RoutedMessage& routed = record.routed();
         std::cout << "routed " << multiplexer::RoutedMessage::Disposition_Name(routed.disposition())
                   << " type=" << type_name(rules.get(), routed.type()) << " id=" << routed.id()
                   << " from=" << routed.from() << " (" << peer_name(rules.get(), routed.from_peer_type()) << ")";
-        if (routed.recipient() || routed.recipient_peer_type())
+        if (routed.recipient() || routed.recipient_peer_type()) {
           std::cout << " -> " << routed.recipient() << " (" << peer_name(rules.get(), routed.recipient_peer_type())
                     << ")";
-        if (routed.to())
+        }
+        if (routed.to()) {
           std::cout << " to=" << routed.to();
-        if (routed.references())
+        }
+        if (routed.references()) {
           std::cout << " references=" << routed.references();
-        if (routed.error_reported())
+        }
+        if (routed.error_reported()) {
           std::cout << " error_reported";
+        }
         std::cout << " payload_bytes=" << routed.payload().size() << (routed.truncated() ? " truncated" : "") << "\n";
       }
     }
@@ -170,4 +188,4 @@ int DumpRecording::run() {
   return 0;
 }
 
-} // namespace mxcontrol
+}  // namespace mxcontrol

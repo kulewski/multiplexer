@@ -9,6 +9,6 @@ namespace mx {
 // continues if the limit cannot be raised.
 void enable_core_dump();
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_CORE_DUMP_H_
+#endif  // MX_LIB_CORE_DUMP_H_

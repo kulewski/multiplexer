@@ -17,15 +17,6 @@
 #ifndef MX_MULTIPLEXER_BASIC_CLIENT_H_
 #define MX_MULTIPLEXER_BASIC_CLIENT_H_
 
-#include "lib/assertion.h"
-#include "lib/functors.h"
-#include "lib/mutex.h"
-#include "lib/spanset.h"
-#include "lib/timer.h"
-#include "lib/triple.h"
-#include "multiplexer/connections_manager.h"
-#include "multiplexer/defaults.h"
-#include "multiplexer/io/connection.h"
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
 #include <cstdint>
@@ -35,6 +26,16 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "lib/assertion.h"
+#include "lib/functors.h"
+#include "lib/mutex.h"
+#include "lib/spanset.h"
+#include "lib/timer.h"
+#include "lib/triple.h"
+#include "multiplexer/connections_manager.h"
+#include "multiplexer/defaults.h"
+#include "multiplexer/io/connection.h"
 
 namespace multiplexer {
 
@@ -60,8 +61,8 @@ enum class SendState : unsigned char { QUEUED, SENT, LOST };
 // written to the socket, LOST if the connection died first. The entry holds
 // the state weakly and the tracker handed to the caller holds it strongly,
 // so a caller that does not keep the tracker costs nothing.
-template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerTraits {
-
+template <>
+struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerTraits {
   typedef DefaultConnectionsManagerTraits Base;
 
   struct MessagesBufferTraits : public Base::MessagesBufferTraits {
@@ -74,28 +75,25 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
 
     struct ToBufferRepresentationConverter
         : public std::function<temporary_value_type(std::shared_ptr<const RawMessage>)> {
-
       temporary_value_type operator()(std::shared_ptr<const RawMessage> raw) const {
-
         return temporary_value_type(temporary_value_type::first_type(new SendState(SendState::QUEUED)), raw);
       }
     };
     typedef mx::FirstFromPairExtractor<temporary_value_type> SchedulingResultFunctor;
 
     struct SendingResultNotifier : public Base::SendingResultNotifier {
-
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType &qe) const {
-
-        if (temporary_value_type::first_type state = qe.first.lock())
+      void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType& qe) const {
+        if (temporary_value_type::first_type state = qe.first.lock()) {
           *state = SendState::SENT;
+        }
       }
 
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType &qe) const {
-
-        if (temporary_value_type::first_type state = qe.first.lock())
+      void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType& qe) const {
+        if (temporary_value_type::first_type state = qe.first.lock()) {
           *state = SendState::LOST;
+        }
       }
     };
   };
@@ -104,7 +102,7 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
   // a dropped connection can be re-established without the caller; the
   // addresses that resolved to this time, tried in turn; and the one in use.
   struct ConnectionManagerPrivateDataInConnection {
-  private:
+   private:
     BasicClientTraits::Target target;
     BasicClientTraits::Endpoint expected_endpoint;
     std::vector<BasicClientTraits::Endpoint> candidates;
@@ -122,41 +120,42 @@ template <> struct ConnectionsManagerTraits<BasicClient> : public DefaultConnect
 // the connection they arrived on, so a peer can answer through the same
 // multiplexer.
 class ConnectionWrapper {
-public:
+ public:
   inline operator bool() const { return static_cast<bool>(lock()); }
   // Same connection, or the same target once it is gone (the observer's
   // "down" notification carries only the target).
-  bool is_same_connection(const ConnectionWrapper &other) const { return target_ == other.target_; }
+  bool is_same_connection(const ConnectionWrapper& other) const { return target_ == other.target_; }
 
-private:
+ private:
   typedef ConnectionsManagerTraits<BasicClient>::Connection Connection;
 
-public:
+ public:
   ConnectionWrapper() {}
-  ConnectionWrapper(const ConnectionWrapper &) = default;
+  ConnectionWrapper(const ConnectionWrapper&) = default;
 
-private:
-  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target &target,
-                    const BasicClientTraits::Endpoint &endpoint)
+ private:
+  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target& target,
+                    const BasicClientTraits::Endpoint& endpoint)
       : conn_(conn), target_(target), endpoint_(endpoint) {}
   Connection::pointer lock() const { return conn_.lock(); }
 
-public:
-  ConnectionWrapper &operator=(const ConnectionWrapper &other) {
-    if (this == &other)
+ public:
+  ConnectionWrapper& operator=(const ConnectionWrapper& other) {
+    if (this == &other) {
       return *this;
+    }
     conn_ = other.conn_;
     target_ = other.target_;
     endpoint_ = other.endpoint_;
     return *this;
   }
   // What the connection was asked for, host and port, kept after it is gone.
-  const BasicClientTraits::Target &target() const { return target_; }
+  const BasicClientTraits::Target& target() const { return target_; }
   // The address that resolved to and the connection used, kept after it is
   // gone; unspecified until a name resolved.
-  const BasicClientTraits::Endpoint &endpoint() const { return endpoint_; }
+  const BasicClientTraits::Endpoint& endpoint() const { return endpoint_; }
 
-private:
+ private:
   Connection::weak_pointer conn_;
   BasicClientTraits::Target target_;
   BasicClientTraits::Endpoint endpoint_;
@@ -182,13 +181,13 @@ private:
 // keeps nothing alive. Shared between the caller's thread and a
 // ThreadedClient's io thread, hence the mutex. docs/api_cpp.md, "Lanes".
 class Lane {
-public:
+ public:
   explicit Lane(bool pinned = false) : pinned_(pinned) {}
   // Seeded with a connection, the one a reply came through.
-  explicit Lane(const ConnectionWrapper &connection, bool pinned = false)
+  explicit Lane(const ConnectionWrapper& connection, bool pinned = false)
       : connection_(connection), pinned_(pinned), holds_(true) {}
-  Lane(const Lane &) = delete;
-  Lane &operator=(const Lane &) = delete;
+  Lane(const Lane&) = delete;
+  Lane& operator=(const Lane&) = delete;
 
   bool pinned() const { return pinned_; }
   // The connection held; empty until the first message went through.
@@ -212,15 +211,16 @@ public:
   // The library writes the connection it used or a reply came through;
   // public because the Python synchronous client runs the algorithm in
   // Python. A pinned lane takes the first connection only.
-  void adopt(const ConnectionWrapper &connection) {
+  void adopt(const ConnectionWrapper& connection) {
     mx::MutexLock lock(mutex_);
-    if (pinned_ && holds_)
+    if (pinned_ && holds_) {
       return;
+    }
     connection_ = connection;
     holds_ = true;
   }
 
-private:
+ private:
   mutable mx::Mutex mutex_;
   ConnectionWrapper connection_ MX_GUARDED_BY(mutex_);
   const bool pinned_;
@@ -241,22 +241,22 @@ enum Probe { PROBE_SEARCH, PROBE_PING };
 // message. Each overrides what() so the types stay distinct for the binding.
 struct ExceptionDefinitions {
   struct MxClientError : public mx::Exception {
-    const char *what() const throw() { return mx::Exception::what(); }
+    const char* what() const throw() { return mx::Exception::what(); }
   };
   struct NotConnected : public MxClientError {
-    const char *what() const throw() { return MxClientError::what(); }
+    const char* what() const throw() { return MxClientError::what(); }
   };
   // The client was inherited across a fork; see lib/fork.h. A NotConnected,
   // so that handlers for a broker outage catch it, with a message that says
   // what really happened.
   struct UsedAfterFork : public NotConnected {
-    const char *what() const throw() { return "client used after fork; create a new one in the child"; }
+    const char* what() const throw() { return "client used after fork; create a new one in the child"; }
   };
   struct OperationTimedOut : public MxClientError {
-    const char *what() const throw() { return MxClientError::what(); }
+    const char* what() const throw() { return MxClientError::what(); }
   };
   struct OperationFailed : public MxClientError {
-    const char *what() const throw() { return MxClientError::what(); }
+    const char* what() const throw() { return MxClientError::what(); }
   };
 };
 
@@ -266,11 +266,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
                     public std::enable_shared_from_this<BasicClient>,
                     public BasicClientTraits,
                     public ExceptionDefinitions {
+ private:
+  BasicClient(asio::io_service& io_service, std::uint32_t client_type);
 
-private:
-  BasicClient(asio::io_service &io_service, std::uint32_t client_type);
-
-public:
+ public:
   // definitions
   typedef ConnectionsManager<BasicClient> Base;
 
@@ -285,7 +284,7 @@ public:
 
   // The only way to make one: connections keep weak references to their
   // manager, so it must live in a shared_ptr.
-  static pointer Create(asio::io_service &io_service, unsigned short port) {
+  static pointer Create(asio::io_service& io_service, unsigned short port) {
     return pointer(new BasicClient(io_service, port));
   }
 
@@ -310,7 +309,7 @@ public:
   // connection that fails or drops is retried from connection_destroyed
   // after AUTO_RECONNECT_TIME, whenever the loop runs, resolving the name
   // again each time, so a multiplexer that moved is found at the next try.
-  void shutdown(); // close every connection; idempotent
+  void shutdown();  // close every connection; idempotent
 
   // Fork, see lib/fork.h: a client a forked child inherited is an orphan
   // there. Every public entry point checks first and throws UsedAfterFork,
@@ -327,27 +326,27 @@ public:
   // thread and driven from another; BaseMultiplexerServer::serve_forever()
   // calls it on entry. Only the debug-build thread checks care.
   void bind_to_current_thread();
-  ConnectionWrapper async_connect(const Endpoint &peer_endpoint);               // an address: start connecting
-  ConnectionWrapper async_connect(const std::string &host, std::uint16_t port); // a name or an address
-  bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const;    // run the loop until registered
-  ConnectionWrapper connect(const Endpoint &peer_endpoint, float timeout);      // async_connect + wait
-  ConnectionWrapper connect(const std::string &host, std::uint16_t port, float timeout);
-  void connection_destroyed(Connection *conn); // a connection ended; schedule the reconnect
-  void reconnect_after_timeout(TimerPointer, Target target, const asio::error_code &);
+  ConnectionWrapper async_connect(const Endpoint& peer_endpoint);                // an address: start connecting
+  ConnectionWrapper async_connect(const std::string& host, std::uint16_t port);  // a name or an address
+  bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const;     // run the loop until registered
+  ConnectionWrapper connect(const Endpoint& peer_endpoint, float timeout);       // async_connect + wait
+  ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout);
+  void connection_destroyed(Connection* conn);  // a connection ended; schedule the reconnect
+  void reconnect_after_timeout(TimerPointer, Target target, const asio::error_code&);
 
   // How a host name becomes addresses: the system resolver unless a test
   // installs one, a function of the host and the port that returns the
   // addresses, or none with `error` set. Called on this client's thread.
-  typedef std::function<std::vector<Endpoint>(const std::string &host, std::uint16_t port, asio::error_code &error)>
+  typedef std::function<std::vector<Endpoint>(const std::string& host, std::uint16_t port, asio::error_code& error)>
       Resolver;
   void set_resolver(Resolver resolver) { resolver_hook_ = resolver; }
 
-public:
+ public:
   // A deadline `timeout` seconds from now on this client's io_service;
   // negative means never.
   std::unique_ptr<mx::SimpleTimer> create_timer(float timeout) const;
 
-public:
+ public:
   // The only peer a client accepts a welcome from is a multiplexer.
   bool accept_peer_type(std::uint32_t peer_type) const {
     return peer_type == peers::MULTIPLEXER && Base::accept_peer_type(peer_type);
@@ -365,7 +364,7 @@ public:
   // not read must not be able to grow memory without limit.
   // Alternatively, a sink called on the owner thread as each message arrives
   // (ThreadedClient); while one is set the queue is not used.
-  typedef std::function<void(const IncomingMessagesBuffer::value_type &)> IncomingSink;
+  typedef std::function<void(const IncomingMessagesBuffer::value_type&)> IncomingSink;
   void set_incoming_sink(IncomingSink sink) {
     MX_DCHECK_RUN_ON(&owner_thread());
     incoming_sink_ = sink;
@@ -374,26 +373,28 @@ public:
   // Told, on the owner thread, when a connection completes its handshake
   // (up) and when one is gone (down), so a caller can move work that was
   // bound to a connection.
-  typedef std::function<void(const ConnectionWrapper &, bool up)> ConnectionObserver;
+  typedef std::function<void(const ConnectionWrapper&, bool up)> ConnectionObserver;
   void set_connection_observer(ConnectionObserver observer) {
     MX_DCHECK_RUN_ON(&owner_thread());
     connection_observer_ = observer;
   }
-  void after_connection_registration(Connection::pointer conn, const WelcomeMessage &) {
+  void after_connection_registration(Connection::pointer conn, const WelcomeMessage&) {
     MX_DCHECK_RUN_ON(&owner_thread());
-    if (connection_observer_)
+    if (connection_observer_) {
       connection_observer_(_wrap(conn), true);
+    }
   }
 
   inline bool has_incoming_messages() const { return !incoming_messages_.empty(); }
-  IncomingMessagesBuffer::value_type next_incoming_message(); // pop the oldest; only when has_incoming_messages()
+  IncomingMessagesBuffer::value_type next_incoming_message();  // pop the oldest; only when has_incoming_messages()
   inline bool incoming_queue_full() const { return incoming_queue_max_size_ <= incoming_messages_.size(); }
 
   // Runs the loop until a message is queued or `timeout` seconds pass;
   // throws OperationTimedOut, or NotConnected when no connection exists.
   void inline wait_for_incoming_message(float timeout = -1) const {
-    if (has_incoming_messages())
+    if (has_incoming_messages()) {
       return;
+    }
     std::unique_ptr<mx::SimpleTimer> timer = create_timer(timeout);
     return wait_for_incoming_message(*timer);
   }
@@ -405,8 +406,9 @@ public:
   // later wait would spin forever. Restarting the service first makes the
   // new wait's timer fire as intended.
   std::size_t run_one() const {
-    if (io_service_.stopped())
+    if (io_service_.stopped()) {
       io_service_.reset();
+    }
     return io_service_.run_one();
   }
 
@@ -417,27 +419,30 @@ public:
   // side has closed succeeds, and the message would be lost with no error.
   void poll() const {
     MX_DCHECK_RUN_ON(&owner_thread());
-    if (io_service_.stopped())
+    if (io_service_.stopped()) {
       io_service_.reset();
+    }
     io_service_.poll();
   }
 
   // Runs the loop until a message is queued or the timer expires. A socket
   // close, a reconnect timer or a heartbeat are all handled in here as a side
   // effect, which is the only time a passive client notices any of them.
-  void inline wait_for_incoming_message(mx::SimpleTimer &timer) const {
+  void inline wait_for_incoming_message(mx::SimpleTimer& timer) const {
     MX_DCHECK_RUN_ON(&owner_thread());
     unsigned int cc = 1;
-    const bool DISABLE_IFCONNECTED_CHECK = true; // TODO
-    while (!has_incoming_messages() && !timer.expired() && ((cc = connections_count(true)), DISABLE_IFCONNECTED_CHECK))
+    const bool DISABLE_IFCONNECTED_CHECK = true;  // TODO
+    while (!has_incoming_messages() && !timer.expired() &&
+           ((cc = connections_count(true)), DISABLE_IFCONNECTED_CHECK)) {
       run_one();
+    }
 
     if (!has_incoming_messages()) {
-      if (timer.expired())
+      if (timer.expired()) {
         MXTHROW(OperationTimedOut());
-      else if (!cc)
+      } else if (!cc) {
         MXTHROW(NotConnected());
-      else {
+      } else {
         // TODO logger.warning << "wait_for_incoming_message()
         // operation failed for unknown reason";
         MXTHROW(OperationFailed());
@@ -451,12 +456,13 @@ public:
     MX_DCHECK_RUN_ON(&owner_thread());
     unsigned int c = 0;
     for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
-
       if (Connection::pointer conn = entry->second.lock()) {
-        if (conn->outgoing_queue_full() || !conn->living())
+        if (conn->outgoing_queue_full() || !conn->living()) {
           continue;
-        if (conn->schedule(raw))
+        }
+        if (conn->schedule(raw)) {
           ++c;
+        }
       }
     }
     return c;
@@ -466,22 +472,24 @@ public:
   // the connection used is moved to the back of the list, and connections
   // that are dead or full are skipped. Returns a null tracker when none took
   // it.
-  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper *used = NULL) {
+  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper* used = NULL) {
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::pointer conn;
-    ConnectionsList &connections = connections_by_type_[peers::MULTIPLEXER];
+    ConnectionsList& connections = connections_by_type_[peers::MULTIPLEXER];
     for (ConnectionsList::iterator entry = connections.begin();
          (entry = choose_free_connections(connections, entry)) != connections.end(); ++entry) {
-
-      if (!(conn = entry->lock()))
+      if (!(conn = entry->lock())) {
         continue;
+      }
       BasicScheduledMessageTracker tracker = conn->schedule(raw);
-      if (!tracker)
+      if (!tracker) {
         continue;
+      }
       // round-robin: move *entry to the end of multiplexers list
       connections.splice(connections.end(), connections, entry);
-      if (used)
+      if (used) {
         *used = _wrap(conn);
+      }
       return tracker;
     }
     return BasicScheduledMessageTracker();
@@ -490,24 +498,28 @@ public:
   // Runs the loop until some connection is registered or the timer expires:
   // this is where a synchronous client's reconnect timers get to fire when
   // every connection is gone. True when a connection is available.
-  bool wait_for_any_connection(mx::SimpleTimer &timer) {
+  bool wait_for_any_connection(mx::SimpleTimer& timer) {
     MX_DCHECK_RUN_ON(&owner_thread());
-    while (connections_count(true) == 0 && !timer.expired())
+    while (connections_count(true) == 0 && !timer.expired()) {
       run_one();
+    }
     return connections_count(true) != 0;
   }
 
   // Like wait_for_incoming_message, but also returns, with false, as soon as
   // `watch` is no longer a live connection: a caller waiting for a reply
   // through it learns at once that the reply cannot come that way.
-  bool wait_for_incoming_message_or_loss(mx::SimpleTimer &timer, const ConnectionWrapper &watch) const {
+  bool wait_for_incoming_message_or_loss(mx::SimpleTimer& timer, const ConnectionWrapper& watch) const {
     MX_DCHECK_RUN_ON(&owner_thread());
-    while (!has_incoming_messages() && !timer.expired() && watch)
+    while (!has_incoming_messages() && !timer.expired() && watch) {
       run_one();
-    if (has_incoming_messages())
+    }
+    if (has_incoming_messages()) {
       return true;
-    if (!watch)
+    }
+    if (!watch) {
       return false;
+    }
     MXTHROW(OperationTimedOut());
   }
 
@@ -527,8 +539,9 @@ public:
       if (wrapper.endpoint_.port() && timeout > 0) {
         wrapper = this->connect(wrapper.endpoint_, timeout);
         return schedule_one(raw, wrapper, 0);
-      } else
+      } else {
         MXTHROW(NotConnected());
+      }
     }
   }
 
@@ -537,51 +550,57 @@ public:
   // connection takes stays in the buffer and is reported lost by the caller.
   // A message pinned to its connection (RawMessage::pinned, a pinned lane's)
   // is never handed over: it is reported lost, which is what the pin means.
-  template <typename MessagesBuffer> void inline handle_orphaned_outgoing_messages(MessagesBuffer &outgoing_messages) {
+  template <typename MessagesBuffer>
+  void inline handle_orphaned_outgoing_messages(MessagesBuffer& outgoing_messages) {
     MX_DCHECK_RUN_ON(&owner_thread());
     std::list<Connection::pointer> working_connections;
-    for (Connection::weak_pointer connwp : connections_by_type_[peers::MULTIPLEXER])
-
-      if (Connection::pointer conn = connwp.lock())
-        if (conn->living())
+    for (Connection::weak_pointer connwp : connections_by_type_[peers::MULTIPLEXER]) {
+      if (Connection::pointer conn = connwp.lock()) {
+        if (conn->living()) {
           working_connections.push_back(conn);
+        }
+      }
+    }
 
-    for (typename MessagesBuffer::value_type &message : outgoing_messages) {
-      if (message.second->pinned())
+    for (typename MessagesBuffer::value_type& message : outgoing_messages) {
+      if (message.second->pinned()) {
         continue;
+      }
 
       for (size_t n = working_connections.size(); n; --n) {
         if (working_connections.front()->take_over(message)) {
           // move front element to the end
           working_connections.splice(working_connections.end(), working_connections, working_connections.begin());
           message.first.reset();
-        } else
+        } else {
           working_connections.pop_front();
+        }
       }
-      if (working_connections.empty())
+      if (working_connections.empty()) {
         break;
+      }
     }
   }
 
-  mx::Random64::result_type random64() { return random_(); }        // a message id
-  std::uint32_t inline client_type() const { return client_type_; } // this peer's type
+  mx::Random64::result_type random64() { return random_(); }         // a message id
+  std::uint32_t inline client_type() const { return client_type_; }  // this peer's type
 
-private:
+ private:
   typedef std::map<Target, Connection::weak_pointer> ConnectionByTarget;
 
   // The wrapper of a connection, from what it stores.
-  static ConnectionWrapper _wrap(const Connection::pointer &conn) {
+  static ConnectionWrapper _wrap(const Connection::pointer& conn) {
     return ConnectionWrapper(conn, conn->managers_private_data().target,
                              conn->managers_private_data().expected_endpoint);
   }
   // A new connection for `target`, in the map, replacing an earlier one.
-  Connection::pointer _new_connection(const Target &target);
+  Connection::pointer _new_connection(const Target& target);
   // Resolves the connection's target, then connects; on the io thread.
   void _resolve_and_start(Connection::pointer conn);
-  void _resolved(Connection::pointer conn, const asio::error_code &error, std::vector<Endpoint> candidates);
+  void _resolved(Connection::pointer conn, const asio::error_code& error, std::vector<Endpoint> candidates);
   // Connects to the next address the target resolved to, or gives up.
   void _try_next_candidate(Connection::pointer conn);
-  void _connected(Connection::pointer conn, const asio::error_code &error);
+  void _connected(Connection::pointer conn, const asio::error_code& error);
 
   /* instance properties */
   std::uint32_t client_type_;
@@ -606,6 +625,6 @@ private:
   mx::SpanSet<std::uint64_t, 2048> last_seen_message_ids_;
 };
 
-}; // namespace multiplexer
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_BASIC_CLIENT_H_
+#endif  // MX_MULTIPLEXER_BASIC_CLIENT_H_

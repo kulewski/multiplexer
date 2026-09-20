@@ -1,4 +1,9 @@
-# Same style the code was written in (LLVM: 2-space indent, braces on the
-# same line), with the line length raised to match black's 120.
-BasedOnStyle: LLVM
+# Google's formatting (not its naming: the API is snake_case, like the
+# Python side), at black's 120 columns, with braces on every statement body
+# and one pointer spelling across the tree. clangd applies the same file, so
+# format-on-save in an editor gives what ./format.sh gives.
+BasedOnStyle: Google
 ColumnLimit: 120
+InsertBraces: true
+PointerAlignment: Left
+DerivePointerAlignment: false

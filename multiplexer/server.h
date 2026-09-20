@@ -21,8 +21,6 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
 #include <memory>
-
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -37,12 +35,12 @@
 
 namespace multiplexer {
 
-class Server; // forward
+class Server;  // forward
 
 // The multiplexer's queues hold bare frames and nobody tracks their fate:
 // scheduling a frame answers true or false, and that is all a sender learns.
-template <> struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits {
-
+template <>
+struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits {
   struct MessagesBufferTraits : public DefaultConnectionsManagerTraits::MessagesBufferTraits {
     typedef std::shared_ptr<const RawMessage> value_type;
     typedef mx::ReferencingFunctor<value_type> ToRawMessagePointerConverter;
@@ -57,15 +55,14 @@ template <> struct ConnectionsManagerTraits<Server> : public DefaultConnectionsM
 // See the file comment. Created with Create(), started with start(),
 // driven by io_service.run() in mxcontrol/start_multiplexer_server.cc.
 class Server : public ConnectionsManager<Server>, public std::enable_shared_from_this<Server> {
+ private:
+  Server(asio::io_service& io_service, const std::string& host, unsigned short port);
 
-private:
-  Server(asio::io_service &io_service, const std::string &host, unsigned short port);
-
-public:
+ public:
   typedef ConnectionsManager<Server> Base;
   typedef std::shared_ptr<Server> pointer;
   typedef std::weak_ptr<Server> weak_pointer;
-  static pointer Create(asio::io_service &io_service, const std::string &host, unsigned short port) {
+  static pointer Create(asio::io_service& io_service, const std::string& host, unsigned short port) {
     return pointer(new Server(io_service, host, port));
   }
 
@@ -98,8 +95,8 @@ public:
   // --recording-dir names where such sessions go; a peer taps in with TAP
   // once --allow-tap is set. The rules file's fingerprint goes into the
   // header record that opens every recording session.
-  void set_rules_fingerprint(const std::string &fingerprint) { rules_fingerprint_ = fingerprint; }
-  void set_recording_dir(const std::string &dir) { recording_dir_ = dir; }
+  void set_rules_fingerprint(const std::string& fingerprint) { rules_fingerprint_ = fingerprint; }
+  void set_recording_dir(const std::string& dir) { recording_dir_ = dir; }
   void set_allow_tap(bool allow) { allow_tap_ = allow; }
   bool remote_recording_enabled() const { return !recording_dir_.empty() || allow_tap_; }
 
@@ -108,16 +105,16 @@ public:
   // is open or the file cannot be opened. `label` names the session in the
   // header and the status; `max_bytes` and `max_seconds` close it on their
   // own, 0 means never.
-  bool start_recording(const std::string &path, const std::string &label, unsigned int payload_limit,
-                       std::uint64_t max_bytes, unsigned int max_seconds, std::string *error);
+  bool start_recording(const std::string& path, const std::string& label, unsigned int payload_limit,
+                       std::uint64_t max_bytes, unsigned int max_seconds, std::string* error);
   // Closes the file session, if one is open, noting `reason` for the status.
-  void stop_recording(const std::string &reason);
+  void stop_recording(const std::string& reason);
   bool recording() const { return recorder_ != nullptr; }
 
   // --peers-file: rewritten atomically on every registration and
   // unregistration, one line per connected peer: "<instance id> <peer type
   // name> <peer type>". Empty, the default, writes nothing.
-  void set_peers_file(const std::string &path) { peers_file_ = path; }
+  void set_peers_file(const std::string& path) { peers_file_ = path; }
 
   // Port the acceptor is bound to; meaningful when constructed with port 0.
   unsigned short local_port() const { return acceptor_.local_endpoint().port(); }
@@ -130,45 +127,47 @@ public:
   // rules file; the one exception is a recording controller, accepted when
   // remote recording is on.
   bool inline accept_peer_type(std::uint32_t peer_type) const {
-    if (peer_type == RECORDING_CONTROLLER)
+    if (peer_type == RECORDING_CONTROLLER) {
       return remote_recording_enabled();
+    }
     return peer_type > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE && Base::accept_peer_type(peer_type);
   }
 
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
   // and note the arrival for the recording and the peers file. A recording
   // controller is passive: it calls in when it has something to ask.
-  void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage &) {
-    if (new_connection->peer_type() == RECORDING_CONTROLLER)
+  void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
+    if (new_connection->peer_type() == RECORDING_CONTROLLER) {
       new_connection->set_is_passive(true);
+    }
     new_connection->start_rest();
     _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
     _write_peers_file();
   }
 
   // A registered peer's connection ended; a tap it held ends with it.
-  void connection_unregistered(Connection *conn) {
+  void connection_unregistered(Connection* conn) {
     _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
     _untap(conn);
     _write_peers_file(conn);
   }
 
-private:
+ private:
   void _start_accept();
-  void _handle_accept(Connection::pointer new_connection, const asio::error_code &error);
+  void _handle_accept(Connection::pointer new_connection, const asio::error_code& error);
 
   // Everything about the message being routed, passed down the _schedule
   // calls. Collects the delivery failures as they happen; at the end,
   // _handle_delivery_errors turns them into one DELIVERY_ERROR if any.
   struct MessageMetaHandler {
-    MessageMetaHandler(const MessageMetaHandler &) = delete;
-    MessageMetaHandler &operator=(const MessageMetaHandler &) = delete;
-    MessageMetaHandler(const MultiplexerMessage &message, Connection::pointer connection,
+    MessageMetaHandler(const MessageMetaHandler&) = delete;
+    MessageMetaHandler& operator=(const MessageMetaHandler&) = delete;
+    MessageMetaHandler(const MultiplexerMessage& message, Connection::pointer connection,
                        std::shared_ptr<const RawMessage> raw_message)
         : msg(message), conn(connection), raw(raw_message) {}
 
     // Nobody of `type` received it under `rule`.
-    void failed(const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t type);
+    void failed(const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t type);
     // The instance id `to` is not connected, or could not take it.
     void failed(std::uint64_t to);
     // The message type has no entry in the rules file.
@@ -176,45 +175,46 @@ private:
     // The message type has an entry but no routing rule, and no `to`.
     void unroutable();
 
-  private:
+   private:
     void __create_delivery_error_message(bool include_original_packet_in_report);
 
-  public:
+   public:
     std::unique_ptr<DeliveryError> delivery_error_message;
-    const MultiplexerMessage &msg;
+    const MultiplexerMessage& msg;
     const Connection::pointer conn;
     const std::shared_ptr<const RawMessage> raw;
   };
 
   // The per-message path; see the file comment for the order of the cases.
-  void _handle_message(Connection::pointer conn, const MultiplexerMessage &msg, std::shared_ptr<const RawMessage> raw);
-  void _handle_delivery_errors(MessageMetaHandler &meta_handler);
-  bool _handle_message_inlined_rules(MessageMetaHandler &meta_handler);
-  bool _handle_meta_message(MessageMetaHandler &meta_handler);
+  void _handle_message(Connection::pointer conn, const MultiplexerMessage& msg, std::shared_ptr<const RawMessage> raw);
+  void _handle_delivery_errors(MessageMetaHandler& meta_handler);
+  bool _handle_message_inlined_rules(MessageMetaHandler& meta_handler);
+  bool _handle_meta_message(MessageMetaHandler& meta_handler);
 
   // Applying rules. The overloads narrow from a message description to its
   // list of rules to one rule to the connections of one peer type; each
   // returns how many connections the frame was queued on. Zero, with
   // report_delivery_error set, records a failure in the meta handler.
-  unsigned int _schedule(MessageMetaHandler &meta_handler, const MultiplexerMessageDescription &desc);
-  unsigned int _schedule(MessageMetaHandler &meta_handler,
-                         const ::google::protobuf::RepeatedPtrField<MultiplexerMessageDescription::RoutingRule> &rules);
-  unsigned int _schedule(MessageMetaHandler &meta_handler, const MultiplexerMessageDescription::RoutingRule &rule);
-  unsigned int _schedule(MessageMetaHandler &meta_handler, ConnectionsList &connections,
-                         const MultiplexerMessageDescription::RoutingRule &rule);
-  unsigned int _schedule(MessageMetaHandler &meta_handler, ConnectionsList &connections,
-                         const MultiplexerMessageDescription::RoutingRule &rule, std::uint32_t peer_type);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription& desc);
+  unsigned int _schedule(MessageMetaHandler& meta_handler,
+                         const ::google::protobuf::RepeatedPtrField<MultiplexerMessageDescription::RoutingRule>& rules);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription::RoutingRule& rule);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
+                         const MultiplexerMessageDescription::RoutingRule& rule);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
+                         const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t peer_type);
 
   // whom: ALL and whom: ANY over one peer type's connections.
-  unsigned int send_to_all(MessageMetaHandler &meta_handler, ConnectionsList &connections);
-  unsigned int send_to_one(MessageMetaHandler &meta_handler, ConnectionsList &connections);
+  unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
+  unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
   // Recording. A record is built once and goes to the file session and to
   // every tap; nothing is built while neither exists.
-  void _record(const MessageMetaHandler &meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,
+  void _record(const MessageMetaHandler& meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,
                RoutedMessage::Disposition disposition, bool error_reported) {
-    if (!recorder_ && taps_.empty())
+    if (!recorder_ && taps_.empty()) {
       return;
+    }
     // A message of the multiplexer's own, a DELIVERY_ERROR, is routed
     // through the connection of the peer it answers; it is still ours.
     const std::uint32_t from_peer_type =
@@ -227,18 +227,18 @@ private:
   void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
   // Stamps `record`, writes it to the file session, closing the session at
   // its cap, and streams it to every tap.
-  void _emit(Record &record);
+  void _emit(Record& record);
 
   // A peer receiving every record as RECORDING_RECORD messages.
   struct Tap {
     Connection::weak_pointer conn;
     std::uint64_t peer_id;
     unsigned int payload_limit;
-    std::uint64_t dropped; // records its full outgoing queue lost
+    std::uint64_t dropped;  // records its full outgoing queue lost
   };
   typedef std::vector<Tap> Taps;
-  Taps::iterator _find_tap(const Connection *conn);
-  void _untap(const Connection *conn);
+  Taps::iterator _find_tap(const Connection* conn);
+  void _untap(const Connection* conn);
 
   // What a file session was, kept after it closed for the status.
   struct Session {
@@ -248,27 +248,27 @@ private:
     std::uint64_t max_bytes = 0;
     std::uint64_t bytes = 0;
     std::uint64_t records = 0;
-    std::string stopped; // why it ended; empty while open or before the first
+    std::string stopped;  // why it ended; empty while open or before the first
   };
 
   // RECORDING_CONTROL from a peer: carry it out and answer RECORDING_STATUS.
-  void _handle_recording_control(MessageMetaHandler &meta_handler);
-  void _fill_status(RecordingStatus &status, const Connection *requester);
+  void _handle_recording_control(MessageMetaHandler& meta_handler);
+  void _fill_status(RecordingStatus& status, const Connection* requester);
   // Queues `payload` as a message of `type` on the sender's connection,
   // referencing the message being handled.
-  void _reply(const MessageMetaHandler &meta_handler, std::uint32_t type, const ::google::protobuf::Message &payload);
-  static void _on_session_deadline(weak_pointer server, const asio::error_code &error);
+  void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload);
+  static void _on_session_deadline(weak_pointer server, const asio::error_code& error);
 
   // The peers file, if configured; `leaving` is excluded, since it is
   // written before the indexes drop it.
-  void _write_peers_file(Connection *leaving = NULL);
+  void _write_peers_file(Connection* leaving = NULL);
   // A peer type's name for the peers file: from the rules, or the reserved name.
   std::string _peer_name(std::uint32_t peer_type) const;
 
-private:
+ private:
   asio::ip::tcp::acceptor acceptor_;
   std::shared_ptr<const RawMessage> welcome_message_;
-  asio::io_service &io_service_;
+  asio::io_service& io_service_;
   unsigned int memory_log_every_ = 0;
   unsigned long routed_messages_ = 0;
   std::string rules_fingerprint_;
@@ -279,8 +279,8 @@ private:
   asio::steady_timer session_timer_;
   Taps taps_;
   std::string peers_file_;
-}; // class Server
+};  // class Server
 
-}; // namespace multiplexer
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_SERVER_H_
+#endif  // MX_MULTIPLEXER_SERVER_H_

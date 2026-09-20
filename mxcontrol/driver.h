@@ -7,8 +7,8 @@ namespace mxcontrol {
 // Parses the general options, picks the subcommand named on the command line
 // and runs it. Shared by mxcontrol and by other binaries that register their
 // own subcommands with REGISTER_MXCONTROL_SUBCOMMAND.
-int run_tasks(int argc, char **argv);
+int run_tasks(int argc, char** argv);
 
-} // namespace mxcontrol
+}  // namespace mxcontrol
 
-#endif // MX_MXCONTROL_DRIVER_H_
+#endif  // MX_MXCONTROL_DRIVER_H_

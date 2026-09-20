@@ -25,7 +25,7 @@
 #  *	Like MX_TRIGGER_STATIC_INITIALIZATION but code can be any C++ code
 #  *	in braces.
 #  */
-#define MX_TRIGGER_STATIC_INITIALIZATION_CODE(code, condition)                                                         \
+#define MX_TRIGGER_STATIC_INITIALIZATION_CODE(code, condition) \
   MX_TRIGGER_STATIC_INITIALIZATION_CODE_NAME(code, _, condition)
 
 #/*
@@ -33,8 +33,8 @@
 #  *	Like MX_TRIGGER_STATIC_INITIALIZATION_CODE. `name' is used as a static initializer
 #  *	name seed (use when auto generation of name fails.
 #  */
-#define MX_TRIGGER_STATIC_INITIALIZATION_CODE_NAME(code, name, condition)                                              \
-  __MX_TRIGGER_STATIC_INITIALIZATION_CODE(MX_UNIQUE_NAME(MX_PP_CAT(name, _trigger_static_initialization)), code,       \
+#define MX_TRIGGER_STATIC_INITIALIZATION_CODE_NAME(code, name, condition)                                        \
+  __MX_TRIGGER_STATIC_INITIALIZATION_CODE(MX_UNIQUE_NAME(MX_PP_CAT(name, _trigger_static_initialization)), code, \
                                           condition)
 
 #/*
@@ -45,15 +45,15 @@
 #  * the other never ran (mxcontrol registered "receivelogs" twice and lost
 #  * "streamlogs").
 #  */
-#define __MX_TRIGGER_STATIC_INITIALIZATION_CODE(name, code, condition)                                                 \
-  namespace {                                                                                                          \
-  struct MX_PP_CAT(name, _struct) {                                                                                    \
-    MX_PP_CAT(name, _struct)() {                                                                                       \
-      if (condition) {                                                                                                 \
-        MX_PP_REMOVE_BRACES code;                                                                                      \
-      }                                                                                                                \
-    }                                                                                                                  \
-  } MX_PP_CAT(name, _instance);                                                                                        \
+#define __MX_TRIGGER_STATIC_INITIALIZATION_CODE(name, code, condition) \
+  namespace {                                                          \
+  struct MX_PP_CAT(name, _struct) {                                    \
+    MX_PP_CAT(name, _struct)() {                                       \
+      if (condition) {                                                 \
+        MX_PP_REMOVE_BRACES code;                                      \
+      }                                                                \
+    }                                                                  \
+  } MX_PP_CAT(name, _instance);                                        \
   }
 
-#endif // MX_LIB_INITIALIZATION_H_
+#endif  // MX_LIB_INITIALIZATION_H_

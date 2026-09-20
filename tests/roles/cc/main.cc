@@ -4,4 +4,4 @@
 #include "lib/program.h" /* main() */
 #include "mxcontrol/driver.h"
 
-int MxMain(int argc, char **argv) { return mxcontrol::run_tasks(argc, argv); }
+int MxMain(int argc, char** argv) { return mxcontrol::run_tasks(argc, argv); }

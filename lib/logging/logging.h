@@ -61,11 +61,11 @@
 #  *                FLOW(mxmsg.workflow())
 #  *		    DATA(MALFORMED_MESSAGE_SO_SHUTDOWN, characteristics));
 #  */
-#define MX_LOG(level, verbosity, tokens...)                                                                            \
-  do {                                                                                                                 \
-    if (::mx::logging::impl::should_log(level, verbosity)) {                                                           \
-      MX_LOG_ALWAYS(level, verbosity, tokens);                                                                         \
-    }                                                                                                                  \
+#define MX_LOG(level, verbosity, tokens...)                  \
+  do {                                                       \
+    if (::mx::logging::impl::should_log(level, verbosity)) { \
+      MX_LOG_ALWAYS(level, verbosity, tokens);               \
+    }                                                        \
   } while (0)
 
 #/*
@@ -73,11 +73,11 @@
 #  *	MX_LOG without the verbosity check: for an entry that must reach
 #  *	the log whatever the setting, the report of a fatal error.
 #  */
-#define MX_LOG_ALWAYS(level, verbosity, tokens...)                                                                     \
-  do {                                                                                                                 \
-    ::mx::logging::Entry __mx_log_entry(level, verbosity, __FILE__, __LINE__);                                         \
-    __MX_LOG_PROCESS_TOKENS(__mx_log_entry, tokens)                                                                    \
-    __mx_log_entry.emit();                                                                                             \
+#define MX_LOG_ALWAYS(level, verbosity, tokens...)                             \
+  do {                                                                         \
+    ::mx::logging::Entry __mx_log_entry(level, verbosity, __FILE__, __LINE__); \
+    __MX_LOG_PROCESS_TOKENS(__mx_log_entry, tokens)                            \
+    __mx_log_entry.emit();                                                     \
   } while (0)
 
 namespace mx {
@@ -103,10 +103,10 @@ const static unsigned int MAX_LEVEL = CRITICAL;
  * the level entirely.
  */
 static const unsigned int ZEROVERBOSITY = 0;
-static const unsigned int LOWVERBOSITY = 1;    // messages that appear very rarely
-static const unsigned int MEDIUMVERBOSITY = 2; // messages that appear sometimes
-static const unsigned int HIGHVERBOSITY = 3;   // messages that are usually quite numerous
-static const unsigned int CHATTERBOX = 4;      // messages that can flood you
+static const unsigned int LOWVERBOSITY = 1;     // messages that appear very rarely
+static const unsigned int MEDIUMVERBOSITY = 2;  // messages that appear sometimes
+static const unsigned int HIGHVERBOSITY = 3;    // messages that are usually quite numerous
+static const unsigned int CHATTERBOX = 4;       // messages that can flood you
 const static unsigned int MAX_VERBOSITY = CHATTERBOX;
 #define MX_LOGGING_DEFAULT_VERBOSITY() (::mx::logging::consts::HIGHVERBOSITY)
 
@@ -114,17 +114,17 @@ const static unsigned int MAX_VERBOSITY = CHATTERBOX;
  * logging_get_level_name(level), logging_get_verbosity_name(verbosity)
  *	    The name of a level or verbosity, "UNKNOWN" for none.
  */
-static inline const char *logging_get_level_name(const unsigned int level) MX_ATTRIBUTE_ALWAYS_INLINE;
-static inline const char *logging_get_verbosity_name(const unsigned int verbosity) MX_ATTRIBUTE_ALWAYS_INLINE;
+static inline const char* logging_get_level_name(const unsigned int level) MX_ATTRIBUTE_ALWAYS_INLINE;
+static inline const char* logging_get_verbosity_name(const unsigned int verbosity) MX_ATTRIBUTE_ALWAYS_INLINE;
 
-}; // namespace consts
+};  // namespace consts
 
 /*
  * process_context()
  *	    Get context of the whole process as required for
  *	    MX_LOG(., ., context).
  */
-static inline const std::string &process_context() MX_ATTRIBUTE_ALWAYS_INLINE;
+static inline const std::string& process_context() MX_ATTRIBUTE_ALWAYS_INLINE;
 
 /*
  * set_maximal_logging_verbosity(for_level, minimal_verbosity)
@@ -144,8 +144,8 @@ void set_maximal_logging_verbosity(const unsigned int for_level, const unsigned 
  *	initializes, so a deployment sets a process's logging without a
  *	rebuild or a call.
  */
-bool apply_verbosity_spec(const std::string &spec, std::string *error = NULL);
-static const char *const VERBOSITY_ENVIRONMENT_VARIABLE = "MX_LOG_VERBOSITY";
+bool apply_verbosity_spec(const std::string& spec, std::string* error = NULL);
+static const char* const VERBOSITY_ENVIRONMENT_VARIABLE = "MX_LOG_VERBOSITY";
 
 /*
  * set_logging_fd
@@ -153,18 +153,18 @@ static const char *const VERBOSITY_ENVIRONMENT_VARIABLE = "MX_LOG_VERBOSITY";
  */
 void set_logging_fd(unsigned int logging_fd, bool close_on_delete = false, bool log_the_fact = true);
 
-void set_logging_file(const std::string &file);
+void set_logging_file(const std::string& file);
 
 std::uint64_t create_log_id();
 
-static inline const std::string &process_context();
-static inline void set_process_context(const std::string &s);
-void set_process_context_program_name(const std::string &s);
+static inline const std::string& process_context();
+static inline void set_process_context(const std::string& s);
+void set_process_context_program_name(const std::string& s);
 
-void die(const std::string &text);
+void die(const std::string& text);
 
-}; // namespace logging
-}; // namespace mx
+};  // namespace logging
+};  // namespace mx
 
 /*
  * export logging constants names
@@ -173,4 +173,4 @@ using namespace mx::logging::consts;
 
 #include "lib/logging/impl.h"
 
-#endif // MX_LIB_LOGGING_LOGGING_H_
+#endif  // MX_LIB_LOGGING_LOGGING_H_

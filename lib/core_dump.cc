@@ -1,10 +1,11 @@
 // See core_dump.h.
 #include "lib/core_dump.h"
 
+#include <sys/resource.h>
+
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <sys/resource.h>
 
 namespace mx {
 
@@ -21,4 +22,4 @@ void enable_core_dump() {
   }
 }
 
-} // namespace mx
+}  // namespace mx

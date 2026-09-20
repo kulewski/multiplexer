@@ -1,20 +1,20 @@
 // BaseMultiplexerServer: the loop, the reply defaults and the protocol
 // messages a backend answers itself. See the header for the design.
-#include <memory>
-
 #include "multiplexer/backend/base_multiplexer_server.h"
+
+#include <memory>
 
 namespace multiplexer {
 namespace backend {
 
-BaseMultiplexerServer::BaseMultiplexerServer(const MultiplexerAddresses &addresses, PeerType type)
+BaseMultiplexerServer::BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type)
     : working(true), _has_sent_response(false), __conn(new multiplexer::Client(type)), conn(__conn.get()) {
-  for (const MultiplexerAddress &address : addresses) {
+  for (const MultiplexerAddress& address : addresses) {
     conn->connect(address.first, address.second);
   }
 }
 
-BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client *conn_, PeerType type)
+BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client* conn_, PeerType type)
     : working(true), _has_sent_response(false), conn(conn_) {
   Assert(conn->client_type() == type);
 }
@@ -33,11 +33,12 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   drain_seconds_ = drain_seconds;
   try {
     while (working) {
-      if (draining_ && drained())
+      if (draining_ && drained()) {
         break;
+      }
       try {
         loop_iter(poll);
-      } catch (Client::OperationTimedOut &) {
+      } catch (Client::OperationTimedOut&) {
       }
       periodic_task();
     }
@@ -49,8 +50,9 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
 }
 
 void BaseMultiplexerServer::start_draining() {
-  if (draining_)
+  if (draining_) {
     return;
+  }
   draining_ = true;
   draining_since_ = std::chrono::steady_clock::now();
 }
@@ -69,12 +71,12 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
 
   DbgAssert(kwargs.check_keys(KwargsKeys()("message")("to")("type")("references")("workflow")));
   Assert(kwargs.has_key("message"));
-  DbgAssert(kwargs.unsafe_is<const MultiplexerMessage *>("message") ||
-            kwargs.unsafe_is<const std::string *>("message") || kwargs.unsafe_is<std::string>("message"));
+  DbgAssert(kwargs.unsafe_is<const MultiplexerMessage*>("message") || kwargs.unsafe_is<const std::string*>("message") ||
+            kwargs.unsafe_is<std::string>("message"));
   DbgAssert(kwargs.empty_or<std::uint32_t>("type"));
   DbgAssert(kwargs.empty_or<std::uint64_t>("references"));
   DbgAssert(kwargs.empty_or<std::uint64_t>("to"));
-  DbgAssert(kwargs.empty_or<std::string>("workflow") || kwargs.unsafe_is<const std::string *>("workflow"));
+  DbgAssert(kwargs.empty_or<std::string>("workflow") || kwargs.unsafe_is<const std::string*>("workflow"));
 
   // defaults
   kwargs.set_default("workflow", last_mxmsg->workflow());
@@ -83,8 +85,8 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   kwargs.set_default("multiplexer", last_connwrap);
 
   std::unique_ptr<MultiplexerMessage> _mxmsg;
-  const MultiplexerMessage *mxmsg;
-  if (!kwargs.unsafe_is<const MultiplexerMessage *>("message")) {
+  const MultiplexerMessage* mxmsg;
+  if (!kwargs.unsafe_is<const MultiplexerMessage*>("message")) {
     // Construct new MultiplexerMessage using some info from kwargs.
     _mxmsg.reset(new MultiplexerMessage());
     // id and from: the server drops messages without a sender, and replies
@@ -93,12 +95,13 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
     _mxmsg->set_from(conn->instance_id());
 
     // set message
-    if (kwargs.unsafe_is<std::string>("message"))
-      _mxmsg->set_message(kwargs.get<const std::string &>("message"));
-    else if (kwargs.unsafe_is<const std::string *>("message"))
-      _mxmsg->set_message(*kwargs.get<const std::string *>("message"));
-    else
+    if (kwargs.unsafe_is<std::string>("message")) {
+      _mxmsg->set_message(kwargs.get<const std::string&>("message"));
+    } else if (kwargs.unsafe_is<const std::string*>("message")) {
+      _mxmsg->set_message(*kwargs.get<const std::string*>("message"));
+    } else {
       AssertMsg(false, "impossible");
+    }
     // type
     _mxmsg->set_type(kwargs.get<std::uint32_t>("type"));
     // to
@@ -106,36 +109,38 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
     // references
     _mxmsg->set_references(kwargs.get<std::uint64_t>("references"));
     // workflow
-    if (kwargs.unsafe_is<const std::string *>("workflow"))
-      _mxmsg->set_workflow(*kwargs.get<const std::string *>("workflow"));
-    else if (kwargs.unsafe_is<std::string>("workflow"))
-      _mxmsg->set_workflow(kwargs.get<const std::string &>("workflow"));
+    if (kwargs.unsafe_is<const std::string*>("workflow")) {
+      _mxmsg->set_workflow(*kwargs.get<const std::string*>("workflow"));
+    } else if (kwargs.unsafe_is<std::string>("workflow")) {
+      _mxmsg->set_workflow(kwargs.get<const std::string&>("workflow"));
+    }
 
     mxmsg = _mxmsg.get();
 
   } else {
-    mxmsg = kwargs.get<const MultiplexerMessage *>("message");
+    mxmsg = kwargs.get<const MultiplexerMessage*>("message");
   }
 
   if (kwargs.unsafe_is<int>("multiplexer")) {
     switch (kwargs.get<int>("multiplexer")) {
-    case ALL:
-      return conn->schedule_all(*mxmsg);
-    case ONE:
-      return conn->schedule_one(*mxmsg);
-    default:
-      AssertMsg(false, "impossible");
+      case ALL:
+        return conn->schedule_all(*mxmsg);
+      case ONE:
+        return conn->schedule_one(*mxmsg);
+      default:
+        AssertMsg(false, "impossible");
     }
   } else if (kwargs.unsafe_is<ConnectionWrapper>("multiplexer")) {
-    return conn->schedule_one(*mxmsg, kwargs.get<const ConnectionWrapper &>("multiplexer"));
+    return conn->schedule_one(*mxmsg, kwargs.get<const ConnectionWrapper&>("multiplexer"));
   }
   AssertMsg(false, "impossible");
-  return false; // unreachable
+  return false;  // unreachable
 }
 
 void BaseMultiplexerServer::notify_start() {
-  DbgAssertMsg(!_has_sent_response, "If you use notify_start(), place it as a first function in "
-                                    "your handle_message() code");
+  DbgAssertMsg(!_has_sent_response,
+               "If you use notify_start(), place it as a first function in "
+               "your handle_message() code");
   send_message(Kwargs()
                    .set("message", std::string(""))
                    .set("type", types::REQUEST_RECEIVED)
@@ -165,19 +170,20 @@ void BaseMultiplexerServer::__handle_message() {
                     "response"));
       }
     }
-  } catch (std::exception &error) {
+  } catch (std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception in handle_message: ") + error.what()));
     if (!_has_sent_response) {
       // Same as the Python backend: tell the requester instead of leaving it
       // to time out.
       report_error(error.what());
     }
-    if (!on_handler_exception(error))
+    if (!on_handler_exception(error)) {
       throw;
+    }
   }
 }
 
-void BaseMultiplexerServer::report_error(const std::string &message) {
+void BaseMultiplexerServer::report_error(const std::string& message) {
   send_message(Kwargs().set("message", message).set("type", types::BACKEND_ERROR));
 }
 
@@ -186,39 +192,41 @@ void BaseMultiplexerServer::report_error(const std::string &message) {
 // backend is alive and where to send the request; a PING without
 // references is an echo request and is answered with the same payload.
 void BaseMultiplexerServer::__handle_internal_message() {
-  const MultiplexerMessage &mxmsg = *last_mxmsg;
+  const MultiplexerMessage& mxmsg = *last_mxmsg;
   switch (mxmsg.type()) {
-  case types::BACKEND_FOR_PACKET_SEARCH:
-    if (should_respond_to_backend_for_packet_search())
-      send_message(Kwargs().set("message", std::string()).set("type", types::PING));
-    else
-      no_response(); // draining: let the client find another backend
-    break;
+    case types::BACKEND_FOR_PACKET_SEARCH:
+      if (should_respond_to_backend_for_packet_search()) {
+        send_message(Kwargs().set("message", std::string()).set("type", types::PING));
+      } else {
+        no_response();  // draining: let the client find another backend
+      }
+      break;
 
-  case types::PING:
-    if (!mxmsg.references()) {
-      DbgAssert(mxmsg.id());
-      send_message(Kwargs()
-                       .set("message", mxmsg.message())
-                       //.set("flush", true)
-                       .set("type", types::PING));
-    } else {
-      no_response();
-    }
-    break;
+    case types::PING:
+      if (!mxmsg.references()) {
+        DbgAssert(mxmsg.id());
+        send_message(Kwargs()
+                         .set("message", mxmsg.message())
+                         //.set("flush", true)
+                         .set("type", types::PING));
+      } else {
+        no_response();
+      }
+      break;
 
-  default:
-    MX_LOG(ERROR, LOWVERBOSITY, TEXT("received unknown meta-packet type=" + repr(mxmsg.type())));
-  } // switch
+    default:
+      MX_LOG(ERROR, LOWVERBOSITY, TEXT("received unknown meta-packet type=" + repr(mxmsg.type())));
+  }  // switch
 }
 
 void BaseMultiplexerServer::close() {
-  if (conn == NULL)
+  if (conn == NULL) {
     return;
+  }
   conn->shutdown();
   __conn.reset();
   conn = NULL;
 }
 
-}; // namespace backend
-}; // namespace multiplexer
+};  // namespace backend
+};  // namespace multiplexer

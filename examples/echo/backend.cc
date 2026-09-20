@@ -16,7 +16,7 @@
 static volatile std::sig_atomic_t leave_requested = 0;
 
 #include "multiplexer/backend/base_multiplexer_server.h"
-#include "multiplexer/multiplexer.constants.h" // generated from echo.rules
+#include "multiplexer/multiplexer.constants.h"  // generated from echo.rules
 
 using multiplexer::MultiplexerMessage;
 using multiplexer::backend::BaseMultiplexerServer;
@@ -24,27 +24,29 @@ using multiplexer::backend::MultiplexerAddresses;
 using mx::util::kwargs::Kwargs;
 
 class EchoBackend : public BaseMultiplexerServer {
-public:
-  EchoBackend(const MultiplexerAddresses &addresses, multiplexer::backend::PeerType type)
+ public:
+  EchoBackend(const MultiplexerAddresses& addresses, multiplexer::backend::PeerType type)
       : BaseMultiplexerServer(addresses, type) {}
 
-protected:
-  void handle_message(MultiplexerMessage &mxmsg) override {
+ protected:
+  void handle_message(MultiplexerMessage& mxmsg) override {
     std::string payload = mxmsg.message();
-    for (char &character : payload)
+    for (char& character : payload) {
       character = std::toupper(static_cast<unsigned char>(character));
+    }
     send_message(
         Kwargs().set("message", payload).set("type", static_cast<std::uint32_t>(multiplexer::types::ECHO_RESPONSE)));
   }
 
   // Runs after every iteration: start draining once the signal flag is set.
   void periodic_task() override {
-    if (leave_requested)
+    if (leave_requested) {
       start_draining();
+    }
   }
 };
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   std::string address = argc > 1 ? argv[1] : "127.0.0.1:1980";
   std::string::size_type colon = address.rfind(':');
   MultiplexerAddresses addresses;

@@ -12,6 +12,6 @@ namespace mx {
 
 size_t heap_in_use_bytes();
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_MEMORY_H_
+#endif  // MX_LIB_MEMORY_H_

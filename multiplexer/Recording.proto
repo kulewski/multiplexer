@@ -7,6 +7,8 @@
 // that tapped in; RecordingControl and RecordingStatus are the messages of
 // that protocol. docs/operations.md describes it from the outside;
 // multiplexer/recording.py reads and drives it.
+syntax = "proto2";  // labels and defaults: the original dialect, said explicitly since protoc warns otherwise
+
 package multiplexer;
 
 option optimize_for = SPEED;

@@ -4,14 +4,13 @@
 // --multiplexer as a RECORDING_CONTROLLER, resolving a host name to all its
 // addresses, so one command reaches every replica behind a name. See
 // docs/operations.md.
+#include <asio/ip/tcp.hpp>
 #include <chrono>
 #include <csignal>
 #include <fstream>
 #include <iostream>
-#include <set>
-
-#include <asio/ip/tcp.hpp>
 #include <optional>
+#include <set>
 
 #include "lib/protobuf/stream.h"
 #include "lib/repr.h"
@@ -53,15 +52,17 @@ const float POLL_SECONDS = 2.0;
 
 // One status as a line: which multiplexer, what it is doing, and the error
 // if the request was refused.
-std::string describe(const RecordingStatus &status, bool with_tap) {
+std::string describe(const RecordingStatus& status, bool with_tap) {
   std::string line = "multiplexer " + repr(status.multiplexer_id()) + ": ";
-  if (status.has_error())
+  if (status.has_error()) {
     return line + "error: " + status.error();
+  }
   if (status.recording()) {
     line +=
         "recording " + status.path() + " (" + repr(status.records()) + " records, " + repr(status.bytes()) + " bytes";
-    if (status.has_label())
+    if (status.has_label()) {
       line += ", label " + status.label();
+    }
     line += ")";
   } else if (status.has_path()) {
     line += "not recording; last " + status.path() + " (" + repr(status.records()) + " records, " +
@@ -69,22 +70,23 @@ std::string describe(const RecordingStatus &status, bool with_tap) {
   } else {
     line += "not recording";
   }
-  if (with_tap)
+  if (with_tap) {
     line += "; " + std::string(status.tapping() ? "tapping" : "not tapping") + " (" + repr(status.taps()) + " taps, " +
             repr(status.dropped()) + " dropped)";
+  }
   return line;
 }
 
-} // namespace
+}  // namespace
 
 class RecordingControlTask : public Task {
-public:
+ public:
   virtual int run();
   virtual std::string short_description() const { return "start, stop, query or tap the recording of multiplexers"; }
-  virtual std::string short_synopsis(const std::string &commandname) {
+  virtual std::string short_synopsis(const std::string& commandname) {
     return "<" + commandname + "-options> start|stop|status|tap";
   }
-  virtual void print_help(std::ostream &out) {
+  virtual void print_help(std::ostream& out) {
     out << "Drive recording on every --multiplexer given, over the protocol.\n"
         << "  start   open a file session named --label in each multiplexer's --recording-dir\n"
         << "  stop    close it\n"
@@ -96,8 +98,8 @@ public:
         << _options();
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     options.add("action", &action_, "start, stop, status or tap").positional("action");
     options.add("multiplexer,M", &multiplexers_,
                 "multiplexer address as host:port; a name resolves to every address; may be repeated");
@@ -113,25 +115,25 @@ protected:
     options.add("timeout", &timeout_, 5.0, "seconds to wait for connections and answers");
   }
 
-private:
+ private:
   // Every address of every --multiplexer, resolved; returns how many connected.
-  unsigned int _connect(Client &client);
+  unsigned int _connect(Client& client);
   // Queues `control` on every connection; returns the request id.
-  std::uint64_t _send(Client &client, const RecordingControl &control);
+  std::uint64_t _send(Client& client, const RecordingControl& control);
   // Queues `control` on one connection.
-  void _send(Client &client, const RecordingControl &control, multiplexer::ConnectionWrapper connection);
+  void _send(Client& client, const RecordingControl& control, multiplexer::ConnectionWrapper connection);
   // Sends `control` everywhere and collects one status per connection,
   // printing each; returns false if any was an error or missing.
-  bool _control(Client &client, const RecordingControl &control, bool with_tap = false);
-  int _stay(Client &client);
-  int _tap(Client &client);
+  bool _control(Client& client, const RecordingControl& control, bool with_tap = false);
+  int _stay(Client& client);
+  int _tap(Client& client);
 
   std::string action_;
   std::vector<std::string> multiplexers_;
   std::uint32_t peer_type_;
   std::string label_;
   unsigned int payload_bytes_;
-  std::string max_bytes_text_; // --max-bytes as typed; empty when not given
+  std::string max_bytes_text_;  // --max-bytes as typed; empty when not given
   std::optional<std::uint64_t> max_bytes_;
   unsigned int max_seconds_;
   bool stay_;
@@ -141,17 +143,18 @@ private:
 
 REGISTER_MXCONTROL_SUBCOMMAND(recording, mxcontrol::RecordingControlTask);
 
-unsigned int RecordingControlTask::_connect(Client &client) {
+unsigned int RecordingControlTask::_connect(Client& client) {
   unsigned int connected = 0;
-  for (const std::string &address : multiplexers_) {
+  for (const std::string& address : multiplexers_) {
     std::string::size_type colon = address.rfind(':');
     if (colon == std::string::npos) {
       std::cerr << "invalid multiplexer address " << address << " (host:port expected)\n";
       continue;
     }
     std::string host = address.substr(0, colon);
-    if (host.empty())
+    if (host.empty()) {
       host = "127.0.0.1";
+    }
     const std::string port = address.substr(colon + 1);
     asio::ip::tcp::resolver resolver(io_service());
     asio::ip::tcp::resolver::iterator end;
@@ -165,14 +168,14 @@ unsigned int RecordingControlTask::_connect(Client &client) {
           std::cerr << "cannot connect to " << endpoint << "\n";
         }
       }
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
       std::cerr << "cannot resolve " << address << ": " << e.what() << "\n";
     }
   }
   return connected;
 }
 
-std::uint64_t RecordingControlTask::_send(Client &client, const RecordingControl &control) {
+std::uint64_t RecordingControlTask::_send(Client& client, const RecordingControl& control) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(client.random64());
   mxmsg.set_from(client.instance_id());
@@ -182,7 +185,7 @@ std::uint64_t RecordingControlTask::_send(Client &client, const RecordingControl
   return mxmsg.id();
 }
 
-void RecordingControlTask::_send(Client &client, const RecordingControl &control,
+void RecordingControlTask::_send(Client& client, const RecordingControl& control,
                                  multiplexer::ConnectionWrapper connection) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(client.random64());
@@ -192,7 +195,7 @@ void RecordingControlTask::_send(Client &client, const RecordingControl &control
   client.schedule_one(mxmsg, connection, timeout_);
 }
 
-bool RecordingControlTask::_control(Client &client, const RecordingControl &control, bool with_tap) {
+bool RecordingControlTask::_control(Client& client, const RecordingControl& control, bool with_tap) {
   const unsigned int expected = client.connections_count();
   if (!expected) {
     std::cerr << "not connected to any multiplexer\n";
@@ -206,21 +209,24 @@ bool RecordingControlTask::_control(Client &client, const RecordingControl &cont
     std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
     try {
       incoming = client.receive_message(timer.remaining() > 0 ? timer.remaining() : 0.01f);
-    } catch (const Client::OperationTimedOut &) {
+    } catch (const Client::OperationTimedOut&) {
       break;
-    } catch (const Client::NotConnected &) {
+    } catch (const Client::NotConnected&) {
       break;
     }
-    const MultiplexerMessage &mxmsg = *incoming.first;
-    if (mxmsg.type() != multiplexer::RECORDING_STATUS || mxmsg.references() != request)
+    const MultiplexerMessage& mxmsg = *incoming.first;
+    if (mxmsg.type() != multiplexer::RECORDING_STATUS || mxmsg.references() != request) {
       continue;
+    }
     RecordingStatus status;
-    if (!status.ParseFromString(mxmsg.message()))
+    if (!status.ParseFromString(mxmsg.message())) {
       continue;
+    }
     answered.insert(status.multiplexer_id());
     std::cout << describe(status, with_tap) << "\n";
-    if (status.has_error())
+    if (status.has_error()) {
       ok = false;
+    }
   }
   std::cout.flush();
   if (answered.size() < expected) {
@@ -231,8 +237,9 @@ bool RecordingControlTask::_control(Client &client, const RecordingControl &cont
 }
 
 int RecordingControlTask::run() {
-  if (!max_bytes_text_.empty())
+  if (!max_bytes_text_.empty()) {
     max_bytes_ = mx::from_string<std::uint64_t>(max_bytes_text_);
+  }
   if (action_ != "start" && action_ != "stop" && action_ != "status" && action_ != "tap") {
     std::cerr << "action must be start, stop, status or tap\n";
     return 2;
@@ -252,12 +259,14 @@ int RecordingControlTask::run() {
     control.set_action(RecordingControl::START);
     control.set_label(label_);
     control.set_payload_limit(payload_bytes_);
-    if (max_bytes_)
+    if (max_bytes_) {
       control.set_max_bytes(*max_bytes_);
+    }
     control.set_max_seconds(max_seconds_);
     const bool ok = _control(client, control);
-    if (!stay_)
+    if (!stay_) {
       return ok ? 0 : 1;
+    }
     return _stay(client);
   }
   if (action_ == "stop") {
@@ -274,15 +283,16 @@ int RecordingControlTask::run() {
 // Until SIGINT or SIGTERM: ask every multiplexer for its status every
 // POLL_SECONDS, start a session on any that has never had one (a replica
 // that restarted), then stop every session on the way out.
-int RecordingControlTask::_stay(Client &client) {
+int RecordingControlTask::_stay(Client& client) {
   std::signal(SIGINT, request_stop);
   std::signal(SIGTERM, request_stop);
   RecordingControl start;
   start.set_action(RecordingControl::START);
   start.set_label(label_);
   start.set_payload_limit(payload_bytes_);
-  if (max_bytes_)
+  if (max_bytes_) {
     start.set_max_bytes(*max_bytes_);
+  }
   start.set_max_seconds(max_seconds_);
   RecordingControl status_request;
   status_request.set_action(RecordingControl::STATUS);
@@ -293,15 +303,16 @@ int RecordingControlTask::_stay(Client &client) {
       std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
       try {
         incoming = client.receive_message(std::min(timer.remaining(), 0.5f));
-      } catch (const Client::OperationTimedOut &) {
+      } catch (const Client::OperationTimedOut&) {
         continue;
-      } catch (const Client::NotConnected &) {
+      } catch (const Client::NotConnected&) {
         continue;
       }
-      const MultiplexerMessage &mxmsg = *incoming.first;
+      const MultiplexerMessage& mxmsg = *incoming.first;
       RecordingStatus status;
-      if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message()))
+      if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message())) {
         continue;
+      }
       if (status.has_error()) {
         std::cout << describe(status, false) << "\n";
       } else if (!status.recording() && !status.has_stopped()) {
@@ -322,9 +333,9 @@ int RecordingControlTask::_stay(Client &client) {
 // output as a Record; every POLL_SECONDS a status request finds the
 // multiplexers not streaming to us (a replica that restarted) and taps
 // them again. Statuses go to stderr, the records are the output.
-int RecordingControlTask::_tap(Client &client) {
+int RecordingControlTask::_tap(Client& client) {
   std::ofstream file;
-  std::ostream *out = &std::cout;
+  std::ostream* out = &std::cout;
   if (!out_.empty()) {
     file.open(out_.c_str(), std::ios::out | std::ios::binary | std::ios::app);
     if (!file.good()) {
@@ -350,12 +361,12 @@ int RecordingControlTask::_tap(Client &client) {
       std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
       try {
         incoming = client.receive_message(std::min(timer.remaining(), 0.5f));
-      } catch (const Client::OperationTimedOut &) {
+      } catch (const Client::OperationTimedOut&) {
         continue;
-      } catch (const Client::NotConnected &) {
+      } catch (const Client::NotConnected&) {
         continue;
       }
-      const MultiplexerMessage &mxmsg = *incoming.first;
+      const MultiplexerMessage& mxmsg = *incoming.first;
       if (mxmsg.type() == multiplexer::RECORDING_RECORD) {
         Record record;
         if (record.ParseFromString(mxmsg.message())) {
@@ -365,15 +376,17 @@ int RecordingControlTask::_tap(Client &client) {
         continue;
       }
       RecordingStatus status;
-      if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message()))
+      if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message())) {
         continue;
+      }
       if (status.has_error()) {
         std::cerr << describe(status, true) << "\n";
         continue;
       }
       if (status.tapping()) {
-        if (tapped.insert(status.multiplexer_id()).second)
+        if (tapped.insert(status.multiplexer_id()).second) {
           std::cerr << "multiplexer " << status.multiplexer_id() << ": tapping\n";
+        }
       } else {
         std::cerr << "multiplexer " << status.multiplexer_id() << ": not tapping; tapping again\n";
         _send(client, tap, incoming.second);
@@ -386,9 +399,10 @@ int RecordingControlTask::_tap(Client &client) {
   std::signal(SIGTERM, SIG_DFL);
   RecordingControl untap;
   untap.set_action(RecordingControl::UNTAP);
-  std::streambuf *cout_buffer = std::cout.rdbuf();
-  if (out == &std::cout)
-    std::cout.rdbuf(std::cerr.rdbuf()); // the statuses must not land among the records
+  std::streambuf* cout_buffer = std::cout.rdbuf();
+  if (out == &std::cout) {
+    std::cout.rdbuf(std::cerr.rdbuf());  // the statuses must not land among the records
+  }
   const bool ok = _control(client, untap, true);
   std::cout.rdbuf(cout_buffer);
   out->flush();
@@ -396,4 +410,4 @@ int RecordingControlTask::_tap(Client &client) {
   return ok ? 0 : 1;
 }
 
-} // namespace mxcontrol
+}  // namespace mxcontrol

@@ -1,14 +1,13 @@
 // RawMessage: header encoding, size check and CRC. See the header for the
 // object's life cycle.
 
+#include "multiplexer/io/raw_message.h"
+
 #include "lib/assertion.h"
+#include "lib/crc32.h"
 #include "lib/encoding/decode_from_range.h"
 #include "lib/encoding/encode_to_range.h"
 #include "lib/encoding/little_endian.h"
-
-#include "multiplexer/io/raw_message.h"
-
-#include "lib/crc32.h"
 
 using namespace multiplexer;
 
@@ -17,7 +16,7 @@ using namespace multiplexer;
 void RawMessage::switch_to_writing() {
   Assert(usability_ == PRE_WRITING || usability_ == READING);
   Assert(writing_buffers_.empty());
-  usability_ = READING; // fool get_header_buffer() and get_body_buffer()
+  usability_ = READING;  // fool get_header_buffer() and get_body_buffer()
   writing_buffers_.push_back(get_header_buffer());
   writing_buffers_.push_back(get_body_buffer());
   usability_ = WRITING;
@@ -59,7 +58,7 @@ bool RawMessage::verify() {
 }
 
 // Standard CRC-32 (the zlib one), so peers in any language can compute it.
-std::uint32_t RawMessage::Crc32(const std::string &message) { return mx::crc32(message.data(), message.size()); }
+std::uint32_t RawMessage::Crc32(const std::string& message) { return mx::crc32(message.data(), message.size()); }
 
 void RawMessage::initialize_header() {
   mx::encoders::EncodeToRange<std::string::iterator, mx::encodings::LittleEndian> encoder(header_.begin(),

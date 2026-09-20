@@ -18,7 +18,7 @@ using multiplexer::MultiplexerMessage;
 // --no-flush returns before the write; --interval pauses between sends;
 // --linger keeps the process alive after the last one. Events: sent, done.
 class EventClientRole : public mxcontrol::Task {
-public:
+ public:
   virtual std::string short_description() const { return "send events as a passive peer, never run a loop"; }
   virtual int run() {
     std::unique_ptr<Client> client = common_.connect();
@@ -31,8 +31,9 @@ public:
       message.set_from(client->instance_id());
       message.set_type(sends[index].first);
       message.set_message(sends[index].second);
-      if (to_)
+      if (to_) {
         message.set_to(to_);
+      }
       Event sent = event("sent");
       sent.set_type(sends[index].first);
       sent.set_id(message.id());
@@ -49,7 +50,7 @@ public:
           sent.set_is_sent(tracker.is_sent());
           sent.set_is_lost(tracker.is_lost());
         } else {
-          client->send(message, 10.0f); // written, through whatever connection is alive by then
+          client->send(message, 10.0f);  // written, through whatever connection is alive by then
           sent.set_in_queue(false);
           sent.set_is_sent(true);
           sent.set_is_lost(false);
@@ -58,15 +59,18 @@ public:
       } catch (...) {
         report_client_errors([]() { throw; }, error);
       }
-      if (!ok)
+      if (!ok) {
         continue;
+      }
       ++sent_count;
       emit(sent);
-      if (interval_ > 0)
+      if (interval_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(int(interval_ * 1000)));
+      }
     }
-    if (linger_ > 0)
+    if (linger_ > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(int(linger_ * 1000)));
+    }
     Event done = event("done");
     done.set_sent(sent_count);
     done.set_connections(client->connections_count());
@@ -75,8 +79,8 @@ public:
     return 0;
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     common_.add(options);
     options.add("send", &send_, "TYPE:payload, repeatable, sent in order");
     options.add("to", &to_, 0, "direct to this instance id");
@@ -86,7 +90,7 @@ protected:
     options.add("linger", &linger_, 0.0, "stay connected this long after sending");
   }
 
-private:
+ private:
   CommonOptions common_;
   std::vector<std::string> send_;
   std::uint64_t to_;
@@ -98,4 +102,4 @@ private:
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_client, EventClientRole);
 
-} // namespace mxtestroles
+}  // namespace mxtestroles

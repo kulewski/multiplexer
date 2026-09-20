@@ -1,15 +1,14 @@
 // The CONNECTION_WELCOME frame a manager sends after connecting: a
 // WelcomeMessage with its peer type and instance id, serialized once and
 // reused for every connection.
-#include "multiplexer/multiplexer.constants.h" /* generated */
-
 #include "multiplexer/connections_manager.h"
+
+#include "multiplexer/multiplexer.constants.h" /* generated */
 
 namespace multiplexer {
 namespace impl {
 
 std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id) {
-
   // prepare WelcomeMessage
   WelcomeMessage welcome;
   welcome.set_type(peer_type);
@@ -26,5 +25,5 @@ std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type
   return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
 }
 
-}; // namespace impl
-}; // namespace multiplexer
+};  // namespace impl
+};  // namespace multiplexer

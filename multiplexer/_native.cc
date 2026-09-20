@@ -21,9 +21,11 @@
 namespace mxtyping = pybind11::typing;
 #else
 namespace mxtyping {
-template <typename... Types> using Tuple = pybind11::tuple;
-template <typename Signature> using Callable = pybind11::function;
-} // namespace mxtyping
+template <typename... Types>
+using Tuple = pybind11::tuple;
+template <typename Signature>
+using Callable = pybind11::function;
+}  // namespace mxtyping
 #endif
 #include <unistd.h>
 
@@ -66,8 +68,9 @@ static unsigned long main_thread_ident = 0;
 static std::atomic<int> gil_takers(0);
 
 static bool python_is_finalizing() {
-  if (exiting.load())
+  if (exiting.load()) {
     return true;
+  }
 #if PY_VERSION_HEX >= 0x030D0000
   return Py_IsFinalizing();
 #else
@@ -88,22 +91,25 @@ struct CallbackSlot {
   CallbackSlot() {
     gil_takers.fetch_add(1);
     ok = !python_is_finalizing();
-    if (!ok)
+    if (!ok) {
       gil_takers.fetch_sub(1);
+    }
   }
   ~CallbackSlot() {
-    if (ok)
+    if (ok) {
       gil_takers.fetch_sub(1);
+    }
   }
-  bool ok; // false: the interpreter is leaving; do nothing
+  bool ok;  // false: the interpreter is leaving; do nothing
 };
 
 // Sleeps forever: for a thread that must not take the GIL again. A daemon
 // thread parked here does not delay the exit, and a non-daemon one was
 // joined before the exit began.
 [[noreturn]] static void park_forever() {
-  for (;;)
+  for (;;) {
     pause();
+  }
 }
 
 // Releases the GIL around a blocking wait, like pybind11::gil_scoped_release,
@@ -114,7 +120,7 @@ struct CallbackSlot {
 // thread that passed the check retake the GIL and get to its next wait,
 // where it parks, rather than have the interpreter kill it mid-retake.
 class GilRelease {
-public:
+ public:
   GilRelease() : state_(PyEval_SaveThread()) {}
   ~GilRelease() noexcept(false) {
     gil_takers.fetch_add(1);
@@ -125,18 +131,17 @@ public:
     PyEval_RestoreThread(state_);
     gil_takers.fetch_sub(1);
   }
-  GilRelease(const GilRelease &) = delete;
-  GilRelease &operator=(const GilRelease &) = delete;
+  GilRelease(const GilRelease&) = delete;
+  GilRelease& operator=(const GilRelease&) = delete;
 
-private:
-  PyThreadState *state_;
+ private:
+  PyThreadState* state_;
 };
 
 // Client with the few signatures pybind11 needs: strings instead of
 // templates, and a read that releases the GIL.
 struct PythonClient : public Client {
-
-public:
+ public:
   // The io_service is owned here, not by a Python attribute: CPython clears
   // an instance's attributes before the base type's deallocator runs, so a
   // Client that only borrowed it would shut down on freed memory.
@@ -165,10 +170,11 @@ public:
                                                                                 bool pinned) {
     std::string message(serialized);
     ConnectionWrapper used;
-    basic_client_->poll(); // as Client::schedule_one does
+    basic_client_->poll();  // as Client::schedule_one does
     shared_ptr<const RawMessage> raw = _serialize(&message);
-    if (pinned)
+    if (pinned) {
       raw->mark_pinned();
+    }
     ScheduledMessageTracker tracker(basic_client_->schedule_one(raw, &used));
     return mxtyping::Tuple<ScheduledMessageTracker, ConnectionWrapper>(pybind11::make_tuple(tracker, used));
   }
@@ -187,11 +193,13 @@ public:
     {
       GilRelease release;
       got = basic_client_->wait_for_incoming_message_or_loss(*timer, watch);
-      if (got)
+      if (got) {
         next = basic_client_->next_incoming_message();
+      }
     }
-    if (!got)
+    if (!got) {
       return std::nullopt;
+    }
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
         pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
   }
@@ -204,14 +212,16 @@ public:
   ScheduledMessageTracker schedule_on(pybind11::bytes serialized, ConnectionWrapper w, bool pinned) {
     std::string message(serialized);
     basic_client_->poll();
-    if (!w)
+    if (!w) {
       return ScheduledMessageTracker(BasicScheduledMessageTracker());
+    }
     shared_ptr<const RawMessage> raw = _serialize(&message);
-    if (pinned)
+    if (pinned) {
       raw->mark_pinned();
+    }
     try {
-      return Client::schedule_one(raw, w, 0); // no reconnect: a gone connection throws
-    } catch (NotConnected &) {
+      return Client::schedule_one(raw, w, 0);  // no reconnect: a gone connection throws
+    } catch (NotConnected&) {
       return ScheduledMessageTracker(BasicScheduledMessageTracker());
     }
   }
@@ -225,10 +235,12 @@ public:
 // The probe an addressed query locates its addressee with, as the Python
 // side names it: the message type it sends.
 static Probe probe_from_type(std::uint32_t type) {
-  if (type == types::PING)
+  if (type == types::PING) {
     return PROBE_PING;
-  if (type == types::BACKEND_FOR_PACKET_SEARCH)
+  }
+  if (type == types::BACKEND_FOR_PACKET_SEARCH) {
     return PROBE_SEARCH;
+  }
   throw std::invalid_argument("probe must be types.BACKEND_FOR_PACKET_SEARCH or types.PING");
 }
 
@@ -238,12 +250,12 @@ static pybind11::object *py_not_connected, *py_operation_timed_out, *py_operatio
 
 static pybind11::object exception_for(ThreadedClient::Outcome outcome) {
   switch (outcome) {
-  case ThreadedClient::TIMED_OUT:
-    return (*py_operation_timed_out)();
-  case ThreadedClient::FAILED:
-    return (*py_operation_failed)();
-  default:
-    return (*py_not_connected)();
+    case ThreadedClient::TIMED_OUT:
+      return (*py_operation_timed_out)();
+    case ThreadedClient::FAILED:
+      return (*py_operation_failed)();
+    default:
+      return (*py_not_connected)();
   }
 }
 
@@ -260,21 +272,23 @@ struct PythonThreadedClient {
   PythonThreadedClient(std::uint32_t peer_type, pybind11::object on_message)
       : client(peer_type, on_message.is_none() ? ThreadedClient::MessageSink() : sink_for(on_message)) {}
   static ThreadedClient::MessageSink sink_for(pybind11::object callback) {
-    std::shared_ptr<pybind11::object> held(new pybind11::object(callback), [](pybind11::object *object) {
+    std::shared_ptr<pybind11::object> held(new pybind11::object(callback), [](pybind11::object* object) {
       CallbackSlot slot;
-      if (!slot.ok)
-        return; // leaked on purpose: the GIL is out of reach, and the process is going
+      if (!slot.ok) {
+        return;  // leaked on purpose: the GIL is out of reach, and the process is going
+      }
       pybind11::gil_scoped_acquire acquire;
       delete object;
     });
-    return [held](const IncomingMessage &incoming) {
+    return [held](const IncomingMessage& incoming) {
       CallbackSlot slot;
-      if (!slot.ok)
-        return; // the callback would need the GIL; nothing to deliver to any more
+      if (!slot.ok) {
+        return;  // the callback would need the GIL; nothing to deliver to any more
+      }
       pybind11::gil_scoped_acquire acquire;
       try {
         (*held)((pybind11::bytes)incoming.first->get_message(), incoming.second);
-      } catch (pybind11::error_already_set &error) {
+      } catch (pybind11::error_already_set& error) {
         error.restore();
         PyErr_Print();
       }
@@ -288,21 +302,23 @@ struct PythonThreadedClient {
   // for a backend; runs on the io thread with the GIL. See
   // ThreadedClient::set_search_policy.
   void set_search_policy(mxtyping::Callable<bool()> answer) {
-    std::shared_ptr<pybind11::object> held(new pybind11::object(answer), [](pybind11::object *object) {
+    std::shared_ptr<pybind11::object> held(new pybind11::object(answer), [](pybind11::object* object) {
       CallbackSlot slot;
-      if (!slot.ok)
-        return; // leaked on purpose, see sink_for
+      if (!slot.ok) {
+        return;  // leaked on purpose, see sink_for
+      }
       pybind11::gil_scoped_acquire acquire;
       delete object;
     });
     ThreadedClient::SearchPolicy policy = [held]() -> bool {
       CallbackSlot slot;
-      if (!slot.ok)
+      if (!slot.ok) {
         return false;
+      }
       pybind11::gil_scoped_acquire acquire;
       try {
         return (*held)().cast<bool>();
-      } catch (pybind11::error_already_set &error) {
+      } catch (pybind11::error_already_set& error) {
         error.restore();
         PyErr_Print();
         return false;
@@ -312,7 +328,7 @@ struct PythonThreadedClient {
     client.set_search_policy(policy);
   }
 
-  bool connect(const std::string &host, std::uint16_t port, float timeout) {
+  bool connect(const std::string& host, std::uint16_t port, float timeout) {
     GilRelease release;
     return client.connect(host, port, timeout);
   }
@@ -339,10 +355,11 @@ struct PythonThreadedClient {
                           mxtyping::Callable<void(unsigned int)> callback, std::optional<LanePtr> lane_given) {
     std::string serialized(payload);
     LanePtr lane = lane_given.value_or(LanePtr());
-    std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function *function) {
+    std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function* function) {
       CallbackSlot slot;
-      if (!slot.ok)
-        return; // leaked on purpose, see sink_for
+      if (!slot.ok) {
+        return;  // leaked on purpose, see sink_for
+      }
       pybind11::gil_scoped_acquire acquire;
       delete function;
     });
@@ -350,12 +367,13 @@ struct PythonThreadedClient {
         serialized, all, timeout,
         [held](unsigned int written) {
           CallbackSlot slot;
-          if (!slot.ok)
+          if (!slot.ok) {
             return;
+          }
           pybind11::gil_scoped_acquire acquire;
           try {
             (*held)(written);
-          } catch (pybind11::error_already_set &error) {
+          } catch (pybind11::error_already_set& error) {
             error.restore();
             PyErr_Print();
           }
@@ -364,10 +382,11 @@ struct PythonThreadedClient {
   }
   // The request as a serialized MultiplexerMessage, `to` included; `probe`
   // as a message type (see probe_from_type), `lane` a Lane or None.
-  static MultiplexerMessage parse(const std::string &serialized) {
+  static MultiplexerMessage parse(const std::string& serialized) {
     MultiplexerMessage msg;
-    if (!msg.ParseFromString(serialized))
+    if (!msg.ParseFromString(serialized)) {
       throw std::invalid_argument("not a serialized MultiplexerMessage");
+    }
     return msg;
   }
   mxtyping::Tuple<pybind11::bytes, ConnectionWrapper> query(pybind11::bytes serialized, float timeout,
@@ -380,7 +399,7 @@ struct PythonThreadedClient {
       GilRelease release;
       result = client.query(msg, timeout, lane, how);
     }
-    result.check(); // throws the C++ exception, translated below
+    result.check();  // throws the C++ exception, translated below
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
         pybind11::make_tuple((pybind11::bytes)result.reply.first->get_message(), result.reply.second));
   }
@@ -392,26 +411,29 @@ struct PythonThreadedClient {
     LanePtr lane = lane_given.value_or(LanePtr());
     MultiplexerMessage msg = parse(std::string(serialized));
     Probe how = probe_from_type(probe);
-    std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function *function) {
+    std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function* function) {
       CallbackSlot slot;
-      if (!slot.ok)
-        return; // leaked on purpose, see sink_for
+      if (!slot.ok) {
+        return;  // leaked on purpose, see sink_for
+      }
       pybind11::gil_scoped_acquire acquire;
       delete function;
     });
     client.query(
         msg,
-        [held](const ThreadedClient::Result &result) {
+        [held](const ThreadedClient::Result& result) {
           CallbackSlot slot;
-          if (!slot.ok)
+          if (!slot.ok) {
             return;
+          }
           pybind11::gil_scoped_acquire acquire;
           try {
-            if (result.outcome == ThreadedClient::REPLIED)
+            if (result.outcome == ThreadedClient::REPLIED) {
               (*held)((pybind11::bytes)result.reply.first->get_message(), result.reply.second, pybind11::none());
-            else
+            } else {
               (*held)(pybind11::none(), pybind11::none(), exception_for(result.outcome));
-          } catch (pybind11::error_already_set &error) {
+            }
+          } catch (pybind11::error_already_set& error) {
             // A callback that raises: print the Python traceback and go on,
             // as a thread's uncaught exception would be printed.
             error.restore();
@@ -427,7 +449,7 @@ struct PythonThreadedClient {
 
   ThreadedClient client;
 };
-}; // namespace multiplexer
+};  // namespace multiplexer
 
 // template <typename T>
 // void foo() {
@@ -466,15 +488,15 @@ PYBIND11_MODULE(_native, module) {
 
   // LogEntry for the Python logger: each numeric field as a property with
   // has_/clear_, each string field likewise with a copying getter.
-#define MX_EXPORT_NUM_FIELD(name)                                                                                      \
-  .def("has_" #name, &mx::logging::LogEntry::has_##name)                                                               \
-      .def("clear_" #name, &mx::logging::LogEntry::clear_##name)                                                       \
+#define MX_EXPORT_NUM_FIELD(name)                                \
+  .def("has_" #name, &mx::logging::LogEntry::has_##name)         \
+      .def("clear_" #name, &mx::logging::LogEntry::clear_##name) \
       .def_property(#name, &mx::logging::LogEntry::name, &mx::logging::LogEntry::set_##name)
-#define MX_EXPORT_STR_FIELD(name)                                                                                      \
-  .def("has_" #name, &mx::logging::LogEntry::has_##name)                                                               \
-      .def("clear_" #name, &mx::logging::LogEntry::clear_##name)                                                       \
-      .def_property(#name, pybind11::cpp_function(&mx::logging::LogEntry::name, pybind11::return_value_policy::copy),  \
-                    pybind11::cpp_function((void(mx::logging::LogEntry::*)(const std::string &)) &                     \
+#define MX_EXPORT_STR_FIELD(name)                                                                                     \
+  .def("has_" #name, &mx::logging::LogEntry::has_##name)                                                              \
+      .def("clear_" #name, &mx::logging::LogEntry::clear_##name)                                                      \
+      .def_property(#name, pybind11::cpp_function(&mx::logging::LogEntry::name, pybind11::return_value_policy::copy), \
+                    pybind11::cpp_function((void(mx::logging::LogEntry::*)(const std::string&)) &                     \
                                            mx::logging::LogEntry::set_##name))
   pybind11::class_<mx::logging::LogEntry>(module, "LogEntry")
       .def(pybind11::init<>()) MX_EXPORT_NUM_FIELD(id) MX_EXPORT_NUM_FIELD(timestamp) MX_EXPORT_NUM_FIELD(level)
@@ -484,15 +506,15 @@ PYBIND11_MODULE(_native, module) {
       .def("has_data", &mx::logging::LogEntry::has_data)
       .def("clear_data", &mx::logging::LogEntry::clear_data)
       .def_property(
-          "data", [](const mx::logging::LogEntry &entry) { return pybind11::bytes(entry.data()); },
-          [](mx::logging::LogEntry &entry, pybind11::bytes data) { entry.set_data(std::string(data)); })
+          "data", [](const mx::logging::LogEntry& entry) { return pybind11::bytes(entry.data()); },
+          [](mx::logging::LogEntry& entry, pybind11::bytes data) { entry.set_data(std::string(data)); })
           MX_EXPORT_STR_FIELD(source_file) MX_EXPORT_STR_FIELD(compilation_datetime) MX_EXPORT_STR_FIELD(version);
 #undef MX_EXPORT_NUM_FIELD
 #undef MX_EXPORT_STR_FIELD
 
   module.def(
       "emit_log",
-      [](const mx::logging::LogEntry &entry, unsigned int flags) { mx::logging::impl::emit_log(entry, flags); },
+      [](const mx::logging::LogEntry& entry, unsigned int flags) { mx::logging::impl::emit_log(entry, flags); },
       pybind11::arg("entry"), pybind11::arg("flags") = 0, "Write an entry to stderr and to the logging stream.");
 
   pybind11::class_<multiplexer::Client::NotConnected>(module, "Client_NotConnected");
@@ -514,15 +536,16 @@ PYBIND11_MODULE(_native, module) {
   // callers can catch NotConnected, OperationTimedOut and OperationFailed.
   pybind11::register_exception_translator([](std::exception_ptr p) {
     try {
-      if (p)
+      if (p) {
         std::rethrow_exception(p);
-    } catch (const multiplexer::Client::UsedAfterFork &e) {
+      }
+    } catch (const multiplexer::Client::UsedAfterFork& e) {
       PyErr_SetString(UsedAfterForkException.ptr(), e.what());
-    } catch (const multiplexer::Client::NotConnected &e) {
+    } catch (const multiplexer::Client::NotConnected& e) {
       PyErr_SetString(NotConnectedException.ptr(), e.what());
-    } catch (const multiplexer::Client::OperationTimedOut &e) {
+    } catch (const multiplexer::Client::OperationTimedOut& e) {
       PyErr_SetString(OperationTimedOutException.ptr(), e.what());
-    } catch (const multiplexer::Client::OperationFailed &e) {
+    } catch (const multiplexer::Client::OperationFailed& e) {
       PyErr_SetString(OperationFailedException.ptr(), e.what());
     }
   });
@@ -539,7 +562,7 @@ PYBIND11_MODULE(_native, module) {
       .def("__bool__", &multiplexer::ConnectionWrapper::operator bool)
       .def_property_readonly(
           "endpoint",
-          [](const multiplexer::ConnectionWrapper &wrapper) {
+          [](const multiplexer::ConnectionWrapper& wrapper) {
             return mxtyping::Tuple<pybind11::str, pybind11::int_>(
                 pybind11::make_tuple(wrapper.endpoint().address().to_string(), wrapper.endpoint().port()));
           },
@@ -548,7 +571,7 @@ PYBIND11_MODULE(_native, module) {
   pybind11::class_<multiplexer::Lane, multiplexer::LanePtr>(
       module, "Lane", "One connection for a stream of messages; see multiplexer.mxclient.Client.lane().")
       .def(pybind11::init<bool>(), pybind11::arg("pinned") = false)
-      .def(pybind11::init<const multiplexer::ConnectionWrapper &, bool>(), pybind11::arg("connection"),
+      .def(pybind11::init<const multiplexer::ConnectionWrapper&, bool>(), pybind11::arg("connection"),
            pybind11::arg("pinned") = false)
       .def_property_readonly("pinned", &multiplexer::Lane::pinned,
                              "Whether the lane keeps its first connection for good.")
@@ -571,12 +594,12 @@ PYBIND11_MODULE(_native, module) {
       .def("_get_instance_id", &multiplexer::PythonClient::instance_id)
 
       .def("async_connect_to",
-           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, std::uint16_t)) &
+           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string&, std::uint16_t)) &
                multiplexer::PythonClient::async_connect,
            pybind11::arg("host"), pybind11::arg("port"))
 
       .def("connect_to",
-           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string &, std::uint16_t, float)) &
+           (multiplexer::ConnectionWrapper(multiplexer::PythonClient::*)(const std::string&, std::uint16_t, float)) &
                multiplexer::PythonClient::connect,
            pybind11::arg("host"), pybind11::arg("port"), pybind11::arg("timeout"))
 
@@ -608,10 +631,10 @@ PYBIND11_MODULE(_native, module) {
       .def("read_raw_message_watching", &multiplexer::PythonClient::read_message_watching, pybind11::arg("timeout"),
            pybind11::arg("watch"))
 
-      .def("flush",
-           (void(multiplexer::PythonClient::*)(ScheduledMessageTracker, float) const) &
-               multiplexer::PythonClient::flush,
-           pybind11::arg("tracker"), pybind11::arg("timeout"))
+      .def(
+          "flush",
+          (void(multiplexer::PythonClient::*)(ScheduledMessageTracker, float) const) & multiplexer::PythonClient::flush,
+          pybind11::arg("tracker"), pybind11::arg("timeout"))
 
       .def("flush_all", &multiplexer::PythonClient::flush_all, pybind11::arg("timeout"))
 
@@ -621,8 +644,8 @@ PYBIND11_MODULE(_native, module) {
       module, "ThreadedClient",
       "A client with an io thread of its own; see multiplexer.threaded_client for the Python API.")
       .def(pybind11::init<std::uint32_t, pybind11::object>(), pybind11::arg("peer_type"), pybind11::arg("on_message"))
-      .def("instance_id", [](const multiplexer::PythonThreadedClient &client) { return client.client.instance_id(); })
-      .def("random", [](multiplexer::PythonThreadedClient &client) { return client.client.random64(); })
+      .def("instance_id", [](const multiplexer::PythonThreadedClient& client) { return client.client.instance_id(); })
+      .def("random", [](multiplexer::PythonThreadedClient& client) { return client.client.random64(); })
       .def("connect", &multiplexer::PythonThreadedClient::connect, pybind11::arg("host"), pybind11::arg("port"),
            pybind11::arg("timeout"))
       .def("connections_count", &multiplexer::PythonThreadedClient::connections_count)
@@ -642,7 +665,7 @@ PYBIND11_MODULE(_native, module) {
            pybind11::arg("lane") = multiplexer::LanePtr())
       .def("shutdown", &multiplexer::PythonThreadedClient::shutdown);
 
-  multiplexer::main_thread_ident = PyThread_get_thread_ident(); // the importing thread: the main one
+  multiplexer::main_thread_ident = PyThread_get_thread_ident();  // the importing thread: the main one
   module.def(
       "begin_exit",
       [] {
@@ -650,8 +673,9 @@ PYBIND11_MODULE(_native, module) {
         // Callbacks and waits already past their check hold or are about
         // to take the GIL: give it up and let them finish, within reason.
         pybind11::gil_scoped_release release;
-        for (int waited_ms = 0; waited_ms < 2000 && multiplexer::gil_takers.load() > 0; ++waited_ms)
+        for (int waited_ms = 0; waited_ms < 2000 && multiplexer::gil_takers.load() > 0; ++waited_ms) {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
       },
       "Tell the binding the interpreter is exiting: threads coming back from blocking waits park from now on, "
       "no callback into Python starts, and the ones in progress are waited for. "

@@ -1,9 +1,9 @@
 // The CRC-32 of this library against published vectors, since a wrong
 // checksum agreed on by both ends of the wire would go unnoticed, and the
 // fingerprint built on it.
-#include <string>
-
 #include <gtest/gtest.h>
+
+#include <string>
 
 #include "lib/crc32.h"
 #include "lib/fingerprint.h"

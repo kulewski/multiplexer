@@ -14,7 +14,7 @@ size_t heap_in_use_bytes() {
   // soak tests, which look at growth, on a libc that old.
   struct mallinfo info = mallinfo();
 #endif
-  return static_cast<size_t>(info.uordblks) + static_cast<size_t>(info.hblkhd); // in-use chunks, plus mmapped
+  return static_cast<size_t>(info.uordblks) + static_cast<size_t>(info.hblkhd);  // in-use chunks, plus mmapped
 }
 
-} // namespace mx
+}  // namespace mx

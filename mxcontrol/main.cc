@@ -4,7 +4,7 @@
 #include "lib/program.h" /* main() */
 #include "mxcontrol/driver.h"
 
-int MxMain(int argc, char **argv) {
+int MxMain(int argc, char** argv) {
   mx::enable_core_dump();
   return mxcontrol::run_tasks(argc, argv);
 }

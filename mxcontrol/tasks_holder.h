@@ -2,12 +2,13 @@
 #ifndef MX_MXCONTROL_TASKS_HOLDER_H_
 #define MX_MXCONTROL_TASKS_HOLDER_H_
 
+#include <iostream>
+#include <string>
+
 #include "lib/assertion.h"
 #include "lib/initialization.h"
 #include "lib/preproc/common.h"
 #include "mxcontrol/task.h"
-#include <iostream>
-#include <string>
 
 namespace mxcontrol {
 
@@ -16,8 +17,7 @@ namespace mxcontrol {
 // held as factories (TaskProxy) and constructed only when run, so
 // registering is cheap and order-independent.
 class TasksHolder {
-
-public:
+ public:
   /*
    * class representing a Task without instantiating it
    */
@@ -36,12 +36,13 @@ public:
   typedef std::map<std::string, std::shared_ptr<TaskProxy>> TasksMap;
 
   // takes ownership
-  void register_(const std::string &name, TaskProxy *task_proxy) throw();
+  void register_(const std::string& name, TaskProxy* task_proxy) throw();
 
-  bool inline is_command(const std::string &name) const { return named_tasks_.count(name); }
-  const TasksMap &tasks() const { return named_tasks_; }
+  bool inline is_command(const std::string& name) const { return named_tasks_.count(name); }
+  const TasksMap& tasks() const { return named_tasks_; }
 
-  template <typename ArgsVector> int run(ArgsVector &args) {
+  template <typename ArgsVector>
+  int run(ArgsVector& args) {
     using namespace mx;
 
     TasksMap::iterator ti = named_tasks_.find(args.front());
@@ -56,48 +57,49 @@ public:
     return __run(ti, args_copy);
   }
 
-  TasksHolder &set_original_args(int argc, const char *const *argv) {
+  TasksHolder& set_original_args(int argc, const char* const* argv) {
     original_argc_ = argc;
     original_argv_ = argv;
     return *this;
   }
 
   int original_argc() { return original_argc_; }
-  const char *const *original_argv() { return original_argv_; }
+  const char* const* original_argv() { return original_argv_; }
 
-private:
-  int __run(TasksMap::iterator, std::vector<std::string> &args);
+ private:
+  int __run(TasksMap::iterator, std::vector<std::string>& args);
 
-private:
+ private:
   TasksMap named_tasks_;
   int original_argc_;
-  const char *const *original_argv_;
+  const char* const* original_argv_;
 
-public:
+ public:
   mx::options::Options general_options;
 };
 
 namespace tasks_holder_detail {
 // TasksHolder singleton
-TasksHolder &tasks_holder();
+TasksHolder& tasks_holder();
 
-template <typename subcommand> struct TaskProxyImpl : TasksHolder::TaskProxy {
+template <typename subcommand>
+struct TaskProxyImpl : TasksHolder::TaskProxy {
   virtual std::shared_ptr<Task> operator()() { return std::shared_ptr<subcommand>(new subcommand()); }
 };
 
-}; // namespace tasks_holder_detail
+};  // namespace tasks_holder_detail
 
 using tasks_holder_detail::tasks_holder;
 
 // Put at file scope in the subcommand's .cc: `name` becomes the word on the
 // command line. Linking the .cc into a binary is what makes the subcommand
 // exist, so the binary's deps decide its command set.
-#define REGISTER_MXCONTROL_SUBCOMMAND(name, subcommand)                                                                \
-  MX_TRIGGER_STATIC_INITIALIZATION_CODE(                                                                               \
-      (::mxcontrol::tasks_holder_detail::tasks_holder().register_(                                                     \
-          MX_PP_STRINGIZE(name), new ::mxcontrol::tasks_holder_detail::TaskProxyImpl<subcommand>());),                 \
+#define REGISTER_MXCONTROL_SUBCOMMAND(name, subcommand)                                                \
+  MX_TRIGGER_STATIC_INITIALIZATION_CODE(                                                               \
+      (::mxcontrol::tasks_holder_detail::tasks_holder().register_(                                     \
+          MX_PP_STRINGIZE(name), new ::mxcontrol::tasks_holder_detail::TaskProxyImpl<subcommand>());), \
       true);
 
-}; // namespace mxcontrol
+};  // namespace mxcontrol
 
-#endif // MX_MXCONTROL_TASKS_HOLDER_H_
+#endif  // MX_MXCONTROL_TASKS_HOLDER_H_

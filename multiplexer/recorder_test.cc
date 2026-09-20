@@ -1,8 +1,8 @@
 // The session label rules and the session file name, the parts of remote
 // recording that keep a request from choosing a path.
-#include <gtest/gtest.h>
-
 #include "multiplexer/recorder.h"
+
+#include <gtest/gtest.h>
 
 using multiplexer::recording::session_path;
 using multiplexer::recording::valid_label;

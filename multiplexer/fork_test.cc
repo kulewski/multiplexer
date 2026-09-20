@@ -2,12 +2,11 @@
 // throws UsedAfterFork, destroying them neither hangs nor touches the
 // parent's connections, and the parent's clients keep working. See
 // lib/fork.h.
+#include <gtest/gtest.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <memory>
-
-#include <gtest/gtest.h>
 
 #include "multiplexer/client.h"
 #include "multiplexer/in_process_multiplexer.h"
@@ -23,38 +22,40 @@ namespace {
 // Runs in the child: returns 0 when every check passed, otherwise the
 // number of the first failed check. gtest cannot report from a forked
 // child, so the parent asserts on the exit code.
-int child_checks(std::unique_ptr<Client> &sync, std::unique_ptr<ThreadedClient> &threaded, unsigned short port) {
+int child_checks(std::unique_ptr<Client>& sync, std::unique_ptr<ThreadedClient>& threaded, unsigned short port) {
   try {
     sync->query("x", multiplexer::types::PYTHON_TEST_REQUEST, 1);
     return 1;
-  } catch (Client::UsedAfterFork &) {
+  } catch (Client::UsedAfterFork&) {
   }
   try {
     sync->connect("127.0.0.1", 1, 0.1f);
     return 2;
-  } catch (Client::UsedAfterFork &) {
+  } catch (Client::UsedAfterFork&) {
   }
   try {
     threaded->query("x", multiplexer::types::PYTHON_TEST_REQUEST, 1);
     return 3;
-  } catch (ThreadedClient::UsedAfterFork &) {
+  } catch (ThreadedClient::UsedAfterFork&) {
   }
   try {
     threaded->send(threaded->new_message(multiplexer::types::PYTHON_TEST_REQUEST, "x"));
     return 4;
-  } catch (ThreadedClient::UsedAfterFork &) {
+  } catch (ThreadedClient::UsedAfterFork&) {
   }
-  sync.reset();     // the orphan teardown: must not hang
-  threaded.reset(); // nor this one
+  sync.reset();      // the orphan teardown: must not hang
+  threaded.reset();  // nor this one
   ThreadedClient fresh(multiplexer::peers::WEBSITE);
-  if (!fresh.connect("127.0.0.1", port, 5))
+  if (!fresh.connect("127.0.0.1", port, 5)) {
     return 5;
-  if (fresh.query("x", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome != ThreadedClient::FAILED)
-    return 6; // FAILED: connected, and nobody serves the type
+  }
+  if (fresh.query("x", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome != ThreadedClient::FAILED) {
+    return 6;  // FAILED: connected, and nobody serves the type
+  }
   return 0;
 }
 
-} // namespace
+}  // namespace
 
 TEST(Fork, InheritedClientsAreOrphansAndTheParentKeepsWorking) {
   InProcessMultiplexer mx;
@@ -65,8 +66,9 @@ TEST(Fork, InheritedClientsAreOrphansAndTheParentKeepsWorking) {
 
   pid_t pid = fork();
   ASSERT_NE(-1, pid);
-  if (pid == 0)
+  if (pid == 0) {
     _exit(child_checks(sync, threaded, mx.port));
+  }
 
   int status = 0;
   ASSERT_EQ(pid, waitpid(pid, &status, 0));

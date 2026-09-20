@@ -13,13 +13,13 @@ using multiplexer::MultiplexerMessage;
 
 // A backend that receives events, reports each one and never answers.
 class EventBackendServer : public multiplexer::backend::BaseMultiplexerServer {
-public:
-  EventBackendServer(Client *client, unsigned type) : BaseMultiplexerServer(client, type), received_(0) {}
+ public:
+  EventBackendServer(Client* client, unsigned type) : BaseMultiplexerServer(client, type), received_(0) {}
   int received() const { return received_; }
 
-protected:
+ protected:
   // Report one received event.
-  virtual void handle_message(MultiplexerMessage &mxmsg) {
+  virtual void handle_message(MultiplexerMessage& mxmsg) {
     ++received_;
     Event received = event("received");
     received.set_type(mxmsg.type());
@@ -31,14 +31,14 @@ protected:
     no_response();
   }
 
-private:
+ private:
   int received_;
 };
 
 // The `event_backend` subcommand: runs an EventBackendServer until SIGTERM,
 // --until N messages, or --for S seconds. Events: received, done.
 class EventBackendRole : public mxcontrol::Task {
-public:
+ public:
   virtual std::string short_description() const { return "receive events in a loop and report them"; }
   virtual int run() {
     install_signal_handlers();
@@ -48,13 +48,15 @@ public:
     std::chrono::steady_clock::time_point deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(int(duration_ * 1000));
     while (!stop_requested) {
-      if (until_ && server.received() >= until_)
+      if (until_ && server.received() >= until_) {
         break;
-      if (duration_ > 0 && std::chrono::steady_clock::now() >= deadline)
+      }
+      if (duration_ > 0 && std::chrono::steady_clock::now() >= deadline) {
         break;
+      }
       try {
         server.loop_iter(0.25f);
-      } catch (Client::OperationTimedOut &) {
+      } catch (Client::OperationTimedOut&) {
       }
     }
     Event done = event("done");
@@ -64,14 +66,14 @@ public:
     return 0;
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     common_.add(options);
     options.add("until", &until_, 0, "exit after N messages");
     options.add("for", &duration_, 0.0, "exit after S seconds");
   }
 
-private:
+ private:
   CommonOptions common_;
   int until_;
   double duration_;
@@ -79,4 +81,4 @@ private:
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_backend, EventBackendRole);
 
-} // namespace mxtestroles
+}  // namespace mxtestroles

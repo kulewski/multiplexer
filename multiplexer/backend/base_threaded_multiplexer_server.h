@@ -39,9 +39,9 @@ class BaseThreadedMultiplexerServer;
 
 // What a BaseThreadedMultiplexerServer is built with.
 struct ThreadedServerOptions {
-  unsigned int workers = 1;                // handler threads
-  std::size_t queue_size = 1024;           // requests waiting for a worker; beyond it they are dropped
-  bool decline_searches_when_full = false; // leave a client's search unanswered while saturated
+  unsigned int workers = 1;                 // handler threads
+  std::size_t queue_size = 1024;            // requests waiting for a worker; beyond it they are dropped
+  bool decline_searches_when_full = false;  // leave a client's search unanswered while saturated
   float connect_timeout = DEFAULT_TIMEOUT;
 };
 
@@ -49,12 +49,12 @@ struct ThreadedServerOptions {
 // `references`, `workflow` and the connection from the request and sends
 // through the threaded client, from whichever thread calls it.
 class Request {
-public:
-  ~Request(); // logs a warning when nobody answered or called no_response()
+ public:
+  ~Request();  // logs a warning when nobody answered or called no_response()
 
-  const MultiplexerMessage &mxmsg() const { return *incoming_.third; }
-  const ConnectionWrapper &connection() const { return incoming_.second; }
-  const IncomingMessage &incoming() const { return incoming_; }
+  const MultiplexerMessage& mxmsg() const { return *incoming_.third; }
+  const ConnectionWrapper& connection() const { return incoming_.second; }
+  const IncomingMessage& incoming() const { return incoming_; }
   bool answered() const { return answered_; }
 
   // The reply: `payload` as a message of `type`, or a message you built,
@@ -64,46 +64,47 @@ public:
   // it has seen answered; a follow-up that is not the reply goes through
   // the server's client() with `to` set and no `references`, correlated
   // in the payload.
-  void reply(const std::string &payload, std::uint32_t type);
+  void reply(const std::string& payload, std::uint32_t type);
   void reply(MultiplexerMessage msg);
   // The message needs no reply, as an event does.
   void no_response() { answered_ = true; }
   // BACKEND_ERROR carrying `message`: a Python requester's query() raises
   // BackendError, a C++ one gets the message itself.
-  void report_error(const std::string &message);
+  void report_error(const std::string& message);
   // REQUEST_RECEIVED to the requester at once, for a handler that takes long.
   void notify_start();
-  template <typename Message> Message parse_message() const {
+  template <typename Message>
+  Message parse_message() const {
     Message message;
     message.ParseFromString(mxmsg().message());
     return message;
   }
 
-private:
+ private:
   friend class BaseThreadedMultiplexerServer;
-  Request(ThreadedClient *client, const IncomingMessage &incoming) : client_(client), incoming_(incoming) {}
-  Request(const Request &) = delete;
-  Request &operator=(const Request &) = delete;
+  Request(ThreadedClient* client, const IncomingMessage& incoming) : client_(client), incoming_(incoming) {}
+  Request(const Request&) = delete;
+  Request& operator=(const Request&) = delete;
 
-  ThreadedClient *client_;
+  ThreadedClient* client_;
   IncomingMessage incoming_;
   std::atomic<bool> answered_{false};
-  bool dropped_ = false; // the server said why; no warning from the destructor
+  bool dropped_ = false;  // the server said why; no warning from the destructor
 };
 typedef std::shared_ptr<Request> RequestPtr;
 
 class BaseThreadedMultiplexerServer {
-public:
+ public:
   typedef ThreadedServerOptions Options;
 
-protected:
+ protected:
   // Connects to every address as a backend of `type` and starts the
   // workers; a subclass calls it.
-  BaseThreadedMultiplexerServer(const MultiplexerAddresses &addresses, PeerType type,
-                                const Options &options = Options());
+  BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
+                                const Options& options = Options());
 
-public:
-  virtual ~BaseThreadedMultiplexerServer(); // close()
+ public:
+  virtual ~BaseThreadedMultiplexerServer();  // close()
 
   // Until stop() or a drain is over: every `poll` seconds, or sooner when
   // woken, periodic_task(); then take no new message, let the workers
@@ -129,14 +130,14 @@ public:
   std::size_t dropped() const { return dropped_.load(); }
 
   std::uint64_t instance_id() const { return client_.instance_id(); }
-  ThreadedClient &client() { return client_; } // for messages that are not replies
+  ThreadedClient& client() { return client_; }  // for messages that are not replies
 
-protected:
+ protected:
   // Called on a worker thread with every message that is not the
   // protocol's own. Answer with request->reply(), or call
   // request->no_response() for an event; either may happen later, from
   // any thread, as long as it happens.
-  virtual void handle_message(const RequestPtr &request) = 0;
+  virtual void handle_message(const RequestPtr& request) = 0;
   // Called from serve_forever() after every poll, on its thread.
   virtual void periodic_task() {}
   // Whether the drain is over: by default `drain_seconds` have passed
@@ -145,7 +146,7 @@ protected:
   // Called on the worker thread when handle_message() threw, after
   // BACKEND_ERROR went to the requester. True (the default) keeps serving;
   // false makes serve_forever() return and rethrow.
-  virtual bool on_handler_exception(const std::exception &) { return true; }
+  virtual bool on_handler_exception(const std::exception&) { return true; }
   // Whether to answer a client's search for a backend; on the io thread,
   // so quick. False while draining, and with decline_searches_when_full
   // while every worker is busy and requests wait.
@@ -153,10 +154,10 @@ protected:
 
   std::atomic<bool> working{true};
 
-private:
-  void _on_message(const IncomingMessage &incoming);
+ private:
+  void _on_message(const IncomingMessage& incoming);
   void _work();
-  void _handle(const RequestPtr &request);
+  void _handle(const RequestPtr& request);
 
   const Options options_;
   mutable mx::Mutex mutex_;
@@ -173,10 +174,10 @@ private:
   std::exception_ptr failure_;
   std::atomic<bool> closed_{false};
   std::atomic<std::size_t> dropped_{0};
-  ThreadedClient client_; // last: its callbacks reach the members above
+  ThreadedClient client_;  // last: its callbacks reach the members above
 };
 
-} // namespace backend
-} // namespace multiplexer
+}  // namespace backend
+}  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_BACKEND_BASE_THREADED_MULTIPLEXER_SERVER_H_
+#endif  // MX_MULTIPLEXER_BACKEND_BASE_THREADED_MULTIPLEXER_SERVER_H_

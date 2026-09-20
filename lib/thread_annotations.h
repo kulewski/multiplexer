@@ -47,4 +47,4 @@
 // On a function: skip the analysis (say why in a comment).
 #define MX_NO_THREAD_SAFETY_ANALYSIS MX_THREAD_ANNOTATION_ATTRIBUTE(no_thread_safety_analysis)
 
-#endif // MX_LIB_THREAD_ANNOTATIONS_H_
+#endif  // MX_LIB_THREAD_ANNOTATIONS_H_

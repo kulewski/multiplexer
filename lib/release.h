@@ -5,10 +5,10 @@
 
 namespace mx {
 namespace release {
-extern const char *const version;
-extern const char *const version_hash;
-extern const char *const version_short_hash;
-} // namespace release
-} // namespace mx
+extern const char* const version;
+extern const char* const version_hash;
+extern const char* const version_short_hash;
+}  // namespace release
+}  // namespace mx
 
-#endif // MX_LIB_RELEASE_H_
+#endif  // MX_LIB_RELEASE_H_

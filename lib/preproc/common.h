@@ -49,4 +49,4 @@
 #  */
 #define MX_PP_REMOVE_BRACES(args...) args
 
-#endif // MX_LIB_PREPROC_COMMON_H_
+#endif  // MX_LIB_PREPROC_COMMON_H_

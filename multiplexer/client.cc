@@ -1,20 +1,23 @@
 // Client: constructors, and the query algorithm with the send-and-receive
 // it is built on. The design is in client.h.
 #include "multiplexer/client.h"
+
 #include "multiplexer/Multiplexer.pb.h"
 
 using namespace multiplexer;
 using std::cerr;
 
 Client::Client(std::uint32_t client_type)
-    : io_service_ptr_(new asio::io_service()), io_service_(*io_service_ptr_),
+    : io_service_ptr_(new asio::io_service()),
+      io_service_(*io_service_ptr_),
       basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
 Client::Client(std::shared_ptr<asio::io_service> io_service, std::uint32_t client_type)
-    : io_service_ptr_(io_service), io_service_(*io_service_ptr_),
+    : io_service_ptr_(io_service),
+      io_service_(*io_service_ptr_),
       basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
-Client::Client(asio::io_service &io_service, std::uint32_t client_type)
+Client::Client(asio::io_service& io_service, std::uint32_t client_type)
     : io_service_(io_service), basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
 // The thread that destroys the client owns it from here on, whichever
@@ -29,9 +32,10 @@ Client::Client(asio::io_service &io_service, std::uint32_t client_type)
 Client::~Client() {
   if (basic_client_->orphaned()) {
     basic_client_->orphan_close_descriptors();
-    new shared_ptr<BasicClient>(basic_client_); // leaked: keeps the object alive forever
-    if (io_service_ptr_)
-      new shared_ptr<asio::io_service>(io_service_ptr_); // leaked likewise
+    new shared_ptr<BasicClient>(basic_client_);  // leaked: keeps the object alive forever
+    if (io_service_ptr_) {
+      new shared_ptr<asio::io_service>(io_service_ptr_);  // leaked likewise
+    }
     return;
   }
   basic_client_->bind_to_current_thread();
@@ -50,18 +54,20 @@ namespace multiplexer {
 namespace {
 // A lane that is not pinned, or a pinned one still empty, takes the
 // connection a message went through or a reply came through.
-void adopt(const LanePtr &lane, const ConnectionWrapper &connection) {
-  if (lane)
+void adopt(const LanePtr& lane, const ConnectionWrapper& connection) {
+  if (lane) {
     lane->adopt(connection);
+  }
 }
-} // namespace
+}  // namespace
 
 // The query algorithm; the Python Client.query in mxclient.py is the same
 // steps and the two must stay in agreement. A request with `to` set is an
 // addressed query, with stages of its own below.
-IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe) {
-  if (query.to())
+IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe) {
+  if (query.to()) {
     return _query_addressed(query, timeout, lane, probe);
+  }
 
   std::unique_ptr<mx::SimpleTimer> timer;
 
@@ -74,7 +80,7 @@ IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, L
       adopt(lane, result.second);
       return result;
     }
-  } catch (OperationTimedOut &) {
+  } catch (OperationTimedOut&) {
   }
 
   // No reply, or a delivery error: ask every multiplexer who has a backend
@@ -98,8 +104,9 @@ IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, L
     return result;
   }
 
-  if (result.third->type() != types::PING)
+  if (result.third->type() != types::PING) {
     MXTHROW(OperationFailed());
+  }
 
   // Repeat the request to the backend that answered first, by instance id
   // and through the connection its PING came on. A late reply to the
@@ -115,8 +122,9 @@ IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, L
   timer = basic_client_->create_timer(timeout);
   result = _send_and_receive(direct_query, *timer, false, false, query.id(), types::REQUEST_RECEIVED, mxmsg.id(),
                              result.second, lane);
-  if (result.third->type() == types::DELIVERY_ERROR)
+  if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());
+  }
   adopt(lane, result.second);
   return result;
 }
@@ -132,14 +140,16 @@ IncomingMessage Client::_query(const MultiplexerMessage &query, float timeout, L
 // and a request that gets no answer at all within it is OperationTimedOut
 // without a probe, since a silent addressee is one the multiplexer still
 // has, and a probe would find the same one.
-IncomingMessage Client::_query_addressed(const MultiplexerMessage &query, float timeout, LanePtr lane, Probe probe) {
+IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe) {
   std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
   MultiplexerMessage request = query;
-  if (!request.id())
+  if (!request.id()) {
     request.set_id(random64());
-  if (!request.from())
+  }
+  if (!request.from()) {
     request.set_from(instance_id());
-  request.set_report_delivery_error(true); // "not behind this multiplexer" must come back as a message
+  }
+  request.set_report_delivery_error(true);  // "not behind this multiplexer" must come back as a message
 
   std::vector<uint64_t> accept_ids;
   accept_ids.push_back(request.id());
@@ -156,14 +166,16 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage &query, float 
   const bool pinned = lane && lane->pinned();
   result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, request.id(), types::REQUEST_RECEIVED, -1,
                              ConnectionWrapper(), lane);
-  if (result.third->type() == types::DELIVERY_ERROR)
-    MXTHROW(OperationFailed()); // no multiplexer has the instance
+  if (result.third->type() == types::DELIVERY_ERROR) {
+    MXTHROW(OperationFailed());  // no multiplexer has the instance
+  }
   if (result.third->references() == request.id()) {
     adopt(lane, result.second);
-    return result; // a late reply to the request after all
+    return result;  // a late reply to the request after all
   }
-  if (result.third->type() != types::PING)
+  if (result.third->type() != types::PING) {
     MXTHROW(OperationFailed());
+  }
 
   // The request again, a fresh id, through the connection the answer came
   // on; the lane adopts it.
@@ -171,8 +183,9 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage &query, float 
   again.set_id(random64());
   result = _send_and_receive(again, *timer, false, false, request.id(), types::REQUEST_RECEIVED, mxmsg.id(),
                              result.second, lane);
-  if (result.third->type() == types::DELIVERY_ERROR)
+  if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());
+  }
   adopt(lane, result.second);
   return result;
 }
@@ -180,7 +193,7 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage &query, float 
 // The message that locates who can take `query`: a search for a backend of
 // its type, addressed to its `to` when it has one, or a PING to that
 // instance.
-MultiplexerMessage Client::_probe_for(const MultiplexerMessage &query, Probe probe) {
+MultiplexerMessage Client::_probe_for(const MultiplexerMessage& query, Probe probe) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random64());
   mxmsg.set_from(instance_id());
@@ -205,29 +218,32 @@ MultiplexerMessage Client::_probe_for(const MultiplexerMessage &query, Probe pro
 // said no" is detected. Messages of ignore_type (REQUEST_RECEIVED) are
 // skipped; others that reference ignore_id are skipped silently, the rest
 // are logged and dropped.
-IncomingMessage Client::_send_and_receive(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer, bool schedule_all,
+IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all,
                                           bool handle_delivery_errors, std::uint64_t accept_id,
                                           std::uint32_t ignore_type, std::uint64_t ignore_id,
                                           ConnectionWrapper connection, LanePtr lane) {
-
   IncomingMessage result;
 
   std::vector<uint64_t> accept_ids;
   accept_ids.push_back(mxmsg.id());
-  if (accept_id)
+  if (accept_id) {
     accept_ids.push_back(accept_id);
+  }
 
   if (schedule_all) {
     int sends = this->schedule_all(mxmsg);
-    if (sends == 0 && !basic_client_->wait_for_any_connection(timer))
+    if (sends == 0 && !basic_client_->wait_for_any_connection(timer)) {
       MXTHROW(NotConnected());
-    if (sends == 0)
+    }
+    if (sends == 0) {
       sends = this->schedule_all(mxmsg);
+    }
     while (!timer.expired()) {
       result = _receive(timer, accept_ids, ignore_type, ignore_id);
       if (result.third->type() == types::DELIVERY_ERROR && handle_delivery_errors) {
-        if ((--sends) > 0)
+        if ((--sends) > 0) {
           continue;
+        }
       }
       return result;
     }
@@ -246,17 +262,19 @@ IncomingMessage Client::_send_and_receive(const MultiplexerMessage &mxmsg, mx::S
 // connection is available, until the deadline. `connection` is the one to
 // prefer (a reply's origin); any other is used if it is gone. Through a
 // pinned lane there is no other: the loss is NotConnected.
-IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer &timer,
+IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer& timer,
                                               std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
                                               std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane) {
   for (;;) {
     ConnectionWrapper used = _send_one(mxmsg, timer, connection, lane);
     bool lost = false;
     IncomingMessage result = _receive(timer, accept_ids, ignore_type, ignore_id, &used, &lost);
-    if (!lost)
+    if (!lost) {
       return result;
-    if (lane && lane->pinned())
+    }
+    if (lane && lane->pinned()) {
       MXTHROW(NotConnected());
+    }
     MX_LOG(WARNING, MEDIUMVERBOSITY,
            CTX("multiplexer.client")
                TEXT("connection lost while waiting for a reply to " + repr(mxmsg.id()) + "; sending again"));
@@ -272,34 +290,40 @@ IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::Simp
 // With a lane, the lane's connection is the one preferred, and the lane
 // adopts the connection used; a pinned lane allows no other, so its
 // connection being gone, or dying under the write, is NotConnected.
-ConnectionWrapper Client::_send_one(const MultiplexerMessage &mxmsg, mx::SimpleTimer &timer,
+ConnectionWrapper Client::_send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer,
                                     ConnectionWrapper preferred, LanePtr lane) {
   shared_ptr<const RawMessage> raw = _serialize(mxmsg);
-  basic_client_->poll(); // retire what the multiplexers closed while we were idle
+  basic_client_->poll();  // retire what the multiplexers closed while we were idle
   if (lane) {
-    if (lane->closed())
+    if (lane->closed()) {
       MXTHROW(NotConnected());
-    if (lane->pinned())
-      raw->mark_pinned(); // never handed to another connection if this one dies under it
-    if (lane->holds_connection() && !preferred)
-      preferred = lane->connection(); // a connection given outright wins: where a probe was answered
+    }
+    if (lane->pinned()) {
+      raw->mark_pinned();  // never handed to another connection if this one dies under it
+    }
+    if (lane->holds_connection() && !preferred) {
+      preferred = lane->connection();  // a connection given outright wins: where a probe was answered
+    }
   }
   const bool only_preferred = lane && lane->pinned() && lane->holds_connection();
   for (;;) {
     ConnectionWrapper used;
     BasicScheduledMessageTracker tracker;
     if (preferred) {
-      if (BasicClient::Connection::pointer conn = preferred.lock())
+      if (BasicClient::Connection::pointer conn = preferred.lock()) {
         if (conn->living()) {
           tracker = conn->schedule(raw);
           used = preferred;
         }
-      preferred = ConnectionWrapper(); // one try; any connection after that
+      }
+      preferred = ConnectionWrapper();  // one try; any connection after that
     }
-    if (!tracker && only_preferred)
+    if (!tracker && only_preferred) {
       MXTHROW(NotConnected());
-    if (!tracker)
+    }
+    if (!tracker) {
       tracker = basic_client_->schedule_one(raw, &used);
+    }
     if (tracker) {
       flush(ScheduledMessageTracker(tracker), timer);
       if (ScheduledMessageTracker(tracker).is_sent()) {
@@ -307,22 +331,24 @@ ConnectionWrapper Client::_send_one(const MultiplexerMessage &mxmsg, mx::SimpleT
         return used;
       }
       // The connection died under the write; the reconnect is scheduled.
-      if (only_preferred)
+      if (only_preferred) {
         MXTHROW(NotConnected());
+      }
     }
-    if (timer.expired())
+    if (timer.expired()) {
       MXTHROW(OperationTimedOut());
-    if (!basic_client_->wait_for_any_connection(timer))
+    }
+    if (!basic_client_->wait_for_any_connection(timer)) {
       MXTHROW(NotConnected());
+    }
   }
 }
 
 // Waits for a message referencing one of accept_ids. With `watch`, also
 // stops when that connection dies, setting *lost instead of returning a
 // message.
-IncomingMessage Client::_receive(mx::SimpleTimer &timer, const std::vector<uint64_t> &accept_ids, uint32_t ignore_type,
-                                 uint64_t ignore_id, const ConnectionWrapper *watch, bool *lost) {
-
+IncomingMessage Client::_receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
+                                 uint64_t ignore_id, const ConnectionWrapper* watch, bool* lost) {
   IncomingMessage result;
 
   while (!timer.expired()) {
@@ -335,12 +361,14 @@ IncomingMessage Client::_receive(mx::SimpleTimer &timer, const std::vector<uint6
     } else {
       result = read_raw_message(timer);
     }
-    const MultiplexerMessage &mxmsg = *result.third;
+    const MultiplexerMessage& mxmsg = *result.third;
 
-    if (mxmsg.type() == ignore_type)
+    if (mxmsg.type() == ignore_type) {
       continue;
-    if (contains(accept_ids, mxmsg.references()))
+    }
+    if (contains(accept_ids, mxmsg.references())) {
       return result;
+    }
     if (ignore_id != mxmsg.references()) {
       MX_LOG(WARNING, HIGHVERBOSITY,
              TEXT("message (id=" + repr(mxmsg.id()) + ", type=" + repr(mxmsg.type()) + ", from=" + repr(mxmsg.from()) +
@@ -354,4 +382,4 @@ IncomingMessage Client::_receive(mx::SimpleTimer &timer, const std::vector<uint6
   MXTHROW(OperationTimedOut());
 }
 
-} // namespace multiplexer
+}  // namespace multiplexer

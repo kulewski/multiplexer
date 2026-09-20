@@ -14,15 +14,15 @@ namespace mxcontrol {
 // --peers-file (the connected peers, rewritten on every change). See
 // docs/mxcontrol.md.
 class StartMultiplexerServer : public Task {
-public:
+ public:
   virtual int run();
   virtual std::string short_description() const { return "run a multiplexer"; }
-  virtual std::string short_synopsis(const std::string &commandname) {
+  virtual std::string short_synopsis(const std::string& commandname) {
     return "<" + commandname + "-options> [--address] address:port";
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     options.add("rules", &rules_file_, "multiplexer.rules", "file from which routing rules will be read");
     options.add("address,M", &host_port_, "0.0.0.0:1980", "local address to listen on").positional("address");
     options.add("port-file", &port_file_,
@@ -42,7 +42,7 @@ protected:
                 "rewrite this file with the connected peers on every registration and unregistration");
   }
 
-private:
+ private:
   std::string host_port_;
   std::string rules_file_;
   std::string port_file_;
@@ -54,6 +54,6 @@ private:
   std::string peers_file_;
 };
 
-}; // namespace mxcontrol
+};  // namespace mxcontrol
 
-#endif // MX_MXCONTROL_START_MULTIPLEXER_SERVER_H_
+#endif  // MX_MXCONTROL_START_MULTIPLEXER_SERVER_H_

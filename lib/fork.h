@@ -12,6 +12,6 @@ namespace mx {
 
 unsigned int fork_generation();
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_FORK_H_
+#endif  // MX_LIB_FORK_H_

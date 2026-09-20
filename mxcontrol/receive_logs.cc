@@ -22,26 +22,25 @@ using mx::util::kwargs::Kwargs;
 namespace mxcontrol {
 
 class ReceiveLogs : public Task {
-public:
+ public:
   virtual int run();
   virtual std::string short_description() const { return "receive logs and print them on stdout"; }
-  virtual void print_help(std::ostream &out) { out << "Start a Multiplexer backend that does something with logs.\n"; }
+  virtual void print_help(std::ostream& out) { out << "Start a Multiplexer backend that does something with logs.\n"; }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) { _add_multiplexer_client_options(options); }
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) { _add_multiplexer_client_options(options); }
 
-private:
+ private:
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(receivelogs, mxcontrol::ReceiveLogs);
 
 struct LogReceiverServer : public multiplexer::backend::BaseMultiplexerServer {
-
-  LogReceiverServer(multiplexer::Client *conn, multiplexer::backend::PeerType type)
+  LogReceiverServer(multiplexer::Client* conn, multiplexer::backend::PeerType type)
       : BaseMultiplexerServer(conn, type) {}
 
-protected:
-  virtual void handle_message(MultiplexerMessage &mxmsg) {
+ protected:
+  virtual void handle_message(MultiplexerMessage& mxmsg) {
     std::string tf;
     google::protobuf::TextFormat::PrintToString(mxmsg, &tf);
     std::cout << tf << "\n";
@@ -51,10 +50,9 @@ protected:
 };
 
 int ReceiveLogs::run() {
-
   LogReceiverServer(&_multiplexer_client(peers::LOG_RECEIVER_EXAMPLE), peers::LOG_RECEIVER_EXAMPLE).serve_forever();
 
   return 0;
 }
 
-}; // namespace mxcontrol
+};  // namespace mxcontrol

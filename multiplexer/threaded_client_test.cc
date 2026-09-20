@@ -1,18 +1,19 @@
 // Unit tests for ThreadedClient against a Server running in this process:
 // the outcomes a query can have, and the lifecycle rules, without the
 // integration harness.
+#include "multiplexer/threaded_client.h"
+
+#include <gtest/gtest.h>
+
+#include <asio/io_service.hpp>
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
 
-#include <asio/io_service.hpp>
-#include <gtest/gtest.h>
-
 #include "multiplexer/client.h"
 #include "multiplexer/in_process_multiplexer.h"
 #include "multiplexer/multiplexer.constants.h"
-#include "multiplexer/threaded_client.h"
 
 using multiplexer::ThreadedClient;
 
@@ -20,7 +21,7 @@ namespace {
 
 using multiplexer::testing::InProcessMultiplexer;
 
-} // namespace
+}  // namespace
 
 TEST(ThreadedClient, QueryWithNoBackendFailsAtOnce) {
   InProcessMultiplexer mx;
@@ -33,7 +34,7 @@ TEST(ThreadedClient, QueryWithNoBackendFailsAtOnce) {
 
 TEST(ThreadedClient, QueryWithNoMultiplexerIsNotConnected) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
-  EXPECT_FALSE(client.connect("127.0.0.1", 1, 0.2f)); // nothing listens on port 1
+  EXPECT_FALSE(client.connect("127.0.0.1", 1, 0.2f));  // nothing listens on port 1
   ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 0.3f);
   EXPECT_EQ(ThreadedClient::NOT_CONNECTED, result.outcome);
 }
@@ -42,7 +43,7 @@ TEST(ThreadedClient, QueryWithNoMultiplexerIsNotConnected) {
 // instance id and read what comes back.
 struct Peer {
   explicit Peer(unsigned short port, std::uint32_t type) : client(type) { client.connect("127.0.0.1", port, 5); }
-  multiplexer::MultiplexerMessage message(std::uint32_t type, const std::string &payload, std::uint64_t to,
+  multiplexer::MultiplexerMessage message(std::uint32_t type, const std::string& payload, std::uint64_t to,
                                           std::uint64_t references = 0) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
@@ -50,11 +51,12 @@ struct Peer {
     msg.set_type(type);
     msg.set_message(payload);
     msg.set_to(to);
-    if (references)
+    if (references) {
       msg.set_references(references);
+    }
     return msg;
   }
-  void send(const multiplexer::MultiplexerMessage &msg) { client.flush(client.schedule_one(msg), 5); }
+  void send(const multiplexer::MultiplexerMessage& msg) { client.flush(client.schedule_one(msg), 5); }
   multiplexer::Client client;
 };
 
@@ -62,7 +64,7 @@ TEST(ThreadedClient, OnMessageGetsWhatIsAddressedToIt) {
   InProcessMultiplexer mx;
   std::promise<multiplexer::MultiplexerMessage> got;
   ThreadedClient client(multiplexer::peers::WEBSITE,
-                        [&got](const multiplexer::IncomingMessage &incoming) { got.set_value(*incoming.third); });
+                        [&got](const multiplexer::IncomingMessage& incoming) { got.set_value(*incoming.third); });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   Peer peer(mx.port, multiplexer::peers::WEBSITE);
   peer.send(peer.message(multiplexer::types::PYTHON_TEST_REQUEST, "for you", client.instance_id()));
@@ -75,7 +77,7 @@ TEST(ThreadedClient, PingIsAnsweredAndNotHandedOn) {
   InProcessMultiplexer mx;
   std::atomic<int> handed_on(0);
   ThreadedClient client(multiplexer::peers::WEBSITE,
-                        [&handed_on](const multiplexer::IncomingMessage &) { ++handed_on; });
+                        [&handed_on](const multiplexer::IncomingMessage&) { ++handed_on; });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   Peer peer(mx.port, multiplexer::peers::WEBSITE);
   multiplexer::MultiplexerMessage ping = peer.message(multiplexer::types::PING, "echo me", client.instance_id());
@@ -91,10 +93,11 @@ TEST(ThreadedClient, LateReplyIsDroppedButAnEventIsNot) {
   InProcessMultiplexer mx;
   std::atomic<int> handed_on(0);
   std::promise<multiplexer::MultiplexerMessage> event;
-  ThreadedClient client(multiplexer::peers::WEBSITE, [&](const multiplexer::IncomingMessage &incoming) {
+  ThreadedClient client(multiplexer::peers::WEBSITE, [&](const multiplexer::IncomingMessage& incoming) {
     ++handed_on;
-    if (!incoming.third->references())
+    if (!incoming.third->references()) {
       event.set_value(*incoming.third);
+    }
   });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   Peer backend(mx.port, multiplexer::peers::PYTHON_TEST_SERVER);
@@ -104,7 +107,7 @@ TEST(ThreadedClient, LateReplyIsDroppedButAnEventIsNot) {
     std::promise<ThreadedClient::Result> done;
     client.query(
         "slow", multiplexer::types::PYTHON_TEST_REQUEST,
-        [&done](const ThreadedClient::Result &r) { done.set_value(r); }, 0.3f);
+        [&done](const ThreadedClient::Result& r) { done.set_value(r); }, 0.3f);
     multiplexer::IncomingMessage request = backend.client.read_raw_message(5);
     EXPECT_EQ("slow", request.third->message());
     ThreadedClient::Result r = done.get_future().get();
@@ -126,11 +129,11 @@ TEST(ThreadedClient, BlockingQueryOnTheIoThreadThrows) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   std::promise<bool> threw;
-  client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, [&](const ThreadedClient::Result &) {
+  client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, [&](const ThreadedClient::Result&) {
     try {
       client.query("nested", multiplexer::types::PYTHON_TEST_REQUEST, 1);
       threw.set_value(false);
-    } catch (std::logic_error &) {
+    } catch (std::logic_error&) {
       threw.set_value(true);
     }
   });
@@ -142,7 +145,7 @@ TEST(ThreadedClient, CallsAfterShutdownDoNotHang) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   client.shutdown();
-  client.shutdown(); // idempotent
+  client.shutdown();  // idempotent
   EXPECT_THROW(client.connections_count(), ThreadedClient::NotConnected);
   EXPECT_THROW(client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "x")),
                ThreadedClient::NotConnected);
@@ -168,7 +171,7 @@ TEST(ThreadedClient, ShutdownFailsQueriesInFlight) {
   // PING to nobody in particular is never answered: the query waits for its
   // deadline, or for shutdown().
   client.query(
-      "x", multiplexer::types::PYTHON_TEST_RESPONSE, [&](const ThreadedClient::Result &r) { seen = r.outcome; }, 30);
+      "x", multiplexer::types::PYTHON_TEST_RESPONSE, [&](const ThreadedClient::Result& r) { seen = r.outcome; }, 30);
   client.shutdown();
   EXPECT_EQ(ThreadedClient::SHUT_DOWN, seen);
 }
@@ -180,23 +183,24 @@ namespace {
 // Reads the next message addressed to `peer` and answers it as a backend
 // would: a PING for a search or a ping, the payload upper-cased for a
 // request.
-void serve_one(Peer &peer, float timeout = 5) {
+void serve_one(Peer& peer, float timeout = 5) {
   multiplexer::IncomingMessage incoming = peer.client.read_raw_message(timeout);
-  const multiplexer::MultiplexerMessage &msg = *incoming.third;
+  const multiplexer::MultiplexerMessage& msg = *incoming.third;
   if (msg.type() == multiplexer::types::BACKEND_FOR_PACKET_SEARCH || msg.type() == multiplexer::types::PING) {
     peer.send(peer.message(multiplexer::types::PING, msg.message(), msg.from(), msg.id()));
     return;
   }
   std::string payload = msg.message();
-  for (char &character : payload)
+  for (char& character : payload) {
     character = std::toupper(static_cast<unsigned char>(character));
+  }
   peer.client.flush(
       peer.client.schedule_one(peer.message(multiplexer::types::PYTHON_TEST_RESPONSE, payload, msg.from(), msg.id()),
                                incoming.second),
       5);
 }
 
-} // namespace
+}  // namespace
 
 TEST(ThreadedClient, AddressedQueryReachesTheInstanceNamedOnly) {
   InProcessMultiplexer mx;
@@ -209,7 +213,7 @@ TEST(ThreadedClient, AddressedQueryReachesTheInstanceNamedOnly) {
   // The peers are synchronous clients of this thread, so the query goes
   // out in its callback form and the peer is served here meanwhile.
   std::promise<ThreadedClient::Result> done;
-  client.query(request, [&done](const ThreadedClient::Result &r) { done.set_value(r); }, 5);
+  client.query(request, [&done](const ThreadedClient::Result& r) { done.set_value(r); }, 5);
   serve_one(second);
   ThreadedClient::Result result = done.get_future().get();
   ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
@@ -219,7 +223,7 @@ TEST(ThreadedClient, AddressedQueryReachesTheInstanceNamedOnly) {
   // The PING probe, as an option, on a query that needs no locating.
   std::promise<ThreadedClient::Result> again;
   client.query(
-      request, [&again](const ThreadedClient::Result &r) { again.set_value(r); }, 5, multiplexer::LanePtr(),
+      request, [&again](const ThreadedClient::Result& r) { again.set_value(r); }, 5, multiplexer::LanePtr(),
       multiplexer::PROBE_PING);
   serve_one(second);
   EXPECT_EQ(ThreadedClient::REPLIED, again.get_future().get().outcome);
@@ -244,7 +248,7 @@ TEST(ThreadedClient, ASearchAddressedToTheClientIsAnsweredWithAPing) {
   InProcessMultiplexer mx;
   std::atomic<int> handed_on(0);
   ThreadedClient client(multiplexer::peers::WEBSITE,
-                        [&handed_on](const multiplexer::IncomingMessage &) { ++handed_on; });
+                        [&handed_on](const multiplexer::IncomingMessage&) { ++handed_on; });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   Peer peer(mx.port, multiplexer::peers::WEBSITE);
   multiplexer::BackendForPacketSearch search;
@@ -268,15 +272,17 @@ TEST(ThreadedClient, ALaneKeepsAStreamOnOneConnectionAndAPinnedOneFails) {
   backend.client.connect("127.0.0.1", second->port, 5);
 
   multiplexer::LanePtr lane(new multiplexer::Lane());
-  for (int index = 0; index < 100; ++index)
+  for (int index = 0; index < 100; ++index) {
     ASSERT_EQ(1, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "n" + std::to_string(index)),
                              lane, 5));
+  }
   unsigned short way = 0;
   for (int index = 0; index < 100; ++index) {
     multiplexer::IncomingMessage incoming = backend.client.read_raw_message(5);
     EXPECT_EQ("n" + std::to_string(index), incoming.third->message()) << "in order";
-    if (!way)
+    if (!way) {
       way = incoming.second.endpoint().port();
+    }
     EXPECT_EQ(way, incoming.second.endpoint().port()) << "all the same way";
   }
   EXPECT_EQ(way, lane->connection().endpoint().port());
@@ -291,8 +297,9 @@ TEST(ThreadedClient, ALaneKeepsAStreamOnOneConnectionAndAPinnedOneFails) {
   // The multiplexer behind the pinned lane goes away.
   (pinned_way == first->port ? first : second).reset();
   std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (pinned->connected() && std::chrono::steady_clock::now() < deadline)
+  while (pinned->connected() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   ASSERT_TRUE(pinned->closed());
   EXPECT_EQ(0, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "refused"), pinned, 5));
   multiplexer::MultiplexerMessage request = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "refused");
@@ -318,13 +325,14 @@ TEST(ThreadedClient, AQueryReleasesItsLaneWhenItEnds) {
   std::promise<ThreadedClient::Result> done;
   client.query(
       client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "held"),
-      [&done](const ThreadedClient::Result &r) { done.set_value(r); }, 5, lane);
-  lane.reset(); // the caller lets go mid-query
+      [&done](const ThreadedClient::Result& r) { done.set_value(r); }, 5, lane);
+  lane.reset();  // the caller lets go mid-query
   EXPECT_FALSE(weak.expired()) << "the query holds it while it runs";
   serve_one(backend);
   EXPECT_EQ(ThreadedClient::REPLIED, done.get_future().get().outcome);
   std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!weak.expired() && std::chrono::steady_clock::now() < deadline)
+  while (!weak.expired() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
   EXPECT_TRUE(weak.expired()) << "the query released it";
 }

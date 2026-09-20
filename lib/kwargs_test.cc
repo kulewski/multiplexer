@@ -2,6 +2,7 @@
 #include "lib/kwargs.h"
 
 #include <gtest/gtest.h>
+
 #include <string>
 
 using mx::util::kwargs::KeyError;

@@ -7,29 +7,30 @@
 // throw site, any other std::exception with its type, and the program exits
 // with 1. Include it from exactly one file of a binary.
 
-#include "lib/exception.h"
-#include "lib/type_utils.h"
 #include <iostream>
 
-int MxMain(int argc, char **argv);
+#include "lib/exception.h"
+#include "lib/type_utils.h"
 
-int main(int argc, char **argv) {
+int MxMain(int argc, char** argv);
+
+int main(int argc, char** argv) {
   using std::cerr;
   using std::endl;
 
   try {
     return MxMain(argc, argv);
 
-  } catch (mx::Exception &error) {
+  } catch (mx::Exception& error) {
     cerr << mx::type_utils::type_name(error) << " in " << error.file() << ":" << error.line() << " ("
          << error.function() << ")\n"
          << "    " << error.what() << endl;
     return 1;
 
-  } catch (std::exception &error) {
+  } catch (std::exception& error) {
     cerr << mx::type_utils::type_name(error) << ": " << error.what() << "\n";
     return 1;
   }
 }
 
-#endif // MX_LIB_PROGRAM_H_
+#endif  // MX_LIB_PROGRAM_H_

@@ -8,8 +8,8 @@ namespace mx {
 namespace util {
 
 struct Fd {
-  Fd(const Fd &) = delete;
-  Fd &operator=(const Fd &) = delete;
+  Fd(const Fd&) = delete;
+  Fd& operator=(const Fd&) = delete;
   explicit Fd(int fd, bool own_fd = false) : fd_(fd), own_fd_(own_fd) {}
 
   inline int fd() const { return fd_; }
@@ -19,12 +19,12 @@ struct Fd {
     }
   }
 
-private:
+ private:
   int fd_;
   bool own_fd_;
-}; // struct Fd
+};  // struct Fd
 
-}; // namespace util
-}; // namespace mx
+};  // namespace util
+};  // namespace mx
 
-#endif // MX_LIB_FD_H_
+#endif  // MX_LIB_FD_H_

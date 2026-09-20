@@ -20,8 +20,7 @@
 #ifndef MX_MULTIPLEXER_IO_CONNECTION_H_
 #define MX_MULTIPLEXER_IO_CONNECTION_H_
 
-#include <deque>
-#include <string>
+#include <google/protobuf/message.h>
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
@@ -29,8 +28,9 @@
 #include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
-#include <google/protobuf/message.h>
+#include <deque>
 #include <memory>
+#include <string>
 
 #include "lib/functors.h"
 #include "lib/logging/logging.h"
@@ -47,7 +47,8 @@ using mx::repr;
 
 // Specialized per manager (Server, BasicClient) in the manager's own header,
 // which includes this one; declared here so that this header stands alone.
-template <typename ConnectionsManagerImplementation> struct ConnectionsManagerTraits;
+template <typename ConnectionsManagerImplementation>
+struct ConnectionsManagerTraits;
 
 // The connection itself; see the file comment. `ConnectionsManagerImplementation`
 // is Server or BasicClient, and must provide: instance_id(),
@@ -57,8 +58,7 @@ template <typename ConnectionsManagerImplementation> struct ConnectionsManagerTr
 // shared implementation of most of them.
 template <class ConnectionsManagerImplementation>
 class Connection : public std::enable_shared_from_this<Connection<ConnectionsManagerImplementation>> {
-
-public:
+ public:
   typedef multiplexer::ConnectionsManagerTraits<ConnectionsManagerImplementation> ConnectionsManagerTraits;
   typedef typename ConnectionsManagerTraits::MessagesBufferTraits MessagesBufferTraits;
   typedef std::deque<typename MessagesBufferTraits::value_type> MessagesBuffer;
@@ -74,12 +74,22 @@ public:
   typedef typename ChannelState::_ChannelState ChannelStateT;
 
   /* instance members */
-private:
-  Connection(asio::io_service &io_service, std::shared_ptr<ConnectionsManagerImplementation> manager)
-      : socket_(io_service), peer_type_(0), peer_id_(0), is_passive_(false), is_living_(false), shuts_down_(false),
-        is_registered_(false), manager_(manager), should_send_heartbit_(true),
-        outgoing_channel_state_(ChannelState::FREE), outgoing_queue_max_size_(1), incoming_message_(new RawMessage()),
-        incoming_channel_state_(ChannelState::FREE), send_heartbit_timer_(io_service),
+ private:
+  Connection(asio::io_service& io_service, std::shared_ptr<ConnectionsManagerImplementation> manager)
+      : socket_(io_service),
+        peer_type_(0),
+        peer_id_(0),
+        is_passive_(false),
+        is_living_(false),
+        shuts_down_(false),
+        is_registered_(false),
+        manager_(manager),
+        should_send_heartbit_(true),
+        outgoing_channel_state_(ChannelState::FREE),
+        outgoing_queue_max_size_(1),
+        incoming_message_(new RawMessage()),
+        incoming_channel_state_(ChannelState::FREE),
+        send_heartbit_timer_(io_service),
         require_heartbit_timer_(io_service)
   //, send_heartbit_timer_(io_service,
   // std::chrono::microseconds(HEARTBIT_INTERVAL * 1000000)) ,
@@ -96,7 +106,7 @@ private:
     heartbit_message_.reset(RawMessage::FromMessage(mxmsg));
   }
 
-public:
+ public:
   typedef std::shared_ptr<Connection> pointer;
   typedef std::weak_ptr<Connection> weak_pointer;
   typedef std::shared_ptr<ConnectionsManagerImplementation> ManagerPointer;
@@ -107,21 +117,22 @@ public:
    * shared_ptr, so that having a shared_ptr is always equal to having living
    * instance.
    */
-  static pointer Create(asio::io_service &io_service, std::shared_ptr<ConnectionsManagerImplementation> manager) {
+  static pointer Create(asio::io_service& io_service, std::shared_ptr<ConnectionsManagerImplementation> manager) {
     pointer created(new Connection(io_service, manager));
-    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("created new Connection " + repr((void *)created.get())));
+    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("created new Connection " + repr((void*)created.get())));
     return created;
   }
 
   ~Connection() {
-    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("destroying Connection " + repr((void *)this)));
-    if (!shuts_down_)
+    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("destroying Connection " + repr((void*)this)));
+    if (!shuts_down_) {
       shutdown();
+    }
   }
 
-  asio::ip::tcp::socket &socket() { return socket_; }
+  asio::ip::tcp::socket& socket() { return socket_; }
 
-public:
+ public:
   // A client starts reading and sends its welcome at once. The multiplexer
   // calls the two halves separately: it reads only, until the peer's welcome
   // has been accepted (see Server::after_connection_registration), and only
@@ -133,7 +144,7 @@ public:
 
   void start_only_read() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("starting Connection " + repr((void *)this)));
+    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("starting Connection " + repr((void*)this)));
     Assert(!is_living_);
     Assert(!shuts_down_);
     is_living_ = true;
@@ -147,12 +158,13 @@ public:
 
   void start_rest() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (shuts_down_)
+    if (shuts_down_) {
       return;
+    }
     Assert(is_living_);
     ManagerPointer manager = manager_.lock();
     if (manager && schedule(manager->get_welcome_message(), true, true)) {
-      _send_heartbit_later(); // included in schedule() >> _process_send_queue()
+      _send_heartbit_later();  // included in schedule() >> _process_send_queue()
       _require_heartbit_later();
     } else {
       shutdown();
@@ -174,9 +186,9 @@ public:
   // that was never opened, and idempotent. Pending handlers see BROKEN.
   void shutdown() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("shutdown called on " + repr((void *)this)));
+    MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("shutdown called on " + repr((void*)this)));
     if (shuts_down_) {
-      MX_LOG(ERROR, HIGHVERBOSITY, TEXT("shutdown called twice on " + repr((void *)this)));
+      MX_LOG(ERROR, HIGHVERBOSITY, TEXT("shutdown called twice on " + repr((void*)this)));
       return;
     }
 
@@ -185,11 +197,13 @@ public:
     ManagerPointer manager = manager_.lock();
 
     // notify our Manager
-    if (is_registered_ && manager)
+    if (is_registered_ && manager) {
       manager->unregister_connection(this);
+    }
     is_registered_ = false;
-    if (manager)
+    if (manager) {
       manager->connection_destroyed(this);
+    }
     is_living_ = false;
 
     // stop doing I/O
@@ -226,15 +240,16 @@ public:
 
     using mx::repr;
 
-    if (!is_living_)
-      return scheduling_result_type_default_functor_(); // drop
+    if (!is_living_) {
+      return scheduling_result_type_default_functor_();  // drop
+    }
 
     Assert(msg->usability() == RawMessage::WRITING);
     Assert(!shuts_down_);
 
     if (!force && outgoing_queue_full()) {
       MX_LOG(WARNING, HIGHVERBOSITY, TEXT("outgoing queue full, dropping message"));
-      return scheduling_result_type_default_functor_(); // drop
+      return scheduling_result_type_default_functor_();  // drop
     }
 
     typename MessagesBufferTraits::ToBufferRepresentationConverter::result_type value = raw_to_buffer_converter_(msg);
@@ -268,8 +283,9 @@ public:
   // dead multiplexer connection to a live one.
   bool inline take_over(typename MessagesBuffer::value_type internal) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (!is_living_ || outgoing_queue_full())
+    if (!is_living_ || outgoing_queue_full()) {
       return false;
+    }
     outgoing_queue_.push_back(internal);
     _process_send_queue();
     return true;
@@ -291,14 +307,15 @@ public:
   inline bool living() const { return is_living_; }
   inline bool shuts_down() const { return shuts_down_; }
 
-private:
+ private:
   /* Heartbeats. Two timers: send_heartbit_timer_ fires HEARTBIT_INTERVAL after
    * the last write and queues a heartbeat, so an idle connection carries one
    * frame every interval. require_heartbit_timer_ is re-armed on every frame
    * read and drops the connection in two phases, NO_HEARTBIT_SO_PREPARE_DROP
    * then NO_HEARTBIT_SO_REALLY_DROP, when nothing arrives. Both are off for
    * passive peers, in the sense described at set_is_passive(). */
-  template <typename WaitHandler> void _do_later(asio::steady_timer &timer, const float seconds, WaitHandler handler) {
+  template <typename WaitHandler>
+  void _do_later(asio::steady_timer& timer, const float seconds, WaitHandler handler) {
     // timer.cancel();
     timer.expires_after(std::chrono::microseconds(static_cast<long>(seconds * 1e6)));
     timer.async_wait(handler);
@@ -306,15 +323,17 @@ private:
 
   void _send_heartbit_later() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (outgoing_queue_.empty())
+    if (outgoing_queue_.empty()) {
       _do_later(send_heartbit_timer_, HEARTBIT_INTERVAL,
-                [self = this->shared_from_this()](const asio::error_code &error) { self->_send_heartbit_now(error); });
+                [self = this->shared_from_this()](const asio::error_code& error) { self->_send_heartbit_now(error); });
+    }
   }
 
-  void _send_heartbit_now(const asio::error_code &error) {
+  void _send_heartbit_now(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_) {
       return;
+    }
     // To a passive peer, at most one heartbeat per frame received: it reads
     // only inside calls, and a stream of heartbeats would fill its socket
     // buffer and then its incoming queue while it is away.
@@ -343,24 +362,26 @@ private:
 
     _do_later(
         require_heartbit_timer_, NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL,
-        [self = this->shared_from_this()](const asio::error_code &error) { self->_require_heartbit_soon(error); });
+        [self = this->shared_from_this()](const asio::error_code& error) { self->_require_heartbit_soon(error); });
   }
 
-  void _require_heartbit_soon(const asio::error_code &error) {
+  void _require_heartbit_soon(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
     // First phase of the drop: nothing arrived for the prepare interval. Wait
     // once more before really closing, so that a short stall on a busy peer
     // does not cost it the connection.
-    if (error == asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_) {
       return;
+    }
     _do_later(require_heartbit_timer_, NO_HEARTBIT_SO_REALLY_DROP_INTERVAL,
-              [self = this->shared_from_this()](const asio::error_code &error) { self->_require_heartbit_now(error); });
+              [self = this->shared_from_this()](const asio::error_code& error) { self->_require_heartbit_now(error); });
   }
 
-  void _require_heartbit_now(const asio::error_code &error) {
+  void _require_heartbit_now(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == asio::error::operation_aborted || shuts_down_)
+    if (error == asio::error::operation_aborted || shuts_down_) {
       return;
+    }
     // TODO logger.error << "no received messages for " <<
     // NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL +
     // NO_HEARTBIT_SO_REALLY_DROP_INTERVAL
@@ -375,31 +396,33 @@ private:
    * connection: input from the network is never trusted with an Assert. */
   void _start_read() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (incoming_channel_state_ == ChannelState::BROKEN)
+    if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
+    }
 
     Assert(incoming_channel_state_ == ChannelState::FREE);
 
     incoming_channel_state_ = ChannelState::READING_HEADER;
     asio::async_read(socket_, asio::buffer(incoming_message_->get_header_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
                        self->_handle_read_header(error, bytes);
                      });
   }
-  void _handle_read_header(const asio::error_code &error, size_t bytes_transferred) {
+  void _handle_read_header(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (incoming_channel_state_ == ChannelState::BROKEN)
+    if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
+    }
 
     if (bytes_transferred == 0) {
       MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("peer shut its end down \"gracefully\""));
-      incoming_channel_state_ = ChannelState::BROKEN; // this shouldn't be needed
+      incoming_channel_state_ = ChannelState::BROKEN;  // this shouldn't be needed
       shutdown();
       return;
     }
     if (error) {
       MX_LOG(ERROR, HIGHVERBOSITY,
-             TEXT("read header error on " + repr((void *)this) + "error=" + repr(error) +
+             TEXT("read header error on " + repr((void*)this) + "error=" + repr(error) +
                   "bytes_transferred=" + repr(bytes_transferred)));
       shutdown();
       return;
@@ -409,7 +432,7 @@ private:
     Assert(bytes_transferred == incoming_message_->get_header_length());
     if (!incoming_message_->unpack_header()) {
       MX_LOG(WARNING, LOWVERBOSITY,
-             CTX("connection") TEXT("invalid frame header from peer; dropping connection " + repr((void *)this)));
+             CTX("connection") TEXT("invalid frame header from peer; dropping connection " + repr((void*)this)));
       shutdown();
       return;
     }
@@ -417,19 +440,20 @@ private:
     incoming_channel_state_ = ChannelState::READING_BODY;
     _require_heartbit_later();
     asio::async_read(socket_, asio::buffer(incoming_message_->get_body_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
                        self->_handle_read_body(error, bytes);
                      });
   }
-  void _handle_read_body(const asio::error_code &error, size_t bytes_transferred) {
+  void _handle_read_body(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     should_send_heartbit_ = true;
-    if (incoming_channel_state_ == ChannelState::BROKEN)
+    if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
+    }
 
     if (error || bytes_transferred != incoming_message_->get_body_length()) {
       MX_LOG(ERROR, HIGHVERBOSITY,
-             TEXT("read body error on " + repr((void *)this) + "error=" + repr(error) + "bytes_transferred=" +
+             TEXT("read body error on " + repr((void*)this) + "error=" + repr(error) + "bytes_transferred=" +
                   repr(bytes_transferred) + "expected_transferred=" + repr(incoming_message_->get_body_length())));
       shutdown();
       return;
@@ -459,7 +483,7 @@ private:
 
     ManagerPointer manager = manager_.lock();
     if (!manager) {
-      MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("manager is gone for " + repr((void *)this)));
+      MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("manager is gone for " + repr((void*)this)));
       shutdown();
       return;
     }
@@ -467,18 +491,19 @@ private:
     std::shared_ptr<MultiplexerMessage> mxmsg(new MultiplexerMessage());
     if (!mxmsg->ParseFromString(message->get_message())) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
-             TEXT("received invalid message on " + repr((void *)this) + "(maybe id=" + repr(mxmsg->id()) + ")"));
+             TEXT("received invalid message on " + repr((void*)this) + "(maybe id=" + repr(mxmsg->id()) + ")"));
       shutdown();
       return;
     }
 
-    if (_receive_internal_message(*mxmsg, manager))
-      return; // already handled
+    if (_receive_internal_message(*mxmsg, manager)) {
+      return;  // already handled
+    }
 
     if (!is_registered_) {
       MX_LOG(WARNING, LOWVERBOSITY,
              CTX("connection") TEXT("message of type " + repr(mxmsg->type()) +
-                                    " before CONNECTION_WELCOME; dropping connection " + repr((void *)this)));
+                                    " before CONNECTION_WELCOME; dropping connection " + repr((void*)this)));
       shutdown();
       return;
     }
@@ -490,48 +515,51 @@ private:
   // registers the peer with the manager (exactly once, first, or the
   // connection is closed), and heartbeats, which have no content. Everything
   // else goes to the manager, but only once registered.
-  inline bool _receive_internal_message(MultiplexerMessage &mxmsg, ManagerPointer manager) {
+  inline bool _receive_internal_message(MultiplexerMessage& mxmsg, ManagerPointer manager) {
     MX_DCHECK_RUN_ON(&io_thread_);
     switch (mxmsg.type()) {
-    case types::CONNECTION_WELCOME:
-      if (!is_registered_) {
-        WelcomeMessage welcome;
-        bool ok = false;
-        do {
-          if (mxmsg.type() != types::CONNECTION_WELCOME)
-            break;
-          if (!welcome.ParseFromString(mxmsg.message()))
-            break;
-          ok = true;
-        } while (0);
+      case types::CONNECTION_WELCOME:
+        if (!is_registered_) {
+          WelcomeMessage welcome;
+          bool ok = false;
+          do {
+            if (mxmsg.type() != types::CONNECTION_WELCOME) {
+              break;
+            }
+            if (!welcome.ParseFromString(mxmsg.message())) {
+              break;
+            }
+            ok = true;
+          } while (0);
 
-        if (!ok) {
-          // TODO logger.error << "received invalid CONNECTION_WELCOME message;
+          if (!ok) {
+            // TODO logger.error << "received invalid CONNECTION_WELCOME message;
+            // shutting down";
+            shutdown();
+
+          } else {
+            peer_id_ = welcome.id();
+            peer_type_ = welcome.type();
+            manager->register_connection(this->shared_from_this(), welcome);
+            if (shuts_down_) {
+              return true;  // register_connection refused this connection
+            }
+            manager->after_connection_registration(this->shared_from_this(), welcome);
+            is_registered_ = true;
+          }
+        } else {
+          // TODO logger.error << "received repeated CONNECTION_WELCOME message;
           // shutting down";
           shutdown();
-
-        } else {
-          peer_id_ = welcome.id();
-          peer_type_ = welcome.type();
-          manager->register_connection(this->shared_from_this(), welcome);
-          if (shuts_down_)
-            return true; // register_connection refused this connection
-          manager->after_connection_registration(this->shared_from_this(), welcome);
-          is_registered_ = true;
         }
-      } else {
-        // TODO logger.error << "received repeated CONNECTION_WELCOME message;
-        // shutting down";
-        shutdown();
-      }
-      return true;
-      // types::CONNECTION_WELCOME
+        return true;
+        // types::CONNECTION_WELCOME
 
-    case types::HEARTBIT:
-      return true;
+      case types::HEARTBIT:
+        return true;
 
-    default:
-      return false;
+      default:
+        return false;
     }
   }
 
@@ -553,21 +581,22 @@ private:
       Assert(raw->get_message_buffer().size());
       // The handler holds a shared_ptr to this, so the connection outlives the write.
       asio::async_write(socket_, raw->get_message_buffer(),
-                        [self = this->shared_from_this()](const asio::error_code &error, size_t bytes) {
+                        [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
                           self->_handle_write(error, bytes);
                         });
     }
   }
-  void _handle_write(const asio::error_code &error, size_t bytes_transferred) {
+  void _handle_write(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (error) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
-             TEXT("write error on " + repr((void *)this) + " error=" + repr(error) +
+             TEXT("write error on " + repr((void*)this) + " error=" + repr(error) +
                   " bytes_transferred=" + repr(bytes_transferred)));
     }
 
-    if (outgoing_channel_state_ == ChannelState::BROKEN)
+    if (outgoing_channel_state_ == ChannelState::BROKEN) {
       return;
+    }
     if (bytes_transferred == 0) {
       // is it exceptional?
       MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("i have managed to write nothing. Shut down"));
@@ -604,33 +633,36 @@ private:
   // entries to another connection) and reports the rest as lost.
   void inline _orphan_outgoing_messages() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (outgoing_queue_.empty())
+    if (outgoing_queue_.empty()) {
       return;
+    }
     if (ManagerPointer manager = manager_.lock()) {
       manager->handle_orphaned_outgoing_messages(outgoing_queue_);
-      if (outgoing_queue_.empty())
+      if (outgoing_queue_.empty()) {
         return;
+      }
     }
     // we haven't managed to transfer messages ownership to the manager for
     // eventual resending
     MX_LOG(WARNING, HIGHVERBOSITY,
-           TEXT("Connection shutdown on " + repr((void *)this) + ", dropping about " + repr(outgoing_queue_.size()) +
+           TEXT("Connection shutdown on " + repr((void*)this) + ", dropping about " + repr(outgoing_queue_.size()) +
                 " outgoing messages"));
-    for (typename MessagesBuffer::value_type &entry : outgoing_queue_)
+    for (typename MessagesBuffer::value_type& entry : outgoing_queue_) {
       message_sending_notifier_.notify_error(manager_, entry);
+    }
     outgoing_queue_.clear();
   }
 
-public:
-  typename ConnectionsManagerTraits::ConnectionManagerPrivateDataInConnection &managers_private_data() {
+ public:
+  typename ConnectionsManagerTraits::ConnectionManagerPrivateDataInConnection& managers_private_data() {
     return managers_private_data_;
   }
-  const typename ConnectionsManagerTraits::ConnectionManagerPrivateDataInConnection &managers_private_data() const {
+  const typename ConnectionsManagerTraits::ConnectionManagerPrivateDataInConnection& managers_private_data() const {
     return managers_private_data_;
   }
 
   /* members */
-private:
+ private:
   asio::ip::tcp::socket socket_;
   std::uint32_t peer_type_;
   std::uint64_t peer_id_;
@@ -642,13 +674,13 @@ private:
   std::weak_ptr<ConnectionsManagerImplementation> manager_;
   bool should_send_heartbit_;
 
-public:
+ public:
   // Makes the calling thread the one this connection is driven from, for a
   // client that was built on one thread and is served from another; see
   // BasicClient::bind_to_current_thread().
   void bind_io_thread_to_current() { io_thread_.bind_to_current(); }
 
-private:
+ private:
   // The thread that runs this connection's io_service: every method here
   // runs on it, and the members below may only be touched on it.
   mx::ThreadChecker io_thread_;
@@ -679,8 +711,8 @@ private:
 
   // friend class ConnectionsManagerImplementation;
 
-}; // class Connection
+};  // class Connection
 
-}; // namespace multiplexer
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_IO_CONNECTION_H_
+#endif  // MX_MULTIPLEXER_IO_CONNECTION_H_

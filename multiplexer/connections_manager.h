@@ -15,11 +15,10 @@
 #ifndef MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
 #define MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
 
-#include <string>
-
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <memory>
+#include <string>
 
 #include "lib/logging/logging.h"
 #include "lib/random.h"
@@ -41,30 +40,32 @@ struct DefaultConnectionsManagerTraits {
   struct MessagesBufferTraits {
     struct SendingResultNotifier {
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType &) const {}
+      void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType&) const {}
 
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType &) const {}
+      void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType&) const {}
     };
   };
 };
 
-template <typename ConnectionsManagerImplementation> struct ConnectionsManagerTraits;
+template <typename ConnectionsManagerImplementation>
+struct ConnectionsManagerTraits;
 
 namespace impl {
 std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id);
 };
 
-template <typename ConnectionsManagerImplementation> class ConnectionsManager {
-protected:
+template <typename ConnectionsManagerImplementation>
+class ConnectionsManager {
+ protected:
   // The instance id is drawn once here; it is what the peer announces in its
   // welcome and what `from` and `to` fields refer to.
-  ConnectionsManager(asio::io_service &io_service) : io_service_(io_service), instance_id_(random_()) {
+  ConnectionsManager(asio::io_service& io_service) : io_service_(io_service), instance_id_(random_()) {
     MX_LOG(DEBUG, HIGHVERBOSITY,
            CTX("ConnectionsManager") TEXT("created new ConnectionsManager with id " + repr(instance_id_)));
   }
 
-public:
+ public:
   const static unsigned int DEFAULT_OUT_QUEUE_SIZE = 1024;
 
   typedef multiplexer::ConnectionsManagerTraits<ConnectionsManagerImplementation> ConnectionsManagerTraits;
@@ -93,13 +94,13 @@ public:
   // connection in both indexes and applies the peer type's settings
   // (passive, queue size). Refusal is conn->shutdown(); the connection
   // notices through shuts_down().
-  void register_connection(typename Connection::pointer conn, const WelcomeMessage &welcome) {
+  void register_connection(typename Connection::pointer conn, const WelcomeMessage& welcome) {
     MX_DCHECK_RUN_ON(&owner_thread_);
 
     MX_LOG(DEBUG, HIGHVERBOSITY,
-           CTX("ConnectionsManager") TEXT("registering connection " + repr((void *)conn.get()) +
+           CTX("ConnectionsManager") TEXT("registering connection " + repr((void*)conn.get()) +
                                           " id=" + repr(conn->peer_id()) + " type=" + repr(conn->peer_type())));
-    if (!static_cast<const ConnectionsManagerImplementation &>(*this).accept_peer_type(conn->peer_type())) {
+    if (!static_cast<const ConnectionsManagerImplementation&>(*this).accept_peer_type(conn->peer_type())) {
       std::cerr << "invalid peer type " << conn->peer_type() << "\n";
       conn->shutdown();
       return;
@@ -152,24 +153,25 @@ public:
 
   // Hook for the derived class, right after register_connection accepted a
   // peer; the multiplexer sends its welcome here, the client tells its observer.
-  void inline after_connection_registration(typename Connection::pointer, const WelcomeMessage &) {}
+  void inline after_connection_registration(typename Connection::pointer, const WelcomeMessage&) {}
 
   // Two connections announcing the same instance id: the usual cause is first
   // peer that lost its connection and came back before the old socket was
   // noticed dead, so the same host may replace its own id. Another host
   // claiming first live id is refused (see register_connection).
-  static bool same_remote_address(Connection &first, Connection &second) {
+  static bool same_remote_address(Connection& first, Connection& second) {
     asio::error_code first_error, second_error;
     asio::ip::tcp::endpoint first_endpoint = first.socket().remote_endpoint(first_error);
     asio::ip::tcp::endpoint second_endpoint = second.socket().remote_endpoint(second_error);
-    if (first_error || second_error)
-      return true; // one side is already gone: let the newcomer replace it
+    if (first_error || second_error) {
+      return true;  // one side is already gone: let the newcomer replace it
+    }
     return first_endpoint.address() == second_endpoint.address();
   }
 
   // Called from Connection::shutdown. Removes the connection from both
   // indexes; expired entries found on the way are removed too.
-  void unregister_connection(Connection *conn) {
+  void unregister_connection(Connection* conn) {
     MX_DCHECK_RUN_ON(&owner_thread_);
     if (connection_by_id_.find(conn->peer_id()) == connection_by_id_.end()) {
       MX_LOG(WARNING, HIGHVERBOSITY,
@@ -186,12 +188,12 @@ public:
                                           repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
                                           repr(config_.peer_name_by_type(conn->peer_type())) + ")"));
 
-    static_cast<ConnectionsManagerImplementation &>(*this).connection_unregistered(conn);
+    static_cast<ConnectionsManagerImplementation&>(*this).connection_unregistered(conn);
 
     bool scan_connections_by_id = false;
 
     connection_by_id_.erase(conn->peer_id());
-    ConnectionsList &cons = connections_by_type_[conn->peer_type()];
+    ConnectionsList& cons = connections_by_type_[conn->peer_type()];
     for (typename ConnectionsList::iterator next = cons.begin(), current;
          next != cons.end() && (current = next++, true);) {
       typename Connection::pointer pointer = current->lock();
@@ -207,7 +209,7 @@ public:
     if (scan_connections_by_id) {
       for (typename ConnectionById::iterator next = connection_by_id_.begin(), current;
            next != connection_by_id_.end() && (current = next++, true);) {
-        Assert(!current->second.lock() || current->second.lock().get() != conn); // assume we are not in threaded env.
+        Assert(!current->second.lock() || current->second.lock().get() != conn);  // assume we are not in threaded env.
         if (!current->second.lock()) {
           connection_by_id_.erase(current);
         }
@@ -217,12 +219,12 @@ public:
 
   // Hook for the derived class when a connection has ended; the client
   // schedules its reconnect here.
-  void inline connection_destroyed(Connection *) {}
+  void inline connection_destroyed(Connection*) {}
 
   // Hook for the derived class, at the start of unregister_connection for a
   // connection that was registered; the multiplexer records the peer
   // leaving.
-  void inline connection_unregistered(Connection *) {}
+  void inline connection_unregistered(Connection*) {}
 
   // How many connections are registered; with `exact`, expired entries are
   // dropped first so the count is of live ones.
@@ -231,8 +233,9 @@ public:
     if (exact) {
       for (typename ConnectionById::iterator next = connection_by_id_.begin(), current;
            next != connection_by_id_.end() && (current = next++, true);) {
-        if (!current->second.lock())
+        if (!current->second.lock()) {
           connection_by_id_.erase(current);
+        }
       }
     }
     return connection_by_id_.size();
@@ -241,11 +244,13 @@ public:
   unsigned int connections_count(bool exact) const {
     if (exact) {
       unsigned int c = 0;
-      for (const typename ConnectionById::value_type &current : connection_by_id_)
-        if (current.second.lock())
+      for (const typename ConnectionById::value_type& current : connection_by_id_) {
+        if (current.second.lock()) {
           ++c;
-        else
+        } else {
           MX_LOG(ERROR, LOWVERBOSITY, CTX("ConnectionsManager") TEXT("dangling weak_ref in connection_by_id_"));
+        }
+      }
       return c;
     }
     return connection_by_id_.size();
@@ -254,41 +259,44 @@ public:
   // The next connection at or after `begin` that is alive and has room in
   // its outgoing queue; expired entries are erased on the way. This is the
   // skip-the-full-peer rule of whom: ANY.
-  static inline typename ConnectionsList::iterator choose_free_connections(ConnectionsList &connections,
+  static inline typename ConnectionsList::iterator choose_free_connections(ConnectionsList& connections,
                                                                            typename ConnectionsList::iterator begin) {
     for (typename ConnectionsList::iterator current, next = begin;
          next != connections.end() && (current = next++, true);) {
       if (typename Connection::pointer conn = current->lock()) {
         if (conn->outgoing_queue_full() || !conn->living()) {
-          MX_LOG(DEBUG, CHATTERBOX, // per message while a connection is full or dying
+          MX_LOG(DEBUG, CHATTERBOX,  // per message while a connection is full or dying
                  CTX("ConnectionsManager") TEXT("skipping connection to " + repr(conn->peer_id()) + ": " +
                                                 (conn->living() ? "outgoing queue full" : "not living")));
           continue;
         }
         return current;
-      } else
+      } else {
         connections.erase(current);
+      }
     }
     return connections.end();
   }
 
   // Hook: a connection shut down with unsent messages; the client re-queues them.
-  template <typename MessagesBuffer> void inline handle_orphaned_outgoing_messages(MessagesBuffer &) {}
+  template <typename MessagesBuffer>
+  void inline handle_orphaned_outgoing_messages(MessagesBuffer&) {}
 
-public:
+ public:
   /* The rules file. The multiplexer reads the real one at start; first client
    * has only the built-in minimum (Config's default), enough to know what first
    * multiplexer is. */
-  inline const Config &config() const { return config_; }
+  inline const Config& config() const { return config_; }
   void clear_rules() { config_.clear(); }
-  void read_rules(const std::string &file) { config_.read_configuration(file); }
+  void read_rules(const std::string& file) { config_.read_configuration(file); }
   // The queue_size the rules file gives `peer_type`, or the default for a
   // type it does not name (a reserved one the derived class accepted).
   unsigned int outgoing_queue_max_size(std::uint32_t peer_type) const {
     if (config_.initialized()) {
       typename Config::PeerDescriptionById::const_iterator entry = config_.peer_by_type().find(peer_type);
-      if (entry != config_.peer_by_type().end())
+      if (entry != config_.peer_by_type().end()) {
         return entry->second.queue_size();
+      }
     }
     return DEFAULT_OUT_QUEUE_SIZE;
   }
@@ -299,18 +307,18 @@ public:
   // the first thread that checks it, so an object may be constructed on one
   // thread and driven from another as long as it is then driven from that
   // one only.
-  const mx::ThreadChecker &owner_thread() const { return owner_thread_; }
+  const mx::ThreadChecker& owner_thread() const { return owner_thread_; }
   // Makes the calling thread the owner, whatever it was before.
   void bind_owner_to_current_thread() { owner_thread_.bind_to_current(); }
 
-protected:
+ protected:
   /* optional helpers */
   inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type) const {
     return impl::create_welcome_message(peer_type, instance_id_);
   }
 
-protected:
-  asio::io_service &io_service_;
+ protected:
+  asio::io_service& io_service_;
   mx::Random64 random_;
   std::uint64_t instance_id_;
   Config config_;
@@ -318,8 +326,8 @@ protected:
   ConnectionsByType connections_by_type_;
   ConnectionById connection_by_id_;
   mx::ThreadChecker owner_thread_{mx::ThreadChecker::BIND_LATER};
-}; // ConnectionsManager
+};  // ConnectionsManager
 
-}; // namespace multiplexer
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
+#endif  // MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_

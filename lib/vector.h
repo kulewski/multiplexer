@@ -8,13 +8,15 @@
 namespace mx {
 
 template <typename T, typename Alloc, typename U>
-static inline bool contains(const std::vector<T, Alloc> &vec, const U &val) {
-  for (unsigned int index = 0; index < vec.size(); ++index)
-    if (vec[index] == val)
+static inline bool contains(const std::vector<T, Alloc>& vec, const U& val) {
+  for (unsigned int index = 0; index < vec.size(); ++index) {
+    if (vec[index] == val) {
       return true;
+    }
+  }
   return false;
 }
 
-}; // namespace mx
+};  // namespace mx
 
-#endif // MX_LIB_VECTOR_H_
+#endif  // MX_LIB_VECTOR_H_

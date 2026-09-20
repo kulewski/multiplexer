@@ -10,8 +10,8 @@
 
 namespace mx {
 
-std::uint32_t crc32(const void *data, std::size_t size);
+std::uint32_t crc32(const void* data, std::size_t size);
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_CRC32_H_
+#endif  // MX_LIB_CRC32_H_

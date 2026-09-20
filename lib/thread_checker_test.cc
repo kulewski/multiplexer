@@ -1,10 +1,11 @@
 // Unit tests for lib/thread_checker.h and lib/mutex.h.
-#include <thread>
+#include "lib/thread_checker.h"
 
 #include <gtest/gtest.h>
 
+#include <thread>
+
 #include "lib/mutex.h"
-#include "lib/thread_checker.h"
 
 using mx::Mutex;
 using mx::MutexLock;
@@ -59,7 +60,7 @@ TEST(ThreadChecker, DcheckRunOnPassesOnOwner) {
   std::thread([&] {
     try {
       owner.touch();
-    } catch (const mx::AssertionError &) {
+    } catch (const mx::AssertionError&) {
       threw = true;
     }
   }).join();
@@ -80,12 +81,14 @@ TEST(Mutex, GuardsACounter) {
     int value MX_GUARDED_BY(mu) = 0;
   } counter;
   std::thread first([&] {
-    for (int index = 0; index < 1000; ++index)
+    for (int index = 0; index < 1000; ++index) {
       counter.add();
+    }
   });
   std::thread second([&] {
-    for (int index = 0; index < 1000; ++index)
+    for (int index = 0; index < 1000; ++index) {
       counter.add();
+    }
   });
   first.join();
   second.join();

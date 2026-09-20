@@ -8,29 +8,34 @@
 
 namespace mx {
 
-template <typename What, typename From> struct ConstructingFunctor : std::function<What(From)> {
-  What operator()(From &f) const { return What(f); }
-  What operator()(const From &f) const { return What(f); }
+template <typename What, typename From>
+struct ConstructingFunctor : std::function<What(From)> {
+  What operator()(From& f) const { return What(f); }
+  What operator()(const From& f) const { return What(f); }
 };
 
-template <typename What> struct ReferencingFunctor : std::function<What(What)> {
-  What &operator()(What &w) const { return w; }
-  What operator()(const What &w) const { return w; }
+template <typename What>
+struct ReferencingFunctor : std::function<What(What)> {
+  What& operator()(What& w) const { return w; }
+  What operator()(const What& w) const { return w; }
 };
 
-template <typename What> struct DefaultConstructingFactory {
+template <typename What>
+struct DefaultConstructingFactory {
   What operator()() const { return What(); }
 };
 
-template <typename Pair> struct FirstFromPairExtractor : std::function<typename Pair::first_type(Pair)> {
-  typename Pair::first_type &operator()(Pair &p) const { return p.first; }
-  const typename Pair::first_type &operator()(const Pair &p) const { return p.first; }
+template <typename Pair>
+struct FirstFromPairExtractor : std::function<typename Pair::first_type(Pair)> {
+  typename Pair::first_type& operator()(Pair& p) const { return p.first; }
+  const typename Pair::first_type& operator()(const Pair& p) const { return p.first; }
 };
 
-template <typename Pair> struct SecondFromPairExtractor : std::function<typename Pair::second_type(Pair)> {
-  typename Pair::second_type &operator()(Pair &p) const { return p.second; }
-  const typename Pair::second_type &operator()(const Pair &p) const { return p.second; }
+template <typename Pair>
+struct SecondFromPairExtractor : std::function<typename Pair::second_type(Pair)> {
+  typename Pair::second_type& operator()(Pair& p) const { return p.second; }
+  const typename Pair::second_type& operator()(const Pair& p) const { return p.second; }
 };
-}; // namespace mx
+};  // namespace mx
 
-#endif // MX_LIB_FUNCTORS_H_
+#endif  // MX_LIB_FUNCTORS_H_

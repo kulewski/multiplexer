@@ -32,6 +32,6 @@ static const float NO_HEARTBIT_SO_REALLY_DROP_INTERVAL = 60;
 // size unless the request says otherwise (RecordingControl.max_bytes).
 static const std::uint64_t DEFAULT_REMOTE_RECORDING_MAX_BYTES = 1024ULL * 1024 * 1024;
 
-}; // namespace multiplexer
+};  // namespace multiplexer
 
-#endif // MX_MULTIPLEXER_DEFAULTS_H_
+#endif  // MX_MULTIPLEXER_DEFAULTS_H_

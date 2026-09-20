@@ -6,16 +6,20 @@
 namespace mx {
 namespace encoders {
 
-template <typename Base, template <typename> class Encoding> struct BaseDecoder {
-protected:
+template <typename Base, template <typename> class Encoding>
+struct BaseDecoder {
+ protected:
   BaseDecoder() {}
 
-public:
-  template <typename T> void operator()(T &t) { Encoding<T>::decode(*static_cast<Base *>(this), t); }
+ public:
+  template <typename T>
+  void operator()(T& t) {
+    Encoding<T>::decode(*static_cast<Base*>(this), t);
+  }
 };
 
-}; // namespace encoders
+};  // namespace encoders
 
-}; // namespace mx
+};  // namespace mx
 
-#endif // MX_LIB_ENCODING_BASE_DECODER_H_
+#endif  // MX_LIB_ENCODING_BASE_DECODER_H_

@@ -16,9 +16,9 @@ struct Random64 {
   Random64();
   result_type operator()() { return engine_(); }
 
-private:
+ private:
   std::mt19937_64 engine_;
 };
-}; // namespace mx
+};  // namespace mx
 
-#endif // MX_LIB_RANDOM_H_
+#endif  // MX_LIB_RANDOM_H_

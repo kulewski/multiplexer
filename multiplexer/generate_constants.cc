@@ -29,37 +29,45 @@ typedef multiplexer::Config<std::multimap> Config;
 // TODO(findepi) implement MX_DEFAULT_PROGRAM_LOGGING_LEVEL
 // MX_DEFAULT_PROGRAM_LOGGING_LEVEL(mx::logging::INFO);
 
-bool endswith(const std::string &str, const std::string &with) {
-  if (str.size() < with.size())
+bool endswith(const std::string& str, const std::string& with) {
+  if (str.size() < with.size()) {
     return false;
-  for (unsigned int i = str.size() - with.size(); i != str.size(); ++i)
-    if (str[i] != with[i + with.size() - str.size()])
+  }
+  for (unsigned int i = str.size() - with.size(); i != str.size(); ++i) {
+    if (str[i] != with[i + with.size() - str.size()]) {
       return false;
+    }
+  }
   return true;
 }
 
-template <typename ValueType> struct RepeatedKeyException : mx::Exception {
-  RepeatedKeyException(const ValueType &value) : mx::Exception("value of '" + mx::repr(value) + "' repeats") {}
-  RepeatedKeyException(const ValueType &value, const std::string &hint)
+template <typename ValueType>
+struct RepeatedKeyException : mx::Exception {
+  RepeatedKeyException(const ValueType& value) : mx::Exception("value of '" + mx::repr(value) + "' repeats") {}
+  RepeatedKeyException(const ValueType& value, const std::string& hint)
       : mx::Exception("value of '" + mx::repr(value) + "' repeats (" + hint + ")") {}
 };
 
-template <typename SetType, typename ValueType> void __set_checked_add(SetType &values, const ValueType &value) {
-  if (!values.insert(value).second)
+template <typename SetType, typename ValueType>
+void __set_checked_add(SetType& values, const ValueType& value) {
+  if (!values.insert(value).second) {
     MXTHROW(RepeatedKeyException<ValueType>(value));
+  }
 }
 
 template <typename SetType, typename ValueType>
-void __set_checked_add(SetType &values, const ValueType &value, const std::string &hint) {
-  if (!values.insert(value).second)
+void __set_checked_add(SetType& values, const ValueType& value, const std::string& hint) {
+  if (!values.insert(value).second) {
     MXTHROW(RepeatedKeyException<ValueType>(value, hint));
+  }
 }
 
-template <typename Map> void check_map_values_name_type_uniqueness(const Map &entry) {
+template <typename Map>
+void check_map_values_name_type_uniqueness(const Map& entry) {
   std::set<std::string> names;
   std::unordered_set<std::uint32_t> ids;
 
-  for (const typename Map::value_type &value : entry) {
+  for (const typename Map::value_type& value : entry) {
     __set_checked_add(names, value.second.name());
     __set_checked_add(ids, value.second.type(), "somewhere about " + value.second.name());
   }
@@ -67,13 +75,12 @@ template <typename Map> void check_map_values_name_type_uniqueness(const Map &en
   Assert(entry.size() == ids.size());
 }
 
-void check_config(Config &config) {
-
+void check_config(Config& config) {
   check_map_values_name_type_uniqueness(config.message_description_by_id());
   check_map_values_name_type_uniqueness(config.peer_by_type());
 }
 
-void write_signature(const char *comment, ostream &out, const std::string &source_file) {
+void write_signature(const char* comment, ostream& out, const std::string& source_file) {
   out << "\n"
       << comment << "\n"
       << comment << " this file is generated from " << source_file << "\n"
@@ -83,17 +90,19 @@ void write_signature(const char *comment, ostream &out, const std::string &sourc
 }
 
 template <typename Map>
-void __write_python_name_to_type_mapping(ostream &out, const Map &map, const std::string &set_name) {
+void __write_python_name_to_type_mapping(ostream& out, const Map& map, const std::string& set_name) {
   out << "class " << set_name << ":\n";
   out << "\n";
-  for (const typename Map::value_type &entry : map)
+  for (const typename Map::value_type& entry : map) {
     out << "\t" << entry.second.name() << " = " << entry.second.type() << "\n";
+  }
   out << "\n";
   out << "\t"
       << "idtoname = {}\n";
-  for (const typename Map::value_type &entry : map)
+  for (const typename Map::value_type& entry : map) {
     out << "\t"
         << "idtoname[" << entry.second.name() << "] = '" << entry.second.name() << "'\n";
+  }
   out << "\t"
       << "pass\n"
       << "\n";
@@ -101,21 +110,23 @@ void __write_python_name_to_type_mapping(ostream &out, const Map &map, const std
 
 // The SHA-1 of the rules file's text, so that a recording made by a
 // multiplexer running with a different rules file can be told apart.
-std::string rules_fingerprint(const std::string &source_file) {
+std::string rules_fingerprint(const std::string& source_file) {
   ifstream in(source_file.c_str(), ifstream::binary);
   std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   return mx::fingerprint(text);
 }
 
 // The stub of the Python module, for type checkers: the same names, typed.
-template <typename Map> void __write_python_stub_mapping(ostream &out, const Map &map, const std::string &set_name) {
+template <typename Map>
+void __write_python_stub_mapping(ostream& out, const Map& map, const std::string& set_name) {
   out << "class " << set_name << ":\n";
-  for (const typename Map::value_type &entry : map)
+  for (const typename Map::value_type& entry : map) {
     out << "    " << entry.second.name() << ": int\n";
+  }
   out << "\n";
 }
 
-int write_python_stub(Config &config, ostream &out, const std::string &source_file) {
+int write_python_stub(Config& config, ostream& out, const std::string& source_file) {
   write_signature("#", out, source_file);
   out << "RULES_FINGERPRINT: str\n\n"
       << "class _constants_base:\n"
@@ -127,7 +138,7 @@ int write_python_stub(Config &config, ostream &out, const std::string &source_fi
   return 0;
 }
 
-int write_python(Config &config, ostream &out, const std::string &source_file) {
+int write_python(Config& config, ostream& out, const std::string& source_file) {
   write_signature("#", out, source_file);
   out << "# SHA-1 of the rules file these constants were generated from; a recording's header carries the same.\n"
       << "RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\"\n\n";
@@ -168,13 +179,14 @@ std::string get_random_identifier(unsigned int length) {
 }
 
 template <typename Map>
-void __write_cxx_name_to_type_mapping(ostream &out, const Map &map, const std::string &set_name) {
-  const char *const PREF = "\t";
+void __write_cxx_name_to_type_mapping(ostream& out, const Map& map, const std::string& set_name) {
+  const char* const PREF = "\t";
 
   out << PREF << "namespace " << set_name << " {\n";
-  for (const typename Map::value_type &entry : map)
+  for (const typename Map::value_type& entry : map) {
     out << PREF << "\t"
         << "static const std::uint32_t " << entry.second.name() << " = " << entry.second.type() << ";\n";
+  }
 
   // generate get_name() function using great switch() statement
   out << "\n"
@@ -184,11 +196,12 @@ void __write_cxx_name_to_type_mapping(ostream &out, const Map &map, const std::s
       << PREF << "\t"
       << "\t"
       << "switch(t) {\n";
-  for (const typename Map::value_type &entry : map)
+  for (const typename Map::value_type& entry : map) {
     out << PREF << "\t"
         << "\t"
         << "\t"
         << "case " << entry.second.name() << ": return \"" << entry.second.name() << "\";\n";
+  }
   out << PREF << "\t"
       << "\t"
       << "\t"
@@ -202,7 +215,7 @@ void __write_cxx_name_to_type_mapping(ostream &out, const Map &map, const std::s
       << "\n";
 }
 
-int write_cxx(Config &config, ostream &out, const std::string &source_file) {
+int write_cxx(Config& config, ostream& out, const std::string& source_file) {
   std::string identifier = get_random_identifier(10);
   out << "#ifndef GENERATED_" << identifier << "\n"
       << "#define GENERATED_" << identifier << "\n"
@@ -222,8 +235,7 @@ int write_cxx(Config &config, ostream &out, const std::string &source_file) {
   return 0;
 }
 
-int MxMain(int argc, char **argv) {
-
+int MxMain(int argc, char** argv) {
   if (argc != 3) {
     std::cerr << "Usage: " << argv[0] << " <multiplexer.rules file> (C++ header file | Python file)\n"
               << "  Program generates definition of constants found in "
@@ -233,13 +245,13 @@ int MxMain(int argc, char **argv) {
 
   enum OUTFILETYPE { PYTHON, PYTHON_STUB, CXX };
   OUTFILETYPE filetype;
-  if (endswith(argv[2], ".h"))
+  if (endswith(argv[2], ".h")) {
     filetype = CXX;
-  else if (endswith(argv[2], ".pyi"))
+  } else if (endswith(argv[2], ".pyi")) {
     filetype = PYTHON_STUB;
-  else if (endswith(argv[2], ".py"))
+  } else if (endswith(argv[2], ".py")) {
     filetype = PYTHON;
-  else {
+  } else {
     std::cerr << "Unknown file type that is " << argv[2] << "\n";
     return 2;
   }
@@ -255,31 +267,31 @@ int MxMain(int argc, char **argv) {
   check_config(config);
 
   switch (filetype) {
-  case PYTHON:
-    return write_python(config, out, argv[1]);
-  case PYTHON_STUB:
-    return write_python_stub(config, out, argv[1]);
-  case CXX:
-    return write_cxx(config, out, argv[1]);
+    case PYTHON:
+      return write_python(config, out, argv[1]);
+    case PYTHON_STUB:
+      return write_python_stub(config, out, argv[1]);
+    case CXX:
+      return write_cxx(config, out, argv[1]);
   }
   assert(false);
   std::cerr << "unreachable code.\n";
   abort();
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   using std::cerr;
   using std::endl;
 
   try {
     return MxMain(argc, argv);
 
-  } catch (mx::Exception &e) {
+  } catch (mx::Exception& e) {
     cerr << mx::type_utils::type_name(e) << " in " << e.file() << ":" << e.line() << " (" << e.function() << ")\n"
          << "    " << e.what() << endl;
     return 1;
 
-  } catch (std::exception &e) {
+  } catch (std::exception& e) {
     cerr << mx::type_utils::type_name(e) << ": " << e.what() << "\n";
     return 1;
   }

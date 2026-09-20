@@ -30,22 +30,25 @@ using multiplexer::ThreadedClient;
 // times; {worker}, {round} and {i} in a payload are filled in. --timeout,
 // --payload-size, --sleep-before and --sleep-between shape the run.
 class ClientRole : public mxcontrol::Task {
-public:
+ public:
   virtual std::string short_description() const { return "issue queries and report the answers"; }
 
   virtual int run() {
-    if (workers_ > 0)
+    if (workers_ > 0) {
       return run_workers();
+    }
     std::vector<std::thread> threads;
-    for (int worker_index = 0; worker_index < parallel_; ++worker_index)
+    for (int worker_index = 0; worker_index < parallel_; ++worker_index) {
       threads.push_back(std::thread(&ClientRole::run_worker, this, worker_index));
-    for (size_t index = 0; index < threads.size(); ++index)
+    }
+    for (size_t index = 0; index < threads.size(); ++index) {
       threads[index].join();
+    }
     return 0;
   }
 
-protected:
-  virtual void _initialize_options(mx::options::Options &options) {
+ protected:
+  virtual void _initialize_options(mx::options::Options& options) {
     common_.add(options);
     options.add("query", &query_, "TYPE:payload, repeatable, sent in order");
     options.add("count", &count_, 1, "repeat the list N times");
@@ -60,7 +63,7 @@ protected:
     options.add("memory-every", &memory_every_, 0, "emit a memory event every N answered queries");
   }
 
-private:
+ private:
   // One query of a worker's list, with the payload already expanded.
   struct Query {
     int round, index;
@@ -69,17 +72,17 @@ private:
   };
 
   // The kind name of a threaded client's outcome, as the Python roles report it.
-  static const char *outcome_name(ThreadedClient::Outcome outcome) {
+  static const char* outcome_name(ThreadedClient::Outcome outcome) {
     switch (outcome) {
-    case ThreadedClient::REPLIED:
-      return "";
-    case ThreadedClient::TIMED_OUT:
-      return "OperationTimedOut";
-    case ThreadedClient::FAILED:
-      return "OperationFailed";
-    case ThreadedClient::NOT_CONNECTED:
-    case ThreadedClient::SHUT_DOWN:
-      return "NotConnected";
+      case ThreadedClient::REPLIED:
+        return "";
+      case ThreadedClient::TIMED_OUT:
+        return "OperationTimedOut";
+      case ThreadedClient::FAILED:
+        return "OperationFailed";
+      case ThreadedClient::NOT_CONNECTED:
+      case ThreadedClient::SHUT_DOWN:
+        return "NotConnected";
     }
     return "";
   }
@@ -88,7 +91,7 @@ private:
   std::vector<Query> queries_for(int worker_index) const {
     std::vector<std::pair<std::uint32_t, std::string>> list = typed_payloads(query_);
     std::vector<Query> out;
-    for (int round = 0; round < count_; ++round)
+    for (int round = 0; round < count_; ++round) {
       for (size_t query_index = 0; query_index < list.size(); ++query_index) {
         std::string payload = payload_size_ ? std::string(payload_size_, 'x') : list[query_index].second;
         payload = replace_all(payload, "{worker}", mx::repr(worker_index));
@@ -97,11 +100,12 @@ private:
         Query query = {round, (int)query_index, list[query_index].first, payload};
         out.push_back(query);
       }
+    }
     return out;
   }
 
   // The fields every response or error event carries.
-  static Event query_event(const std::string &name, int worker_index, const Query &query) {
+  static Event query_event(const std::string& name, int worker_index, const Query& query) {
     Event result = event(name);
     result.set_worker(worker_index);
     result.set_round(query.round);
@@ -110,7 +114,7 @@ private:
     return result;
   }
 
-  static void report_reply(int worker_index, const Query &query, const MultiplexerMessage &reply, double ms) {
+  static void report_reply(int worker_index, const Query& query, const MultiplexerMessage& reply, double ms) {
     Event response = query_event("response", worker_index, query);
     response.set_type(reply.type());
     response.set_from_(reply.from());
@@ -120,7 +124,7 @@ private:
     emit(response);
   }
 
-  static void report_error(int worker_index, const Query &query, const std::string &kind, double ms) {
+  static void report_error(int worker_index, const Query& query, const std::string& kind, double ms) {
     Event error = query_event("error", worker_index, query);
     error.set_kind(kind);
     error.set_ms(ms);
@@ -141,15 +145,17 @@ private:
   // Counts answered queries across workers and emits a memory event every
   // --memory-every of them.
   void count_answered() {
-    if (!memory_every_)
+    if (!memory_every_) {
       return;
+    }
     long answered = ++answered_;
-    if (answered % memory_every_ == 0)
+    if (answered % memory_every_ == 0) {
       emit(memory_event(answered));
+    }
   }
 
   // Report a threaded client's outcome; returns true for a reply.
-  static bool report_outcome(int worker_index, const Query &query, const ThreadedClient::Result &result, double ms) {
+  static bool report_outcome(int worker_index, const Query& query, const ThreadedClient::Result& result, double ms) {
     if (result.outcome == ThreadedClient::REPLIED) {
       report_reply(worker_index, query, *result.reply.third, ms);
       return true;
@@ -169,7 +175,7 @@ private:
     return client;
   }
 
-  Event connected_event(ThreadedClient &client, int worker_index) const {
+  Event connected_event(ThreadedClient& client, int worker_index) const {
     Event connected = event("connected");
     connected.set_instance_id(client.instance_id());
     connected.set_connections(client.connections_count());
@@ -190,15 +196,17 @@ private:
     connected.set_worker(worker_index);
     connected.set_threaded(false);
     emit(connected);
-    if (sleep_before_ > 0)
+    if (sleep_before_ > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_before_ * 1000)));
+    }
 
     int responses = 0, errors = 0;
     std::vector<Query> queries = queries_for(worker_index);
     for (size_t index = 0; index < queries.size(); ++index) {
-      const Query &query = queries[index];
-      if (sleep_between_ > 0 && index)
+      const Query& query = queries[index];
+      if (sleep_between_ > 0 && index) {
         std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_between_ * 1000)));
+      }
       std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
       multiplexer::IncomingMessage reply;
       bool ok = false;
@@ -211,8 +219,9 @@ private:
         error.set_ms(ms_since(started));
         report_client_errors([]() { throw; }, error);
       }
-      if (!ok)
+      if (!ok) {
         continue;
+      }
       ++responses;
       report_reply(worker_index, query, *reply.third, ms_since(started));
       count_answered();
@@ -226,27 +235,30 @@ private:
   void run_worker_threaded(int worker_index) {
     std::unique_ptr<ThreadedClient> client = connect_threaded();
     emit(connected_event(*client, worker_index));
-    if (sleep_before_ > 0)
+    if (sleep_before_ > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_before_ * 1000)));
+    }
 
     std::vector<Query> queries = queries_for(worker_index);
     std::mutex mutex;
     std::condition_variable done_cv;
     int in_flight = 0, responses = 0, errors = 0;
     for (size_t index = 0; index < queries.size(); ++index) {
-      const Query &query = queries[index];
-      if (sleep_between_ > 0 && index)
+      const Query& query = queries[index];
+      if (sleep_between_ > 0 && index) {
         std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_between_ * 1000)));
+      }
       std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
       if (async_ <= 1) {
         // The query first, then the clock: argument evaluation order is
         // unspecified, and measuring before the call once reported 0 ms.
         ThreadedClient::Result result = client->query(query.payload, query.type, timeout_);
         double ms = ms_since(started);
-        if (report_outcome(worker_index, query, result, ms))
+        if (report_outcome(worker_index, query, result, ms)) {
           ++responses;
-        else
+        } else {
           ++errors;
+        }
         count_answered();
         continue;
       }
@@ -257,7 +269,7 @@ private:
       }
       client->query(
           query.payload, query.type,
-          [&, query, started, worker_index](const ThreadedClient::Result &result) {
+          [&, query, started, worker_index](const ThreadedClient::Result& result) {
             // On the io thread: report, then let the worker issue the next one.
             bool replied = report_outcome(worker_index, query, result, ms_since(started));
             count_answered();
@@ -290,7 +302,7 @@ private:
     emit(connected);
 
     std::vector<std::thread> threads;
-    for (int worker_index = 0; worker_index < workers_; ++worker_index)
+    for (int worker_index = 0; worker_index < workers_; ++worker_index) {
       threads.push_back(std::thread([&, worker_index] {
         struct Item {
           Query query;
@@ -299,31 +311,33 @@ private:
         };
         std::mutex mutex;
         std::condition_variable cv;
-        std::queue<Item> inbox; // replies land here, from the io thread
+        std::queue<Item> inbox;  // replies land here, from the io thread
         int pending = 0, responses = 0, errors = 0;
-        auto take = [&](const Item &item) {
-          if (report_outcome(worker_index, item.query, item.result, ms_since(item.started)))
+        auto take = [&](const Item& item) {
+          if (report_outcome(worker_index, item.query, item.result, ms_since(item.started))) {
             ++responses;
-          else
+          } else {
             ++errors;
+          }
         };
         std::vector<Query> queries = queries_for(worker_index);
         for (size_t index = 0; index < queries.size(); ++index) {
-          const Query &query = queries[index];
+          const Query& query = queries[index];
           std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
           client->query(
               query.payload, query.type,
-              [&, query, started](const ThreadedClient::Result &result) {
+              [&, query, started](const ThreadedClient::Result& result) {
                 std::lock_guard<std::mutex> lock(mutex);
                 inbox.push(Item{query, started, result});
                 cv.notify_one();
               },
               timeout_);
           ++pending;
-          if (sleep_between_ > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_between_ * 1000))); // own work
+          if (sleep_between_ > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_between_ * 1000)));  // own work
+          }
           std::lock_guard<std::mutex> lock(mutex);
-          while (!inbox.empty()) { // whatever arrived meanwhile, without waiting
+          while (!inbox.empty()) {  // whatever arrived meanwhile, without waiting
             take(inbox.front());
             inbox.pop();
             --pending;
@@ -338,8 +352,10 @@ private:
         }
         report_done(worker_index, responses, errors, client->connections_count(), client->instance_id());
       }));
-    for (size_t index = 0; index < threads.size(); ++index)
+    }
+    for (size_t index = 0; index < threads.size(); ++index) {
       threads[index].join();
+    }
     client->shutdown();
     return 0;
   }
@@ -361,4 +377,4 @@ private:
 
 REGISTER_MXCONTROL_SUBCOMMAND(client, ClientRole);
 
-} // namespace mxtestroles
+}  // namespace mxtestroles

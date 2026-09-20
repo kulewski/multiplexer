@@ -16,4 +16,4 @@
 #define __MX_LOG_KW_DATA(type_id, arg, entry) entry.data(type_id, arg);
 #define __MX_LOG_KW_SKIPFILEIF(arg, entry) entry.skip_file_if(arg);
 
-#endif // MX_LIB_LOGGING_LOG_TOKENS_H_
+#endif  // MX_LIB_LOGGING_LOG_TOKENS_H_

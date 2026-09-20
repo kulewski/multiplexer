@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Formats every source file in the repository:
 #   Python  -> black  (settings in pyproject.toml: 120 columns, py311)
-#   C++     -> clang-format-18 (settings in .clang-format: LLVM, 120 columns)
+#   C++     -> clang-format-18 (settings in .clang-format: Google, 120 columns, braces everywhere)
 #   Bazel   -> buildifier (BUILD, WORKSPACE, *.bzl)
 #   YAML    -> parsed with PyYAML in --check (the workflow files), no rewriting
 #   docs    -> docs/diagrams/generate.py regenerates the protocol pages,

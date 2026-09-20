@@ -19,32 +19,32 @@
 
 #// FLOW(flow)
 #define __MX_PP_KWARGS_TOKEN_FLOW(flow) __MX_PP_KWARGS_TOKEN_FLOW_I(flow,
-#define __MX_PP_KWARGS_TOKEN_FLOW_I(flow, tokens, namespace, data)                                                     \
+#define __MX_PP_KWARGS_TOKEN_FLOW_I(flow, tokens, namespace, data) \
   namespace##FLOW(flow, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
 #// TEXT(text)
 #define __MX_PP_KWARGS_TOKEN_TEXT(text) __MX_PP_KWARGS_TOKEN_TEXT_I(text,
-#define __MX_PP_KWARGS_TOKEN_TEXT_I(text, tokens, namespace, data)                                                     \
+#define __MX_PP_KWARGS_TOKEN_TEXT_I(text, tokens, namespace, data) \
   namespace##TEXT(text, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
 #// CTX(context)
 #define __MX_PP_KWARGS_TOKEN_CTX(text) __MX_PP_KWARGS_TOKEN_CTX_I(text,
-#define __MX_PP_KWARGS_TOKEN_CTX_I(text, tokens, namespace, data)                                                      \
+#define __MX_PP_KWARGS_TOKEN_CTX_I(text, tokens, namespace, data) \
   namespace##CTX(text, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
 #// CONTEXT(context)
 #define __MX_PP_KWARGS_TOKEN_CONTEXT(text) __MX_PP_KWARGS_TOKEN_CONTEXT_I(text,
-#define __MX_PP_KWARGS_TOKEN_CONTEXT_I(text, tokens, namespace, data)                                                  \
+#define __MX_PP_KWARGS_TOKEN_CONTEXT_I(text, tokens, namespace, data) \
   namespace##CONTEXT(text, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
 #// DATA(type_id, message)
 #define __MX_PP_KWARGS_TOKEN_DATA(type_id, message) __MX_PP_KWARGS_TOKEN_DATA_I(type_id, message,
-#define __MX_PP_KWARGS_TOKEN_DATA_I(type_id, message, tokens, namespace, data)                                         \
+#define __MX_PP_KWARGS_TOKEN_DATA_I(type_id, message, tokens, namespace, data) \
   namespace##DATA(type_id, message, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
 #// SKIPFILEIF(b)
 #define __MX_PP_KWARGS_TOKEN_SKIPFILEIF(b) __MX_PP_KWARGS_TOKEN_SKIPFILEIF_I(b,
-#define __MX_PP_KWARGS_TOKEN_SKIPFILEIF_I(b, tokens, namespace, data)                                                  \
+#define __MX_PP_KWARGS_TOKEN_SKIPFILEIF_I(b, tokens, namespace, data) \
   namespace##SKIPFILEIF(b, data) __MX_PP_KWARGS_TOKEN_##tokens, namespace, data)
 
-#endif // MX_LIB_PREPROC_KWARGS_H_
+#endif  // MX_LIB_PREPROC_KWARGS_H_

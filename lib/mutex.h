@@ -12,29 +12,29 @@
 namespace mx {
 
 class MX_CAPABILITY("mutex") Mutex {
-public:
+ public:
   Mutex() = default;
-  Mutex(const Mutex &) = delete;
-  Mutex &operator=(const Mutex &) = delete;
+  Mutex(const Mutex&) = delete;
+  Mutex& operator=(const Mutex&) = delete;
 
   void lock() MX_ACQUIRE() { mutex_.lock(); }
   void unlock() MX_RELEASE() { mutex_.unlock(); }
   bool try_lock() MX_TRY_ACQUIRE(true) { return mutex_.try_lock(); }
 
-private:
+ private:
   std::mutex mutex_;
 };
 
 // Holds a Mutex for its scope.
 class MX_SCOPED_CAPABILITY MutexLock {
-public:
-  explicit MutexLock(Mutex &mutex) MX_ACQUIRE(mutex) : mutex_(mutex) { mutex_.lock(); }
+ public:
+  explicit MutexLock(Mutex& mutex) MX_ACQUIRE(mutex) : mutex_(mutex) { mutex_.lock(); }
   ~MutexLock() MX_RELEASE() { mutex_.unlock(); }
-  MutexLock(const MutexLock &) = delete;
-  MutexLock &operator=(const MutexLock &) = delete;
+  MutexLock(const MutexLock&) = delete;
+  MutexLock& operator=(const MutexLock&) = delete;
 
-private:
-  Mutex &mutex_;
+ private:
+  Mutex& mutex_;
 };
 
 // A scoped lock a std::condition_variable_any can release and retake
@@ -42,18 +42,18 @@ private:
 // scope like MutexLock, and read as such by the analysis, which is right,
 // since the wait gives the lock back before it returns.
 class MX_SCOPED_CAPABILITY UniqueLock {
-public:
-  explicit UniqueLock(Mutex &mutex) MX_ACQUIRE(mutex) : lock_(mutex) {}
+ public:
+  explicit UniqueLock(Mutex& mutex) MX_ACQUIRE(mutex) : lock_(mutex) {}
   ~UniqueLock() MX_RELEASE() {}
-  UniqueLock(const UniqueLock &) = delete;
-  UniqueLock &operator=(const UniqueLock &) = delete;
+  UniqueLock(const UniqueLock&) = delete;
+  UniqueLock& operator=(const UniqueLock&) = delete;
   void lock() MX_ACQUIRE() { lock_.lock(); }
   void unlock() MX_RELEASE() { lock_.unlock(); }
 
-private:
+ private:
   std::unique_lock<Mutex> lock_;
 };
 
-} // namespace mx
+}  // namespace mx
 
-#endif // MX_LIB_MUTEX_H_
+#endif  // MX_LIB_MUTEX_H_

@@ -3,8 +3,9 @@
 // nothing else is safe to do there.
 #include "lib/fork.h"
 
-#include <atomic>
 #include <pthread.h>
+
+#include <atomic>
 
 namespace mx {
 namespace {
@@ -17,8 +18,8 @@ struct Registration {
   Registration() { pthread_atfork(nullptr, nullptr, in_child); }
 } registration;
 
-} // namespace
+}  // namespace
 
 unsigned int fork_generation() { return generation.load(std::memory_order_relaxed); }
 
-} // namespace mx
+}  // namespace mx

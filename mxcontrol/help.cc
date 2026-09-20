@@ -1,21 +1,23 @@
 // See help.h.
-#include "mxcontrol/tasks_holder.h"
+#include "mxcontrol/help.h"
+
 #include <iomanip>
 #include <iostream>
 
-#include "mxcontrol/help.h"
+#include "mxcontrol/tasks_holder.h"
 
 namespace mxcontrol {
 int Help::run() {
   if (subcommand_.empty()) {
     // general help
     size_t longest_name = 0;
-    for (const TasksHolder::TasksMap::value_type &entry : tasks_holder().tasks())
+    for (const TasksHolder::TasksMap::value_type& entry : tasks_holder().tasks()) {
       longest_name = std::max(entry.first.size(), longest_name);
+    }
 
     std::cerr << "Usage: " << _program_name() << " <general-options> <command> <command-options>\n"
               << "Commands:\n";
-    for (const TasksHolder::TasksMap::value_type &entry : tasks_holder().tasks()) {
+    for (const TasksHolder::TasksMap::value_type& entry : tasks_holder().tasks()) {
       std::cerr << "  " << std::left << std::setw(longest_name + 4) << entry.first
                 << entry.second->task()->short_description() << "\n";
     }
@@ -25,7 +27,7 @@ int Help::run() {
     return 1;
   } else {
     // help about a subcommand_
-    const TasksHolder::TasksMap::value_type &entry = *tasks_holder().tasks().find(subcommand_);
+    const TasksHolder::TasksMap::value_type& entry = *tasks_holder().tasks().find(subcommand_);
     std::shared_ptr<Task> task = entry.second->task();
     std::cerr << "Usage: " << _program_name() << " <general-options> " << entry.first << " "
               << task->short_synopsis(entry.first) << "\n"
@@ -35,6 +37,6 @@ int Help::run() {
 
   return 0;
 }
-}; // namespace mxcontrol
+};  // namespace mxcontrol
 
 REGISTER_MXCONTROL_SUBCOMMAND(help, mxcontrol::Help);

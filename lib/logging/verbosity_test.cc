@@ -8,7 +8,7 @@ using namespace mx::logging::consts;
 
 namespace {
 bool logs(unsigned int level, unsigned int verbosity) { return mx::logging::impl::should_log(level, verbosity); }
-} // namespace
+}  // namespace
 
 TEST(VerbositySpec, OneLevelOrEveryLevel) {
   mx::logging::apply_verbosity_spec("HIGH");
