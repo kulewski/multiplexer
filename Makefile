@@ -6,7 +6,7 @@
 #
 #   make -j            build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 #   make check         the C++ and Python unit tests, against what was built
-#   make wheel         build/dist/multiplexer-<VERSION>-*.whl, for pip
+#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip
 #   make install       mxcontrol, generate_constants, the library, the headers and
 #                      a pkg-config file under PREFIX
 #   make RULES=your.rules ...   generate the constants from your rules file
@@ -211,13 +211,16 @@ check-py: python $(PY_TESTS) $(MXCONTROL)
 	cd $(PY) && PYTHONPATH=. MXCONTROL=$(abspath $(MXCONTROL)) TEST_SRCDIR=$(abspath $(RUNFILES)) TEST_WORKSPACE=mx \
 	    TEST_TMPDIR=$(abspath $(BUILD)/tmp) $(PYTHON) -m unittest $(subst /,.,$(patsubst %.py,%,$(PY_TEST_FILES)))
 
-# The wheel: the package without the tests, with setup.py from make/.
+# The wheel: the package without the tests, with setup.py and
+# pyproject.toml from make/ and the README, which setup.py turns into the
+# PyPI page.
 
 wheel: python
 	rm -rf $(BUILD)/wheel && mkdir -p $(BUILD)/wheel $(BUILD)/dist
 	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
 	sed 's/@VERSION@/$(VERSION)/' make/setup.py > $(BUILD)/wheel/setup.py
+	cp make/pyproject.toml README.md $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .
 	@ls $(BUILD)/dist/*.whl
 

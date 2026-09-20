@@ -1,0 +1,6 @@
+# The build system of the wheel, copied next to make/setup.py by `make
+# wheel`, so that pip builds it through the standard interface rather than
+# by running setup.py itself, which pip is retiring.
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

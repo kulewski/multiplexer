@@ -10,7 +10,7 @@ the same way, in Docker, so a release can be reproduced on a workstation.
 | `mxcontrol-<version>-linux-amd64` with its `.sha256` | running a multiplexer, or its tools, on any Linux | nothing: statically linked |
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
 | `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev` and `libasio-dev` to build against the library |
-| `multiplexer-<version>-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers | `pip`; the `protobuf` package comes with it |
+| `mx_multiplexer-<version>-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers | `pip`; the `protobuf` package comes with it |
 | the source archive GitHub makes for the tag | everything else, through Bazel or `make` | [building.md](building.md) |
 
 Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
@@ -82,8 +82,12 @@ the package's copy. Changing the reserved block is not supported.
 protobuf 3.21.12 compiled once from source and linked statically into the
 extension, then `make wheel` per CPython and `auditwheel`, which verifies
 that the wheel needs nothing from the system beyond what manylinux allows.
-`pip install multiplexer-<version>-cp312-manylinux_2_28_x86_64.whl` is
-then the whole installation; the package depends on `protobuf` from PyPI.
+`pip install mx-multiplexer` installs them from PyPI, where every release
+is published under that name, because `multiplexer` on PyPI belongs to an
+unrelated package; the import is `multiplexer` all the same. `pip install
+mx_multiplexer-<version>-cp312-manylinux_2_28_x86_64.whl` installs the
+file from the release page instead. Either way that is the whole
+installation; the package depends on `protobuf` from PyPI.
 The wheel includes `multiplexer.testing`, the test harness; a `Cluster`
 names its rules file and needs `MXCONTROL` in the environment pointing at
 a multiplexer binary, the static one for example.
@@ -98,12 +102,21 @@ against it without any setup.
 2. Tag it: `git tag -a v<version> -m "..."` and `git push origin main v<version>`.
 3. The workflow runs the tests, builds every artifact, pushes the image and
    creates the release with the files attached.
+4. Approve the upload to PyPI: the `pypi` job waits for the reviewer of
+   the `pypi` environment in the Actions tab, then publishes the wheels
+   through trusted publishing, which PyPI grants to this workflow file and
+   that environment; no token exists anywhere.
 
 To try the workflow before tagging, start it by hand from the Actions tab,
-or with `gh workflow run release.yml -f tag=v<version>`: the same build
+or with `gh workflow run release.yml -f tag=v<version>rc1`: the same build
 from the chosen branch, the files named after the tag given, without the
-push to ghcr.io and without a release. A failed run is re-run from its
-page once the fix is on the branch; the tag never moves.
+push to ghcr.io and without a release, and with the wheels uploaded to
+test.pypi.org instead of PyPI, installed from there into a fresh
+environment and smoke-tested against the run's own static `mxcontrol`.
+TestPyPI never accepts a version it has seen, so the tag given is a
+release candidate that will not be tagged, never the version itself. A
+failed run is re-run from its page once the fix is on the branch; the tag
+never moves.
 
 To rebuild any artifact by hand: `bazel build //mxcontrol:mxcontrol_static`,
 `bazel run //docker:load`, `packaging/build_debs.sh`, `packaging/build_wheels.sh`.

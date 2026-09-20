@@ -21,8 +21,8 @@ Deploy several instances active-active: there is no single point of failure,
 every client and backend connects to all of them, and failover between them
 is automatic and transparent.
 
-Multiplexer has been in continuous production use in countless projects since
-2008, almost twenty years. This repository adds what publication calls for:
+Multiplexer has been used in production in a number of projects since 2008.
+This repository adds what publication calls for:
 complete documentation, a test for every failure mode, and static
 thread-safety analysis.
 
@@ -241,7 +241,8 @@ Two ways, and the choice is only whether you build it:
   image `ghcr.io/kulewski/multiplexer:<version>` with nothing in it but
   the binary, a Debian package per Debian and Ubuntu release with
   `mxcontrol`, the C++ library, its headers and a pkg-config file, and
-  manylinux wheels of the Python package for every CPython from 3.10.
+  manylinux wheels of the Python package for every CPython from 3.10,
+  which `pip install mx-multiplexer` fetches from PyPI.
   [docs/packaging.md](docs/packaging.md) says how to use each;
   [docs/operations.md](docs/operations.md#on-kubernetes) how to run the
   image on Kubernetes.
@@ -329,7 +330,9 @@ ports, scripted peers, and the macro this repository's own scenarios use
 
 ## Using it from Python
 
-A backend waits for requests and answers them. `serve_forever()` runs the loop
+`pip install mx-multiplexer` installs the package, extension included, on
+Linux; the import is `multiplexer`. A backend waits for requests and
+answers them. `serve_forever()` runs the loop
 and calls `handle_message` for each request; `send_message` replies to the peer
 that asked.
 

@@ -45,7 +45,7 @@ for tag in "${pythons[@]}"; do
   "$python" -m pip install -q pybind11 pybind11-stubgen "protobuf>=4.21,<5" setuptools wheel auditwheel
   rm -rf build/python build/obj/multiplexer/_native.o build/wheel
   make -j"$(nproc)" wheel PYTHON="$python" > /dev/null
-  "$python" -m auditwheel repair -w "$out" build/dist/multiplexer-*-linux_x86_64.whl > /dev/null
-  rm -f build/dist/multiplexer-*-linux_x86_64.whl
+  "$python" -m auditwheel repair -w "$out" build/dist/mx_multiplexer-*-linux_x86_64.whl > /dev/null
+  rm -f build/dist/mx_multiplexer-*-linux_x86_64.whl
 done
 ls -la "$out"/*.whl

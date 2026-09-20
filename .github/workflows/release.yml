@@ -1,14 +1,18 @@
 # The release: on a version tag, every artifact from the same commit, each
-# checked the way the tree is checked, then attached to the GitHub release
-# and the image pushed to ghcr.io. docs/packaging.md describes the
+# checked the way the tree is checked, then attached to the GitHub release,
+# the image pushed to ghcr.io, and the wheels to PyPI once the `pypi`
+# environment's reviewer approves. docs/packaging.md describes the
 # artifacts; the scripts under packaging/ build them the same way locally.
 name: release
 on:
   push:
     tags: ["v*"]
-  # By hand, from the Actions tab or `gh workflow run release.yml -f tag=v2.1.0`:
-  # the same build from the chosen branch, its files named after `tag`, and
-  # the release step skipped, so that a run can be tried before tagging.
+  # By hand, from the Actions tab or `gh workflow run release.yml -f tag=v2.3.0rc1`:
+  # the same build from the chosen branch, its files named after `tag`, the
+  # release step skipped, and the wheels uploaded to test.pypi.org instead
+  # of PyPI and installed from there for the smoke test, so that a run can
+  # be tried before tagging. TestPyPI never accepts a version twice, so the
+  # tag given is one that will not be released, a release candidate.
   workflow_dispatch:
     inputs:
       tag:
@@ -93,3 +97,68 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: false
+
+  testpypi:
+    # The dry run's upload: the wheels to test.pypi.org through trusted
+    # publishing, then `pip install` from there into a fresh environment
+    # and the wheel's smoke test against the static mxcontrol of the same
+    # run. The `testpypi` environment on GitHub and the pending publisher
+    # on test.pypi.org name this workflow file and that environment.
+    needs: [static, wheels]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    environment: testpypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: static
+          path: static
+      - name: install from test.pypi.org and run the smoke test
+        run: |
+          python3 -m venv venv
+          # The dependency from PyPI proper, then the package alone from
+          # TestPyPI, which takes a moment to serve a fresh upload: two
+          # steps, so that nothing on TestPyPI can stand in for protobuf.
+          venv/bin/pip install -q protobuf
+          for attempt in $(seq 20); do
+            venv/bin/pip install -q --no-deps --index-url https://test.pypi.org/simple/ "mx-multiplexer==${VERSION#v}" && break
+            sleep 15
+          done
+          venv/bin/python -c "import multiplexer; print(multiplexer.__file__)"
+          chmod +x static/mxcontrol-*-linux-amd64
+          # The smoke test changes directory before it starts the multiplexer: an absolute path.
+          MXCONTROL="$PWD/$(ls static/mxcontrol-*-linux-amd64)" venv/bin/python make/wheel_smoke.py multiplexer.rules
+
+  pypi:
+    # The wheels to PyPI, after the release exists and once the `pypi`
+    # environment's reviewer approves in the Actions tab; trusted
+    # publishing, no token anywhere.
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mx-multiplexer/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
