@@ -30,6 +30,7 @@ LIB_SRCS := \
 MXCONTROL_SRCS := \
   mxcontrol/driver.cc \
   mxcontrol/dump_recording.cc \
+  mxcontrol/generate_constants.cc \
   mxcontrol/help.cc \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \
@@ -94,6 +95,7 @@ HEADERS := \
   multiplexer/client.h \
   multiplexer/config.h \
   multiplexer/connections_manager.h \
+  multiplexer/constants_writer.h \
   multiplexer/defaults.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \

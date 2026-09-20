@@ -121,8 +121,8 @@ go.
 
 ## Checks
 
-At build time `generate_constants` refuses a file where a name or a number
-repeats. At start the multiplexer refuses a rule whose `peer` names no peer
+At build time `generate_constants`, and `mxcontrol generate_constants` for
+a build outside Bazel, refuses a file where a name or a number repeats. At start the multiplexer refuses a rule whose `peer` names no peer
 type, and stops. A message whose type has no entry is dropped at run time and
 reported as a delivery error with `is_known_type` false.
 

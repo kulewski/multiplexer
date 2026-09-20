@@ -20,6 +20,19 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":config",
+        ":constants_writer",
+        "//lib:type_utils",
+    ],
+)
+
+# The writer the tool above and `mxcontrol generate_constants` share.
+cc_library(
+    name = "constants_writer",
+    hdrs = ["constants_writer.h"],
+    visibility = ["//mxcontrol:__pkg__"],
+    deps = [
+        "//lib:assert",
+        "//lib:exception",
         "//lib:fingerprint",
         "//lib:type_utils",
     ],
@@ -31,6 +44,7 @@ genrule(
     outs = ["multiplexer.constants.h"],
     cmd = "$(location :generate_constants) $< $@",
     tools = [":generate_constants"],
+    visibility = ["//mxcontrol:__pkg__"],  # the subcommand's test compares with these
 )
 
 genrule(
@@ -39,6 +53,7 @@ genrule(
     outs = ["multiplexer_constants.py"],
     cmd = "$(location :generate_constants) $< $@",
     tools = [":generate_constants"],
+    visibility = ["//mxcontrol:__pkg__"],  # the subcommand's test compares with these
 )
 
 # The stub of the native extension for type checkers, from the built module;
@@ -119,6 +134,7 @@ genrule(
     outs = ["multiplexer_constants.pyi"],
     cmd = "$(location :generate_constants) $< $@",
     tools = [":generate_constants"],
+    visibility = ["//mxcontrol:__pkg__"],  # the subcommand's test compares with these
 )
 
 cc_library(

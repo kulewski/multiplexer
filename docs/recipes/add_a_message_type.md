@@ -11,7 +11,8 @@ file and in the peers; nothing in this repository changes.
    field. A reply type needs no `to` rule.
 2. **Build.** The constants regenerate: `peers.NAME` and `types.NAME` in
    Python, `multiplexer::peers::NAME` and `multiplexer::types::NAME` in C++.
-   A duplicate name or number fails the build here.
+   A duplicate name or number fails the build here. Outside Bazel, run
+   `mxcontrol generate_constants` again ([mxcontrol.md](../mxcontrol.md#generate_constants)).
 3. **Restart the multiplexers** with the new file; they read it once at
    start.
 4. **Use it.** A backend of the new peer type subclasses

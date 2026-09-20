@@ -5,7 +5,12 @@ Three modules matter: `multiplexer.clients` holds `Client` for clients,
 `multiplexer.multiplexer_constants` holds `peers` and `types`, generated
 from the [rules file](rules.md) the build was pointed at. Depend on
 `@mx//multiplexer:clients` or `@mx//multiplexer:servers`, and on
-`@mx//multiplexer:multiplexer_constants`. `multiplexer.threaded_client`,
+`@mx//multiplexer:multiplexer_constants`. Outside Bazel, after `pip
+install mx-multiplexer`, the constants of your rules file come from
+`mxcontrol generate_constants your.rules --python multiplexer_constants.py
+--pyi multiplexer_constants.pyi`, a module to import from wherever it is
+written ([mxcontrol.md](mxcontrol.md#generate_constants)); the package's
+own `multiplexer.multiplexer_constants` holds the example file's. `multiplexer.threaded_client`,
 `multiplexer.aio` and `multiplexer.threaded_server` hold the threaded and
 asyncio clients and the threaded backend, each described below;
 [which class to build on](README.md#backend-or-client-which-class-to-build-on)

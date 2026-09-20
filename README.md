@@ -331,8 +331,10 @@ ports, scripted peers, and the macro this repository's own scenarios use
 ## Using it from Python
 
 `pip install mx-multiplexer` installs the package, extension included, on
-Linux; the import is `multiplexer`. A backend waits for requests and
-answers them. `serve_forever()` runs the loop
+Linux; the import is `multiplexer`, and `mxcontrol generate_constants
+your.rules --python multiplexer_constants.py` writes the `peers` and
+`types` of your rules file, which a Bazel build generates on its own. A
+backend waits for requests and answers them. `serve_forever()` runs the loop
 and calls `handle_message` for each request; `send_message` replies to the peer
 that asked.
 

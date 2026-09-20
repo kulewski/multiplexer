@@ -112,8 +112,8 @@ INDEX = [
     ("Reading the rules file", "multiplexer/config.h", "`Config::read_configuration`"),
     (
         "Generating the constants from the rules file",
-        "multiplexer/generate_constants.cc",
-        "`write_cxx`, `write_python`",
+        "multiplexer/constants_writer.h",
+        "`write_cxx`, `write_python`, `write_python_stub`; run by `multiplexer/generate_constants.cc` at build time and by `mxcontrol generate_constants`",
     ),
     ("Every timeout and limit", "multiplexer/defaults.h", ""),
     ("The Python binding", "multiplexer/_native.cc", "`PYBIND11_MODULE`"),
@@ -174,9 +174,9 @@ def header_comment(path: str) -> str:
     name = os.path.basename(path)
     if ext in (".py", ".bzl"):
         m = re.match(r'\s*(?:#![^\n]*\n)?\s*(?:#[^\n]*\n\s*)*"""(.*?)"""', text, re.S)
-        if not m:
-            return ""
-        return first_paragraph(m.group(1).strip().splitlines())
+        if m:
+            return first_paragraph(m.group(1).strip().splitlines())
+        # No docstring: the leading # lines, as a generated file has.
     if ext in (".h", ".cc", ".proto"):
         lines = []
         for line in text.splitlines():

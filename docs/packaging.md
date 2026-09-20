@@ -72,9 +72,11 @@ releases: the library is compiled against the release's `libprotobuf-dev`,
 and a program using it must be too. `Recommends` names the exact version.
 The library itself depends only on the reserved peer and message types,
 ids 1 to 99 ([rules.md](rules.md)), which every rules file carries as
-shipped; your own types come from `generate_constants your.rules
-multiplexer/multiplexer.constants.h`, placed on the include path before
-the package's copy. Changing the reserved block is not supported.
+shipped; your own types come from `mxcontrol generate_constants your.rules
+--cxx multiplexer/multiplexer.constants.h`, placed on the include path
+before the package's copy (`generate_constants your.rules
+multiplexer/multiplexer.constants.h`, the build-time tool the package also
+holds, writes the same). Changing the reserved block is not supported.
 
 ## The wheels
 
@@ -90,7 +92,11 @@ file from the release page instead. Either way that is the whole
 installation; the package depends on `protobuf` from PyPI.
 The wheel includes `multiplexer.testing`, the test harness; a `Cluster`
 names its rules file and needs `MXCONTROL` in the environment pointing at
-a multiplexer binary, the static one for example.
+a multiplexer binary, the static one for example. The constants of your
+own rules file, the `peers` and `types` a Bazel build generates, come from
+that binary too: `mxcontrol generate_constants your.rules --python
+multiplexer_constants.py --pyi multiplexer_constants.pyi`, once, and
+again when the file changes ([mxcontrol.md](mxcontrol.md#generate_constants)).
 The package is typed: a `py.typed` marker and a stub next to every
 generated module and the extension, so Pylance and pyright check code
 against it without any setup.

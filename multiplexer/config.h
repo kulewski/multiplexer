@@ -79,7 +79,7 @@ class Config {
 
 #ifndef IS_GENERATE_CONSTANTS
     using namespace mx::logging::consts;
-    MX_LOG(DEBUG, MEDIUMVERBOSITY, CTX("config") TEXT("reading configuration file"));
+    MX_LOG(DEBUG, HIGHVERBOSITY, CTX("config") TEXT("reading configuration file " + file));
 #endif
 
     ifstream in(file.c_str(), ifstream::in | ifstream::binary);

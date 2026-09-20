@@ -59,6 +59,31 @@ type, and again when it leaves. A message nobody could receive is
 logged at `ERROR`, or `WARNING` if the rule says so, and a full queue is
 logged at `WARNING` for every message dropped.
 
+## generate_constants
+
+Writes the peer and message types of a rules file as constants, for a
+program built outside Bazel: the Python module (classes `peers` and
+`types`), its stub for type checkers, and the C++ header (namespaces
+`multiplexer::peers` and `multiplexer::types`), whichever are asked for.
+The files are the ones a Bazel build generates from the same rules file,
+byte for byte apart from the header's include guard.
+
+```
+mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE]
+```
+
+| Option | Effect |
+|---|---|
+| `RULES` | the [rules file](rules.md) |
+| `--python FILE` | write the Python module, `multiplexer_constants.py` by convention, importable as `multiplexer_constants` from wherever it is put |
+| `--pyi FILE` | write the module's type stub, next to the module |
+| `--cxx FILE` | write the C++ header, as `multiplexer/multiplexer.constants.h` on the include path before the installed package's copy |
+
+A rules file where a name or a number repeats is refused, as at build time.
+A program installed from a release, with `pip install mx-multiplexer` or
+the Debian package, runs this once per rules file and again when the file
+changes; a Bazel build does it on its own.
+
 ## dump_recording
 
 Prints recordings, one line per record; several files, the sessions of

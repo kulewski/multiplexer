@@ -64,6 +64,18 @@ cc_library(
 )
 
 cc_library(
+    name = "generate_constants",
+    srcs = ["generate_constants.cc"],
+    deps = [
+        ":task",
+        ":tasks_holder",
+        "//multiplexer:config",
+        "//multiplexer:constants_writer",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "dump_recording",
     srcs = ["dump_recording.cc"],
     deps = [
@@ -123,6 +135,7 @@ maybe_strip_cc_binary(
     deps = [
         ":driver",
         ":dump_recording",
+        ":generate_constants",
         ":help",
         ":receive_logs",
         ":recording_control",
@@ -131,6 +144,20 @@ maybe_strip_cc_binary(
         "//lib:core_dump",
         "//lib:program",
     ],
+)
+
+py_test(
+    name = "generate_constants_test",
+    size = "small",
+    srcs = ["generate_constants_test.py"],
+    data = [
+        ":mxcontrol",
+        "//:multiplexer.rules",
+        "//multiplexer:multiplexer.constants.h",
+        "//multiplexer:multiplexer_constants.py",
+        "//multiplexer:multiplexer_constants.pyi",
+    ],
+    deps = ["//multiplexer/testing"],
 )
 
 # The same binary linked statically: one file that runs on any Linux and
@@ -153,6 +180,7 @@ cc_binary(
     deps = [
         ":driver",
         ":dump_recording",
+        ":generate_constants",
         ":help",
         ":receive_logs",
         ":recording_control",
