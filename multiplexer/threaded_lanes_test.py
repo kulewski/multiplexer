@@ -15,6 +15,9 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.threaded_client import ThreadedClient
+from multiplexer.testing import runfile
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
@@ -31,7 +34,7 @@ class ThreadedClientLanesTest(unittest.TestCase):
     """ThreadedClient: a cluster of two per test, since several tests kill one."""
 
     def setUp(self):
-        self.cluster = Cluster(2).__enter__()
+        self.cluster = Cluster(2, rules=RULES).__enter__()
         self.peer = FakePeer(self.cluster, peers.PYTHON_TEST_SERVER, name="first").start()
         self.other = FakePeer(self.cluster, peers.PYTHON_TEST_SERVER, name="second").start()
         self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER, count=2)
@@ -225,7 +228,7 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
     """AsyncClient: the same surface, awaited."""
 
     async def asyncSetUp(self):
-        self.cluster = Cluster(2).__enter__()
+        self.cluster = Cluster(2, rules=RULES).__enter__()
         self.peer = FakePeer(self.cluster, peers.PYTHON_TEST_SERVER, name="first").start()
         self.other = FakePeer(self.cluster, peers.PYTHON_TEST_SERVER, name="second").start()
         self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER, count=2)

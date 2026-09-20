@@ -28,7 +28,9 @@ def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str
             pass
 
     if mxcontrol is None:
-        mxcontrol = os.path.abspath(os.path.dirname(os.path.dirname(multiplexer.__file__)) + "/mxcontrol/mxcontrol")
+        package = multiplexer.__file__
+        assert package is not None, "the multiplexer package has no file; give mxcontrol explicitly"
+        mxcontrol = os.path.abspath(os.path.dirname(os.path.dirname(package)) + "/mxcontrol/mxcontrol")
 
     logging_fd_set_from_pid = os.getpid()
 

@@ -82,6 +82,7 @@ class LeakTest(unittest.TestCase):
             host, port = port_file.read().strip().rsplit(":", 1)
         self.endpoint = (host, int(port))
         self.serving = True
+        self.backend_id = 0
         ready = threading.Event()
 
         def serve():

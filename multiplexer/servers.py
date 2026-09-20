@@ -15,10 +15,11 @@ import sys
 import time
 import traceback
 
-from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedException  # noqa: F401
+from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedException  # re-exported
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxclient import OperationTimedOut, parse_message
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.mxclient import ConnectionWrapper, OperationTimedOut, parse_message
 
 
 def format_exception(exc, trace=None):
@@ -43,7 +44,8 @@ class MultiplexerPeer(object):
     BaseMultiplexerServer. `self.conn` is the BasicClient."""
 
     # the peer type, if a subclass wants to fix it instead of passing `type`
-    multiplexer_client_type = None
+    multiplexer_client_type: int | None = None
+    conn: BasicClient
 
     @log_call
     def __init__(self, addresses, type=None):
@@ -89,7 +91,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """Connect to every multiplexer in `addresses` as a backend of peer type `type`."""
         super(BaseMultiplexerServer, self).__init__(addresses, type)
         self.working = True
-        self.last_mxmsg = None
+        self.last_mxmsg: MultiplexerMessage | None = None
+        self.last_connwrap: ConnectionWrapper | None = None
         self._start_time = time.time()
         self._draining_since = None
         self._drain_seconds = 0.0
@@ -118,7 +121,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
         given to serve_forever() have passed since start_draining(). Override
         to wait for your own condition, for example
         `super().drained() and not self.in_flight`."""
-        return self.draining and time.time() - self._draining_since >= self._drain_seconds
+        since = self._draining_since
+        return since is not None and time.time() - since >= self._drain_seconds
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
         """Whether to answer a client's search for a backend; override for
@@ -195,6 +199,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
         # request. A PING without references is an echo request.
         """Answer the protocol's own messages: a PING referencing a client's search for a backend, an echo of a PING without references."""
         mxmsg = self.last_mxmsg
+        assert mxmsg is not None
         if mxmsg.type == types.BACKEND_FOR_PACKET_SEARCH:
             if self.should_respond_to_backend_for_packet_search():
                 self.send_message(message="", embed=True, flush=True, type=types.PING)
@@ -221,7 +226,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """Dispatch the last received message to __handle_internal_message() or handle_message(), then apply the exception rules."""
         try:
             self._has_sent_response = False
-            if self.last_mxmsg.type <= types.MAX_MULTIPLEXER_META_PACKET:
+            mxmsg = self.last_mxmsg
+            assert mxmsg is not None
+            if mxmsg.type <= types.MAX_MULTIPLEXER_META_PACKET:
                 # internal messages
                 self.__handle_internal_message()
                 if not self._has_sent_response:
@@ -232,7 +239,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     )
             else:
                 # the rest
-                self.handle_message(self.last_mxmsg)
+                self.handle_message(mxmsg)
                 if not self._has_sent_response:
                     log(
                         WARNING,
@@ -261,14 +268,21 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
     def parse_message(self, type, mxmsg=None):
         """parse mxmsg.message with new Protobuf message of type `type'"""
-        return parse_message(type, self.last_mxmsg.message if mxmsg is None else mxmsg.message)
+        return parse_message(type, self._current(mxmsg).message)
 
     # The pickle convention, see the clients: a payload that is a Python
     # pickle. Only between Python peers on a trusted network, since
     # unpickling runs code.
     def parse_pickle(self, mxmsg=None):
         """The payload of `mxmsg` (the current message by default) unpickled."""
-        return pickle.loads(self.last_mxmsg.message if mxmsg is None else mxmsg.message)
+        return pickle.loads(self._current(mxmsg).message)
+
+    def _current(self, mxmsg: MultiplexerMessage | None) -> MultiplexerMessage:
+        """`mxmsg`, or the message being handled when none is given."""
+        if mxmsg is not None:
+            return mxmsg
+        assert self.last_mxmsg is not None, "no message is being handled"
+        return self.last_mxmsg
 
     @log_call
     def send_pickle(self, data, type=types.PICKLE_RESPONSE, **kwargs):
@@ -327,9 +341,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def close(self):
         """Close every connection; the server cannot be used afterwards. Safe to call twice."""
-        if self.conn is not None:
-            self.conn.shutdown()
-            self.conn = None
+        self.conn.shutdown()  # idempotent, so a second close() is harmless
 
 
 class MultiplexerServer(BaseMultiplexerServer):

@@ -107,6 +107,26 @@ std::string rules_fingerprint(const std::string &source_file) {
   return mx::fingerprint(text);
 }
 
+// The stub of the Python module, for type checkers: the same names, typed.
+template <typename Map> void __write_python_stub_mapping(ostream &out, const Map &map, const std::string &set_name) {
+  out << "class " << set_name << ":\n";
+  for (const typename Map::value_type &entry : map)
+    out << "    " << entry.second.name() << ": int\n";
+  out << "\n";
+}
+
+int write_python_stub(Config &config, ostream &out, const std::string &source_file) {
+  write_signature("#", out, source_file);
+  out << "RULES_FINGERPRINT: str\n\n"
+      << "class _constants_base:\n"
+      << "    idtoname: dict[int, str]\n"
+      << "    @classmethod\n"
+      << "    def get_name(cls, type: int, default: str = ...) -> str: ...\n\n";
+  __write_python_stub_mapping(out, config.message_description_by_id(), "types(_constants_base)");
+  __write_python_stub_mapping(out, config.peer_by_type(), "peers(_constants_base)");
+  return 0;
+}
+
 int write_python(Config &config, ostream &out, const std::string &source_file) {
   write_signature("#", out, source_file);
   out << "# SHA-1 of the rules file these constants were generated from; a recording's header carries the same.\n"
@@ -211,10 +231,12 @@ int MxMain(int argc, char **argv) {
     return 1;
   }
 
-  enum OUTFILETYPE { PYTHON, CXX };
+  enum OUTFILETYPE { PYTHON, PYTHON_STUB, CXX };
   OUTFILETYPE filetype;
   if (endswith(argv[2], ".h"))
     filetype = CXX;
+  else if (endswith(argv[2], ".pyi"))
+    filetype = PYTHON_STUB;
   else if (endswith(argv[2], ".py"))
     filetype = PYTHON;
   else {
@@ -235,6 +257,8 @@ int MxMain(int argc, char **argv) {
   switch (filetype) {
   case PYTHON:
     return write_python(config, out, argv[1]);
+  case PYTHON_STUB:
+    return write_python_stub(config, out, argv[1]);
   case CXX:
     return write_cxx(config, out, argv[1]);
   }

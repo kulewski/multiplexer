@@ -1,3 +1,14 @@
 [tool.black]
 line-length = 120
 target-version = ["py311"]
+
+# Type checking: Pylance in VS Code and `npx pyright` in check.sh read this.
+# The generated modules, protocol buffers, constants and the native
+# extension, have stubs in bazel-bin after a build, hence the stubPath.
+[tool.pyright]
+include = ["multiplexer"]
+exclude = ["**/bazel-*", "build"]
+stubPath = "bazel-bin"
+extraPaths = ["bazel-bin"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"

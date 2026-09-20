@@ -34,7 +34,8 @@ class RemoteRecordingRefused(unittest.TestCase):
                 controller.shutdown()
 
     def test_each_option_allows_only_its_own_action(self):
-        rules = harness.default_rules()
+        assert harness.CONFIG is not None and harness.CONFIG.rules
+        rules = harness.CONFIG.rules  # the scenario's, from the BUILD rule
         tap_only = Mx(7, rules, allow_tap=True).start()
         files_only = Mx(8, rules, recording_dir=os.path.join(output_dir(), "files_only")).start()
         os.makedirs(files_only.recording_dir, exist_ok=True)

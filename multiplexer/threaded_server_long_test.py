@@ -13,6 +13,9 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.testing import BackendThread, Cluster, wait_until
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
+from multiplexer.testing import runfile
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 HANDLER_SECONDS = 100
 
@@ -29,7 +32,7 @@ class Slow(BaseThreadedMultiplexerServer):
 
 class LongRequestTest(unittest.TestCase):
     def test_the_backend_stays_registered_under_a_long_request(self):
-        with Cluster(1) as cluster, BackendThread(lambda: Slow(cluster.endpoints)) as served:
+        with Cluster(1, rules=RULES) as cluster, BackendThread(lambda: Slow(cluster.endpoints)) as served:
             cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
             client = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
             try:

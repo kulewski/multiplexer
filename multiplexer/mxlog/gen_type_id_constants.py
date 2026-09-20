@@ -1,6 +1,8 @@
-"""Turn a file of `NAME = int` lines into a C++ header of constants.
+"""Turn a file of `NAME = int` lines into a C++ header of constants, or
+into the stub of the Python module the file is used as verbatim.
 
 Usage: gen_type_id_constants.py type_id_constants.txt type_id_constants.h
+       gen_type_id_constants.py type_id_constants.txt type_id_constants.pyi
 The namespace is the output file's basename without extension.
 """
 
@@ -21,6 +23,12 @@ def main(src: str, out: str) -> None:
             if not m:
                 sys.exit("%s: cannot parse %r" % (src, raw.rstrip()))
             consts.append("  static const unsigned int %s = %s;" % m.groups())
+    if out.endswith(".pyi"):
+        with open(out, "w") as f:
+            f.write("# Generated from %s; do not edit.\n" % os.path.basename(src))
+            for const in consts:
+                f.write("%s: int\n" % const.split()[4])
+        return
     namespace = os.path.splitext(os.path.basename(out))[0]
     # Guard derived from the workspace-relative path, like every other header.
     rel = out.split("/bin/", 1)[1] if "/bin/" in out else out

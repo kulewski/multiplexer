@@ -6,11 +6,12 @@ genrule(
         "Logging.pb.cc",
         "Logging.pb.h",
         "Logging_pb2.py",
+        "Logging_pb2.pyi",
     ],
     # Include and output roots are the repository root, whether we are the
     # main workspace or an external one; see multiplexer/BUILD.
     cmd = "root=$(location Logging.proto); root=$${root%lib/logging/Logging.proto}; root=$${root%/}; " +
-          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/../.. --python_out=$(RULEDIR)/../.. $(SRCS)",
+          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/../.. --python_out=$(RULEDIR)/../.. --pyi_out=$(RULEDIR)/../.. $(SRCS)",
     tools = ["//:protoc"],
 )
 

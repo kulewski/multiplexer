@@ -112,7 +112,7 @@ PROTOS := \
   lib/logging/Logging.proto \
   multiplexer/Multiplexer.proto \
   multiplexer/Recording.proto \
-  multiplexer/testing/events.proto \
+  multiplexer/events.proto \
 
 
 # The Python package, without the generated modules.

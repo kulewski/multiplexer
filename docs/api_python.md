@@ -566,11 +566,13 @@ class SearchTest(unittest.TestCase):
             self.assertEqual(b"pears", index.wait_for(types.SEARCH_REQUEST)[0].message)
 ```
 
-- `Cluster(count, rules=None, record=False, record_payload_bytes=0)` starts
+- `Cluster(count, rules, record=False, record_payload_bytes=0)` starts
   `count` multiplexers on entering and stops every peer and multiplexer on
-  leaving. `rules` defaults to the file `mx_integration_test` named, else
-  the file the `multiplexer_rules` flag names, the one your constants come
-  from, so `Cluster()` is right in any test of your workspace.
+  leaving. `rules` is the path of the rules file, the one your constants
+  were generated from, which the test names: under Bazel
+  `runfile("your/pkg/deployment.rules")` with the file in the test's
+  `data`. A scenario under `mx_integration_test` may leave it out, since
+  the rule's `rules` attribute names it.
   `endpoints` is the list of `(host, port)` the clients take;
   `wait_for_peer(type_or_name, count=1, timeout=15)` blocks until every
   multiplexer lists that many peers of the type in its peers file, and

@@ -10,12 +10,15 @@ from multiplexer.testing import BackendThread, Cluster
 
 import backend
 import gateway
+from multiplexer.testing import runfile
+
+RULES = runfile("chat.rules")  # the file the constants were generated from
 
 
 class GatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_lines_are_answered_and_shouts_reach_everyone(self):
         with (
-            Cluster(1) as cluster,
+            Cluster(1, rules=RULES) as cluster,
             BackendThread(lambda: backend.ChatServer(cluster.endpoints, type=peers.CHAT_SERVER)),
         ):
             cluster.wait_for_peer("CHAT_SERVER")

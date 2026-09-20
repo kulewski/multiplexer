@@ -1,5 +1,5 @@
 // Shared by every C++ test role: the Event lines the harness reads
-// (multiplexer/testing/events.proto), the options every role takes (--mx, --type,
+// (multiplexer/events.proto), the options every role takes (--mx, --type,
 // --name), the SIGTERM flag, and small parsers for the option formats.
 // tests/README.md documents the events and options; the Python roles in
 // tests/roles/py produce the same ones.
@@ -18,7 +18,7 @@
 
 #include "lib/options.h"
 #include "multiplexer/client.h"
-#include "multiplexer/testing/events.pb.h"
+#include "multiplexer/events.pb.h"
 
 namespace mxtestroles {
 

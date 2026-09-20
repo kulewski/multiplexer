@@ -11,17 +11,49 @@ frame body and it is parsed here, so the C++ and Python protobuf runtimes
 never share objects.
 """
 
-from multiplexer._native import *
-import multiplexer._native as _mxclient
 import atexit
 import time
 from functools import wraps
+from typing import Any, Literal, overload
+
 import google.protobuf.message
 
-from multiplexer.protocolbuffers import *
+import multiplexer._native as _mxclient
+from multiplexer._native import (
+    DEFAULT_TIMEOUT,
+    ConnectionWrapper,
+    Lane,
+    MultiplexerClientError,
+    NotConnected,
+    OperationFailed,
+    OperationTimedOut,
+    ScheduledMessageTracker,
+    UsedAfterFork,
+)
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, MultiplexerMessage
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxlog import log, WARNING, HIGHVERBOSITY
-from multiplexer.Multiplexer_pb2 import BackendForPacketSearch
+from multiplexer.mxlog import HIGHVERBOSITY, MEDIUMVERBOSITY, WARNING, log
+import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
+
+# What this module is imported for: the client, its exceptions and handles,
+# the message helpers, and the default timeout.
+__all__ = [
+    "Client",
+    "ConnectionWrapper",
+    "Lane",
+    "MultiplexerClientError",
+    "NotConnected",
+    "OperationFailed",
+    "OperationTimedOut",
+    "UsedAfterFork",
+    "ScheduledMessageTracker",
+    "DEFAULT_TIMEOUT",
+    "TimeoutTicker",
+    "initialize_message",
+    "make_message",
+    "dict_message",
+    "parse_message",
+]
 
 
 def _begin_exit() -> None:
@@ -138,10 +170,10 @@ class Client(_mxclient.Client):
     def __init__(self, client_type):
         """initialize a client with given client (peer) type"""
         self._client_type = client_type
-        self.__instance_id = None
+        self.__instance_id: int | None = None
         super(Client, self).__init__(client_type)
 
-    def __get_instance_id(self):
+    def __get_instance_id(self) -> int:
         """The instance id, read from the C++ side once."""
         if self.__instance_id is None:
             self.__instance_id = super(Client, self)._get_instance_id()
@@ -155,7 +187,7 @@ class Client(_mxclient.Client):
         endpoint is e.g. ("localhost", 1980)
         return ConnectionWrapper
         """
-        return super(Client, self).async_connect(endpoint[0], endpoint[1])
+        return super(Client, self).async_connect_to(endpoint[0], endpoint[1])
 
     def connect(self, endpoint, timeout=DEFAULT_TIMEOUT):
         """
@@ -163,18 +195,18 @@ class Client(_mxclient.Client):
         endpoint is e.g. ("localhost", 1980)
         return ConnectionWrapper
         """
-        return super(Client, self).connect(endpoint[0], endpoint[1], timeout)
+        return super(Client, self).connect_to(endpoint[0], endpoint[1], timeout)
 
-    def wait_for_connection(self, connwrap, timeout=DEFAULT_TIMEOUT):
+    def wait_for_connection(self, connection: ConnectionWrapper, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """wait for connection initiated with async_connect"""
-        return super(Client, self).wait_for_connection(connwrap, timeout)
+        return super(Client, self).wait_for_connection(connection, timeout)
 
-    def __receive_message(self, timeout=-1):
+    def __receive_message(self, timeout: float = -1):
         """
         blocking read from all the sockets (or from incoming message queue)
         returns (MultiplexerMessage, ConnectionWrapper)
         """
-        next = super(Client, self).read_message(timeout)
+        next = super(Client, self).read_raw_message(timeout)
         assert isinstance(next[0], bytes)
         mxmsg = parse_message(MultiplexerMessage, next[0])
         return (mxmsg, next[1])
@@ -235,16 +267,41 @@ class Client(_mxclient.Client):
         came through, seeds the lane."""
         return Lane(connection, pinned) if connection is not None else Lane(pinned)
 
+    @overload
     def query(
         self,
-        message,
-        type,
-        timeout=DEFAULT_TIMEOUT,
-        to=0,
-        probe=types.BACKEND_FOR_PACKET_SEARCH,
-        multiplexer=ONE,
-        with_connection=False,
-    ):
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: "int | Lane | ConnectionWrapper" = ...,
+        with_connection: Literal[False] = ...,
+    ) -> MultiplexerMessage: ...
+
+    @overload
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: "int | Lane | ConnectionWrapper" = ...,
+        *,
+        with_connection: Literal[True],
+    ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
+
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = DEFAULT_TIMEOUT,
+        to: int = 0,
+        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
+        multiplexer: "int | Lane | ConnectionWrapper" = ONE,
+        with_connection: bool = False,
+    ) -> "MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]":
         """Send a request and return its reply, a MultiplexerMessage.
 
         The request goes through one connection. If it comes back as a
@@ -460,6 +517,7 @@ class Client(_mxclient.Client):
             if not self.wait_for_any_connection(timeout_ticker()):
                 raise NotConnected()
             id, tracker = self.__send_message(message, timeout=timeout_ticker(), **kwargs)
+            assert isinstance(tracker, int)
 
         accept_ids = [id] + accept_ids
         while timeout_ticker.permit():
@@ -491,10 +549,11 @@ class Client(_mxclient.Client):
         mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
         while True:
             _, used = self.__send_one(mxmsg, timeout_ticker, preferred, lane)
+            assert used is not None, "__send_one returns a connection or raises"
             preferred = None
             accept_ids = [mxmsg.id] + accept_ids
             while timeout_ticker.permit():
-                got = self.read_message_watching(timeout_ticker(), used)
+                got = self.read_raw_message_watching(timeout_ticker(), used)
                 if got is None:
                     break  # the connection died: send again
                 mxmsg_in, connwrap = self.__parse_incoming(got)

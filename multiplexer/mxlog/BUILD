@@ -1,8 +1,15 @@
-# type_id_constants.txt is a list of NAME = int lines. It is used verbatim as a
-# Python module and turned into a C++ header by gen_type_id_constants.py.
+# type_id_constants.txt is a list of NAME = int lines. It is used verbatim as
+# the Python module //multiplexer:type_id_constants.py and turned into a C++
+# header, and the module's stub, by gen_type_id_constants.py.
+exports_files(
+    ["type_id_constants.txt"],
+    visibility = ["//multiplexer:__pkg__"],
+)
+
 py_binary(
     name = "gen_type_id_constants",
     srcs = ["gen_type_id_constants.py"],
+    visibility = ["//multiplexer:__pkg__"],
 )
 
 genrule(
@@ -13,23 +20,10 @@ genrule(
     tools = [":gen_type_id_constants"],
 )
 
-genrule(
-    name = "generate_py_type_id_constants",
-    srcs = ["type_id_constants.txt"],
-    outs = ["type_id_constants.py"],
-    cmd = "cp $< $@",
-)
-
 cc_library(
     name = "cc_type_id_constants",
     hdrs = [":generate_cc_type_id_constants"],
     visibility = ["//multiplexer:__pkg__"],
-)
-
-py_library(
-    name = "py_type_id_constants",
-    srcs = ["type_id_constants.py"],
-    imports = ["../.."],
 )
 
 py_library(
@@ -44,8 +38,8 @@ py_library(
     imports = ["../.."],
     visibility = ["//multiplexer:__pkg__"],
     deps = [
-        ":py_type_id_constants",
         "//multiplexer:_native",
+        "//multiplexer:py_type_id_constants",
         "//multiplexer:release",
         "//multiplexer/util:decorators",
     ],

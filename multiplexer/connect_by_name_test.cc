@@ -95,7 +95,8 @@ TEST(ConnectByName, EveryAddressOfANameIsTriedInTurn) {
 TEST(ConnectByName, TheSystemResolverAndLocalhost) {
   InProcessMultiplexer mx;
   ThreadedClient client(peers::PYTHON_TEST_CLIENT);
-  EXPECT_TRUE(client.connect("localhost", mx.port, 5)) << "whichever address localhost has first";
+  // A generous timeout: the system resolver in a test sandbox can be slow.
+  EXPECT_TRUE(client.connect("localhost", mx.port, 10)) << "whichever address localhost has first";
   client.shutdown();
 }
 

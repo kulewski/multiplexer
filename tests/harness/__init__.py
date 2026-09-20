@@ -11,9 +11,9 @@ import sys
 import unittest
 
 from multiplexer import testing
-from multiplexer.testing import *  # noqa: F401, F403  (the harness API, one import for scenarios)
-from multiplexer.testing import Config, Mx, Role, mx_runfile, output_dir, runfile  # noqa: F401
-from tests import testing_constants as constants  # noqa: F401  (peers, types)
+from multiplexer.testing import *  # the harness API, one import for scenarios
+from multiplexer.testing import Config, Mx, Role, mx_runfile, output_dir, runfile  # re-exported
+from tests import testing_constants as constants  # re-exported: peers, types
 
 CONFIG: Config | None = None
 

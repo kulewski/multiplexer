@@ -16,12 +16,9 @@ def _function_pretty_name(f: Callable, cls=None) -> str:
     if cls:
         nametokens.append(str(cls))
     else:
-        if (
-            getattr(f, "__module__", False)
-            and getattr(f.__module__, "__name__", False)
-            and f.__module__.__name__ != "__main__"
-        ):
-            nametokens.append(f.__module__.__name__)
+        module = getattr(f, "__module__", None)
+        if module and module != "__main__":
+            nametokens.append(module)
     nametokens.reverse()
     return ".".join(nametokens)
 
@@ -80,9 +77,9 @@ class Timer(object):
     """A stopwatch: restart(), timing(), report(); also a context manager."""
 
     id = 0
+    start: float  # set by restart(), from __init__
+    last: float
     name = None
-    start = None
-    last = None
 
     def __init__(self, name=None, silent=False):
         self.id = Timer.id
@@ -99,8 +96,6 @@ class Timer(object):
     def restart(self) -> None:
         """Set both the start and the last mark to now."""
         self.last = self.start = time.time()
-
-    start = restart
 
     def timing(self) -> tuple[float, float]:
         """(seconds since start, seconds since the last call); moves the last mark."""

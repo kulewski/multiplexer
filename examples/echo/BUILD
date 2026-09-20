@@ -81,15 +81,3 @@ mx_integration_test(
         "@mx//multiplexer:recording_py_proto",
     ],
 )
-
-# The same infrastructure from a plain py_test: Cluster() finds echo.rules
-# through the flag, without the macro.
-py_test(
-    name = "default_rules_test",
-    size = "small",
-    srcs = ["default_rules_test.py"],
-    deps = [
-        "@mx//multiplexer:multiplexer_constants",
-        "@mx//multiplexer/testing",
-    ],
-)

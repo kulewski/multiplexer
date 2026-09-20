@@ -9,7 +9,7 @@ import sys
 DOCS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(DOCS, "diagrams"))
 
-from pages import DIAGRAMS  # noqa: E402
+from pages import DIAGRAMS
 
 
 def main(argv: list[str]) -> int:

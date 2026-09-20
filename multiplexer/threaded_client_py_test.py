@@ -110,7 +110,7 @@ class ThreadedClientTest(unittest.TestCase):
             try:
                 client.query(b"%d" % index, type=types.PYTHON_TEST_REQUEST, timeout=5)
                 outcomes.put("replied")
-            except Exception as error:  # noqa: BLE001  the outcome is the point
+            except Exception as error:  # the outcome is the point
                 outcomes.put(type(error).__name__)
 
         threads = [threading.Thread(target=ask, args=(index,)) for index in range(20)]

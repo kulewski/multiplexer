@@ -53,6 +53,7 @@ class Request:
         self.mxmsg = mxmsg
         self.connection = connection
         self.answered = False
+        self.dropped = False  # the server said why; no warning from __del__
 
     @property
     def client(self) -> ThreadedClient:
@@ -110,7 +111,7 @@ class Request:
 
     def __del__(self) -> None:
         """A request nobody answered or declared answered: say so."""
-        if not self.answered and not getattr(self, "dropped", False):
+        if not self.answered and not self.dropped:
             log(
                 WARNING,
                 LOWVERBOSITY,
@@ -169,7 +170,7 @@ class BaseThreadedMultiplexerServer:
         self._threads = [
             threading.Thread(target=self._work, name="mx-worker-%d" % index, daemon=True) for index in range(workers)
         ]
-        self.client = ThreadedClient(
+        self._client: ThreadedClient | None = ThreadedClient(
             addresses,
             type,
             timeout,
@@ -181,6 +182,15 @@ class BaseThreadedMultiplexerServer:
             thread.start()
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
+
+    @property
+    def client(self) -> ThreadedClient:
+        """The ThreadedClient the server is built on, for messages that are
+        not replies; gone after close()."""
+        client = self._client
+        if client is None:
+            raise RuntimeError("the server is closed")
+        return client
 
     @property
     def instance_id(self) -> int:
@@ -237,7 +247,8 @@ class BaseThreadedMultiplexerServer:
         """Whether the drain is over and serve_forever() may return: by
         default the `drain_seconds` given to serve_forever() have passed
         since start_draining(). Override to wait for your own condition."""
-        return self.draining and time.time() - self._draining_since >= self._drain_seconds
+        since = self._draining_since
+        return since is not None and time.time() - since >= self._drain_seconds
 
     def stop(self) -> None:
         """Ask serve_forever() to return, from any thread: it finishes what
@@ -284,9 +295,9 @@ class BaseThreadedMultiplexerServer:
         for thread in self._threads:
             thread.join()
         self._threads = []
-        if self.client is not None:
-            self.client.shutdown()
-            self.client = None  # type: ignore[assignment]
+        if self._client is not None:
+            self._client.shutdown()
+            self._client = None
 
     def send_message(self, message: Any, **kwargs: Any) -> int:
         """A message that is not a reply, an event from a handler for
@@ -334,7 +345,7 @@ class BaseThreadedMultiplexerServer:
         """One request through handle_message(), with the exception rules of BaseMultiplexerServer."""
         try:
             self.handle_message(request)
-        except Exception as exc:  # noqa: BLE001  reported to the requester and to on_handler_exception()
+        except Exception as exc:  # reported to the requester and to on_handler_exception()
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % exc)
             if not request.answered:

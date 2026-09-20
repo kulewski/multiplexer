@@ -84,9 +84,12 @@ extension, then `make wheel` per CPython and `auditwheel`, which verifies
 that the wheel needs nothing from the system beyond what manylinux allows.
 `pip install multiplexer-<version>-cp312-manylinux_2_28_x86_64.whl` is
 then the whole installation; the package depends on `protobuf` from PyPI.
-The wheel includes `multiplexer.testing`, the test harness, with the
-example rules file it defaults to; a `Cluster` needs `MXCONTROL` in the
-environment pointing at a multiplexer binary, the static one for example.
+The wheel includes `multiplexer.testing`, the test harness; a `Cluster`
+names its rules file and needs `MXCONTROL` in the environment pointing at
+a multiplexer binary, the static one for example.
+The package is typed: a `py.typed` marker and a stub next to every
+generated module and the extension, so Pylance and pyright check code
+against it without any setup.
 
 ## Cutting a release
 

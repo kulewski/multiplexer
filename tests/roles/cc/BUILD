@@ -9,7 +9,7 @@ cc_library(
         "//lib:memory",
         "//lib:options",
         "//multiplexer:client",
-        "//multiplexer/testing:events_cc_proto",
+        "//multiplexer:events_cc_proto",
     ],
 )
 

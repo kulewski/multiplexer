@@ -101,8 +101,10 @@ mx_integration_test(
 `load("@mx//multiplexer/testing:defs.bzl", "mx_integration_test")`; there
 `rules` defaults to the file the `multiplexer_rules` flag names, the one
 your constants come from, and the scenario imports `multiplexer.testing`
-directly with its own constants. A `Cluster()` in a plain test of yours,
-outside the macro, runs with that same file.
+directly with its own constants. A `Cluster` in a plain test of yours,
+outside the macro, names its rules file, `Cluster(1,
+rules=runfile("your.rules"))`, with the file in the test's `data`; there
+is no default, so a test always says which rules it runs with.
 
 ## Playing a role with your own binary
 
@@ -116,7 +118,7 @@ role. The contract is the command line and the events:
   whatever `spawn(..., option=value)` adds, one `--option value` each (see
   `_argv` in `multiplexer/testing/__init__.py`). `--drain-file PATH` is
   passed only with `spawn(..., drain_file=True)`.
-- Events: one `Event` (`multiplexer/testing/events.proto`) per line of
+- Events: one `Event` (`multiplexer/events.proto`) per line of
   stdout in protocol buffer text format, `event: "connected" instance_id: 7
   connections: 1`, and any fields of the message. A line that is not an
   Event is kept as a `stdout` event. The harness waits for `connected`

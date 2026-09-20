@@ -27,13 +27,13 @@ a reply came through, preferred while it is live. docs/api_python.md,
 
 import pickle
 import socket
-from typing import Any, Callable, overload
+from typing import Any, Callable, Literal, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut, make_message
 from multiplexer.multiplexer_constants import types
-from multiplexer.protocolbuffers import *  # noqa: F401,F403  (MultiplexerMessage.from_)
+import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
 
 DEFAULT_TIMEOUT = _native.DEFAULT_TIMEOUT
 
@@ -75,17 +75,16 @@ class ThreadedClient:
         multiplexer.threaded_server builds on; without it only a search
         addressed to this instance is answered.
         """
-        native_callback = None
-        if on_message is not None:
 
-            def native_callback(raw: bytes, connection: Any) -> None:
-                """The C++ side's callback: parse and hand over."""
-                if with_connection:
-                    on_message(self._parse(raw), connection)
-                else:
-                    on_message(self._parse(raw))
+        def native_callback(raw: bytes, connection: Any) -> None:
+            """The C++ side's callback: parse and hand over."""
+            assert on_message is not None
+            if with_connection:
+                on_message(self._parse(raw), connection)
+            else:
+                on_message(self._parse(raw))
 
-        self._native = _native.ThreadedClient(type, native_callback)
+        self._native = _native.ThreadedClient(type, native_callback if on_message is not None else None)
         self.type = type
         if search_policy is not None:
             self._native.set_search_policy(search_policy)
@@ -197,14 +196,46 @@ class ThreadedClient:
         mxmsg.ParseFromString(raw)
         return mxmsg
 
-    QueryCallback = Callable[[Any], None]
-
-    @overload
-    def query(self, message: Any, type: int, timeout: float = ..., **kwargs: Any) -> MultiplexerMessage: ...
+    QueryCallback = Callable[[Any], object]  # the result is ignored, so a lambda that returns something is fine
 
     @overload
     def query(
-        self, message: Any, type: int, timeout: float = ..., *, callback: QueryCallback, **kwargs: Any
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        *,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: int | Lane | ConnectionWrapper = ...,
+        with_connection: Literal[False] = ...,
+    ) -> MultiplexerMessage: ...
+
+    @overload
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        *,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: int | Lane | ConnectionWrapper = ...,
+        with_connection: Literal[True],
+    ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
+
+    @overload
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        *,
+        callback: QueryCallback,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: int | Lane | ConnectionWrapper = ...,
+        with_connection: bool = ...,
     ) -> None: ...
 
     def query(
@@ -264,6 +295,7 @@ class ThreadedClient:
             if error is not None:
                 callback(error)
                 return
+            assert raw is not None, "a result without an error carries the reply"
             reply = self._parse(raw)
             if reply.type == types.BACKEND_ERROR:
                 callback(BackendError(reply.message))
@@ -278,7 +310,9 @@ class ThreadedClient:
     # between Python peers, and only where the network is trusted, since
     # unpickling runs code.
     @overload
-    def query_pickle(self, data: Any, type: int, timeout: float = ..., **kwargs: Any) -> Any: ...
+    def query_pickle(
+        self, data: Any, type: int, timeout: float = ..., *, callback: None = ..., **kwargs: Any
+    ) -> Any: ...
 
     @overload
     def query_pickle(

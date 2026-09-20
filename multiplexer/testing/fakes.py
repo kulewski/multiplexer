@@ -14,7 +14,7 @@ keep a test in one process where it can inspect everything.
 
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Generic, Protocol, TypeVar
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.clients import Client
@@ -31,7 +31,17 @@ Handler = Callable[[MultiplexerMessage], Any]
 Matcher = Callable[[MultiplexerMessage], bool]
 
 
-class BackendThread:
+class Served(Protocol):
+    """What BackendThread drives: serve_forever(poll=...) until stop()."""
+
+    def serve_forever(self, *, poll: float) -> None: ...
+    def stop(self) -> None: ...
+
+
+ServedT = TypeVar("ServedT", bound=Served)
+
+
+class BackendThread(Generic[ServedT]):
     """A backend served on its own thread.
 
     `factory` builds the backend, a BaseMultiplexerServer, on that thread,
@@ -42,10 +52,10 @@ class BackendThread:
     exception if there was one.
     """
 
-    def __init__(self, factory: Callable[[], BaseMultiplexerServer], poll: float = 0.05, name: str | None = None):
+    def __init__(self, factory: Callable[[], ServedT], poll: float = 0.05, name: str | None = None):
         self.factory = factory
         self.poll = poll
-        self.backend: BaseMultiplexerServer | None = None
+        self.backend: ServedT | None = None
         self.error: BaseException | None = None
         self._built = threading.Event()
         self._thread = threading.Thread(target=self._run, name=name or "mx-backend", daemon=True)
@@ -64,14 +74,14 @@ class BackendThread:
         """The thread: build, announce, serve, keep what went wrong."""
         try:
             self.backend = self.factory()
-        except BaseException as error:  # noqa: B902  (reported by start())
+        except BaseException as error:  # reported by start()
             self.error = error
             self._built.set()
             return
         self._built.set()
         try:
             self.backend.serve_forever(poll=self.poll)
-        except BaseException as error:  # noqa: B902  (reported by stop())
+        except BaseException as error:  # reported by stop()
             self.error = error
 
     @property
@@ -89,7 +99,7 @@ class BackendThread:
         if self.error is not None:
             raise self.error
 
-    def __enter__(self) -> "BackendThread":
+    def __enter__(self) -> "BackendThread[ServedT]":
         return self.start()
 
     def __exit__(self, *exc: object) -> None:
@@ -108,6 +118,7 @@ class _ScriptedBackend(BaseMultiplexerServer):
         """Record `mxmsg` and the multiplexer it came through, then reply as
         scripted or declare no response."""
         peer = self.peer
+        assert self.last_connwrap is not None
         via = peer.cluster.multiplexer_at(self.last_connwrap.endpoint)
         with peer._cond:
             peer.received.append(mxmsg)

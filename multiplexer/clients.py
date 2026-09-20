@@ -13,8 +13,11 @@ one C++ call when that level is off.
 """
 
 import pickle
-from typing import Any, Callable
+from typing import Any, Callable, Literal, overload
+
 from multiplexer import mxclient
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.mxclient import ConnectionWrapper, Lane
 
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
@@ -56,12 +59,52 @@ class BasicClient(mxclient.Client):
         self.__check_backend_error(mxmsg)
         return mxmsg, connwrap
 
+    @overload
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: int | Lane | ConnectionWrapper = ...,
+        with_connection: Literal[False] = ...,
+    ) -> MultiplexerMessage: ...
+
+    @overload
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = ...,
+        to: int = ...,
+        probe: int = ...,
+        multiplexer: int | Lane | ConnectionWrapper = ...,
+        *,
+        with_connection: Literal[True],
+    ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
+
     @log_call
-    def query(self, *args, **kwargs):
+    def query(
+        self,
+        message: Any,
+        type: int,
+        timeout: float = mxclient.DEFAULT_TIMEOUT,
+        to: int = 0,
+        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
+        multiplexer: int | Lane | ConnectionWrapper = mxclient.Client.ONE,
+        with_connection: bool = False,
+    ) -> MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]:
         """Like mxclient.Client.query, but a BACKEND_ERROR reply raises BackendError."""
-        result = super(BasicClient, self).query(*args, **kwargs)
-        self.__check_backend_error(result[0] if kwargs.get("with_connection") else result)
-        return result
+        if with_connection:
+            reply, connection = super(BasicClient, self).query(
+                message, type, timeout, to, probe, multiplexer, with_connection=True
+            )
+            self.__check_backend_error(reply)
+            return reply, connection
+        reply = super(BasicClient, self).query(message, type, timeout, to, probe, multiplexer)
+        self.__check_backend_error(reply)
+        return reply
 
     def __check_backend_error(self, mxmsg):
         """Raise BackendError if `mxmsg` is a BACKEND_ERROR reply."""

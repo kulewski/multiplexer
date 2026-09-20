@@ -22,6 +22,6 @@ workspace's rules file, and the test opens a `Cluster` of real multiplexers,
 scripts a `FakePeer` as the backend and asks it with a `TestClient`. Its
 other tests are the shapes a program's tests need most: a multiplexer
 restart under a live client, a raising handler seen as `BackendError`, and
-a recording read back. `default_rules_test.py` is the same from a plain
-`py_test`: `Cluster()` finds this workspace's rules through the flag. See
+a recording read back; each test names the rules file it runs with,
+`Cluster(1, rules=runfile("echo.rules"))`. See
 [docs/api_python.md](../../docs/api_python.md#testing).

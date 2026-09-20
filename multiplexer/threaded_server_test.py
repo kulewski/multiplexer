@@ -16,6 +16,9 @@ from multiplexer.mxclient import OperationTimedOut
 from multiplexer.testing import BackendThread, Cluster, TestClient, wait_until
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
+from multiplexer.testing import runfile
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
@@ -65,7 +68,7 @@ class ThreadedServerTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cluster = Cluster(1).__enter__()
+        cls.cluster = Cluster(1, rules=RULES).__enter__()
 
     @classmethod
     def tearDownClass(cls):

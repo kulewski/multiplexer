@@ -20,4 +20,4 @@ def _del_from(self):
     delattr(self, "from")
 
 
-MultiplexerMessage.from_ = property(_get_from, _set_from, _del_from)
+setattr(MultiplexerMessage, "from_", property(_get_from, _set_from, _del_from))

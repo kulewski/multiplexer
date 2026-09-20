@@ -107,7 +107,7 @@ class ForkTest(unittest.TestCase):
                 report.append("%s: returned" % name)
             except UsedAfterFork:
                 report.append("%s: UsedAfterFork" % name)
-            except Exception as error:  # noqa: BLE001  the outcome is the point
+            except Exception as error:  # the outcome is the point
                 report.append("%s: %s" % (name, type(error).__name__))
 
         try:
@@ -124,12 +124,12 @@ class ForkTest(unittest.TestCase):
             try:
                 fresh.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=5)
                 report.append("fresh: returned")
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 report.append("fresh: %s" % type(error).__name__)
             fresh.shutdown()
             os.write(write_end, "\n".join(report).encode())
             os._exit(0)
-        except BaseException as error:  # noqa: BLE001  the parent must see why the child died
+        except BaseException as error:  # the parent must see why the child died
             os.write(write_end, ("\n".join(report) + "\nchild failed: %r" % (error,)).encode())
             os._exit(1)
 

@@ -23,14 +23,32 @@ from multiplexer.util.decorators import (
 )
 
 from multiplexer._native import *
-from multiplexer.mxlog.type_id_constants import *
+from multiplexer.type_id_constants import *
 from multiplexer.release import version
 import multiplexer._native as _logging
 
 
-__all__ = ["should_log", "log", "log_call", "log_exception", "PickleData"] + list(
-    k for k in dir(_logging) if isinstance(k, str) and k.isupper()
-)
+# What `from multiplexer.mxlog import *` brings: the functions and the
+# level and verbosity constants, and nothing this module merely imports.
+__all__ = [
+    "should_log",
+    "log",
+    "do_log",
+    "log_call",
+    "log_exception",
+    "PickleData",
+    "DEBUG",
+    "INFO",
+    "OK",
+    "WARNING",
+    "ERROR",
+    "CRITICAL",
+    "ZEROVERBOSITY",
+    "LOWVERBOSITY",
+    "MEDIUMVERBOSITY",
+    "HIGHVERBOSITY",
+    "CHATTERBOX",
+]
 
 
 @never_throw(default=False)
@@ -55,11 +73,10 @@ log_defaults = {"version": version}
 
 
 @never_throw
-def do_log(level: int, verbosity: int, **kwargs) -> None:
+def do_log(level: int, verbosity: int, **kwargs: Any) -> None:
     """log() without the level check; adds the module-wide log_defaults."""
-    if log_defaults:
-        kwargs = dict(log_defaults, **kwargs)
-    return _do_log(level, verbosity, **kwargs)
+    fields: dict[str, Any] = dict(log_defaults, **kwargs) if log_defaults else kwargs
+    return _do_log(level, verbosity, **fields)
 
 
 class PickleData(object):

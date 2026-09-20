@@ -14,7 +14,10 @@ from multiplexer.aio import AsyncClient
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer, TestClient
+from multiplexer.testing import runfile
 from multiplexer.threaded_client import BackendError
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 
 class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
@@ -22,7 +25,7 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cluster = Cluster(1).__enter__()
+        cls.cluster = Cluster(1, rules=RULES).__enter__()
 
     @classmethod
     def tearDownClass(cls):
@@ -207,7 +210,7 @@ class HolderTest(unittest.TestCase):
     def test_aget_makes_one_client_off_the_loop(self):
         """Three concurrent first uses await one creation, the loop keeps
         turning meanwhile, and get() afterwards hands out the same client."""
-        with Cluster(1) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.reply_with(types.PYTHON_TEST_REQUEST, b"pong", types.PYTHON_TEST_RESPONSE)
             holder = AsyncClient.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
 
@@ -235,7 +238,7 @@ class HolderTest(unittest.TestCase):
                 holder.close()
 
     def test_the_holder_makes_one_client_per_process(self):
-        with Cluster(1) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.on(types.PYTHON_TEST_REQUEST, lambda m: m.message.upper(), types.PYTHON_TEST_RESPONSE)
             holder = AsyncClient.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
 
@@ -254,7 +257,7 @@ class HolderTest(unittest.TestCase):
                     assert child_reply == b"CHILD", child_reply
                     child_client.close()
                     os._exit(0)
-                except BaseException as error:  # noqa: BLE001  reported through the exit code
+                except BaseException as error:  # reported through the exit code
                     print("child failed:", repr(error), file=sys.stderr)
                     os._exit(1)
             _, status = os.waitpid(pid, 0)
@@ -284,7 +287,7 @@ class InterpreterExitTest(unittest.TestCase):
     """A program that exits with an AsyncClient alive exits cleanly."""
 
     def test_exit_with_a_live_client(self):
-        with Cluster(1) as cluster:
+        with Cluster(1, rules=RULES) as cluster:
             env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
             program = EXIT_PROBE % {"peer": peers.PYTHON_TEST_CLIENT, "request": types.PYTHON_TEST_RESPONSE}
             for _ in range(5):

@@ -125,8 +125,21 @@ examples, the sanitizer and analysis configurations. Those are Bazel's.
 
 Only for working on the repository, never for building it: `clang-format-18`,
 `black`, `buildifier` and `python3-yaml` for `./format.sh`; `clang-18` for
-the thread-safety analysis build (`--config=clang`); mermaid-cli, through
-`npx`, for the diagram check; Docker for [docker/check.sh](../docker/check.sh).
+the thread-safety analysis build (`--config=clang`); mermaid-cli and
+pyright, both through `npx`, for the diagram check and the type check;
+Docker for [docker/check.sh](../docker/check.sh). The type check reads the
+stubs of the generated modules from `bazel-bin` (`stubPath` in
+`pyproject.toml`), where the build writes them next to the modules, and
+the stub of the native extension from `bazel build
+//multiplexer:_native_pyi`, which Bazel makes with pybind11-stubgen fetched
+as a wheel; Pylance in VS Code reads the same configuration, so a fresh
+checkout type-checks after one build. `make` writes the same stubs into
+`build/`, and `make wheel` ships them with a `py.typed` marker; the
+extension's stub needs `pybind11-stubgen` importable by `PYTHON` there and
+is left out with no other consequence when it is not, and the stubs of
+the protocol buffer modules need a `protoc` of 3.20 or newer, which
+Ubuntu 22.04's 3.12 is not, so a package built there has none of those
+either.
 [AGENTS.md](../AGENTS.md) lists the commands.
 
 ## Checking on a clean machine

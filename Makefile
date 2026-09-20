@@ -31,6 +31,8 @@ GTEST_LIBS ?= -lgtest -lgtest_main
 GEN := $(BUILD)/gen
 OBJ := $(BUILD)/obj
 PY := $(BUILD)/python
+# _native.pyi needs pybind11-stubgen in $(PYTHON); without it the package has no stub for the extension.
+NATIVE_PYI := $(if $(shell $(PYTHON) -c "import pybind11_stubgen" 2>/dev/null && echo yes),$(PY)/multiplexer/_native.pyi,)
 
 ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread -DASIO_STANDALONE
 ALL_CPPFLAGS := -I. -I$(GEN) $(CPPFLAGS)
@@ -43,11 +45,18 @@ include make/sources.mk
 PROTO_CC := $(patsubst %.proto,$(GEN)/%.pb.cc,$(PROTOS))
 PROTO_H := $(PROTO_CC:.cc=.h)
 PROTO_PY := $(patsubst %.proto,$(GEN)/%_pb2.py,$(PROTOS))
+# protoc writes the stubs of the generated modules (--pyi_out) from 3.20 on;
+# an older one, Ubuntu 22.04's 3.12, builds the package without them.
+PROTOC_HAS_PYI := $(if $(shell printf '%s\n' 3.20 "$$($(PROTOC) --version | sed 's/.* //')" | sort -V | head -1 | grep -qx 3.20 && echo yes),yes,)
+PYI_OUT := $(if $(PROTOC_HAS_PYI),--pyi_out=$(GEN),)
+PROTO_PYI := $(if $(PROTOC_HAS_PYI),$(PROTO_PY:.py=.pyi),)
 CONSTANTS_H := $(GEN)/multiplexer/multiplexer.constants.h
 TYPE_IDS_H := $(GEN)/multiplexer/mxlog/type_id_constants.h
 GEN_H := $(PROTO_H) $(TYPE_IDS_H) $(CONSTANTS_H)
-GEN_PY := $(PROTO_PY) $(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multiplexer/mxlog/type_id_constants.py \
-          $(GEN)/multiplexer/testing/rules_path.py
+GEN_PY := $(PROTO_PY) $(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multiplexer/type_id_constants.py
+# The stubs type checkers read, one per generated module; the package
+# carries them with a py.typed marker (PEP 561).
+GEN_PYI := $(PROTO_PYI) $(GEN)/multiplexer/multiplexer_constants.pyi $(GEN)/multiplexer/type_id_constants.pyi
 
 LIB_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(LIB_SRCS)) $(patsubst $(GEN)/%.cc,$(OBJ)/%.o,$(PROTO_CC))
 MXCONTROL_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(MXCONTROL_SRCS))
@@ -63,9 +72,9 @@ GENERATE_CONSTANTS := $(BUILD)/bin/generate_constants
 # The Python package: the sources, the generated modules, the extension,
 # and __init__.py where Bazel needed none.
 PY_PACKAGE := $(patsubst %,$(PY)/%,$(PY_FILES)) $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PY)) \
+              $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PYI)) $(PY)/multiplexer/py.typed $(NATIVE_PYI) \
               $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py \
-              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so \
-              $(PY)/multiplexer/testing/multiplexer.rules
+              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so
 PY_TESTS := $(patsubst %,$(PY)/%,$(PY_TEST_FILES))
 
 .PHONY: all python check check-cc check-py wheel install clean
@@ -78,37 +87,45 @@ python: $(PY_PACKAGE)
 
 # Generated sources.
 
-$(GEN)/%.pb.cc $(GEN)/%.pb.h $(GEN)/%_pb2.py: %.proto
+$(GEN)/%.pb.cc $(GEN)/%.pb.h $(GEN)/%_pb2.py $(GEN)/%_pb2.pyi: %.proto
 	@mkdir -p $(GEN)
-	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $<
+	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<
+
+# multiplexer/protocolbuffers.py adds `from_`, the `from` field under a name Python allows.
+$(GEN)/multiplexer/Multiplexer_pb2.pyi: multiplexer/Multiplexer.proto
+	@mkdir -p $(GEN)
+	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<
+	sed -i 's/^class MultiplexerMessage(.*/&\n    from_: int/' $@
 
 $(TYPE_IDS_H): multiplexer/mxlog/type_id_constants.txt multiplexer/mxlog/gen_type_id_constants.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) multiplexer/mxlog/gen_type_id_constants.py $< $@
 
-$(GEN)/multiplexer/mxlog/type_id_constants.py: multiplexer/mxlog/type_id_constants.txt
+$(GEN)/multiplexer/type_id_constants.py: multiplexer/mxlog/type_id_constants.txt
 	@mkdir -p $(dir $@)
 	cp $< $@
+
+$(GEN)/multiplexer/type_id_constants.pyi: multiplexer/mxlog/type_id_constants.txt multiplexer/mxlog/gen_type_id_constants.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) multiplexer/mxlog/gen_type_id_constants.py $< $@
 
 $(CONSTANTS_H): $(RULES) $(GENERATE_CONSTANTS)
 	@mkdir -p $(dir $@)
 	$(GENERATE_CONSTANTS) $< $@
 
-$(GEN)/multiplexer/multiplexer_constants.py: $(RULES) $(GENERATE_CONSTANTS)
+$(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multiplexer/multiplexer_constants.pyi: $(RULES) $(GENERATE_CONSTANTS)
 	@mkdir -p $(dir $@)
 	$(GENERATE_CONSTANTS) $< $@
 
-# The test harness's default rules file travels with the package, next to
-# this module, so that a wheel works wherever it is installed.
-$(GEN)/multiplexer/testing/rules_path.py: $(RULES)
+$(PY)/multiplexer/py.typed:
 	@mkdir -p $(dir $@)
-	@echo '"""Generated: the rules file this build used, shipped next to this module."""' > $@
-	@echo 'import os' >> $@
-	@echo 'RULES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "multiplexer.rules")' >> $@
+	@touch $@
 
-$(PY)/multiplexer/testing/multiplexer.rules: $(RULES)
-	@mkdir -p $(dir $@)
-	cp $< $@
+# The stub of the extension, from the built module with pybind11-stubgen
+# (tools/native_stub.py); built when that tool is importable, as it is where
+# the wheels are made, and skipped with a note otherwise.
+$(PY)/multiplexer/_native.pyi: $(PY)/multiplexer/_native.so tools/native_stub.py
+	$(PYTHON) tools/native_stub.py $< $@
 
 # Objects. Every object of the library and the tool waits for the
 # generated headers it may include; the tool's own objects only for the
@@ -157,6 +174,10 @@ $(PY)/%.py: %.py
 	cp $< $@
 
 $(PY)/%.py: $(GEN)/%.py
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(PY)/%.pyi: $(GEN)/%.pyi
 	@mkdir -p $(dir $@)
 	cp $< $@
 

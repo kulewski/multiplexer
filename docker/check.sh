@@ -18,7 +18,11 @@ docker info > /dev/null 2>&1 || docker=(sudo docker)
 
 context="$(mktemp -d)"
 trap 'rm -rf "$context"' EXIT
-git ls-files -z --cached --others --exclude-standard | tar --null -T - -c | tar -x -C "$context"
+# Tracked and new files that exist: a file deleted but not yet committed is
+# still listed, and would fail the tar.
+git ls-files -z --cached --others --exclude-standard \
+  | while IFS= read -r -d '' path; do [[ -e "$path" ]] && printf '%s\0' "$path"; done \
+  | tar --null -T - -c | tar -x -C "$context"
 
 for which in bazel make; do
   [[ "$path" == all || "$path" == "$which" ]] || continue

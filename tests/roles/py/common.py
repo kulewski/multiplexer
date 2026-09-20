@@ -8,17 +8,17 @@ from typing import Any
 
 from google.protobuf import text_format
 
-from multiplexer import clients  # noqa: F401  (re-exported for roles)
-from multiplexer import servers  # noqa: F401  (re-exported for roles)
-from multiplexer import threaded_client  # noqa: F401  (re-exported for roles)
-from multiplexer.testing import events_pb2
-from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut  # noqa: F401
+from multiplexer import clients  # re-exported for roles
+from multiplexer import servers  # re-exported for roles
+from multiplexer import threaded_client  # re-exported for roles
+from multiplexer import events_pb2
+from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut  # re-exported for roles
 
 STOP = threading.Event()
 
 
 def emit(event: str, **fields: Any) -> None:
-    """Print one Event (multiplexer/testing/events.proto) as a line of protocol
+    """Print one Event (multiplexer/events.proto) as a line of protocol
     buffer text format on stdout, for the harness."""
     message = events_pb2.Event(event=event, **fields)
     sys.stdout.write(text_format.MessageToString(message, as_one_line=True) + "\n")

@@ -36,9 +36,8 @@ from typing import Any, Iterator
 
 from multiplexer.mxclient import OperationTimedOut
 
-from google.protobuf.internal.decoder import _DecodeVarint
 
-from multiplexer.Recording_pb2 import (  # noqa: F401  (the reserved numbers, re-exported)
+from multiplexer.Recording_pb2 import (  # the reserved numbers, re-exported
     RECORDING_CONTROL,
     RECORDING_CONTROLLER,
     RECORDING_RECORD,
@@ -56,6 +55,20 @@ class RulesMismatch(Exception):
     """The recording was made with a rules file other than the one the constants come from."""
 
 
+def _decode_varint(data: bytes, position: int) -> tuple[int, int]:
+    """The base-128 varint at `position`: (value, position after it), as the
+    length prefix of every record in a recording is written."""
+    result = 0
+    shift = 0
+    while True:
+        byte = data[position]
+        position += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, position
+        shift += 7
+
+
 def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
     """Yield every Record in the file, in order. With `check_rules`, the
     first record's rules fingerprint must match RULES_FINGERPRINT of `constants`, the
@@ -65,7 +78,7 @@ def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -
     position = 0
     first = True
     while position < len(data):
-        size, position = _DecodeVarint(data, position)
+        size, position = _decode_varint(data, position)
         record = Record()
         record.ParseFromString(data[position : position + size])
         position += size
@@ -181,7 +194,7 @@ def involves_peer(record: Record, peer_id: int) -> bool:
 # multiplexer the client is connected to, one RecordingStatus back from each.
 
 
-def control(client, action: int, timeout: float = 5.0, **fields: Any) -> list[RecordingStatus]:
+def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **fields: Any) -> list[RecordingStatus]:
     """Send a RecordingControl with `action` and `fields` on every
     connection of `client` and return the statuses that came back within
     `timeout`, one per multiplexer; fewer when one did not answer. Raises

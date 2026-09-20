@@ -42,7 +42,7 @@ mkdir -p "$out"
 for tag in "${pythons[@]}"; do
   python="$(ls -d /opt/python/${tag}-${tag}*/bin/python | head -1)"
   echo "== $tag: $python"
-  "$python" -m pip install -q pybind11 "protobuf>=4.21,<5" setuptools wheel auditwheel
+  "$python" -m pip install -q pybind11 pybind11-stubgen "protobuf>=4.21,<5" setuptools wheel auditwheel
   rm -rf build/python build/obj/multiplexer/_native.o build/wheel
   make -j"$(nproc)" wheel PYTHON="$python" > /dev/null
   "$python" -m auditwheel repair -w "$out" build/dist/multiplexer-*-linux_x86_64.whl > /dev/null

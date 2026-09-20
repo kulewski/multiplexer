@@ -13,7 +13,10 @@ docker info > /dev/null 2>&1 || docker=(sudo docker)
 
 context="$(mktemp -d)"
 trap 'rm -rf "$context"' EXIT
-git ls-files -z --cached --others --exclude-standard | tar --null -T - -c | tar -x -C "$context"
+# Tracked and new files that exist; a file deleted but not committed is still listed.
+git ls-files -z --cached --others --exclude-standard \
+  | while IFS= read -r -d '' path; do [[ -e "$path" ]] && printf '%s\0' "$path"; done \
+  | tar --null -T - -c | tar -x -C "$context"
 mkdir -p build/dist
 
 for base in "${releases[@]}"; do

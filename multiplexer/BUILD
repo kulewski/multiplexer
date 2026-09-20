@@ -41,6 +41,86 @@ genrule(
     tools = [":generate_constants"],
 )
 
+# The stub of the native extension for type checkers, from the built module;
+# manual because it needs the PyPI tool in tools/BUILD:
+#   bazel build //multiplexer:_native_pyi
+genrule(
+    name = "_native_pyi",
+    srcs = [":_native.so"],
+    outs = ["_native.pyi"],
+    cmd = "$(location //tools:native_stub) $(location :_native.so) $@",
+    tags = ["manual"],
+    tools = ["//tools:native_stub"],
+)
+
+# The type ids of log entries, from //multiplexer/mxlog:type_id_constants.txt:
+# the text is the Python module verbatim; the stub and the C++ header come
+# from the generator. The module lives here rather than in mxlog so that a
+# type checker finds its source in bazel-bin: this package has no
+# __init__.py and merges across roots, a regular package does not.
+genrule(
+    name = "generate_py_type_id_constants",
+    srcs = ["//multiplexer/mxlog:type_id_constants.txt"],
+    outs = ["type_id_constants.py"],
+    cmd = "cp $< $@",
+)
+
+genrule(
+    name = "generate_pyi_type_id_constants",
+    srcs = ["//multiplexer/mxlog:type_id_constants.txt"],
+    outs = ["type_id_constants.pyi"],
+    cmd = "$(location //multiplexer/mxlog:gen_type_id_constants) $< $@",
+    tools = ["//multiplexer/mxlog:gen_type_id_constants"],
+)
+
+py_library(
+    name = "py_type_id_constants",
+    srcs = ["type_id_constants.py"],
+    imports = [".."],
+    visibility = ["//multiplexer/mxlog:__pkg__"],
+)
+
+# The Event message the test roles report with, in both languages; here for
+# the same reason as the type ids above.
+genrule(
+    name = "events_proto",
+    srcs = ["events.proto"],
+    outs = [
+        "events.pb.cc",
+        "events.pb.h",
+        "events_pb2.py",
+        "events_pb2.pyi",
+    ],
+    cmd = "root=$(location events.proto); root=$${root%multiplexer/events.proto}; root=$${root%/}; " +
+          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS)",
+    tools = ["//:protoc"],
+)
+
+cc_library(
+    name = "events_cc_proto",
+    srcs = ["events.pb.cc"],
+    hdrs = ["events.pb.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//:protobuf_runtime"],
+)
+
+py_library(
+    name = "events_py_proto",
+    srcs = ["events_pb2.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
+# The stubs type checkers read; bazel-bin is the stubPath in pyproject.toml,
+# so they are found wherever the checker runs after a build.
+genrule(
+    name = "generate_pyi_multiplexer_constants",
+    srcs = ["//:multiplexer_rules"],
+    outs = ["multiplexer_constants.pyi"],
+    cmd = "$(location :generate_constants) $< $@",
+    tools = [":generate_constants"],
+)
+
 cc_library(
     name = "multiplexer_cc_constants",
     hdrs = [":generate_cc_multiplexer_constants"],
@@ -64,12 +144,15 @@ genrule(
         "Multiplexer.pb.cc",
         "Multiplexer.pb.h",
         "Multiplexer_pb2.py",
+        "Multiplexer_pb2.pyi",
     ],
     # The include root and the output root are this repository's root, which
     # is "." when we are the main workspace and "external/mx" when we are
     # consumed as @mx; both are derived from where this package sits.
     cmd = "root=$(location Multiplexer.proto); root=$${root%multiplexer/Multiplexer.proto}; root=$${root%/}; " +
-          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. $(SRCS)",
+          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS) && " +
+          # multiplexer/protocolbuffers.py adds `from_`, the `from` field under a name Python allows.
+          "sed -i 's/^class MultiplexerMessage(.*/&\\n    from_: int/' $(location Multiplexer_pb2.pyi)",
     tools = ["//:protoc"],
 )
 
@@ -80,9 +163,10 @@ genrule(
         "Recording.pb.cc",
         "Recording.pb.h",
         "Recording_pb2.py",
+        "Recording_pb2.pyi",
     ],
     cmd = "root=$(location Recording.proto); root=$${root%multiplexer/Recording.proto}; root=$${root%/}; " +
-          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. $(SRCS)",
+          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS)",
     tools = ["//:protoc"],
 )
 

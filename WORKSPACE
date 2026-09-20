@@ -69,3 +69,14 @@ oci_pull(
     digest = "sha256:52dcfbabb7457ea47c82f6e13af8c8a4a1d9f7b0145142b3ecab20f2b888411d",
     image = "gcr.io/distroless/static-debian12",
 )
+
+# pybind11-stubgen, the stub generator for the native extension (tools/BUILD):
+# a pure-Python wheel, unpacked as a py_library, for this workspace's own
+# checks only, like the rest of this section.
+http_archive(
+    name = "pybind11_stubgen_wheel",  # not "pybind11_stubgen": a repository named like the package would shadow it
+    build_file = "//bazel:pybind11_stubgen.BUILD",
+    sha256 = "10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd",
+    type = "zip",
+    url = "https://files.pythonhosted.org/packages/4f/e4/4f2d41881fae547f06ffa4c9748fa8ed13c4db5c830ff268b84175546b3c/pybind11_stubgen-2.5.5-py3-none-any.whl",
+)

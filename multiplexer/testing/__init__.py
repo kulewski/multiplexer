@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable
 
 from google.protobuf import text_format
 
-from multiplexer.testing import events_pb2
+from multiplexer import events_pb2
 
 Event = dict[str, Any]
 
@@ -344,22 +344,14 @@ class Mx:
         return samples
 
 
-def default_rules() -> str:
-    """The rules file a Cluster uses when given none: the one the BUILD file
-    named (mx_integration_test's `rules`), else the file the
-    multiplexer_rules flag names, which is the one the generated constants
-    come from, in this workspace or in one that consumes @mx."""
-    if CONFIG is not None and CONFIG.rules:
-        return CONFIG.rules
-    from multiplexer.testing import rules_path  # generated at build time
-
-    return runfile(rules_path.RULES)
-
-
 class Cluster:
-    """`count` independent multiplexers with the same rules file. Use as a
-    context manager: entering starts them, leaving stops every role that is
-    still running and then the multiplexers."""
+    """`count` independent multiplexers with the same rules file, which the
+    test names: `rules` is a path, `runfile("multiplexer.rules")` under
+    Bazel for a file in the test's data, and it must be the file the
+    peers' constants were generated from. A scenario under
+    mx_integration_test may leave it out: the rule's `rules` attribute
+    names it. Use as a context manager: entering starts the multiplexers,
+    leaving stops every role that is still running and then them."""
 
     _counter = 0
 
@@ -372,7 +364,12 @@ class Cluster:
         record_payload_bytes: int = 0,
         remote_recording: bool = False,
     ):
-        rules = rules or default_rules()
+        if rules is None:
+            if CONFIG is None or not CONFIG.rules:
+                raise ValueError(
+                    'Cluster needs its rules file: rules=runfile("your.rules"), the file the constants came from'
+                )
+            rules = CONFIG.rules
         # With remote_recording every multiplexer accepts recording sessions
         # and taps from peers; the sessions of all of them land in one
         # directory, as they would on a volume replicas share. One
@@ -786,5 +783,5 @@ def main() -> None:
 
 # The in-process peers, re-exported so that a test imports everything from
 # multiplexer.testing; fakes.py needs Cluster and wait_until, defined above.
-from multiplexer.testing.fakes import BackendThread, FakePeer, TestClient, ThreadedTestClient  # noqa: E402
-from multiplexer.testing.raw_peer import RawPeer  # noqa: E402
+from multiplexer.testing.fakes import BackendThread, FakePeer, TestClient, ThreadedTestClient
+from multiplexer.testing.raw_peer import RawPeer

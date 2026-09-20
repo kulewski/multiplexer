@@ -27,4 +27,4 @@ COPY . /work
 CMD make -j"$(nproc)" all check wheel \
     && python3 -m venv --system-site-packages /venv \
     && /venv/bin/pip install -q build/dist/*.whl \
-    && MXCONTROL=/work/build/bin/mxcontrol /venv/bin/python make/wheel_smoke.py
+    && MXCONTROL=/work/build/bin/mxcontrol /venv/bin/python make/wheel_smoke.py /work/multiplexer.rules

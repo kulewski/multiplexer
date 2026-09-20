@@ -13,7 +13,7 @@ import sys
 from google.protobuf import text_format
 
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import events_pb2
+from multiplexer import events_pb2
 from tests.testing_constants import types
 
 

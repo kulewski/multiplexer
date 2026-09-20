@@ -32,7 +32,7 @@ import inspect
 import os
 import pickle
 import threading
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.multiplexer_constants import types
@@ -261,11 +261,11 @@ class AsyncClient:
         for handler in handlers:
             try:
                 result = handler(mxmsg)
-            except Exception as error:  # noqa: BLE001  one handler's failure is not the others'
+            except Exception as error:  # one handler's failure is not the others'
                 self._handler_failed(handler, mxmsg, error)
                 continue
             if inspect.isawaitable(result):
-                task = self._loop.create_task(result)
+                task = asyncio.ensure_future(result, loop=self._loop)
                 task.add_done_callback(lambda done, handler=handler, mxmsg=mxmsg: self._task_done(done, handler, mxmsg))
         if self._queue is not None:
             if self._queue.full():
@@ -339,7 +339,9 @@ class MessageStream:
 class Holder:
     """One AsyncClient per process; see AsyncClient.holder()."""
 
-    def __init__(self, cls: type, type: int, addresses: Any, **kwargs: Any):
+    def __init__(
+        self, cls: type, type: int, addresses: Sequence[Endpoint] | Callable[[], Sequence[Endpoint]], **kwargs: Any
+    ):
         self._cls, self._type, self._addresses, self._kwargs = cls, type, addresses, kwargs
         self._client: AsyncClient | None = None
         self._creating: asyncio.Future | None = None  # aget() in progress, for the callers behind it
@@ -359,10 +361,12 @@ class Holder:
         """The process's client, made on the first call, on the running loop.
         Making it connects, which blocks the loop for the handshakes; a
         first use that must not do that awaits aget() instead."""
-        if self._client is None or self._pid != os.getpid():
-            self._client = self._cls(self._addresses_now(), self._type, **self._kwargs)
+        client = self._client
+        if client is None or self._pid != os.getpid():
+            client = self._cls(self._addresses_now(), self._type, **self._kwargs)
+            self._client = client
             self._pid = os.getpid()
-        return self._client
+        return client
 
     async def aget(self) -> AsyncClient:
         """The process's client, made in the default executor on the first

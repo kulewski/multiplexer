@@ -15,6 +15,9 @@ import unittest
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer, TestClient
+from multiplexer.testing import runfile
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
@@ -33,7 +36,7 @@ class AddressedQueryTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cluster = Cluster(2).__enter__()
+        cls.cluster = Cluster(2, rules=RULES).__enter__()
 
     @classmethod
     def tearDownClass(cls):
@@ -95,7 +98,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
         """The request went through a multiplexer that is killed while the
         fake is still working on it: the reply comes anyway, through the
         other multiplexer."""
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:
@@ -125,7 +128,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
         """The addressee is behind one multiplexer only while the client is
         on both: the request through the wrong one comes back as a delivery
         error, the probe finds the right one, and the reply comes."""
-        with Cluster(2) as cluster:
+        with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
@@ -142,7 +145,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
     def test_a_draining_addressee_answers_a_ping_probe_only(self):
         """A draining backend declines the default probe, so the query times
         out; probe=PING reaches it, for a request that must land even then."""
-        with Cluster(2) as cluster:
+        with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
@@ -175,7 +178,7 @@ class LaneTest(unittest.TestCase):
     moves or, pinned, fails."""
 
     def test_a_lane_keeps_a_stream_on_one_multiplexer_and_follows_a_failover(self):
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 for index in range(20):
@@ -214,7 +217,7 @@ class LaneTest(unittest.TestCase):
                 client.shutdown()
 
     def test_a_pinned_lane_fails_instead_of_following(self):
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:
@@ -238,7 +241,7 @@ class LaneTest(unittest.TestCase):
                 client.shutdown()
 
     def test_a_pinned_lane_refuses_an_addressee_behind_the_other_multiplexer(self):
-        with Cluster(2) as cluster:
+        with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
@@ -260,7 +263,7 @@ class LaneTest(unittest.TestCase):
                 peer.stop()
 
     def test_a_typed_query_leaves_the_lane_where_the_answer_came_from(self):
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:
@@ -281,7 +284,7 @@ class LaneTest(unittest.TestCase):
         """A pinned lane seeded with the connection a reply came through
         sends and queries that way and fails once it is gone; the bare
         connection prefers that way and falls back, as a reply does."""
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.on(REQUEST, answer, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:

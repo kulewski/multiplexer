@@ -13,6 +13,9 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationFailed, OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient, ThreadedTestClient, wait_until
+from multiplexer.testing import runfile
+
+RULES = runfile("multiplexer.rules")  # the file the constants were generated from
 
 
 class FakePeerTest(unittest.TestCase):
@@ -20,7 +23,7 @@ class FakePeerTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cluster = Cluster(1).__enter__()
+        cls.cluster = Cluster(1, rules=RULES).__enter__()
 
     @classmethod
     def tearDownClass(cls):
@@ -149,7 +152,7 @@ class ThreadedTestClientTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cluster = Cluster(1).__enter__()
+        cls.cluster = Cluster(1, rules=RULES).__enter__()
 
     @classmethod
     def tearDownClass(cls):
@@ -215,7 +218,7 @@ class SendAfterRestartTest(unittest.TestCase):
         """Two multiplexers; one restarts while the client is idle. Both of
         the client's next two sends arrive: the dead connection is noticed
         when a connection is chosen, not after a write into it succeeded."""
-        with Cluster(2) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 client.send(b"warm-up", types.PYTHON_TEST_REQUEST)
@@ -234,7 +237,7 @@ class SendAfterRestartTest(unittest.TestCase):
     def test_with_one_multiplexer_the_send_waits_for_the_reconnect(self):
         """The only multiplexer restarted: the send notices, waits for the
         client's reconnect timer, and the message arrives."""
-        with Cluster(1) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 client.send(b"warm-up", types.PYTHON_TEST_REQUEST)
@@ -252,7 +255,7 @@ class SendAfterRestartTest(unittest.TestCase):
         """MxClient hands out the same Client after a multiplexer restart;
         the client reconnects inside the next call, within the reconnect
         delay, and the query goes through."""
-        with Cluster(1) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.reply_with(types.PYTHON_TEST_REQUEST, b"pong", types.PYTHON_TEST_RESPONSE)
             holder = MxClient(peers.WEBSITE, lambda: cluster.endpoints)
             try:
@@ -287,7 +290,7 @@ class BackendThreadTest(unittest.TestCase):
     def test_serves_until_stopped(self):
         """The factory runs on the serving thread; start() returns with the
         backend connected; stop() returns once the loop has left."""
-        with Cluster(1) as cluster:
+        with Cluster(1, rules=RULES) as cluster:
             served = BackendThread(lambda: Upper(cluster.endpoints)).start()
             cluster.wait_for_peer("PYTHON_TEST_SERVER")
             with TestClient(cluster, peers.WEBSITE) as client:

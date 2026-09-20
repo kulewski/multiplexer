@@ -13,6 +13,9 @@ from multiplexer.Recording_pb2 import RoutedMessage
 from multiplexer.clients import BackendError
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.testing import Cluster, FakePeer, TestClient
+from multiplexer.testing import runfile
+
+RULES = runfile("echo.rules")  # the file the constants were generated from
 
 
 class HarnessTest(unittest.TestCase):
@@ -20,7 +23,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_fake_backend_answers_the_client(self):
         with (
-            Cluster(1) as cluster,
+            Cluster(1, rules=RULES) as cluster,
             FakePeer(cluster, peers.ECHO_BACKEND) as backend,
             TestClient(cluster, peers.ECHO_CLIENT) as client,
         ):
@@ -41,7 +44,7 @@ class HarnessTest(unittest.TestCase):
         a program. The client is a synchronous one, so it reconnects inside
         the call, within the library's reconnect delay."""
         with (
-            Cluster(1) as cluster,
+            Cluster(1, rules=RULES) as cluster,
             FakePeer(cluster, peers.ECHO_BACKEND) as backend,
             TestClient(cluster, peers.ECHO_CLIENT) as client,
         ):
@@ -57,7 +60,7 @@ class HarnessTest(unittest.TestCase):
         """A backend that raises answers BACKEND_ERROR, which the client
         library raises as BackendError; the fake fails the test at stop(),
         so it is stopped explicitly here to look at the exception."""
-        with Cluster(1) as cluster, TestClient(cluster, peers.ECHO_CLIENT) as client:
+        with Cluster(1, rules=RULES) as cluster, TestClient(cluster, peers.ECHO_CLIENT) as client:
             backend = FakePeer(cluster, peers.ECHO_BACKEND).start()
             backend.on(types.ECHO_REQUEST, lambda mxmsg: {}[mxmsg.message])
             with self.assertRaises(BackendError):
@@ -68,7 +71,7 @@ class HarnessTest(unittest.TestCase):
     def test_a_recording_read_back(self):
         """Cluster(record=True) records what was routed; once the
         multiplexer stopped, the file says who sent what to whom."""
-        with Cluster(1, record=True) as cluster:
+        with Cluster(1, rules=RULES, record=True) as cluster:
             with FakePeer(cluster, peers.ECHO_BACKEND) as backend, TestClient(cluster, peers.ECHO_CLIENT) as client:
                 backend.reply_with(types.ECHO_REQUEST, b"pong", types.ECHO_RESPONSE)
                 client.query(b"ping", types.ECHO_REQUEST)

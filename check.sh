@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Everything CI should run, in the order that fails fastest:
-#   formatting and generated docs, every Mermaid block rendered, the fast
-#   tests, the clang thread-safety analysis, ThreadSanitizer on the C++ unit
-#   tests, the example workspaces.
+#   formatting and generated docs, every Mermaid block rendered, the Python
+#   package type-checked, the fast tests, the clang thread-safety analysis,
+#   ThreadSanitizer on the C++ unit tests, the example workspaces.
 # The slow scenarios (heartbeat intervals, restarts, soak) are `bazel test //...`.
 #
 # ./check.sh --leaks runs the scenarios and unit tests under AddressSanitizer
@@ -31,4 +31,11 @@ bazel test --test_tag_filters=-slow //...
 bazel build --config=clang //...
 bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
 ./examples/test_all.sh
+# Type checking last, after a build in the default configuration: pyright
+# reads the stubs from bazel-bin (pyproject.toml), and that symlink follows
+# the most recent build, which the clang and tsan steps above move away
+# from the configuration that holds them. This leaves it where an editor
+# expects it too.
+bazel build //... //multiplexer:_native_pyi
+npx --yes pyright@1.1.414               # through npx, as the Mermaid check runs its tool
 echo "check: everything passed"
