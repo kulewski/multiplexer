@@ -12,7 +12,9 @@ import re
 from setuptools import find_packages, setup
 from setuptools.dist import Distribution
 
-VERSION = "@VERSION@"
+# The release workflow passes the tag, v2.3.0; setuptools normalises that
+# to 2.3.0 for the wheel, and the links below want the same, with one v.
+VERSION = "@VERSION@".lstrip("v")
 REPOSITORY = "https://github.com/kulewski/multiplexer"
 
 
