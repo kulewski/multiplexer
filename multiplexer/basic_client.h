@@ -23,6 +23,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -613,6 +614,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   unsigned int incoming_queue_max_size_;
 
   ConnectionByTarget connection_by_target_;
+  std::set<TimerPointer> reconnect_timers_;  // armed by lost connections; shutdown() cancels them
   const unsigned int fork_generation_at_creation_;
   asio::ip::tcp::resolver resolver_;
   Resolver resolver_hook_;

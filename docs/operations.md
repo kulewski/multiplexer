@@ -156,10 +156,14 @@ handler runs only between iterations and a C++ library in the same process
 can replace it; a pure C++ backend may set a flag from a handler of its
 own. With that, a rolling restart of backends costs nobody a timeout, as
 the [backend_drains](../tests/scenarios/backend_drains/README.md) scenario
-checks. What the drain cannot avoid: the multiplexer keeps routing
-`whom: ANY` requests to a draining backend until it disconnects, so the
-drain must be long enough to answer them, and a backend that dies without
-draining still costs its clients a timeout.
+checks. The multiplexer keeps routing `whom: ANY` requests to a draining
+backend until it disconnects, so the drain must be long enough to answer
+them; a threaded backend refuses what still arrives once it is closing,
+with `DELIVERY_ERROR`, so those cost their clients a retry rather than a
+timeout, while a `BaseMultiplexerServer` loses what arrived after its
+last read. A backend that dies without draining costs its clients a
+timeout per request it held. [How a backend leaves](leaving.md) draws the
+three phases.
 
 ## Debug symbols
 

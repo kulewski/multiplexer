@@ -4,6 +4,7 @@
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "multiplexer/Multiplexer.pb.h"
 #include "multiplexer/multiplexer.constants.h"
 
 namespace multiplexer {
@@ -52,7 +53,9 @@ void Request::notify_start() {
 
 BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                                              const Options& options)
-    : options_(options), client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
+    : options_(options),
+      type_(type),
+      client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
   if (options_.workers < 1) {
     throw std::invalid_argument("workers must be at least 1");
   }
@@ -99,6 +102,7 @@ void BaseThreadedMultiplexerServer::close() {
   if (closed_.exchange(true)) {
     return;
   }
+  start_draining();  // no search answered from here on
   {
     mx::MutexLock lock(mutex_);
     accepting_ = false;
@@ -146,10 +150,13 @@ bool BaseThreadedMultiplexerServer::should_respond_to_backend_for_packet_search(
   return true;
 }
 
-// The io thread: queue the message for a worker, or drop it when the
-// queue is full, as a full queue on the multiplexer drops.
+// The io thread: queue the message for a worker; drop it when the queue
+// is full, as a full queue on the multiplexer drops; refuse it when
+// leaving, with the DELIVERY_ERROR a multiplexer sends for a peer that is
+// gone, so that a query retries elsewhere at once.
 void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming) {
   RequestPtr request(new Request(&client_, incoming));
+  bool accepting;
   {
     mx::MutexLock lock(mutex_);
     if (accepting_ && queue_.size() < options_.queue_size) {
@@ -157,12 +164,25 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
       cond_.notify_one();
       return;
     }
-    request->dropped_ = true;
+    accepting = accepting_;
     ++dropped_;
-    MX_LOG(WARNING, LOWVERBOSITY,
-           CTX("BaseThreadedMultiplexerServer")
-               TEXT("request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type()) +
-                    " dropped: " + (accepting_ ? "queue full" : "leaving")));
+  }
+  request->dropped_ = true;  // said below, not by the destructor
+  const std::string what = "request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type());
+  if (accepting) {
+    MX_LOG(WARNING, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
+    return;
+  }
+  MX_LOG(DEBUG, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " refused: leaving"));
+  // A rule reports delivery errors unless told not to, and so does this; a
+  // sender that set the message's own flag to false hears nothing.
+  const MultiplexerMessage& msg = *incoming.third;
+  const bool wanted = !msg.has_report_delivery_error() || msg.report_delivery_error();
+  if (wanted && msg.type() > types::MAX_MULTIPLEXER_META_PACKET) {
+    DeliveryError error;
+    error.set_packet_id(incoming.third->id());
+    error.add_failed_type(type_);
+    request->reply(error.SerializeAsString(), types::DELIVERY_ERROR);
   }
 }
 

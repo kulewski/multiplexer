@@ -27,10 +27,10 @@ import time
 import traceback
 from typing import Any, Callable
 
-from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxclient import ConnectionWrapper, parse_message
-from multiplexer.mxlog import ERROR, LOWVERBOSITY, WARNING, log
+from multiplexer.mxlog import DEBUG, ERROR, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
 
@@ -142,10 +142,12 @@ class BaseThreadedMultiplexerServer:
         type `type` and start `workers` handler threads. `queue_size`
         bounds the requests waiting for a worker; beyond it a request is
         dropped with a warning, as a full queue on the multiplexer drops,
-        and the requester retries through the search. With
-        `decline_searches_when_full`, a client's search for a backend is
-        left unanswered while every worker is busy and requests wait, so
-        the retry lands on another instance."""
+        and the requester retries through the search. A request that
+        arrives while the server is leaving (close() under way) is
+        refused with DELIVERY_ERROR instead, so the requester retries at
+        once. With `decline_searches_when_full`, a client's search for a
+        backend is left unanswered while every worker is busy and
+        requests wait, so the retry lands on another instance."""
         if type is None:
             type = self.multiplexer_client_type
             if type is None:
@@ -259,7 +261,7 @@ class BaseThreadedMultiplexerServer:
     @property
     def pending(self) -> int:
         """Requests waiting for a worker plus those being handled; `dropped`
-        counts the ones a full queue refused."""
+        counts the ones a full queue dropped or leaving refused."""
         with self._cond:
             return len(self._queue) + self._busy
 
@@ -284,11 +286,15 @@ class BaseThreadedMultiplexerServer:
 
     def close(self) -> None:
         """Take no more messages, let the workers finish what is queued,
-        stop them and close the connections. Safe to call twice. Joins the
-        workers, so from a handler, on a worker, it raises RuntimeError:
-        a handler that wants the server gone calls stop()."""
+        stop them and close the connections. From here on no search is
+        answered, and a request that still arrives, routed before the
+        multiplexer saw the connection go, is refused with DELIVERY_ERROR,
+        so that its requester retries elsewhere at once. Safe to call
+        twice. Joins the workers, so from a handler, on a worker, it raises
+        RuntimeError: a handler that wants the server gone calls stop()."""
         if threading.current_thread() in self._threads:
             raise RuntimeError("close() called from a worker thread, which it would join; call stop() instead")
+        self.start_draining()
         with self._cond:
             self._accepting = False
             self._cond.notify_all()
@@ -307,22 +313,29 @@ class BaseThreadedMultiplexerServer:
     # The io thread's side and the workers' side of the queue.
 
     def _on_message(self, mxmsg: MultiplexerMessage, connection: ConnectionWrapper) -> None:
-        """The io thread: queue the message for a worker, or drop it when the queue is full."""
+        """The io thread: queue the message for a worker; drop it when the
+        queue is full, as a full queue on the multiplexer drops; refuse it
+        when leaving, with the DELIVERY_ERROR a multiplexer sends for a
+        peer that is gone, so that a query retries elsewhere at once."""
         request = Request(self, mxmsg, connection)
         with self._cond:
             if self._accepting and len(self._queue) < self.queue_size:
                 self._queue.append(request)
                 self._cond.notify()
                 return
-        request.dropped = True  # the warning below says it, not __del__
-        with self._cond:
+            accepting = self._accepting
             self.dropped += 1
-        log(
-            WARNING,
-            LOWVERBOSITY,
-            text="request #%d of type %d dropped: %s"
-            % (mxmsg.id, mxmsg.type, "queue full" if self._accepting else "leaving"),
-        )
+        request.dropped = True  # said below, not by __del__
+        if accepting:
+            log(WARNING, LOWVERBOSITY, text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type))
+            return
+        log(DEBUG, LOWVERBOSITY, text="request #%d of type %d refused: leaving" % (mxmsg.id, mxmsg.type))
+        # A rule reports delivery errors unless told not to, and so does this;
+        # a sender that set the message's own flag to false hears nothing.
+        wanted = not mxmsg.HasField("report_delivery_error") or mxmsg.report_delivery_error
+        if wanted and mxmsg.type > types.MAX_MULTIPLEXER_META_PACKET:
+            error = DeliveryError(packet_id=mxmsg.id, failed_type=[self.type])
+            request.reply(error, type=types.DELIVERY_ERROR)
 
     def _work(self) -> None:
         """A worker: take the next request, handle it, report what the handler raised."""

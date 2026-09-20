@@ -266,7 +266,8 @@ find a backend, so no retried request is sent to it, and keeps serving the
 requests the multiplexer still routes to it. `serve_forever()` returns once
 `drained()`, by default `drain_seconds` after the drain started; override
 `drained()` to wait for a condition of your own, keeping the deadline with
-`super().drained() and ...` or not. Overriding
+`super().drained() and ...` or not. [How a backend leaves](leaving.md)
+draws the phases and what each costs a caller. Overriding
 `should_respond_to_backend_for_packet_search()` puts any other condition
 behind the search. Together with clients that retry through the search,
 this makes a rolling restart of backends invisible;
@@ -335,6 +336,10 @@ through it, rather than through `self`.
   incoming queue and the multiplexer's per-connection queue hold; beyond
   it a request is dropped with a warning, as a full queue on the
   multiplexer drops, and the requester's retry goes through the search.
+  A request that arrives while the server is leaving, `close()` under
+  way after `serve_forever()` returned, is refused with `DELIVERY_ERROR`,
+  the multiplexer's own answer for a peer that is gone, so the
+  requester's retry starts at once rather than after its timeout.
 - `handle_message(request)` runs on a worker with every message that is
   not the protocol's own. `request.mxmsg` is the message and
   `request.connection` the connection it came on. `request.reply(message,
@@ -373,8 +378,8 @@ through it, rather than through `self`.
   workers, so from a handler it raises `RuntimeError` rather than join
   itself; a handler that wants the server gone calls `stop()`. `pending`
   is the number of requests waiting or being handled, `dropped` the
-  number a full queue refused; `instance_id` what a client addresses
-  with `to`.
+  number a full queue dropped or leaving refused; `instance_id` what a
+  client addresses with `to`.
 - A handler may call the blocking `query()` and a flushing `send_message()`
   on `self.client`, since it is not on the io thread, which is the point.
   `BackendThread` from `multiplexer.testing` serves this class too.

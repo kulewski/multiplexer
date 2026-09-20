@@ -115,6 +115,7 @@ void ThreadedClient::_io_thread_main() {
   for (;;) {
     try {
       io_service_.run();
+      MX_LOG(DEBUG, HIGHVERBOSITY, CTX("ThreadedClient") TEXT("io thread done"));
       return;
     } catch (const std::exception& e) {
       MX_LOG(ERROR, LOWVERBOSITY,
@@ -553,6 +554,9 @@ void ThreadedClient::shutdown() {
   _post([this] {
     MX_DCHECK_RUN_ON(&io_thread_);
     shut_down_ = true;
+    MX_LOG(DEBUG, HIGHVERBOSITY,
+           CTX("ThreadedClient") TEXT("shutting down: " + repr(in_flight_.size()) + " queries in flight, " +
+                                      repr(pending_sends_.size()) + " sends pending"));
     std::vector<InFlightPtr> pending = in_flight_;
     for (auto& in_flight : pending) {
       if (in_flight->callback) {
@@ -567,6 +571,8 @@ void ThreadedClient::shutdown() {
     pending_sends_.clear();
     basic_client_->shutdown();
     work_.reset();
+    MX_LOG(DEBUG, HIGHVERBOSITY,
+           CTX("ThreadedClient") TEXT("shut down; the io thread ends when its handlers are done"));
   });
   thread_.join();
 }

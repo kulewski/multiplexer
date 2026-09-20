@@ -93,6 +93,13 @@ that changes.
   multiplexer. Which reconnect lands first is chance, since both are
   scheduled 3 s after the drop. Run two multiplexers if a restart must be
   invisible; the `threaded_mx_restarts` scenario records both cases.
+- **A backend leaves.** A threaded backend that is closing, at the end of
+  its drain or on `close()`, answers a request that still reaches it with
+  a delivery error, as a multiplexer answers for a peer that is gone, so
+  the client searches and repeats the request elsewhere at once; the
+  leaving backend declines the search. A plain `BaseMultiplexerServer`
+  loses what arrived after its last read, which costs the client a
+  timeout. [How a backend leaves](leaving.md) draws it.
 - **A backend hangs without dying.** Its connection stays registered as long
   as its library still runs the loop and answers heartbeats, so it keeps
   receiving its share of round-robin requests, which time out. A

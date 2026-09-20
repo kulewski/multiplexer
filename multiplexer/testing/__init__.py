@@ -220,9 +220,13 @@ class Mx:
 
     def start(self, timeout: float = 15) -> "Mx":
         """Start the process and wait until it has written its port file, so
-        that `address` names the port it actually listens on."""
+        that `address` names the port it actually listens on. A peers file
+        from an earlier run goes first: a restarted multiplexer has no peers
+        until they reconnect, and a wait must not read the old list."""
         if os.path.exists(self.port_file):
             os.unlink(self.port_file)
+        if os.path.exists(self.peers_file):
+            os.unlink(self.peers_file)
         if self.record and os.path.exists(self.record_file):
             os.unlink(self.record_file)  # a previous test's recording; the file is appended to
         command = [

@@ -1,7 +1,8 @@
 // BaseThreadedMultiplexerServer against a Server in this process: serial
 // order with one worker, four requests at once with four, a reply from
 // another thread later, the search answered while busy unless told to
-// decline, a full queue dropping, a handler that throws, draining.
+// decline, a full queue dropping, a handler that throws, draining, a
+// request refused while leaving.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -129,8 +130,10 @@ struct Requester {
   std::uint32_t search(float timeout) {
     multiplexer::BackendForPacketSearch search;
     search.set_packet_type(multiplexer::types::PYTHON_TEST_REQUEST);
-    multiplexer::MultiplexerMessage msg =
-        message(search.SerializeAsString(), multiplexer::types::BACKEND_FOR_PACKET_SEARCH);
+    return answer_to(message(search.SerializeAsString(), multiplexer::types::BACKEND_FOR_PACKET_SEARCH), timeout);
+  }
+  // `msg` sent as it is, and the type of the first message referencing it.
+  std::uint32_t answer_to(const multiplexer::MultiplexerMessage& msg, float timeout) {
     client.flush(client.schedule_one(msg), 5);
     for (;;) {
       multiplexer::IncomingMessage got = client.read_raw_message(timeout);
@@ -225,7 +228,9 @@ TEST(ThreadedServer, TheSearchIsAnsweredWhileBusyUnlessToldToDecline) {
   Served served(mx.port, options);
   Requester requester(mx.port);
   requester.send("block");
-  ASSERT_TRUE(eventually([&] { return served.server.pending() == 1; }));
+  // In the handler, not merely queued: a queued request with the worker
+  // still on its way to it is "nothing waiting" too, and answered.
+  ASSERT_TRUE(eventually([&] { return served.server.snapshot().size() == 1; })) << "the worker in the handler";
   EXPECT_EQ(multiplexer::types::PING, requester.search(5)) << "busy but nothing waiting: answered";
   requester.send("event-queued");
   ASSERT_TRUE(eventually([&] { return served.server.pending() == 2; }));
@@ -279,6 +284,27 @@ TEST(ThreadedServer, CloseFromAHandlerIsAnErrorNotADeadlock) {
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
   EXPECT_NE(std::string::npos, reply.third->message().find("worker thread"));
   EXPECT_EQ("STILL", requester.query("still")) << "still serving";
+}
+
+// close() with the worker still busy: a request that arrives then is
+// answered with DELIVERY_ERROR, the multiplexer's own "nobody there", so
+// a query retries through the search at once instead of waiting out its
+// timeout; the search is declined too.
+TEST(ThreadedServer, ARequestArrivingWhileLeavingIsRefusedAtOnce) {
+  InProcessMultiplexer mx;
+  Scripted server(mx.port);
+  Requester requester(mx.port);
+  requester.send("block");
+  ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
+  std::thread closing([&] { server.close(); });
+  ASSERT_TRUE(eventually([&] { return server.draining(); }));
+  EXPECT_EQ(multiplexer::types::DELIVERY_ERROR,
+            requester.answer_to(requester.message("late", multiplexer::types::PYTHON_TEST_REQUEST), 5));
+  EXPECT_THROW(requester.search(1), multiplexer::Client::OperationTimedOut);
+  server.release();
+  closing.join();
+  EXPECT_EQ((std::vector<std::string>{"block"}), server.snapshot());
+  EXPECT_EQ(1u, server.dropped());
 }
 
 TEST(ThreadedServer, DrainingDeclinesSearchesAndFinishesTheQueue) {

@@ -170,6 +170,8 @@ Each page is one fixed picture whose arrows light up one step at a time.
   direct addressing, delivery errors.
 - [Connecting to a multiplexer](handshake.md): the welcome handshake, the
   heartbeats that keep connections alive, and reconnecting after a restart.
+- [How a backend leaves](leaving.md): a drain then the close, a stop without
+  a drain, a kill, and what each costs the callers.
 
 ## Reference
 

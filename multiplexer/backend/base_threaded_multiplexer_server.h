@@ -9,7 +9,10 @@
 // the search clients use to find a backend, and hands every other message
 // to a bounded queue that `workers` threads take from. With one worker
 // handling is serial, in arrival order, as on BaseMultiplexerServer, and
-// the peer stays registered under a request of any length.
+// the peer stays registered under a request of any length. A request that
+// arrives while the server is leaving, routed before the multiplexer saw
+// the connection go, is refused with DELIVERY_ERROR, so its requester
+// retries elsewhere at once rather than after its timeout.
 //
 // The handler is handle_message(request): a Request carries the message
 // and everything needed to answer it, held by shared_ptr so that a handler
@@ -113,9 +116,11 @@ class BaseThreadedMultiplexerServer {
   // threw when on_handler_exception() returned false.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
   // Take no more messages, let the workers finish what is queued, stop
-  // them and close the connections. Idempotent; the destructor calls it.
-  // Joins the workers, so from a handler, on a worker, it throws
-  // std::logic_error: a handler that wants the server gone calls stop().
+  // them and close the connections. From here on no search is answered
+  // and what still arrives is refused with DELIVERY_ERROR. Idempotent;
+  // the destructor calls it. Joins the workers, so from a handler, on a
+  // worker, it throws std::logic_error: a handler that wants the server
+  // gone calls stop().
   void close();
 
   // Draining, as on BaseMultiplexerServer: stop answering searches, keep
@@ -125,7 +130,7 @@ class BaseThreadedMultiplexerServer {
   // Ask serve_forever() to return, from any thread.
   void stop();
   // Requests waiting for a worker plus those being handled, and the
-  // number a full queue refused.
+  // number dropped by a full queue or refused while leaving.
   std::size_t pending() const;
   std::size_t dropped() const { return dropped_.load(); }
 
@@ -160,6 +165,7 @@ class BaseThreadedMultiplexerServer {
   void _handle(const RequestPtr& request);
 
   const Options options_;
+  const PeerType type_;
   mutable mx::Mutex mutex_;
   std::condition_variable_any cond_;
   std::deque<RequestPtr> queue_ MX_GUARDED_BY(mutex_);

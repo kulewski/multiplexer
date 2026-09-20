@@ -336,3 +336,31 @@ TEST(ThreadedClient, AQueryReleasesItsLaneWhenItEnds) {
   }
   EXPECT_TRUE(weak.expired()) << "the query released it";
 }
+
+// A connection lost seconds before shutdown() arms a reconnect timer; the
+// timer firing after the shutdown must not open a connection that nobody
+// closes, which kept the io thread alive and the peer registered.
+TEST(ThreadedClient, ShutdownRightAfterALostConnectionReturns) {
+  InProcessMultiplexer first;
+  std::unique_ptr<InProcessMultiplexer> second(new InProcessMultiplexer());
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
+  ASSERT_TRUE(client.connect("127.0.0.1", second->port, 5));
+  unsigned short lost_port = second->port;
+  second.reset();  // gone; the client's reconnect timer is now pending
+  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (client.connections_count() != 1 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(1u, client.connections_count());
+  second.reset(new InProcessMultiplexer(lost_port));  // back on the same port, so the reconnect would succeed
+  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+  client.shutdown();
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2)) << "shutdown waited for the io thread";
+  // No connection arrives at the multiplexer that came back: the timer was
+  // cancelled by the shutdown. The count is read on the server's own thread.
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+  std::promise<unsigned int> peers;
+  second->io_service.post([&] { peers.set_value(second->server->connections_count(true)); });
+  EXPECT_EQ(0u, peers.get_future().get()) << "a reconnect after shutdown";
+}

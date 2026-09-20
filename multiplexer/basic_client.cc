@@ -96,6 +96,15 @@ void BasicClient::shutdown() {
   MX_DCHECK_RUN_ON(&owner_thread());
   shuts_down_ = true;
   resolver_.cancel();
+  MX_LOG(DEBUG, HIGHVERBOSITY,
+         CTX("BasicClient")
+             TEXT("shutdown: " + repr(connection_by_target_.size()) + " target(s), " + repr(connection_by_id_.size()) +
+                  " registered, " + repr(reconnect_timers_.size()) + " reconnect(s) pending"));
+  // A reconnect armed by a connection lost before this call would open a
+  // connection nobody closes, and keep the loop running until it fired.
+  for (const TimerPointer& timer : reconnect_timers_) {
+    timer->cancel();
+  }
   for (ConnectionByTarget::iterator next = connection_by_target_.begin(), entry;
        next != connection_by_target_.end() && (entry = next++, true);) {
     if (Connection::pointer conn = entry->second.lock()) {
@@ -132,13 +141,21 @@ void BasicClient::connection_destroyed(Connection* conn) {
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
                                    target.first + ":" + repr(target.second)));
     TimerPointer timer(new Timer(io_service_, std::chrono::seconds(AUTO_RECONNECT_TIME)));
+    reconnect_timers_.insert(timer);
     timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code& error) {
       self->reconnect_after_timeout(timer, target, error);
     });
   }
 }
 
-void BasicClient::reconnect_after_timeout(TimerPointer, Target target, const asio::error_code& error) {
+void BasicClient::reconnect_after_timeout(TimerPointer timer, Target target, const asio::error_code& error) {
+  reconnect_timers_.erase(timer);
+  if (shuts_down_) {
+    // Cancelled by shutdown(), or armed just before it and fired after: a
+    // connection opened now would outlive the shutdown, keep a threaded
+    // client's io thread from ending, and leave the peer registered.
+    return;
+  }
   if (!error) {
     if (connection_by_target_.find(target) == connection_by_target_.end()) {
       async_connect(target.first, target.second);

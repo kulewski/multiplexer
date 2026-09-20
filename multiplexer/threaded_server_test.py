@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 
-from multiplexer.Multiplexer_pb2 import BackendForPacketSearch
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
@@ -144,7 +144,9 @@ class ThreadedServerTest(unittest.TestCase):
         _, server = self.serve(decline_searches_when_full=True)
         with TestClient(self.cluster, peers.WEBSITE) as client:
             client.send(b"block", REQUEST)
-            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+            # In the handler, not merely queued: a queued request with the
+            # worker still on its way to it is "nothing waiting" too.
+            wait_until(lambda: server.handled == [b"block"], 10, "the worker in the handler")
             self.assertEqual(types.PING, self.search(client.client, 5).type, "busy but nothing waiting: answered")
             client.send(b"event-queued", REQUEST)
             wait_until(lambda: server.pending == 2, 10, "one request waiting")
@@ -194,6 +196,31 @@ class ThreadedServerTest(unittest.TestCase):
             server.release.set()
             served.stop()
         self.assertEqual([b"block", b"event-0", b"event-1", b"event-2"], server.handled, "the queue was finished")
+        self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
+
+    def test_a_request_arriving_while_leaving_is_refused_at_once(self):
+        """close() with the worker still busy: a request that arrives then
+        is answered with DELIVERY_ERROR, the multiplexer's own "nobody
+        there", so a query retries through the search at once instead of
+        waiting out its timeout; the search is declined too."""
+        served, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"block", REQUEST)
+            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+            closing = threading.Thread(target=server.close)
+            closing.start()
+            wait_until(lambda: server.draining, 10, "close() under way")
+            message = client.client.new_message(message=b"late", type=REQUEST)
+            reply = client.client.send_and_receive(message, timeout=5)[0]
+            self.assertEqual(types.DELIVERY_ERROR, reply.type, "refused, not dropped")
+            self.assertEqual(message.id, reply.references)
+            self.assertEqual(message.id, DeliveryError.FromString(reply.message).packet_id)
+            with self.assertRaises(OperationTimedOut):
+                self.search(client.client, 1.0)
+            server.release.set()
+            closing.join()
+        self.assertEqual([b"block"], server.handled)
+        self.assertEqual(1, server.dropped)
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
 
     def test_close_from_a_handler_is_an_error_not_a_deadlock(self):

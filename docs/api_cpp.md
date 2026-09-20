@@ -187,7 +187,8 @@ when asked to leave: the backend stops answering the search clients use to
 find a backend, so no retried request is sent to it, while it keeps serving
 what the multiplexer still routes to it. `serve_forever` returns once the
 virtual `drained()` says so, by default `drain_seconds` after the drain
-started; override it to wait for a condition of your own. Overriding
+started; override it to wait for a condition of your own.
+[How a backend leaves](leaving.md) draws the phases and what each costs. Overriding
 `should_respond_to_backend_for_packet_search()` puts another condition
 behind the search. The library installs no signal handlers; a handler of
 your own must only set a `sig_atomic_t` that `periodic_task()` reads, as
@@ -245,7 +246,9 @@ Echo(addresses, options).serve_forever();
 
 - `ThreadedServerOptions`: `workers` (1), `queue_size` (1024, the requests
   waiting for a worker; beyond it a request is dropped with a warning, as
-  the multiplexer's full queue drops), `decline_searches_when_full`
+  the multiplexer's full queue drops; one arriving while the server is
+  leaving is refused with `DELIVERY_ERROR`, so its requester retries at
+  once), `decline_searches_when_full`
   (false: searches are answered while the backend serves; true leaves
   them unanswered while every worker is busy and requests wait) and
   `connect_timeout`.

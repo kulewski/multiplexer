@@ -27,6 +27,7 @@ Vocabulary used everywhere: a peer is a client (keeps control, sends requests or
 - [Sending an event](docs/events.md)
 - [How the multiplexer routes a message](docs/routing.md)
 - [Connecting to a multiplexer](docs/handshake.md)
+- [How a backend leaves](docs/leaving.md): draining, closing, dying, and what each costs a caller
 
 ## Reference
 
