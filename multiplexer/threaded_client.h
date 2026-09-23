@@ -98,13 +98,28 @@ class ThreadedClient : public ExceptionDefinitions {
   // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
   // by type or addressed to this instance, is answered with a PING when
   // `answer()` returns true (on the io thread, so it must be quick) and
-  // dropped otherwise, the way BaseMultiplexerServer declines while it
-  // drains. Without a policy the client is no backend: it answers only a
-  // search addressed to it and drops the rest. Call before connecting.
+  // dropped otherwise, the way a saturated backend declines with
+  // decline_searches_when_full. Without a policy the client is no
+  // backend: it answers only a search addressed to it and drops the rest.
+  // Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
   // How host names become addresses; for tests. See BasicClient::Resolver.
   void set_resolver(BasicClient::Resolver resolver);
+
+  // Which of a multiplexer's routing paths reach this peer, told to every
+  // multiplexer and carried in every welcome from now on; see
+  // BasicClient::set_routing. A backend draining sets `any` and `all` off.
+  // From any thread; in effect on the io thread right after.
+  void set_routing(const Routing& routing);
+  // Whether every connected multiplexer has the current routing in effect;
+  // see BasicClient::routing_acknowledged. Not from the io thread.
+  bool routing_acknowledged();
+  // Waits until every connection has written what is queued on it, or
+  // `timeout` seconds; true when everything went out. What a backend
+  // calls before shutdown(), so that its last replies are not cut with
+  // the sockets. Not from the io thread.
+  bool flush_all(float timeout);
 
   std::uint64_t instance_id() const { return instance_id_; }
   std::uint32_t peer_type() const { return peer_type_; }
@@ -206,6 +221,8 @@ class ThreadedClient : public ExceptionDefinitions {
   auto _call(F function) -> decltype(function());
 
   void _on_incoming(const BasicClient::IncomingMessagesBuffer::value_type& incoming) MX_RUN_ON(io_thread_);
+  void _flush_poll(std::shared_ptr<std::promise<bool>> done, std::chrono::steady_clock::time_point deadline,
+                   std::shared_ptr<asio::steady_timer> timer) MX_RUN_ON(io_thread_);
   void _on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
 
   void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);

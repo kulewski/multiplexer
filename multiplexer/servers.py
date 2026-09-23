@@ -18,7 +18,7 @@ import traceback
 from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedException  # re-exported
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
-from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.mxclient import ConnectionWrapper, OperationTimedOut, parse_message
 
 
@@ -80,6 +80,18 @@ class MultiplexerPeer(object):
             self.conn.connect((host, port))
 
 
+# How long close() waits for the last replies to be written before it
+# closes the sockets; a peer that stopped reading cannot hold it longer.
+CLOSE_FLUSH_SECONDS = 1.0
+
+
+def nothing_more_arrives(routing: Routing) -> bool:
+    """Whether a drain with this routing may end as soon as the
+    multiplexers confirmed it: every path by the rules is off and the
+    peer is no last resort, so only addressed messages can still come."""
+    return not (routing.any or routing.all or routing.last_resort)
+
+
 class BaseMultiplexerServer(MultiplexerPeer):
     """Base class for a backend: subclass, implement handle_message(), call
     serve_forever().
@@ -102,8 +114,14 @@ class BaseMultiplexerServer(MultiplexerPeer):
     _start_time = None
 
     @log_call
-    def __init__(self, addresses, type=None):
-        """A backend of peer type `type` for the multiplexers in `addresses`; connect() or serve_forever() connects."""
+    def __init__(self, addresses, type=None, drain_routing: Routing | None = None):
+        """A backend of peer type `type` for the multiplexers in `addresses`;
+        connect() or serve_forever() connects. `drain_routing` is what the
+        backend tells the multiplexers when it starts draining: by default
+        `Routing(any=False, all=False)`, nothing new by the rules, only
+        what is addressed to it; `Routing(any=False)` keeps events coming,
+        `Routing(any=False, all=False, last_resort=True)` keeps a lone
+        backend serving through its drain."""
         super(BaseMultiplexerServer, self).__init__(addresses, type)
         self.working = True
         self.last_mxmsg: MultiplexerMessage | None = None
@@ -111,14 +129,15 @@ class BaseMultiplexerServer(MultiplexerPeer):
         self._start_time = time.time()
         self._draining_since = None
         self._drain_seconds = 0.0
+        self.drain_routing = drain_routing if drain_routing is not None else Routing(any=False, all=False)
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
 
-    # Draining: a backend about to exit stops answering the search clients
-    # use to find a backend, so that no retried request is sent to it, while
-    # it keeps serving what the multiplexer still routes to it. Once
-    # drained() it exits; the requests it was handling are finished, the
-    # ones that reach it later fail over through the search.
+    # Draining: a backend about to exit tells every multiplexer to route it
+    # nothing new by the rules (`drain_routing`), so that no request and
+    # no search is sent to it, while it serves what still arrives. Once
+    # drained() it exits: by default once every multiplexer has confirmed
+    # the routing, or after drain_seconds at the latest.
 
     @property
     def draining(self) -> bool:
@@ -126,23 +145,35 @@ class BaseMultiplexerServer(MultiplexerPeer):
         return self._draining_since is not None
 
     def start_draining(self) -> None:
-        """Stop answering backend searches; keep serving what arrives until drained()."""
+        """Tell every multiplexer the `drain_routing`, nothing new by the
+        rules by default; keep serving what arrives until drained()."""
         if self._draining_since is None:
             self._draining_since = time.time()
+            self.conn.set_routing(self.drain_routing)
 
     def drained(self) -> bool:
         """Whether the drain is over and serve_forever() may return; checked
-        after every iteration while draining. Default: the `drain_seconds`
-        given to serve_forever() have passed since start_draining(). Override
-        to wait for your own condition, for example
+        after every iteration while draining, so between two messages.
+        Default: the `drain_seconds` given to serve_forever() have passed
+        since start_draining(), or, when the drain routing turns every
+        path off and asks for no last resort, every connected multiplexer
+        has confirmed it, so nothing more is on its way; a drain that
+        keeps a path open lasts the whole period, since work keeps
+        arriving. Override to wait for your own condition, for example
         `super().drained() and not self.in_flight`."""
         since = self._draining_since
-        return since is not None and time.time() - since >= self._drain_seconds
+        if since is None:
+            return False
+        if time.time() - since >= self._drain_seconds:
+            return True
+        return nothing_more_arrives(self.drain_routing) and self.conn.routing_acknowledged()
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
-        """Whether to answer a client's search for a backend; override for
-        your own condition. False while draining."""
-        return not self.draining
+        """Whether to answer a client's search for a backend; True unless
+        overridden for a condition of your own. A draining backend needs
+        no policy here: the multiplexers stop offering it (its
+        drain_routing), which is the better mechanism."""
+        return True
 
     def stop(self) -> None:
         """Ask serve_forever() to return, from any thread: it notices within
@@ -201,6 +232,15 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     self.periodic_task()
                     if stall_seconds is not None:
                         faulthandler.cancel_dump_traceback_later()
+            # A drain serves what was already on its way: the requests the
+            # client had read off the sockets when the drain ended are
+            # handled before the connections close, whether the drain ended
+            # on the confirmation or on its cap.
+            while self.draining and self.working and self.conn.has_incoming_messages():
+                try:
+                    self.loop_iter(timeout=0)
+                except OperationTimedOut:
+                    break
         finally:
             self.close()
 
@@ -221,7 +261,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
             if self.should_respond_to_backend_for_packet_search():
                 self.send_message(message="", embed=True, flush=True, type=types.PING)
             else:
-                self.no_response()  # draining: let the client find another backend
+                self.no_response()  # the policy declines: let the client find another backend
 
         elif mxmsg.type == types.PING:
             if not mxmsg.references:
@@ -357,7 +397,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
     @log_call
     def close(self):
-        """Close every connection; the server cannot be used afterwards. Safe to call twice."""
+        """Write what is still queued, up to a second, then close every
+        connection; the server cannot be used afterwards. Safe to call twice."""
+        self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
         self.conn.shutdown()  # idempotent, so a second close() is harmless
 
 

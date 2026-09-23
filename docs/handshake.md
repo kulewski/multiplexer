@@ -40,7 +40,7 @@ graph LR
 
 ### 2. The peer introduces itself
 
-A `WelcomeMessage` carries the peer's type, which must exist in the multiplexer's rules file, and its instance id, a random 64-bit number the peer chose. The multiplexer registers the connection under both.
+A `WelcomeMessage` carries the peer's type, which must exist in the multiplexer's rules file, and its instance id, a random 64-bit number the peer chose. The multiplexer registers the connection under both. It may also carry a `Routing`, which rule-routed paths reach the peer; a backend reconnecting during its drain sends one that turns them off, and the multiplexer applies it before the connection can be routed to ([how a backend leaves](leaving.md)).
 
 ```mermaid
 graph LR

@@ -170,12 +170,17 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
         )
     if kind == "peer":
         peer = record.peer
-        return "%s peer %s id=%d type=%s" % (
+        line = "%s peer %s id=%d type=%s" % (
             when,
             PeerEvent.Kind.Name(peer.kind),
             peer.peer_id,
             peer_name(peer.peer_type, constants),
         )
+        if peer.kind == PeerEvent.ROUTING:
+            line += " any=%s all=%s last_resort=%s" % tuple(
+                "yes" if flag else "no" for flag in (peer.any, peer.all, peer.last_resort)
+            )
+        return line
     routed = record.routed
     line = "%s routed %s type=%s id=%d from=%d (%s)" % (
         when,

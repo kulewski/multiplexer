@@ -39,6 +39,8 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   (one shared `recording_dir`, `recording_files()`), and `mxcontrol(*args)`
   runs the tool to completion; the `remote_recording*` and `recording_tap`
   scenarios use both.
+- A drain in a unit test: `BackendThread(factory, drain_seconds=...)` is the
+  cap of a drain the test starts with the backend's `start_draining()`.
 - The rules file under running multiplexers: a scenario gives `Cluster` a
   copy of the file it may edit, `rules=path`, and
   `rules_check_interval=0.1` to have it read again that often (0 never);
@@ -144,10 +146,10 @@ shipped client roles.
 | Role | Options | Events |
 |---|---|---|
 | all | `--mx host:port` (repeatable), `--type N`, `--name` | `connected {instance_id, connections}` |
-| `backend` | `--serves REQ=RESP`, `--behaviour upper\|echo\|drop\|raise\|sleep:MS`, `--crash-after N`, `--memory-every N`, `--drain-seconds S`, `--drain-file PATH` (the harness passes one; `Role.request_drain()` creates it), `--drain-min-handled N`, `--exit-on-exception` | `request {type, id, from_, size}`, `crash`, `draining {drain_seconds}`, `handler_exception {kind, handled}`, `stopped {handled}` |
+| `backend` | `--serves REQ=RESP`, `--behaviour upper\|echo\|drop\|raise\|sleep:MS`, `--crash-after N`, `--memory-every N`, `--drain-seconds S`, `--drain-file PATH` (the harness passes one; `Role.request_drain()` creates it), `--drain-min-handled N`, `--drain-routing FLAGS` (the `Routing` flags kept on while draining, a comma-separated subset of `any`, `all`, `last_resort`; none by default), `--threaded` (the same on `BaseThreadedMultiplexerServer`, the handler on a worker thread), `--exit-on-exception` | `request {type, id, from_, size}`, `crash`, `draining {drain_seconds}`, `acked {ms}` (every multiplexer has the drain routing in effect), `handler_exception {kind, handled}`, `stopped {handled}` |
 | `client` | `--query TYPE:payload`, `--count`, `--parallel`, `--timeout`, `--payload-size`, `--sleep-before`, `--sleep-between`, `--threaded`, `--async N`, `--workers N`, `--memory-every N` | `response {round, index, type, from_, payload\|size, ms}`, `error {kind, ms}`, `done` |
 | `event_client` | `--send TYPE:payload`, `--to ID`, `--all`, `--no-flush`, `--interval`, `--linger` | `sent {type, id, ...}`, `done` |
-| `event_backend` | `--until N`, `--for S` | `received {type, id, from_, to, payload\|size}`, `done` |
+| `event_backend` | `--until N`, `--for S`, `--drain-file PATH`, `--drain-routing FLAGS` (as for `backend`; the drain starts when the file appears and the loop goes on until `--until`, `--for` or SIGTERM) | `received {type, id, from_, to, payload\|size}`, `draining`, `acked`, `done` |
 
 Payloads may contain `{worker}`, `{round}` and `{i}`, which the client fills
 in. Payloads over 256 bytes are reported by size (and, from the Python roles,

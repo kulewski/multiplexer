@@ -431,6 +431,36 @@ mx_integration_test(
     for client in LANGS
 ]
 
+# What a draining backend still takes, and the drain routing surviving a
+# multiplexer restart; the backends in both languages.
+[
+    mx_integration_test(
+        name = "drain_routing_%s" % lang,
+        size = "medium",
+        roles = {
+            "backend": lang,
+            "client": "py",
+            "event_backend": lang,
+            "event_client": "py",
+        },
+        scenario = "drain_routing/drain_routing.py",
+    )
+    for lang in LANGS
+]
+
+[
+    mx_integration_test(
+        name = "drain_survives_mx_restart_%s" % lang,
+        size = "medium",
+        roles = {
+            "backend": lang,
+            "client": "py",
+        },
+        scenario = "drain_survives_mx_restart/drain_survives_mx_restart.py",
+    )
+    for lang in LANGS
+]
+
 # A multiplexer frozen with SIGSTOP; slow (waits out the heartbeat drop).
 [
     mx_integration_test(

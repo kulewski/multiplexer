@@ -645,6 +645,20 @@ py_library(
 )
 
 py_test(
+    name = "servers_drain_test",
+    size = "medium",
+    srcs = ["servers_drain_test.py"],
+    data = ["//:multiplexer.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "threaded_server_test",
     size = "medium",
     srcs = ["threaded_server_test.py"],

@@ -121,10 +121,51 @@ message MultiplexerMessage {
     optional LoggingMethod.Values logging_method = 23 [default = BOTH];
 }
 
+// Which of a multiplexer's routing paths reach a peer: `any` for rules
+// with whom: ANY, `all` for rules with whom: ALL, both on by default; a
+// message with `to` always arrives. A peer that wants no new work turns
+// them off, which is what a draining backend does. With `last_resort` a
+// path that is off still carries what nobody else of the type could take.
+// The search a client sends for a backend (BACKEND_FOR_PACKET_SEARCH)
+// follows `any`, although it is forwarded to every peer of the type: it
+// exists to find a backend for a request that will then be addressed to
+// it, so a peer taking no new requests is not offered. Carried in the
+// welcome, so a connection registers with it, and changed on a live
+// connection with PEER_CONTROL. docs/leaving.md describes the use.
+message Routing {
+    optional bool any = 1 [default = true];
+    optional bool all = 2 [default = true];
+    optional bool last_resort = 3 [default = false];
+}
+
 // a message to be used in initial handshake
 message WelcomeMessage {
     required uint32 type = 1;
     required uint64 id = 2;
+    optional Routing routing = 3;  // absent: every path, as before the field existed
+}
+
+// The protocol's message types for a peer's routing, in the reserved
+// range below 100, the same in every rules file. PEER_CONTROL is sent to a
+// multiplexer without `to`; it answers PEER_STATUS, `references` set to
+// the request, once the change is in effect: everything routed to the
+// peer before the change arrives before the answer.
+enum PeerMessageType {
+    PEER_CONTROL = 11;
+    PEER_STATUS = 12;
+}
+
+// What a peer tells the multiplexer about itself: the routing that reaches
+// it from now on, replacing what its welcome said.
+message PeerControl {
+    required Routing routing = 1;
+}
+
+// The multiplexer's answer to every PeerControl.
+message PeerStatus {
+    optional uint64 multiplexer_id = 1;
+    optional Routing routing = 2;  // in effect for the peer's connection
+    optional string error = 3;     // why the request was ignored; unset when it was applied
 }
 
 // a message to be used when searching for working backend

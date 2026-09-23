@@ -79,10 +79,15 @@ message PeerEvent {
   enum Kind {
     CONNECTED = 1;      // the peer's welcome was accepted, or it was already connected when the session started
     DISCONNECTED = 2;   // its connection ended
+    ROUTING = 3;        // it changed which routing reaches it (PEER_CONTROL); the flags below say what
   }
   optional Kind kind = 1;
   optional uint64 peer_id = 2;
   optional uint32 peer_type = 3;
+  // For ROUTING: Multiplexer.proto's Routing as it is in effect now.
+  optional bool any = 4;
+  optional bool all = 5;
+  optional bool last_resort = 6;
 }
 
 message RoutedMessage {
@@ -92,6 +97,7 @@ message RoutedMessage {
     UNKNOWN_TYPE = 3;   // the type has no entry in the rules file
     NO_RULE = 4;        // the type has an entry but no routing rule, and no `to`
     QUEUE_FULL = 5;     // the recipient's outgoing queue was full
+    NOT_ACCEPTED = 6;   // the recipient takes no message by this path (its Routing), and others of its type did
   }
   // The envelope, as received.
   optional uint64 id = 1;

@@ -9,10 +9,10 @@ import threading
 import time
 import unittest
 
-from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, Routing
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.mxclient import OperationTimedOut
+from multiplexer.mxclient import OperationFailed, OperationTimedOut
 from multiplexer.testing import BackendThread, Cluster, TestClient, wait_until
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
@@ -63,6 +63,23 @@ class Scripted(BaseThreadedMultiplexerServer):
         return self.keep_serving_after_error
 
 
+class Choking(BaseThreadedMultiplexerServer):
+    """A peer whose handler takes every message for a request of its own
+    and raises on anything else, as one that parses every payload does:
+    a DELIVERY_ERROR it gets is answered with BACKEND_ERROR."""
+
+    multiplexer_client_type = peers.WEBSITE
+
+    def __init__(self, addresses, **kwargs):
+        super().__init__(addresses, **kwargs)
+        self.refusals = 0
+
+    def handle_message(self, request: Request) -> None:
+        if request.mxmsg.type == types.DELIVERY_ERROR:
+            self.refusals += 1
+        raise ValueError("not a request of mine")
+
+
 class ThreadedServerTest(unittest.TestCase):
     """One multiplexer for the class, a server per test."""
 
@@ -74,9 +91,9 @@ class ThreadedServerTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.cluster.__exit__(None, None, None)
 
-    def serve(self, **kwargs) -> tuple[BackendThread, Scripted]:
+    def serve(self, drain_seconds: float = 0.0, **kwargs) -> tuple[BackendThread, Scripted]:
         """A Scripted server on its own thread, registered; stopped at the end of the test."""
-        served = BackendThread(lambda: Scripted(self.cluster.endpoints, **kwargs)).start()
+        served = BackendThread(lambda: Scripted(self.cluster.endpoints, **kwargs), drain_seconds=drain_seconds).start()
         self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
         self.addCleanup(lambda: served.stop() if served.running else None)
         assert isinstance(served.backend, Scripted)
@@ -183,7 +200,11 @@ class ThreadedServerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             served.stop()  # serve_forever() raised what the handler raised
 
-    def test_draining_declines_searches_and_finishes_the_queue(self):
+    def test_draining_takes_the_backend_out_of_routing_and_finishes_the_queue(self):
+        """start_draining() tells the multiplexer to route nothing new by
+        the rules: a request and a search sent after the multiplexer
+        confirmed come back as DELIVERY_ERROR from the multiplexer itself,
+        the queue is finished, and the server leaves."""
         served, server = self.serve()
         with TestClient(self.cluster, peers.WEBSITE) as client:
             client.send(b"block", REQUEST)
@@ -191,19 +212,26 @@ class ThreadedServerTest(unittest.TestCase):
                 client.send(b"event-%d" % index, REQUEST)
             wait_until(lambda: server.pending == 4, 10, "the worker busy and three waiting")
             server.start_draining()
-            with self.assertRaises(OperationTimedOut):
-                self.search(client.client, 1.0)
+            wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed the drain routing")
+            message = client.client.new_message(message=b"late", type=REQUEST)
+            reply = client.client.send_and_receive(message, timeout=5)[0]
+            self.assertEqual(types.DELIVERY_ERROR, reply.type, "nobody takes it by the rules")
+            self.assertEqual([peers.PYTHON_TEST_SERVER], list(DeliveryError.FromString(reply.message).failed_type))
+            self.assertEqual(types.DELIVERY_ERROR, self.search(client.client, 5.0).type, "the search is not forwarded")
             server.release.set()
             served.stop()
         self.assertEqual([b"block", b"event-0", b"event-1", b"event-2"], server.handled, "the queue was finished")
+        self.assertEqual(0, server.dropped, "nothing had to be refused")
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
 
     def test_a_request_arriving_while_leaving_is_refused_at_once(self):
-        """close() with the worker still busy: a request that arrives then
-        is answered with DELIVERY_ERROR, the multiplexer's own "nobody
-        there", so a query retries through the search at once instead of
-        waiting out its timeout; the search is declined too."""
-        served, server = self.serve()
+        """close() with the worker still busy, on a server whose drain
+        routing keeps every path open, as a request routed before the
+        multiplexer applied the usual one would arrive: a request that
+        arrives then is answered with DELIVERY_ERROR, the multiplexer's
+        own "nobody there", so a query retries through the search at once
+        instead of waiting out its timeout."""
+        served, server = self.serve(drain_routing=Routing())
         with TestClient(self.cluster, peers.WEBSITE) as client:
             client.send(b"block", REQUEST)
             wait_until(lambda: server.pending == 1, 10, "the worker busy")
@@ -215,13 +243,114 @@ class ThreadedServerTest(unittest.TestCase):
             self.assertEqual(types.DELIVERY_ERROR, reply.type, "refused, not dropped")
             self.assertEqual(message.id, reply.references)
             self.assertEqual(message.id, DeliveryError.FromString(reply.message).packet_id)
-            with self.assertRaises(OperationTimedOut):
-                self.search(client.client, 1.0)
             server.release.set()
             closing.join()
         self.assertEqual([b"block"], server.handled)
         self.assertEqual(1, server.dropped)
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
+
+    def test_a_reply_arriving_while_leaving_is_dropped_not_refused(self):
+        """A message that answers another, arriving while the server is
+        leaving, is dropped: nobody retries a reply, and refusing one could
+        start a loop. The peer here raises on what it does not expect, so
+        the refusal of its event comes back to the server as a
+        BACKEND_ERROR, a reply; refused in turn, that would bring another
+        DELIVERY_ERROR, and so on until the close ended."""
+        _, server = self.serve()
+        peer = BackendThread(lambda: Choking(self.cluster.endpoints)).start()
+        self.addCleanup(lambda: peer.stop() if peer.running else None)
+        choking = peer.backend
+        assert isinstance(choking, Choking)
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"block", REQUEST)
+            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+            closing = threading.Thread(target=server.close)
+            closing.start()
+            wait_until(lambda: server.draining, 10, "close() under way")
+            choking.client.send_message(b"event-late", type=REQUEST, to=server.instance_id)
+            wait_until(lambda: choking.refusals >= 1, 10, "the event refused")
+            time.sleep(0.5)  # long enough for a loop to go round many times
+            self.assertEqual(1, choking.refusals, "one refusal, not a loop")
+            server.release.set()
+            closing.join()
+        self.assertEqual(2, server.dropped, "the event refused, the BACKEND_ERROR dropped")
+
+    def test_routing_is_the_backends_to_turn_off_and_on(self):
+        """set_routing() on the server's client, outside any drain: with
+        `any` off a request by the rules fails at once, with everything on
+        again it is served, and as the last resort it is served while the
+        server is alone of its type."""
+        _, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            self.assertEqual(b"FIRST", client.query(b"first", REQUEST, timeout=5).message)
+            server.client.set_routing(Routing(any=False))
+            wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed")
+            with self.assertRaises(OperationFailed):
+                client.query(b"second", REQUEST, timeout=5)
+            server.client.set_routing(Routing())
+            wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed again")
+            self.assertEqual(b"THIRD", client.query(b"third", REQUEST, timeout=5).message)
+            server.client.set_routing(Routing(any=False, all=False, last_resort=True))
+            wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed the last resort")
+            self.assertEqual(b"FOURTH", client.query(b"fourth", REQUEST, timeout=5).message)
+            self.assertEqual(types.PING, self.search(client.client, 5.0).type, "a search finds the last resort")
+        self.assertEqual([b"first", b"third", b"fourth"], server.handled)
+
+    def test_the_last_reply_is_written_before_the_close(self):
+        """A reply sent just before close() reaches the requester: close()
+        writes what is queued, up to a second, before it shuts the sockets."""
+        served, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"later", REQUEST)
+            wait_until(lambda: server.kept, 10, "the request kept for a later answer")
+            server.kept[0].reply(b"at-the-last-moment", type=RESPONSE)
+            served.stop()  # close() follows at once
+            self.assertEqual(b"at-the-last-moment", client.receive(timeout=5).message)
+
+    def test_a_drain_ends_when_confirmed_and_the_queue_is_empty(self):
+        """With a 10 s cap, the drain ends as soon as the multiplexer confirmed
+        the routing and the workers finished the queue: within a second,
+        with every queued request handled and nothing refused."""
+        served, server = self.serve(drain_seconds=10)
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"block", REQUEST)
+            for index in range(3):
+                client.send(b"event-%d" % index, REQUEST)
+            wait_until(lambda: server.pending == 4, 10, "the worker busy and three waiting")
+            started = time.time()
+            server.start_draining()
+            server.release.set()
+            wait_until(lambda: not served.running, 10, "serve_forever() returned")
+            self.assertLess(time.time() - started, 5, "on the confirmation and the empty queue, not the cap")
+        self.assertEqual([b"block", b"event-0", b"event-1", b"event-2"], server.handled)
+        self.assertEqual(0, server.dropped)
+        self.assertIsNone(served.error)
+
+    def test_a_drain_keeping_a_path_open_lasts_its_period(self):
+        """With `all` kept on, work may keep arriving, so the drain runs to its cap."""
+        served, server = self.serve(drain_seconds=1.5, drain_routing=Routing(any=False))
+        started = time.time()
+        server.start_draining()
+        wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed")
+        time.sleep(0.5)
+        self.assertTrue(served.running, "confirmed, but events may still come: the drain goes on")
+        wait_until(lambda: not served.running, 10, "serve_forever() returned at the cap")
+        self.assertGreaterEqual(time.time() - started, 1.4)
+
+    def test_the_routing_reaches_a_multiplexer_past_a_full_queue(self):
+        """A saturated backend's PEER_CONTROL is forced past its full outgoing
+        queue: with the multiplexer frozen and the queue full, the routing
+        is still confirmed once the multiplexer is back."""
+        _, server = self.serve()
+        multiplexer = self.cluster.mx[0]
+        multiplexer.pause()
+        try:
+            for _ in range(1200):  # the socket buffers, then the 1024 the queue holds, then drops
+                server.client.send_message(b"x" * 8192, type=9999, multiplexer=server.client.ONE)
+            server.client.set_routing(Routing(any=False))
+        finally:
+            multiplexer.resume()
+        wait_until(server.client.routing_acknowledged, 15, "the routing confirmed after the thaw")
 
     def test_close_from_a_handler_is_an_error_not_a_deadlock(self):
         served, server = self.serve()

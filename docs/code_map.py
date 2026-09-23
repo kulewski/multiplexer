@@ -107,7 +107,12 @@ INDEX = [
     (
         "Draining a backend before it exits",
         "multiplexer/backend/base_multiplexer_server.cc",
-        "`serve_forever`, `periodic_task`, `start_draining`, `drained`; the same names in `multiplexer/servers.py`",
+        "`serve_forever`, `periodic_task`, `start_draining`, `drained`, the drain routing; the same names in `multiplexer/servers.py`",
+    ),
+    (
+        "Which rule-routed paths reach a peer, told in its welcome and by PEER_CONTROL",
+        "multiplexer/basic_client.cc",
+        "`BasicClient::set_routing`, `routing_acknowledged`; `Server::send_to_one`, `send_to_all`, `_handle_peer_control` apply it",
     ),
     ("Reading the rules file", "multiplexer/config.h", "`Config::read_configuration`"),
     (

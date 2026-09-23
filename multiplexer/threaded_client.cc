@@ -134,7 +134,9 @@ void ThreadedClient::_post(F function) {
 // assertion.
 template <typename F>
 auto ThreadedClient::_call(F function) -> decltype(function()) {
-  DbgAssertMsg(!io_thread_.is_current(), "blocking call on the io thread");
+  if (io_thread_.is_current()) {
+    throw std::logic_error("blocking ThreadedClient call on the io thread, from a callback");
+  }
   basic_client_->check_not_orphaned();
   if (_stopped()) {
     MXTHROW(NotConnected());
@@ -214,6 +216,69 @@ unsigned int ThreadedClient::connections_count() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
     return basic_client_->connections_count(true);
+  });
+}
+
+void ThreadedClient::set_routing(const Routing& routing) {
+  basic_client_->check_not_orphaned();
+  if (_stopped()) {
+    return;
+  }
+  _post([this, routing] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (!shut_down_) {
+      basic_client_->set_routing(routing);
+    }
+  });
+}
+
+bool ThreadedClient::routing_acknowledged() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->routing_acknowledged();
+  });
+}
+
+bool ThreadedClient::flush_all(float timeout) {
+  if (io_thread_.is_current()) {
+    throw std::logic_error("blocking ThreadedClient::flush_all() called on the io thread, from a callback");
+  }
+  basic_client_->check_not_orphaned();
+  if (_stopped()) {
+    return true;  // nothing left to write
+  }
+  std::shared_ptr<std::promise<bool>> done(new std::promise<bool>());
+  std::future<bool> future = done->get_future();
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout * 1e6));
+  _post([this, done, deadline] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    _flush_poll(done, deadline, std::shared_ptr<asio::steady_timer>());
+  });
+  return future.get();
+}
+
+// Polls the connections' queues every few milliseconds until they are
+// empty or the deadline passes; the writes themselves run on this thread
+// between the polls.
+void ThreadedClient::_flush_poll(std::shared_ptr<std::promise<bool>> done,
+                                 std::chrono::steady_clock::time_point deadline,
+                                 std::shared_ptr<asio::steady_timer> timer) {
+  if (shut_down_ || basic_client_->all_written()) {
+    done->set_value(true);
+    return;
+  }
+  if (std::chrono::steady_clock::now() >= deadline) {
+    done->set_value(false);
+    return;
+  }
+  if (!timer) {
+    timer.reset(new asio::steady_timer(io_service_));
+  }
+  timer->expires_after(std::chrono::milliseconds(5));
+  timer->async_wait([this, done, deadline, timer](const asio::error_code&) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    _flush_poll(done, deadline, timer);
   });
 }
 
@@ -612,7 +677,7 @@ void ThreadedClient::_on_unmatched(const IncomingMessage& incoming) {
     if (msg.type() == types::BACKEND_FOR_PACKET_SEARCH) {
       if (search_policy_) {
         if (!search_policy_()) {
-          return;  // a backend that declines, draining or full
+          return;  // a backend whose policy declines, saturated for instance
         }
       } else if (msg.to() != instance_id_) {
         return;  // a search by type: this peer is no backend and never answers one

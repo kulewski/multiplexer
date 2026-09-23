@@ -336,6 +336,24 @@ struct PythonThreadedClient {
     GilRelease release;
     return client.connections_count();
   }
+  // A serialized Routing (Multiplexer.proto), which the Python wrapper
+  // builds from the message class.
+  void set_routing_serialized(pybind11::bytes serialized) {
+    Routing routing;
+    if (!routing.ParseFromString(serialized)) {
+      throw std::invalid_argument("not a serialized Routing");
+    }
+    GilRelease release;
+    client.set_routing(routing);
+  }
+  bool routing_acknowledged() {
+    GilRelease release;
+    return client.routing_acknowledged();
+  }
+  bool flush_all(float timeout) {
+    GilRelease release;
+    return client.flush_all(timeout);
+  }
   // The non-flushing sends only post to the io thread, so they need no GIL
   // release and are safe from callbacks; the flushing one waits. `lane` is
   // a Lane or None.
@@ -606,6 +624,18 @@ PYBIND11_MODULE(_native, module) {
       .def("wait_for_connection", &multiplexer::PythonClient::wait_for_connection, pybind11::arg("connection"),
            pybind11::arg("timeout"))
       .def("connections_count", &multiplexer::PythonClient::connections_count)
+      .def(
+          "set_routing_serialized",
+          [](multiplexer::PythonClient& client, pybind11::bytes serialized) {
+            multiplexer::Routing routing;
+            if (!routing.ParseFromString(serialized)) {
+              throw std::invalid_argument("not a serialized Routing");
+            }
+            client.set_routing(routing);
+          },
+          pybind11::arg("serialized"))
+      .def("routing_acknowledged", &multiplexer::PythonClient::routing_acknowledged)
+      .def("has_incoming_messages", &multiplexer::PythonClient::has_incoming_messages)
       .def("shutdown", &multiplexer::PythonClient::shutdown)
       .def("bind_to_current_thread", &multiplexer::PythonClient::bind_to_current_thread)
 
@@ -649,6 +679,10 @@ PYBIND11_MODULE(_native, module) {
       .def("connect", &multiplexer::PythonThreadedClient::connect, pybind11::arg("host"), pybind11::arg("port"),
            pybind11::arg("timeout"))
       .def("connections_count", &multiplexer::PythonThreadedClient::connections_count)
+      .def("set_routing_serialized", &multiplexer::PythonThreadedClient::set_routing_serialized,
+           pybind11::arg("serialized"))
+      .def("routing_acknowledged", &multiplexer::PythonThreadedClient::routing_acknowledged)
+      .def("flush_all", &multiplexer::PythonThreadedClient::flush_all, pybind11::arg("timeout"))
       .def("set_search_policy", &multiplexer::PythonThreadedClient::set_search_policy, pybind11::arg("answer"))
       .def("send", &multiplexer::PythonThreadedClient::send, pybind11::arg("serialized"),
            pybind11::arg("lane") = multiplexer::LanePtr())

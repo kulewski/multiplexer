@@ -107,12 +107,14 @@ passes it to `handle_message`.
 | `RECORDING_RECORD` | 8 | one record streamed to a peer that tapped in |
 | `RULES_CONTROL` | 9 | a peer asks a multiplexer to read its rules file again, or which rules it has in use |
 | `RULES_STATUS` | 10 | the multiplexer's answer |
+| `PEER_CONTROL` | 11 | a peer tells a multiplexer which rule-routed paths reach it from now on, what a draining backend uses |
+| `PEER_STATUS` | 12 | the multiplexer's answer, once in effect |
 | `MAX_MULTIPLEXER_META_PACKET` | 99 | end of the reserved range |
 
-The three recording types and the two rules types are defined in
-`Recording.proto` and `Multiplexer.proto` and handled by the multiplexer
-whatever the rules file says; the shipped rules files name them so that
-dumps and logs show names.
+The three recording types, the two rules types and the two peer types are
+defined in `Recording.proto` and `Multiplexer.proto` and handled by the
+multiplexer whatever the rules file says; the shipped rules files name
+them so that dumps and logs show names.
 
 The libraries also use two ordinary types by name, so keep them in every rules
 file: `REQUEST_RECEIVED`, which a backend may send with `notify_start()` to say

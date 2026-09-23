@@ -12,8 +12,9 @@
 // The routing order, first match wins: a `to` field; override_rrules
 // carried by the message; protocol (meta) types below 100; the rules file's
 // entries for the type. Nobody to deliver to produces a DELIVERY_ERROR back
-// to the sender when the rule asks for it. docs/wire_format.md describes the
-// same order from the outside.
+// to the sender when the rule asks for it. A peer's Routing (its welcome,
+// then PEER_CONTROL) says which rule-routed paths reach it; `to` always
+// does. docs/wire_format.md describes the same order from the outside.
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
@@ -160,7 +161,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
 
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
-  // and note the arrival for the recording and the peers file. A
+  // and note the arrival for the recording and the peers file, with the
+  // routing its welcome carried when that turns anything off. A
   // controller is passive: it calls in when it has something to ask.
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
     if (new_connection->peer_type() == RECORDING_CONTROLLER || new_connection->peer_type() == RULES_CONTROLLER) {
@@ -168,6 +170,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     }
     new_connection->start_rest();
     _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
+    if (restricted(new_connection->routing())) {
+      _emit_peer_routing(*new_connection);
+    }
     _write_peers_file();
   }
 
@@ -209,6 +214,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     const MultiplexerMessage& msg;
     const Connection::pointer conn;
     const std::shared_ptr<const RawMessage> raw;
+    // A BACKEND_FOR_PACKET_SEARCH, forwarded to every peer of the type
+    // that takes rule-routed requests (Routing.any), not every one.
+    bool search = false;
   };
 
   // The per-message path; see the file comment for the order of the cases.
@@ -230,7 +238,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
                          const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t peer_type);
 
-  // whom: ALL and whom: ANY over one peer type's connections.
+  // whom: ALL and whom: ANY over one peer type's connections, to the peers
+  // whose Routing takes the path; the last resorts among the others get
+  // the message when no such peer could.
   unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
   unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
@@ -251,6 +261,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     _emit(record);
   }
   void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
+  void _emit_peer_routing(const Connection& conn);
   // Stamps `record`, writes it to the file session, closing the session at
   // its cap, and streams it to every tap.
   void _emit(Record& record);
@@ -287,6 +298,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
   // RULES_CONTROL from a peer: reload if asked, answer RULES_STATUS.
   void _handle_rules_control(MessageMetaHandler& meta_handler);
+  // PEER_CONTROL from a peer: its routing from now on, answered with
+  // PEER_STATUS once in effect.
+  void _handle_peer_control(MessageMetaHandler& meta_handler);
   void _fill_rules_status(RulesStatus& status);
   // The file's bytes, or false with `error` set: no file named,
   // unreadable, or empty (nothing at all, or caught between a truncate

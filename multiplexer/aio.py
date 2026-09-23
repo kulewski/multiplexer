@@ -34,7 +34,7 @@ import pickle
 import threading
 from typing import Any, Awaitable, Callable, Sequence
 
-from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut
 from multiplexer.mxlog import WARNING, LOWVERBOSITY, log
@@ -93,6 +93,16 @@ class AsyncClient:
     def connections_count(self) -> int:
         """Live connections right now; the io thread keeps it current."""
         return self._threaded.connections_count()
+
+    def set_routing(self, routing: Routing) -> None:
+        """Which of a multiplexer's routing paths reach this peer; see
+        ThreadedClient.set_routing. Does not block."""
+        self._threaded.set_routing(routing)
+
+    def routing_acknowledged(self) -> bool:
+        """Whether every connected multiplexer has that routing in effect;
+        see ThreadedClient.routing_acknowledged. Blocks briefly."""
+        return self._threaded.routing_acknowledged()
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:

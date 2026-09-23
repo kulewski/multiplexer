@@ -3,8 +3,9 @@
 Usage: backend_py [host:port] [drain-file]     (default 127.0.0.1:1980, /tmp/echo-backend-leave)
 
 Creating the drain file asks the backend to leave the way a deployment's
-preStop hook would: it declines backend searches, serves what still arrives
-for five seconds, then exits. The library handles no signals, so a plain
+preStop hook would: for five seconds it drains as the last resort of its
+type, so beside another backend the multiplexers route it nothing new,
+and alone it keeps serving to the end. The library handles no signals, so a plain
 kill ends the process at once, requests in hand included.
 """
 
@@ -12,6 +13,7 @@ import os
 import sys
 
 from multiplexer.servers import BaseMultiplexerServer
+from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.multiplexer_constants import peers, types
 
 
@@ -19,7 +21,11 @@ class EchoBackend(BaseMultiplexerServer):
     """Answers every ECHO_REQUEST with the payload upper-cased."""
 
     def __init__(self, addresses: list[tuple[str, int]], drain_file: str) -> None:
-        super().__init__(addresses, type=peers.ECHO_BACKEND)
+        # The drain as the last resort of the type: alone, the backend keeps
+        # serving through it; beside another, it gets nothing new.
+        super().__init__(
+            addresses, type=peers.ECHO_BACKEND, drain_routing=Routing(any=False, all=False, last_resort=True)
+        )
         self.drain_file = drain_file
 
     def handle_message(self, mxmsg):
@@ -41,9 +47,10 @@ def main(argv: list[str]) -> None:
     # reachable: connect() first; serve_forever() would otherwise.
     backend.connect()
     print("ready", flush=True)
-    # Drain for five seconds once asked: searches are declined so no retried
-    # request comes here, requests that still arrive are served, then the
-    # process exits. A rolling restart costs nobody a timeout.
+    # Drain for five seconds once asked, as the last resort: while another
+    # backend is there the multiplexers route nothing new here, and alone
+    # this one keeps serving to the end. A rolling restart costs nobody a
+    # request.
     backend.serve_forever(poll=0.5, drain_seconds=5)
 
 

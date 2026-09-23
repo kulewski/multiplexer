@@ -8,6 +8,7 @@ py_library(
         "//multiplexer:multiplexer_constants",
         "//multiplexer:servers",
         "//multiplexer:threaded_client_py",
+        "//multiplexer:threaded_server",
     ],
 )
 

@@ -81,6 +81,13 @@ client.shutdown();
   `is_lost()`.
 - `receive_message(timeout = -1)` waits for the next message and returns a
   pair of the message and its connection; `-1` waits forever.
+- `set_routing(const Routing&)` and `routing_acknowledged()`: which of a
+  multiplexer's routing paths reach this peer, `any`, `all` and
+  `last_resort`, told to every multiplexer and carried in every welcome
+  from then on, and whether every one has it in effect; what a backend's
+  drain uses, see [How a backend
+  leaves](leaving.md#what-a-draining-backend-still-takes). On
+  `ThreadedClient` too, from any thread.
 - `instance_id()`, `client_type()`, `connections_count()`, `random64()`, and
   `shutdown()`.
 
@@ -100,8 +107,9 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   repeats the request through the connection that found it; an instance
   nobody has is `OperationFailed` (`FAILED`) at once; one `timeout`
   covers the stages. The probe is `PROBE_SEARCH` by default, a
-  `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which a draining
-  backend declines, or `PROBE_PING`, answered as long as the peer lives.
+  `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it
+  whatever its routing, as every addressed message does, or `PROBE_PING`,
+  which every client library answers, not only a backend.
   The library sets `report_delivery_error` on the request. The old
   behaviour of `Client::query` with `to`, a search by type and the
   request to whichever backend answered, is gone.
@@ -195,14 +203,19 @@ literal or an `int` needs a cast. A wrong type fails an assertion in a debug
 build.
 
 **Leaving gracefully.** From `periodic_task()`, call `start_draining()`
-when asked to leave: the backend stops answering the search clients use to
-find a backend, so no retried request is sent to it, while it keeps serving
-what the multiplexer still routes to it. `serve_forever` returns once the
-virtual `drained()` says so, by default `drain_seconds` after the drain
-started; override it to wait for a condition of your own.
-[How a backend leaves](leaving.md) draws the phases and what each costs. Overriding
-`should_respond_to_backend_for_packet_search()` puts another condition
-behind the search. The library installs no signal handlers; a handler of
+when asked to leave: the backend tells every multiplexer to route it
+nothing new by the rules, its drain routing, so no request and no search
+is sent to it, while it serves what was already on its way.
+`serve_forever` returns once the virtual `drained()` says so: by default
+once every multiplexer confirmed, so nothing more is coming, or
+`drain_seconds` after the drain started at the latest; override it to
+wait for a condition of your own. `set_drain_routing(routing)` before the
+drain changes what it asks for: `all` kept keeps events coming,
+`last_resort` keeps a lone backend serving through its drain, and either
+makes the drain last its `drain_seconds`. [How a backend
+leaves](leaving.md) draws the phases and what each costs. Overriding
+`should_respond_to_backend_for_packet_search()` puts a condition of your
+own behind the search; a drain needs none. The library installs no signal handlers; a handler of
 your own must only set a `sig_atomic_t` that `periodic_task()` reads, as
 [examples/echo/backend.cc](../examples/echo/backend.cc) does. A C++ process
 may rely on a signal like that; a Python process should not, see the
@@ -259,11 +272,15 @@ Echo(addresses, options).serve_forever();
 - `ThreadedServerOptions`: `workers` (1), `queue_size` (1024, the requests
   waiting for a worker; beyond it a request is dropped with a warning, as
   the multiplexer's full queue drops; one arriving while the server is
-  leaving is refused with `DELIVERY_ERROR`, so its requester retries at
-  once), `decline_searches_when_full`
-  (false: searches are answered while the backend serves; true leaves
-  them unanswered while every worker is busy and requests wait) and
-  `connect_timeout`.
+  leaving, routed before the multiplexer applied the drain routing, is
+  refused with `DELIVERY_ERROR`, so its requester retries at once, and one
+  that answers another is dropped, since refusing a reply could start a
+  loop, [how a backend leaves](leaving.md#what-stays)),
+  `decline_searches_when_full` (false: searches are answered while the
+  backend serves; true leaves them unanswered while every worker is busy
+  and requests wait), `connect_timeout` and `drain_routing` (what
+  `start_draining()` tells the multiplexers; `any` and `all` off by
+  default).
 - The constructor only makes the instance id; `connect()` starts the
   workers and connects, once, and `serve_forever()` calls it first, so
   nothing reaches `handle_message()` before your constructor has
@@ -287,8 +304,10 @@ Echo(addresses, options).serve_forever();
 - `serve_forever(poll, drain_seconds)`, `stop()`, `start_draining()`,
   `draining()`, `drained()`, `periodic_task()`,
   `on_handler_exception()` and `should_respond_to_backend_for_packet_search()`
-  are `BaseMultiplexerServer`'s, with the same meanings; `close()` takes
-  no more messages, lets the workers finish the queue and closes the
+  are `BaseMultiplexerServer`'s, with the same meanings, `drained()` also
+  waiting for the queue to be empty; `close()` takes
+  no more messages, lets the workers finish the queue, writes the last
+  replies, for up to a second, and closes the
   connections, and throws `std::logic_error` from a handler, on a
   worker, rather than join itself, `stop()` being the call for that;
   `pending()`, `dropped()`, `instance_id()` and `client()` for messages
@@ -338,6 +357,9 @@ client.shutdown();
   return the number of connections written to, 0 on timeout or for a
   pinned lane whose connection is gone; not from callbacks.
   `new_message()` fills in id and from.
+- `flush_all(timeout)` waits until every connection has written what is
+  queued on it, or `timeout` seconds, and returns whether it all went out:
+  what the backend classes do in `close()`. Not from callbacks.
 - The `MessageSink` given to the constructor runs on the io thread with
   every message that is not a reply to a query or one of the protocol's
   own: events and requests addressed to this peer. Without one such
@@ -353,7 +375,8 @@ client.shutdown();
   addressed to this peer with `to` and correlated in the payload
   ([semantics](semantics.md#delivery)).
 - Callbacks and the sink must return quickly; they may start asynchronous
-  queries and send, but not call the blocking `query` or `shutdown`.
+  queries and send, but not call the blocking `query`, `flush_all` or
+  `shutdown`.
 - `shutdown()`, also run by the destructor, fails every query in flight
   with `SHUT_DOWN`, closes the connections and joins the thread.
 

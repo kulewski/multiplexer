@@ -10,6 +10,7 @@ cc_library(
         "//lib:options",
         "//multiplexer:client",
         "//multiplexer:events_cc_proto",
+        "//multiplexer/backend:base_multiplexer_server",
     ],
 )
 
@@ -22,6 +23,7 @@ cc_library(
             "//multiplexer:multiplexer_cc_proto",
             "//multiplexer:threaded_client",
             "//multiplexer/backend:base_multiplexer_server",
+            "//multiplexer/backend:base_threaded_multiplexer_server",
             "//mxcontrol:task",
             "//mxcontrol:tasks_holder",
         ],

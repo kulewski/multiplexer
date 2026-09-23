@@ -13,6 +13,7 @@ Vocabulary used everywhere: a peer is a client (keeps control, sends requests or
 - Addresses: a peer is given host names or addresses; a name is resolved inside the library on every attempt, each address tried in turn, so a multiplexer that moved is found at the next reconnect and a name not resolving yet is retried like a refused port, never an error.
 - Reserved: peer types and message types 1 to 99 belong to the protocol; deployments use 100 and up in their own rules file, from which the constants are generated (docs/rules.md).
 - The rules file changes without a restart: a multiplexer reads it again every 2 s (`--rules-check-interval`) and puts a changed file in use whole once two reads in a row saw the same new bytes, so nothing half written is applied; SIGHUP and `mxcontrol rules reload` apply at once; a file that is missing, empty, without a peer type or that does not parse leaves the rules in use as they were, and `mxcontrol rules status` reports each replica's fingerprint. On Kubernetes the ConfigMap mounted as a directory updates on its own; a subPath mount or an immutable ConfigMap does not (docs/operations.md#changing-the-rules).
+- Draining: a backend's `start_draining()` sends every multiplexer a `Routing` (`any`, `all`, `last_resort`; message types `PEER_CONTROL` 11 and `PEER_STATUS` 12, also carried in the welcome so a reconnect keeps it) that turns the rule-routed paths off, so requests, events and searches go to the other backends of the type at once, addressed messages still arrive, and the drain ends when every multiplexer confirmed and the work is done, `drain_seconds` at the latest; `last_resort` keeps a lone backend served, `all` kept keeps events coming; `set_routing()` on every client class does the same outside a drain (docs/leaving.md).
 - `is_passive` in the rules file is needed only by peer types built on the synchronous `Client`; ThreadedClient, AsyncClient and both backend classes run the loop all the time. A BaseMultiplexerServer handler must finish within the multiplexer's drop interval (90 s); BaseThreadedMultiplexerServer has no such limit.
 
 ## Start here
@@ -28,7 +29,7 @@ Vocabulary used everywhere: a peer is a client (keeps control, sends requests or
 - [Sending an event](docs/events.md)
 - [How the multiplexer routes a message](docs/routing.md)
 - [Connecting to a multiplexer](docs/handshake.md)
-- [How a backend leaves](docs/leaving.md): draining, closing, dying, and what each costs a caller
+- [How a backend leaves](docs/leaving.md): draining, which tells the multiplexers to route it nothing new, closing, dying, and what each costs a caller
 
 ## Reference
 

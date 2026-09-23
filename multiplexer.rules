@@ -123,6 +123,16 @@ type {
     name: "RULES_STATUS"
     comment: "the multiplexer's answer to RULES_CONTROL; payload is RulesStatus"
 }
+type {
+    type: 11
+    name: "PEER_CONTROL"
+    comment: "a peer tells a multiplexer which routing reaches it from now on; payload is PeerControl"
+}
+type {
+    type: 12
+    name: "PEER_STATUS"
+    comment: "the multiplexer's answer to PEER_CONTROL; payload is PeerStatus"
+}
 
 type {
     type: 99

@@ -26,7 +26,13 @@ using mx::util::kwargs::Kwargs;
 class EchoBackend : public BaseMultiplexerServer {
  public:
   EchoBackend(const MultiplexerAddresses& addresses, multiplexer::backend::PeerType type)
-      : BaseMultiplexerServer(addresses, type) {}
+      : BaseMultiplexerServer(addresses, type) {
+    // The drain as the last resort of the type: alone, the backend keeps
+    // serving through it; beside another, it gets nothing new.
+    multiplexer::Routing routing = multiplexer::backend::direct_only_routing();
+    routing.set_last_resort(true);
+    set_drain_routing(routing);
+  }
 
  protected:
   void handle_message(MultiplexerMessage& mxmsg) override {
@@ -57,9 +63,10 @@ int main(int argc, char** argv) {
   // reachable: connect() first; serve_forever() would otherwise.
   backend.connect();
   std::cout << "ready" << std::endl;
-  // Drain for five seconds once asked: searches are declined so no retried
-  // request comes here, requests that still arrive are served, then the
-  // process exits. A rolling restart costs nobody a timeout.
+  // Drain for five seconds once asked, as the last resort: while another
+  // backend is there the multiplexers route nothing new here, and alone
+  // this one keeps serving to the end. A rolling restart costs nobody a
+  // request.
   std::signal(SIGTERM, [](int) { leave_requested = 1; });
   std::signal(SIGINT, [](int) { leave_requested = 1; });
   backend.serve_forever(0.5f, 5.0f);

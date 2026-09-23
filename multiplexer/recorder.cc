@@ -22,6 +22,14 @@ void fill_peer(Record& record, PeerEvent::Kind kind, std::uint64_t peer_id, std:
   event->set_peer_type(peer_type);
 }
 
+void fill_peer_routing(Record& record, std::uint64_t peer_id, std::uint32_t peer_type, const Routing& routing) {
+  fill_peer(record, PeerEvent::ROUTING, peer_id, peer_type);
+  PeerEvent* event = record.mutable_peer();
+  event->set_any(routing.any());
+  event->set_all(routing.all());
+  event->set_last_resort(routing.last_resort());
+}
+
 void fill_rules(Record& record, const std::string& fingerprint, const std::string& path, std::uint32_t message_types,
                 std::uint32_t peer_types) {
   RulesEvent* event = record.mutable_rules();

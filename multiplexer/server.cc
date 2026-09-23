@@ -292,7 +292,12 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     case RECORDING_STATUS:
     case RECORDING_RECORD:
     case RULES_STATUS:
+    case PEER_STATUS:
       // Only meaningful with a `to` field, which was handled before this.
+      return true;
+
+    case PEER_CONTROL:
+      _handle_peer_control(meta_handler);
       return true;
 
     case RECORDING_CONTROL:
@@ -322,11 +327,13 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
         return true;
       }
 
-      // The searched-for type's first rule, to every peer it names.
+      // The searched-for type's first rule, to every peer it names that
+      // takes rule-routed requests (see MessageMetaHandler::search).
       MultiplexerMessageDescription::RoutingRule rule = description->to().Get(0);
       rule.set_whom(MultiplexerMessageDescription::RoutingRule::ALL);
       rule.set_report_delivery_error(true);
       rule.set_include_original_packet_in_report(false);
+      meta_handler.search = true;
 
       if (rule.peer_type() == peers::ALL_TYPES) {
         for (ConnectionsByType::value_type& by_type : connections_by_type_) {
@@ -411,15 +418,32 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
   return scheduled;
 }
 
-// whom: ALL. Every live connection of the type gets the frame; one whose
-// queue is full drops it (Connection::schedule logs that) and is not
-// counted.
+// whom: ALL. Every live connection of the type that takes the path gets
+// the frame (Routing.all, or Routing.any for a search); one whose queue is
+// full drops it (Connection::schedule logs that) and is not counted. The
+// peers that take nothing by the path are skipped, and recorded as such,
+// unless no peer takes it: then the last resorts among them get it.
 unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
+  const bool by_any = meta_handler.search;
+  bool somebody_takes = false;
+  for (ConnectionsList::iterator current = connections.begin(); current != connections.end(); ++current) {
+    if (Connection::pointer connection = current->lock()) {
+      if (connection->living() && (by_any ? connection->accepts_any() : connection->accepts_all())) {
+        somebody_takes = true;
+        break;
+      }
+    }
+  }
   unsigned int scheduled = 0;
   for (ConnectionsList::iterator current, next = connections.begin();
        next != connections.end() && (current = next++, true);) {
     if (Connection::pointer connection = current->lock()) {
       if (!connection->living()) {
+        continue;
+      }
+      const bool takes = by_any ? connection->accepts_any() : connection->accepts_all();
+      if (!takes && (somebody_takes || !connection->last_resort())) {
+        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::NOT_ACCEPTED, false);
         continue;
       }
       if (connection->schedule(meta_handler.raw)) {
@@ -435,23 +459,27 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
   return scheduled;
 }
 
-// whom: ANY. The first live connection with room, starting from the front
-// of the type's list, then moved to the back: round robin that skips busy
-// peers.
+// whom: ANY. The first live connection with room that takes the path
+// (Routing.any), starting from the front of the type's list, then moved
+// to the back: round robin that skips busy peers and the ones taking no
+// new requests. When there is none, the same over the last resorts.
 unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
-  Connection::pointer connection;
-  for (ConnectionsList::iterator current = connections.begin();
-       (current = choose_free_connections(connections, current)) != connections.end(); ++current) {
-    if (!(connection = current->lock())) {
-      continue;
+  for (int pass = 0; pass < 2; ++pass) {
+    const bool last_resort = pass == 1;
+    Connection::pointer connection;
+    for (ConnectionsList::iterator current = connections.begin();
+         (current = choose_free_connections(connections, current, last_resort)) != connections.end(); ++current) {
+      if (!(connection = current->lock())) {
+        continue;
+      }
+      if (!connection->schedule(meta_handler.raw)) {
+        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
+        continue;
+      }
+      _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
+      connections.splice(connections.end(), connections, current);
+      return 1;
     }
-    if (!connection->schedule(meta_handler.raw)) {
-      _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
-      continue;
-    }
-    _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
-    connections.splice(connections.end(), connections, current);
-    return 1;
   }
   return 0;
 }
@@ -673,6 +701,24 @@ void Server::_handle_rules_control(MessageMetaHandler& meta_handler) {
   _reply(meta_handler, RULES_STATUS, status);
 }
 
+void Server::_handle_peer_control(MessageMetaHandler& meta_handler) {
+  Connection::pointer conn = meta_handler.conn;
+  PeerControl control;
+  PeerStatus status;
+  if (!control.ParseFromString(meta_handler.msg.message())) {
+    status.set_error("garbled PeerControl");
+  } else if (!same_routing(conn->routing(), control.routing())) {
+    conn->set_routing(control.routing());
+    MX_LOG(INFO, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
+                                          ") takes " + routing_text(conn->routing())));
+    _emit_peer_routing(*conn);
+  }
+  status.set_multiplexer_id(instance_id_);
+  *status.mutable_routing() = conn->routing();
+  _reply(meta_handler, PEER_STATUS, status);
+}
+
 void Server::_fill_rules_status(RulesStatus& status) {
   status.set_multiplexer_id(instance_id_);
   status.set_path(rules_file_);
@@ -711,6 +757,12 @@ bool Server::start_recording(const std::string& path, const std::string& label, 
     recording::fill_peer(record, PeerEvent::CONNECTED, connection->peer_id(), connection->peer_type());
     record.set_timestamp_us(now);
     recorder->write(record);
+    if (restricted(connection->routing())) {
+      Record routing;
+      recording::fill_peer_routing(routing, connection->peer_id(), connection->peer_type(), connection->routing());
+      routing.set_timestamp_us(now);
+      recorder->write(routing);
+    }
   }
   recorder_ = std::move(recorder);
   session_ = Session();
@@ -758,6 +810,15 @@ void Server::_emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32
   }
   Record record;
   recording::fill_peer(record, kind, peer_id, peer_type);
+  _emit(record);
+}
+
+void Server::_emit_peer_routing(const Connection& conn) {
+  if (!recorder_ && taps_.empty()) {
+    return;
+  }
+  Record record;
+  recording::fill_peer_routing(record, conn.peer_id(), conn.peer_type(), conn.routing());
   _emit(record);
 }
 
@@ -907,7 +968,10 @@ void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
   mxmsg.set_workflow(meta_handler.msg.workflow());
   payload.SerializeToString(mxmsg.mutable_message());
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
-  meta_handler.conn->schedule(raw);
+  // Forced past a full queue: the one answer to one frame received, which
+  // a peer waits for; pushed at the back, behind everything routed to the
+  // peer before it, as PEER_STATUS promises.
+  meta_handler.conn->schedule(raw, /*force=*/true);
 }
 
 }  // namespace multiplexer

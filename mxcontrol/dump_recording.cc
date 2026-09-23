@@ -164,7 +164,12 @@ int DumpRecording::run() {
       } else if (record.has_peer()) {
         const multiplexer::PeerEvent& peer = record.peer();
         std::cout << "peer " << multiplexer::PeerEvent::Kind_Name(peer.kind()) << " id=" << peer.peer_id()
-                  << " type=" << peer_name(rules.get(), peer.peer_type()) << "\n";
+                  << " type=" << peer_name(rules.get(), peer.peer_type());
+        if (peer.kind() == multiplexer::PeerEvent::ROUTING) {
+          std::cout << " any=" << (peer.any() ? "yes" : "no") << " all=" << (peer.all() ? "yes" : "no")
+                    << " last_resort=" << (peer.last_resort() ? "yes" : "no");
+        }
+        std::cout << "\n";
       } else if (record.has_rules()) {
         const multiplexer::RulesEvent& rules_event = record.rules();
         std::cout << "rules " << rules_event.fingerprint().substr(0, 12) << " from " << rules_event.path() << " ("

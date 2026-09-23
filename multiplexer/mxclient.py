@@ -30,7 +30,7 @@ from multiplexer._native import (
     ScheduledMessageTracker,
     UsedAfterFork,
 )
-from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxlog import HIGHVERBOSITY, MEDIUMVERBOSITY, WARNING, log
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
@@ -197,6 +197,23 @@ class Client(_mxclient.Client):
         """
         return super(Client, self).connect_to(endpoint[0], endpoint[1], timeout)
 
+    def set_routing(self, routing: Routing) -> None:
+        """Which of a multiplexer's routing paths reach this peer, a
+        `Routing` from Multiplexer.proto: `any` for rules with whom ANY,
+        `all` for whom ALL, both True by default, and `last_resort` for
+        getting what nobody else of the type could take; a message with
+        `to` always arrives. Told to every multiplexer as the loop runs
+        and carried in the welcome of every connection made from now on;
+        routing_acknowledged() says when it is in effect everywhere. A
+        backend draining sets any and all False; see docs/leaving.md."""
+        super(Client, self).set_routing_serialized(routing.SerializeToString())
+
+    def routing_acknowledged(self) -> bool:
+        """Whether every connected multiplexer has the routing given to
+        set_routing() in effect, so that nothing routed by a path turned
+        off is on its way from them, except as a last resort."""
+        return super(Client, self).routing_acknowledged()
+
     def wait_for_connection(self, connection: ConnectionWrapper, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """wait for connection initiated with async_connect"""
         return super(Client, self).wait_for_connection(connection, timeout)
@@ -316,7 +333,8 @@ class Client(_mxclient.Client):
         that peer ever gets it. If a multiplexer reports the peer is not
         behind it, or the connection dies under the wait, the peer is located
         with a `probe` addressed to it on every connection, a
-        BACKEND_FOR_PACKET_SEARCH (which a draining backend declines) or a
+        BACKEND_FOR_PACKET_SEARCH (which reaches the instance whatever its
+        routing, as every addressed message does) or a
         PING (answered as long as the peer lives), and the request goes
         again through the connection that found it. A peer nobody has is
         OperationFailed; one `timeout` covers the three stages.

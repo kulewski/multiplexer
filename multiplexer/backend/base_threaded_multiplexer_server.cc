@@ -102,30 +102,55 @@ void BaseThreadedMultiplexerServer::close() {
   if (closed_.exchange(true)) {
     return;
   }
-  start_draining();  // no search answered from here on
   {
-    mx::MutexLock lock(mutex_);
+    mx::MutexLock lock(mutex_);  // before the drain shows: a request seeing draining() must find the door shut
     accepting_ = false;
     cond_.notify_all();
     threads.swap(threads_);
   }
+  start_draining();
+  stop();  // a serve_forever() still running on another thread returns now rather than polling a closed client
   for (std::thread& thread : threads) {
     thread.join();
   }
+  client_.flush_all(CLOSE_FLUSH_SECONDS);  // the last replies go out before the sockets close
   client_.shutdown();
 }
 
 void BaseThreadedMultiplexerServer::start_draining() {
+  // The time first, so that no thread sees draining() without it, and only
+  // by the first call: a later one must not move the start, or a program
+  // that asks on every poll would never reach drain_seconds.
+  std::chrono::steady_clock::rep unset = 0;
+  draining_since_ticks_.compare_exchange_strong(unset, std::chrono::steady_clock::now().time_since_epoch().count());
   if (!draining_.exchange(true)) {
-    draining_since_ = std::chrono::steady_clock::now();
+    if (!closed_.load()) {
+      client_.set_routing(options_.drain_routing);
+    }
     mx::MutexLock lock(wake_mutex_);
     wake_.notify_all();
   }
 }
 
 bool BaseThreadedMultiplexerServer::drained() const {
-  return draining() && std::chrono::steady_clock::now() - draining_since_ >=
-                           std::chrono::microseconds(static_cast<long>(drain_seconds_ * 1e6));
+  if (!draining()) {
+    return false;
+  }
+  if (closed_.load()) {
+    return true;  // nothing more is coming through a closed client
+  }
+  const std::chrono::steady_clock::time_point since(std::chrono::steady_clock::duration(draining_since_ticks_.load()));
+  if (std::chrono::steady_clock::now() - since >= std::chrono::microseconds(static_cast<long>(drain_seconds_ * 1e6))) {
+    return true;
+  }
+  if (!nothing_more_arrives(options_.drain_routing) || pending() != 0) {
+    return false;
+  }
+  try {
+    return client_.routing_acknowledged();
+  } catch (const ThreadedClient::NotConnected&) {
+    return true;  // shut down under us: nothing more is coming
+  }
 }
 
 void BaseThreadedMultiplexerServer::stop() {
@@ -140,9 +165,6 @@ std::size_t BaseThreadedMultiplexerServer::pending() const {
 }
 
 bool BaseThreadedMultiplexerServer::should_respond_to_backend_for_packet_search() const {
-  if (draining()) {
-    return false;
-  }
   if (options_.decline_searches_when_full) {
     mx::MutexLock lock(mutex_);
     return busy_ < options_.workers || queue_.empty();
@@ -153,7 +175,9 @@ bool BaseThreadedMultiplexerServer::should_respond_to_backend_for_packet_search(
 // The io thread: queue the message for a worker; drop it when the queue
 // is full, as a full queue on the multiplexer drops; refuse it when
 // leaving, with the DELIVERY_ERROR a multiplexer sends for a peer that is
-// gone, so that a query retries elsewhere at once.
+// gone, so that a query retries elsewhere at once. Few arrive then: the
+// multiplexers route nothing new to a draining backend once they have
+// its routing; this covers what was routed before.
 void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming) {
   RequestPtr request(new Request(&client_, incoming));
   bool accepting;
@@ -173,10 +197,20 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
     MX_LOG(WARNING, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
     return;
   }
+  const MultiplexerMessage& msg = *incoming.third;
+  if (msg.references()) {
+    // A message that answers another is dropped: nobody retries a reply, and
+    // refusing one could start a loop, a peer whose handler raised on the
+    // refusal answering it with BACKEND_ERROR, refused in turn, until the
+    // close ended.
+    MX_LOG(DEBUG, LOWVERBOSITY,
+           CTX("BaseThreadedMultiplexerServer")
+               TEXT("reply #" + repr(msg.id()) + " of type " + repr(msg.type()) + " dropped: leaving"));
+    return;
+  }
   MX_LOG(DEBUG, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " refused: leaving"));
   // A rule reports delivery errors unless told not to, and so does this; a
   // sender that set the message's own flag to false hears nothing.
-  const MultiplexerMessage& msg = *incoming.third;
   const bool wanted = !msg.has_report_delivery_error() || msg.report_delivery_error();
   if (wanted && msg.type() > types::MAX_MULTIPLEXER_META_PACKET) {
     DeliveryError error;

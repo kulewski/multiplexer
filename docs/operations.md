@@ -204,12 +204,12 @@ across a restart.
 
 A backend that exits immediately takes the requests it holds with it; the
 clients recover through the search, at the price of one timeout each. A
-backend that drains avoids that: asked to leave, it stops answering the
-backend search, so no client sends it a retried request, keeps serving what
-the multiplexer still routes to it for a few seconds, and then exits. Both
-libraries provide this: `start_draining()` from `periodic_task()`, and
-`serve_forever(drain_seconds=...)` returning once `drained()`. The echo
-example uses it.
+backend that drains avoids that: asked to leave, it tells every multiplexer
+to route it nothing new by the rules, serves what was already on its way,
+and exits as soon as every multiplexer has confirmed and its work is done.
+Both libraries provide this: `start_draining()` from `periodic_task()`, and
+`serve_forever(drain_seconds=...)` returning once `drained()`, with
+`drain_seconds` the most a drain may take. The echo example uses it.
 
 How the backend is asked to leave is the deployment's choice, checked from
 `periodic_task()` within one poll. The reliable form is a file: a preStop
@@ -217,16 +217,20 @@ hook writes it, the backend sees it, and the termination grace period is
 longer than the drain. The library handles no signals, because a Python
 handler runs only between iterations and a C++ library in the same process
 can replace it; a pure C++ backend may set a flag from a handler of its
-own. With that, a rolling restart of backends costs nobody a timeout, as
-the [backend_drains](../tests/scenarios/backend_drains/README.md) scenario
-checks. The multiplexer keeps routing `whom: ANY` requests to a draining
-backend until it disconnects, so the drain must be long enough to answer
-them; a threaded backend refuses what still arrives once it is closing,
-with `DELIVERY_ERROR`, so those cost their clients a retry rather than a
+own. With that, a rolling restart of backends costs nobody a timeout or a
+retry, as the [backend_drains](../tests/scenarios/backend_drains/README.md)
+scenario checks: from the confirmation on, the multiplexer routes the
+draining backend nothing by the rules, requests, events and searches
+alike, and a peer alone of its type either drains as the last resort,
+`Routing(any=False, all=False, last_resort=True)`, or fails its callers at
+once. What was routed in the moment before a multiplexer applied the
+change is served, and a threaded backend refuses what reaches it once it
+is closing, with `DELIVERY_ERROR`, so that costs a retry rather than a
 timeout, while a `BaseMultiplexerServer` loses what arrived after its
 last read. A backend that dies without draining costs its clients a
 timeout per request it held. [How a backend leaves](leaving.md) draws the
-three phases.
+three phases and the routing flags; a recording notes each skip as
+`NOT_ACCEPTED`.
 
 ## Debug symbols
 
@@ -318,11 +322,13 @@ generated constants), or from Python with `multiplexer.recording.read()`,
 which yields the records and refuses a file made with other rules than the
 constants were generated from. A `RoutedMessage` says whether it was
 `DELIVERED` or why not: `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`,
-`QUEUE_FULL`. A rules file put in use while the session is open ([changing
-the rules](#changing-the-rules)) leaves a `rules` record with the new
-fingerprint, from which the numbers are the new file's; both readers show
-it, and `recording.read()` refuses to go on past one that differs from its
-constants.
+`QUEUE_FULL`, or `NOT_ACCEPTED` for a peer whose routing turned the path
+off ([how a backend leaves](leaving.md)). A `PeerEvent` marks a peer
+arriving, leaving, or changing its routing. A rules file put in use while
+the session is open ([changing the rules](#changing-the-rules)) leaves a
+`rules` record with the new fingerprint, from which the numbers are the
+new file's; both readers show it, and `recording.read()` refuses to go on
+past one that differs from its constants.
 
 Recording costs one serialization and one buffered write per message and
 grows by the payloads; `--record-payload-bytes N` keeps only the first N

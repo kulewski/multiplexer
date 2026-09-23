@@ -102,9 +102,10 @@ type {
   another backend found by a search across every multiplexer, and a request
   whose connection dies is resent, all inside one call
   ([how a query is answered](docs/query.md)).
-- **Zero-downtime deployments.** A backend asked to leave drains: it declines
-  new work and finishes what it holds, so a Kubernetes rolling restart with a
-  preStop hook costs nobody a timeout
+- **Zero-downtime deployments.** A backend asked to leave drains: it tells
+  every multiplexer to route it nothing new, finishes what it holds, and
+  leaves as soon as they have confirmed, so a Kubernetes rolling restart
+  with a preStop hook costs nobody a timeout, or a retry
   ([backend_drains](tests/scenarios/backend_drains/README.md)).
 - **Load balancing and fan-out from one rules file.** Round-robin across a
   backend pool, publish/subscribe to every subscriber, or direct addressing,

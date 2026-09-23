@@ -73,6 +73,54 @@ TEST(ThreadedClient, OnMessageGetsWhatIsAddressedToIt) {
   EXPECT_EQ("for you", future.get().message());
 }
 
+// A backend built on the threaded client: answers every request handed to on_message.
+struct Answering {
+  explicit Answering(unsigned short port)
+      : client(multiplexer::peers::PYTHON_TEST_SERVER, [this](const multiplexer::IncomingMessage& incoming) {
+          multiplexer::MultiplexerMessage reply =
+              client.new_message(multiplexer::types::PYTHON_TEST_RESPONSE, "answered");
+          reply.set_to(incoming.third->from());
+          reply.set_references(incoming.third->id());
+          client.send(reply, incoming.second);
+        }) {
+    client.set_search_policy([] { return true; });
+    EXPECT_TRUE(client.connect("127.0.0.1", port, 5));
+  }
+  void wait_acknowledged() {
+    for (int tries = 0; tries < 500 && !client.routing_acknowledged(); ++tries) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(client.routing_acknowledged());
+  }
+  ThreadedClient client;
+};
+
+TEST(ThreadedClient, RoutingOffTakesThePeerOutOfRuleRoutingAndBackIn) {
+  InProcessMultiplexer mx;
+  Answering backend(mx.port);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+
+  multiplexer::Routing off;
+  off.set_any(false);
+  off.set_all(false);
+  backend.client.set_routing(off);
+  backend.wait_acknowledged();
+  ThreadedClient::Result refused = client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5);
+  EXPECT_EQ(ThreadedClient::FAILED, refused.outcome) << "nobody takes the request by the rules, at once";
+
+  backend.client.set_routing(multiplexer::Routing());
+  backend.wait_acknowledged();
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+
+  // A last resort gets what nobody else could take.
+  off.set_last_resort(true);
+  backend.client.set_routing(off);
+  backend.wait_acknowledged();
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+}
+
 TEST(ThreadedClient, PingIsAnsweredAndNotHandedOn) {
   InProcessMultiplexer mx;
   std::atomic<int> handed_on(0);

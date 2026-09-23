@@ -24,6 +24,8 @@ std::uint64_t now_us();
 
 // A peer registered (CONNECTED) or left (DISCONNECTED).
 void fill_peer(Record& record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
+// A peer's routing changed (PEER_CONTROL): a ROUTING event with the flags now in effect.
+void fill_peer_routing(Record& record, std::uint64_t peer_id, std::uint32_t peer_type, const Routing& routing);
 // Another rules file was put in use: what a reader needs to know that the
 // numbers changed under it.
 void fill_rules(Record& record, const std::string& fingerprint, const std::string& path, std::uint32_t message_types,

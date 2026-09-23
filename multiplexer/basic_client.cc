@@ -49,6 +49,12 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
                                  std::shared_ptr<MultiplexerMessage> mxmsg) {
   MX_DCHECK_RUN_ON(&owner_thread());
 
+  // The multiplexer's answer to our PEER_CONTROL is this library's business.
+  if (mxmsg->type() == PEER_STATUS) {
+    _on_peer_status(conn, *mxmsg);
+    return;
+  }
+
   // Every message must carry an id: replies are matched by the id they
   // reference and duplicates are detected by it, so one without is useless.
   if (!mxmsg->id()) {
@@ -77,6 +83,7 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
 // target resolved to, or the end of this attempt.
 void BasicClient::_connected(Connection::pointer conn, const asio::error_code& error) {
   if (!error) {
+    conn->managers_private_data().routing_in_welcome = routing_version_;  // what start() sends
     conn->start();
   } else if (!conn->shuts_down()) {
     MX_LOG(DEBUG, MEDIUMVERBOSITY,
@@ -84,6 +91,93 @@ void BasicClient::_connected(Connection::pointer conn, const asio::error_code& e
                                    " failed: " + error.message()));
     _try_next_candidate(conn);
   }
+}
+
+void BasicClient::set_routing(const Routing& routing) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  routing_ = routing;
+  ++routing_version_;
+  welcome_message_.reset();  // the next connection's welcome carries the new routing
+  MX_LOG(INFO, LOWVERBOSITY, CTX("BasicClient") TEXT("routing " + routing_text(routing)));
+  for (ConnectionById::iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
+    if (Connection::pointer conn = entry->second.lock()) {
+      if (conn->living()) {
+        _send_routing(conn);
+      }
+    }
+  }
+}
+
+// Forced past a full outgoing queue, since the peer that steps out is
+// often the saturated one, and pinned, so that a connection that dies
+// does not hand the frame to another multiplexer: each gets its own.
+void BasicClient::_send_routing(Connection::pointer conn) {
+  PeerControl control;
+  *control.mutable_routing() = routing_;
+  MultiplexerMessage mxmsg;
+  mxmsg.set_id(random_());
+  mxmsg.set_from(instance_id_);
+  mxmsg.set_type(PEER_CONTROL);
+  control.SerializeToString(mxmsg.mutable_message());
+  std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+  raw->mark_pinned();
+  conn->managers_private_data().routing_request_id = mxmsg.id();
+  if (!conn->schedule(raw, /*force=*/true)) {
+    MX_LOG(WARNING, LOWVERBOSITY,
+           CTX("BasicClient") TEXT("could not queue PEER_CONTROL on the connection to " + repr(conn->peer_id())));
+  }
+}
+
+// The answer to the last PEER_CONTROL sent on this connection confirms the
+// current routing; the answer to an older one, when two changes were made
+// in a row, confirms nothing, whatever flags it carries.
+void BasicClient::_on_peer_status(Connection::pointer conn, const MultiplexerMessage& mxmsg) {
+  PeerStatus status;
+  if (!status.ParseFromString(mxmsg.message()) || status.has_error()) {
+    MX_LOG(WARNING, LOWVERBOSITY,
+           CTX("BasicClient") TEXT("PEER_STATUS from " + repr(conn->peer_id()) + ": " +
+                                   (status.has_error() ? status.error() : "garbled")));
+    return;
+  }
+  auto& data = conn->managers_private_data();
+  if (mxmsg.references() == data.routing_request_id && same_routing(status.routing(), routing_)) {
+    data.routing_acknowledged = routing_version_;
+  }
+}
+
+bool BasicClient::all_written() const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
+       ++entry) {
+    if (Connection::pointer conn = entry->second.lock()) {
+      if (conn->living() && !conn->outgoing_queue_empty()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool BasicClient::routing_acknowledged() const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (has_incoming_messages()) {
+    return false;  // read, not yet handed out: still on its way
+  }
+  for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
+       ++entry) {
+    if (Connection::pointer conn = entry->second.lock()) {
+      if (!conn->living()) {
+        continue;
+      }
+      // A handshake in flight: the multiplexer may have indexed the
+      // connection, with whatever routing its welcome carried, before we
+      // hear back.
+      if (!conn->registered() || conn->managers_private_data().routing_acknowledged != routing_version_) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 // Idempotent, and the second call may come from any thread: a client that

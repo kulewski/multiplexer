@@ -11,11 +11,13 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "lib/options.h"
+#include "multiplexer/backend/base_multiplexer_server.h"
 #include "multiplexer/client.h"
 #include "multiplexer/events.pb.h"
 
@@ -52,6 +54,8 @@ struct CommonOptions {
 
   void add(mx::options::Options& options);
   std::unique_ptr<Client> connect() const;
+  // The --mx addresses as (host, port) pairs, for a backend that connects itself.
+  multiplexer::backend::MultiplexerAddresses addresses() const;
   // The "connected" event with instance_id, connections and name filled in.
   Event connected_event(Client& client) const;
 };
@@ -65,6 +69,32 @@ std::string upper(std::string text);
 
 // Runs `callable`; if it throws a client exception, emits `error_event` with
 // `kind` set to the exception's name, the same names the Python roles report.
+// --drain-routing's comma-separated flag names as a Routing.
+inline multiplexer::Routing parse_drain_routing(const std::string& flags) {
+  multiplexer::Routing routing;
+  routing.set_any(false);
+  routing.set_all(false);
+  std::string::size_type start = 0;
+  while (start <= flags.size()) {
+    std::string::size_type comma = flags.find(',', start);
+    const std::string flag = flags.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+    if (flag == "any") {
+      routing.set_any(true);
+    } else if (flag == "all") {
+      routing.set_all(true);
+    } else if (flag == "last_resort") {
+      routing.set_last_resort(true);
+    } else if (!flag.empty()) {
+      throw std::invalid_argument("unknown routing flag: " + flag);
+    }
+    if (comma == std::string::npos) {
+      break;
+    }
+    start = comma + 1;
+  }
+  return routing;
+}
+
 template <typename Callable>
 void report_client_errors(Callable callable, Event error_event) {
   try {
