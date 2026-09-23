@@ -203,7 +203,19 @@ class Echo(BaseMultiplexerServer):
 Echo([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_BACKEND).serve_forever()
 ```
 
-The constructor connects to every address. `serve_forever(poll=1.0,
+The constructor makes the instance id; `connect()` connects to every
+address, once, and `serve_forever()` calls it first, so no multiplexer
+knows the backend before it can serve, and a program that only constructs
+and serves never calls it. Call it yourself when something waits for a
+line you print before it sends, a test that reads `ready` from your
+stdout or a notebook that greps your log, so that the line means
+reachable: the echo backend does. Call it before you start
+`serve_forever()` on a thread of your own and send at once, as a test
+does: until that thread has connected, the first request finds no
+backend and fails with `OperationFailed`. Call it too when you drive
+`loop_iter()` yourself instead of `serve_forever()`, and in a test that
+wants a backend connected without a thread serving it. A second call
+does nothing. `serve_forever(poll=1.0,
 drain_seconds=0.0, stall_seconds=None)` runs the loop: each iteration waits
 up to `poll` seconds for a message, answers the protocol's own messages
 itself, calls `handle_message` with every other one, and then calls
@@ -225,8 +237,8 @@ that calls `serve_forever()` becomes its thread, and only that thread may
 touch it from then on. In debug builds the library checks this and fails
 an assertion on a call from another thread. A program that drives
 `loop_iter()` itself from a thread other than the one that built the
-backend calls `backend.conn.bind_to_current_thread()` first; the method is
-also on `Client`. Destruction is exempt: a client still alive at interpreter
+backend calls `backend.conn.bind_to_current_thread()` and then
+`backend.connect()` first; the former is also on `Client`. Destruction is exempt: a client still alive at interpreter
 exit is destroyed on the main thread whichever thread drove it, and that
 is fine as long as the driving thread is done with it.
 
@@ -328,8 +340,16 @@ through it, rather than through `self`.
 
 - `BaseThreadedMultiplexerServer(addresses, type=None, workers=1,
   queue_size=1024, decline_searches_when_full=False, timeout=10)`
-  connects and starts the workers; `type` may instead be the class
-  attribute `multiplexer_client_type`. The io thread heartbeats,
+  only makes the instance id; `type` may instead be the class attribute
+  `multiplexer_client_type`. `connect()` starts the workers and connects,
+  once, and `serve_forever()` calls it first, so nothing reaches
+  `handle_message()` before your `__init__` has finished, and no
+  multiplexer knows the backend until it can serve; `instance_id` is
+  valid from construction. When to call `connect()` yourself is as for
+  `BaseMultiplexerServer` above: something waits for a line you print
+  before it sends, a test wants the backend connected without serving
+  it, or you start `serve_forever()` on a thread of your own and send at
+  once. The io thread heartbeats,
   reconnects, answers pings and the search clients use to find a
   backend, and queues every other message for the workers. `queue_size`
   bounds the requests waiting for a worker, the same 1024 the library's
@@ -359,7 +379,8 @@ through it, rather than through `self`.
   request dropped without a reply or `no_response()` is logged when it is
   collected. `self.send_message(message, **kwargs)` sends a message that is
   not a reply, with no defaults; `self.client` is the `ThreadedClient`.
-- Searches are answered while the backend serves, as today: a busy
+- Searches are answered while the backend serves, from `serve_forever()`
+  on: a busy
   `BaseMultiplexerServer` answers a search when it gets to it, and this
   class answers at once from the io thread. `decline_searches_when_full=True`
   leaves a search unanswered while every worker is busy and requests wait,

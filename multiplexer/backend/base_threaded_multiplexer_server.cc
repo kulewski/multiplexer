@@ -54,18 +54,13 @@ void Request::notify_start() {
 BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                                              const Options& options)
     : options_(options),
+      addresses_(addresses),
       type_(type),
       client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
   if (options_.workers < 1) {
     throw std::invalid_argument("workers must be at least 1");
   }
   client_.set_search_policy([this] { return should_respond_to_backend_for_packet_search(); });
-  for (unsigned int index = 0; index < options_.workers; ++index) {
-    threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
-  }
-  for (const MultiplexerAddress& address : addresses) {
-    client_.connect(address.first, address.second, options_.connect_timeout);
-  }
 }
 
 BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() { close(); }
@@ -73,6 +68,7 @@ BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() { close(); }
 void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   drain_seconds_ = drain_seconds;
   try {
+    connect();
     for (;;) {
       {
         mx::UniqueLock lock(wake_mutex_);
@@ -94,9 +90,13 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
 }
 
 void BaseThreadedMultiplexerServer::close() {
-  for (const std::thread& thread : threads_) {
-    if (thread.get_id() == std::this_thread::get_id()) {
-      throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
+  std::vector<std::thread> threads;
+  {
+    mx::MutexLock lock(mutex_);
+    for (const std::thread& thread : threads_) {
+      if (thread.get_id() == std::this_thread::get_id()) {
+        throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
+      }
     }
   }
   if (closed_.exchange(true)) {
@@ -107,11 +107,11 @@ void BaseThreadedMultiplexerServer::close() {
     mx::MutexLock lock(mutex_);
     accepting_ = false;
     cond_.notify_all();
+    threads.swap(threads_);
   }
-  for (std::thread& thread : threads_) {
+  for (std::thread& thread : threads) {
     thread.join();
   }
-  threads_.clear();
   client_.shutdown();
 }
 
@@ -183,6 +183,29 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
     error.set_packet_id(incoming.third->id());
     error.add_failed_type(type_);
     request->reply(error.SerializeAsString(), types::DELIVERY_ERROR);
+  }
+}
+
+void BaseThreadedMultiplexerServer::connect() {
+  if (connected_.exchange(true) || closed_.load()) {
+    return;
+  }
+  _start_workers();  // before the first connection, so that nothing waits for a worker
+  for (const MultiplexerAddress& address : addresses_) {
+    client_.connect(address.first, address.second, options_.connect_timeout);
+  }
+}
+
+// The workers, started once, from connect() and before it connects:
+// a request must never reach handle_message() on an object whose subclass
+// is not built yet, and once connected it must not wait for a worker.
+void BaseThreadedMultiplexerServer::_start_workers() {
+  mx::MutexLock lock(mutex_);
+  if (!accepting_ || !threads_.empty()) {
+    return;  // closed already, or served before
+  }
+  for (unsigned int index = 0; index < options_.workers; ++index) {
+    threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
   }
 }
 

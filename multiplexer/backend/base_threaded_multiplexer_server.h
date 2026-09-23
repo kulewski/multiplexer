@@ -9,7 +9,10 @@
 // the search clients use to find a backend, and hands every other message
 // to a bounded queue that `workers` threads take from. With one worker
 // handling is serial, in arrival order, as on BaseMultiplexerServer, and
-// the peer stays registered under a request of any length. A request that
+// the peer stays registered under a request of any length. The workers
+// start and the connections open in serve_forever(), so nothing reaches
+// handle_message() before the subclass is built, and no multiplexer knows
+// the backend until it serves. A request that
 // arrives while the server is leaving, routed before the multiplexer saw
 // the connection go, is refused with DELIVERY_ERROR, so its requester
 // retries elsewhere at once rather than after its timeout.
@@ -101,20 +104,30 @@ class BaseThreadedMultiplexerServer {
   typedef ThreadedServerOptions Options;
 
  protected:
-  // Connects to every address as a backend of `type` and starts the
-  // workers; a subclass calls it.
+  // A backend of `type` for the multiplexers at `addresses`; a subclass
+  // calls it. It only makes the instance id: the workers start and the
+  // connections open in connect(), which serve_forever() calls first, so
+  // nothing reaches handle_message() before the subclass is built, and
+  // no multiplexer knows the backend until it can serve.
   BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                 const Options& options = Options());
 
  public:
   virtual ~BaseThreadedMultiplexerServer();  // close()
 
-  // Until stop() or a drain is over: every `poll` seconds, or sooner when
+  // connect(); then, until
+  // stop() or a drain is over: every `poll` seconds, or sooner when
   // woken, periodic_task(); then take no new message, let the workers
   // finish the queue, close the connections and return. The calling thread
   // only polls; the handlers run on the workers. Rethrows what a handler
   // threw when on_handler_exception() returned false.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
+  // Starts the workers and connects to every address, once;
+  // serve_forever() calls it first, and a second call does nothing. Call
+  // it yourself when something waits for a line you print before it
+  // sends, so that the line means reachable, or in a test that wants the
+  // backend connected without a thread serving it.
+  void connect();
   // Take no more messages, let the workers finish what is queued, stop
   // them and close the connections. From here on no search is answered
   // and what still arrives is refused with DELIVERY_ERROR. Idempotent;
@@ -134,8 +147,8 @@ class BaseThreadedMultiplexerServer {
   std::size_t pending() const;
   std::size_t dropped() const { return dropped_.load(); }
 
-  std::uint64_t instance_id() const { return client_.instance_id(); }
-  ThreadedClient& client() { return client_; }  // for messages that are not replies
+  std::uint64_t instance_id() const { return client_.instance_id(); }  // known from construction
+  ThreadedClient& client() { return client_; }                         // for messages that are not replies
 
  protected:
   // Called on a worker thread with every message that is not the
@@ -161,23 +174,26 @@ class BaseThreadedMultiplexerServer {
 
  private:
   void _on_message(const IncomingMessage& incoming);
+  void _start_workers();
   void _work();
   void _handle(const RequestPtr& request);
 
   const Options options_;
+  const MultiplexerAddresses addresses_;
   const PeerType type_;
   mutable mx::Mutex mutex_;
   std::condition_variable_any cond_;
   std::deque<RequestPtr> queue_ MX_GUARDED_BY(mutex_);
   unsigned int busy_ MX_GUARDED_BY(mutex_) = 0;
   bool accepting_ MX_GUARDED_BY(mutex_) = true;
-  std::vector<std::thread> threads_;
+  std::vector<std::thread> threads_ MX_GUARDED_BY(mutex_);
   std::atomic<bool> draining_{false};
   std::chrono::steady_clock::time_point draining_since_;
   float drain_seconds_ = 0.0f;
   mx::Mutex wake_mutex_;
   std::condition_variable_any wake_;
   std::exception_ptr failure_;
+  std::atomic<bool> connected_{false};
   std::atomic<bool> closed_{false};
   std::atomic<std::size_t> dropped_{0};
   ThreadedClient client_;  // last: its callbacks reach the members above

@@ -34,6 +34,7 @@ def main() -> None:
     common.stop_on_sigterm()
 
     event_backend = EventBackend(common.endpoints(args), type=args.type)
+    event_backend.connect()  # the loop below is its own; connect() is what serve_forever() would do first
     emit(
         "connected",
         instance_id=event_backend.conn.instance_id,

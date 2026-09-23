@@ -88,6 +88,7 @@ class LeakTest(unittest.TestCase):
         def serve():
             """The backend, built and driven on this thread."""
             backend = Backend([self.endpoint], type=peers.PYTHON_TEST_SERVER)
+            backend.connect()  # what serve_forever() would do first; this loop is its own
             self.backend_id = backend.conn.instance_id
             ready.set()
             while self.serving:

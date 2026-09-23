@@ -47,8 +47,10 @@ class BaseMultiplexerServer {
   static const int ALL = 2;
 
  protected:
-  // Connects to every address as a peer of `type`. The second form uses a
-  // Client the caller owns and keeps.
+  // A peer of `type` for the multiplexers at `addresses`: this makes the
+  // instance id, and connect() or serve_forever() connects, so no
+  // multiplexer knows the backend before it can serve. The second form
+  // uses a Client the caller owns, keeps and connects.
   BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type);
 
   BaseMultiplexerServer(multiplexer::Client* conn, PeerType type);
@@ -60,7 +62,16 @@ class BaseMultiplexerServer {
   // Throws Client::OperationTimedOut when the time passes.
   virtual void loop_iter(float timeout = DEFAULT_READ_TIMEOUT);
 
-  // The loop: until `working` is cleared or a drain is over, wait up to
+  // Connects to every address given to the constructor, once;
+  // serve_forever() calls it first, and a second call does nothing. Call
+  // it yourself when something waits for a line you print before it
+  // sends, so that the line means reachable; when you drive loop_iter()
+  // yourself; or in a test that wants the backend connected without a
+  // thread serving it.
+  void connect();
+
+  // The loop: connect() unless already connected, then until `working` is
+  // cleared or a drain is over, wait up to
   // `poll` seconds for a message, handle it if one came, call
   // periodic_task(); then close the connections. `drain_seconds` is how
   // long to keep serving after start_draining(), unless drained() is
@@ -172,6 +183,8 @@ class BaseMultiplexerServer {
 
  private:
   std::unique_ptr<multiplexer::Client> __conn;
+  const MultiplexerAddresses addresses_;
+  bool connected_ = false;
 
  protected:
   multiplexer::Client* conn;

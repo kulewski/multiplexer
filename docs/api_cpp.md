@@ -150,10 +150,22 @@ protected:
 };
 ```
 
-The constructor takes a vector of `(host, port)` pairs, connects to each, and
-must be called from a subclass because it is protected. The second
-constructor takes a `Client*` you created, for backends that also act as
-clients. `serve_forever(poll = 1.0f, drain_seconds = 0.0f)` runs the loop:
+The constructor takes a vector of `(host, port)` pairs and makes the
+instance id; it must be called from a subclass because it is protected.
+`connect()` connects to each address, once, and `serve_forever()` calls it
+first, so no multiplexer knows the backend before it can serve, and a
+program that only constructs and serves never calls it. Call it yourself
+when something waits for a line you print before it sends, a test that
+reads `ready` from your stdout or a notebook that greps your log, so that
+the line means reachable: the echo backend does. Call it before you
+start `serve_forever` on a thread of your own and send at once, as a
+test does: until that thread has connected, the first request finds no
+backend and fails. Call it too when you
+drive `loop_iter` yourself instead of `serve_forever`, and in a test that
+wants a backend connected without a thread serving it. A second call does
+nothing. The second constructor takes a `Client*` you created and
+connected, for backends that also act as clients.
+`serve_forever(poll = 1.0f, drain_seconds = 0.0f)` runs the loop:
 each iteration waits up to `poll` seconds for a message, handles it if one
 came, then calls the virtual `periodic_task()`, message or not, so anything
 checked there takes effect within one poll. It returns, with the
@@ -163,7 +175,7 @@ over. `loop_iter(timeout)` does one step and throws
 `serve_forever` becomes the backend's thread, whichever thread built it;
 in debug builds a later call from another thread fails an assertion. A
 program driving `loop_iter` itself from another thread calls
-`Client::bind_to_current_thread()` first.
+`Client::bind_to_current_thread()` and then `connect()` first.
 
 `send_message(Kwargs)` takes named arguments, because the message has many
 optional fields. Keys and their exact types:
@@ -252,6 +264,15 @@ Echo(addresses, options).serve_forever();
   (false: searches are answered while the backend serves; true leaves
   them unanswered while every worker is busy and requests wait) and
   `connect_timeout`.
+- The constructor only makes the instance id; `connect()` starts the
+  workers and connects, once, and `serve_forever()` calls it first, so
+  nothing reaches `handle_message()` before your constructor has
+  finished, and no multiplexer knows the backend until it can serve.
+  `instance_id()` is valid from construction. When to call `connect()`
+  yourself is as for `BaseMultiplexerServer` above: something waits for
+  a line you print before it sends, a test wants the backend connected
+  without serving it, or you start `serve_forever()` on a thread of your
+  own and send at once.
 - `handle_message(const RequestPtr &)` runs on a worker. The `Request`,
   held by `shared_ptr` so a handler may keep it and answer from another
   thread later, has `mxmsg()`, `connection()`, `reply(payload, type)`,

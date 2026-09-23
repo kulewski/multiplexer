@@ -99,7 +99,7 @@ class ServeThreadTest(unittest.TestCase):
 
     def test_built_on_one_thread_served_from_another(self) -> None:
         """serve_forever() on a worker thread adopts it and runs to the end."""
-        backend = CountingBackend([self.endpoint])  # built, and connected, on the main thread
+        backend = CountingBackend([self.endpoint])  # built on the main thread; serve_forever() connects on the worker
         worker = threading.Thread(target=backend.serve_forever, kwargs={"poll": 0.1})
         worker.start()
         worker.join(30)
@@ -113,6 +113,7 @@ class ServeThreadTest(unittest.TestCase):
         def drive() -> None:
             """Three timed-out iterations on this thread."""
             backend.conn.bind_to_current_thread()
+            backend.connect()  # what serve_forever() would have done first
             for _ in range(3):
                 try:
                     backend.loop_iter(timeout=0.1)
@@ -124,6 +125,19 @@ class ServeThreadTest(unittest.TestCase):
         worker.start()
         worker.join(30)
         self.assertFalse(worker.is_alive())
+
+    def test_nothing_is_connected_before_serve_forever(self) -> None:
+        """The constructor makes the id; connect() or serve_forever() connects."""
+        backend = CountingBackend([self.endpoint])
+        self.assertTrue(backend.conn.instance_id, "the id is known before serving")
+        self.assertEqual(0, backend.conn.connections_count(), "and nothing is connected")
+        backend.connect()  # a program that announces itself before serving
+        self.assertEqual(1, backend.conn.connections_count())
+        worker = threading.Thread(target=backend.serve_forever, kwargs={"poll": 0.1})  # connects nothing more
+        worker.start()
+        worker.join(30)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(3, backend.iterations)
 
     def test_destroyed_at_interpreter_exit_on_the_main_thread(self) -> None:
         """A client bound to a worker and left alive exits cleanly: the

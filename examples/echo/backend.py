@@ -37,6 +37,9 @@ def main(argv: list[str]) -> None:
     host, port = (argv[1] if len(argv) > 1 else "127.0.0.1:1980").rsplit(":", 1)
     drain_file = argv[2] if len(argv) > 2 else "/tmp/echo-backend-leave"
     backend = EchoBackend([(host, int(port))], drain_file)
+    # The echo test reads "ready" and queries at once, so the line must mean
+    # reachable: connect() first; serve_forever() would otherwise.
+    backend.connect()
     print("ready", flush=True)
     # Drain for five seconds once asked: searches are declined so no retried
     # request comes here, requests that still arrive are served, then the

@@ -241,6 +241,22 @@ class ThreadedServerTest(unittest.TestCase):
         wait_until(lambda: not served.running, 10, "serve_forever() returned")
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
 
+    def test_nothing_is_connected_or_handled_before_serve_forever(self):
+        server = Scripted(self.cluster.endpoints)  # built, as a subclass's __init__ leaves it
+        self.addCleanup(server.close)
+        self.assertTrue(server.instance_id, "the id is known before serving")
+        self.assertEqual(0, server.client.connections_count(), "and nothing is connected")
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            server.connect()  # a program that announces itself before serving: the workers are up
+            self.assertEqual(1, server.client.connections_count())
+            self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+            self.assertEqual(types.PING, self.search(client.client, 5).type, "the search answered")
+            thread = threading.Thread(target=lambda: server.serve_forever(0.05), daemon=True)  # connects nothing more
+            thread.start()
+            self.assertEqual(b"LATE", client.query(b"late", REQUEST).message)
+        server.stop()
+        thread.join(10)
+
 
 if __name__ == "__main__":
     unittest.main()

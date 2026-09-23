@@ -1,4 +1,4 @@
-// A backend built on one thread and served from another: serve_forever()
+// A backend built on one thread, connected and served from another: serve_forever()
 // adopts the serving thread, so the debug-build thread checks, which bind a
 // client and its connections to the thread that made them, do not fire.
 #include <gtest/gtest.h>
@@ -39,7 +39,7 @@ TEST(ServeThread, BuiltOnOneThreadServedFromAnother) {
   InProcessMultiplexer mx;
   MultiplexerAddresses addresses;
   addresses.push_back(std::make_pair("127.0.0.1", mx.port));
-  CountingBackend backend(addresses);  // built, and connected, on this thread
+  CountingBackend backend(addresses);  // built on this thread; serve_forever() connects on the other
   std::thread server([&backend] { backend.serve_forever(0.1f); });
   server.join();
   EXPECT_EQ(3, backend.iterations);
@@ -52,6 +52,7 @@ TEST(ServeThread, ExplicitRebindForOwnLoop) {
   CountingBackend backend(addresses);
   std::thread driver([&backend] {
     backend.conn_for_test()->bind_to_current_thread();
+    backend.connect();  // what serve_forever() would have done first
     for (int i = 0; i < 3; ++i) {
       try {
         backend.loop_iter(0.1f);
@@ -61,4 +62,18 @@ TEST(ServeThread, ExplicitRebindForOwnLoop) {
     backend.close_for_test();  // the owning thread closes; destroying on another would fail the check
   });
   driver.join();
+}
+
+TEST(ServeThread, NothingIsConnectedBeforeServeForever) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  CountingBackend backend(addresses);
+  EXPECT_NE(0u, backend.conn_for_test()->instance_id()) << "the id is known before serving";
+  EXPECT_EQ(0u, backend.conn_for_test()->connections_count()) << "and nothing is connected";
+  backend.connect();  // a program that announces itself before serving
+  EXPECT_EQ(1u, backend.conn_for_test()->connections_count());
+  std::thread server([&backend] { backend.serve_forever(0.1f); });  // connects nothing more
+  server.join();
+  EXPECT_EQ(3, backend.iterations);
 }

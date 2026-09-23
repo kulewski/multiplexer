@@ -58,6 +58,7 @@ class PickleTest(unittest.TestCase):
             host, port = port_file.read().strip().rsplit(":", 1)
         self.endpoint = (host, int(port))
         self.backend = Doubler([self.endpoint], type=peers.PYTHON_TEST_SERVER)
+        self.backend.connect()  # registered before the first query, however late the thread below runs
         self.backend_thread = threading.Thread(target=self.backend.serve_forever, kwargs={"poll": 0.1}, daemon=True)
         self.backend_thread.start()
 

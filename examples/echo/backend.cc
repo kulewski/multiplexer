@@ -53,6 +53,9 @@ int main(int argc, char** argv) {
   addresses.push_back(
       std::make_pair(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1)))));
   EchoBackend backend(addresses, multiplexer::peers::ECHO_BACKEND);
+  // The echo test reads "ready" and queries at once, so the line must mean
+  // reachable: connect() first; serve_forever() would otherwise.
+  backend.connect();
   std::cout << "ready" << std::endl;
   // Drain for five seconds once asked: searches are declined so no retried
   // request comes here, requests that still arrive are served, then the

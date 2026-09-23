@@ -138,8 +138,11 @@ class BaseThreadedMultiplexerServer:
         decline_searches_when_full: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
     ):
-        """Connect to every multiplexer in `addresses` as a backend of peer
-        type `type` and start `workers` handler threads. `queue_size`
+        """A backend of peer type `type` for the multiplexers in
+        `addresses`. This only makes the instance id: the `workers` handler
+        threads start and the connections open in serve_forever(), so
+        nothing reaches handle_message() before the subclass's __init__ is
+        done, and no multiplexer knows the backend until it serves. `queue_size`
         bounds the requests waiting for a worker; beyond it a request is
         dropped with a warning, as a full queue on the multiplexer drops,
         and the requester retries through the search. A request that
@@ -169,19 +172,18 @@ class BaseThreadedMultiplexerServer:
         self._accepting = True
         self._wake = threading.Event()
         self._failure: BaseException | None = None
-        self._threads = [
-            threading.Thread(target=self._work, name="mx-worker-%d" % index, daemon=True) for index in range(workers)
-        ]
+        self._threads: list[threading.Thread] = []  # started by serve_forever()
+        self._addresses = addresses  # connected to by connect(), which serve_forever() calls first
+        self._timeout = timeout
+        self._connected = False
         self._client: ThreadedClient | None = ThreadedClient(
-            addresses,
+            [],
             type,
             timeout,
             on_message=self._on_message,
             with_connection=True,
             search_policy=self.should_respond_to_backend_for_packet_search,
         )
-        for thread in self._threads:
-            thread.start()
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
 
@@ -196,7 +198,8 @@ class BaseThreadedMultiplexerServer:
 
     @property
     def instance_id(self) -> int:
-        """This backend's instance id, what a client addresses with `to`."""
+        """This backend's instance id, what a client addresses with `to`;
+        known from construction, before connect() or serve_forever() connects."""
         return self.client.instance_id
 
     # What subclasses implement or override.
@@ -231,6 +234,19 @@ class BaseThreadedMultiplexerServer:
             with self._cond:
                 return self._busy < self.workers or not self._queue
         return True
+
+    def connect(self) -> None:
+        """Start the workers and connect to every multiplexer, once;
+        serve_forever() calls it first, and a second call does nothing.
+        Call it yourself when something waits for a line you print before
+        it sends, so that the line means reachable, or in a test that
+        wants the backend connected without a thread serving it."""
+        if self._connected or self._client is None:
+            return
+        self._connected = True
+        self._start_workers()  # before the first connection, so that nothing waits for a worker
+        for endpoint in self._addresses:
+            self._client.connect(endpoint, self._timeout)
 
     # Leaving.
 
@@ -268,13 +284,15 @@ class BaseThreadedMultiplexerServer:
     # The loop.
 
     def serve_forever(self, poll: float = 1.0, drain_seconds: float = 0.0) -> None:
-        """Run until stop() or a drain is over: every `poll` seconds, or
-        sooner when woken, call periodic_task(); then take no new message,
-        let the workers finish the queue, close the connections and
-        return. The calling thread only polls: the handlers run on the
-        workers, which is the point."""
+        """connect(), then run
+        until stop() or a drain is over: every `poll` seconds, or sooner
+        when woken, call periodic_task(); then take no new message, let
+        the workers finish the queue, close the connections and return.
+        The calling thread only polls: the handlers run on the workers,
+        which is the point."""
         self._drain_seconds = drain_seconds
         try:
+            self.connect()
             while self.working and not (self.draining and self.drained()) and self._failure is None:
                 self._wake.wait(poll)
                 self._wake.clear()
@@ -311,6 +329,21 @@ class BaseThreadedMultiplexerServer:
         return self.client.send_message(message, **kwargs)
 
     # The io thread's side and the workers' side of the queue.
+
+    def _start_workers(self) -> None:
+        """The workers, started once, from connect() and before it
+        connects: a request must never reach handle_message() before the
+        subclass's __init__ is done, and once connected it must not wait
+        for a worker."""
+        with self._cond:
+            if not self._accepting or self._threads:
+                return  # closed already, or served before
+            self._threads = [
+                threading.Thread(target=self._work, name="mx-worker-%d" % index, daemon=True)
+                for index in range(self.workers)
+            ]
+            for thread in self._threads:
+                thread.start()
 
     def _on_message(self, mxmsg: MultiplexerMessage, connection: ConnectionWrapper) -> None:
         """The io thread: queue the message for a worker; drop it when the

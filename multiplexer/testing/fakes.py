@@ -32,8 +32,9 @@ Matcher = Callable[[MultiplexerMessage], bool]
 
 
 class Served(Protocol):
-    """What BackendThread drives: serve_forever(poll=...) until stop()."""
+    """What BackendThread drives: connect(), serve_forever(poll=...) until stop()."""
 
+    def connect(self) -> None: ...
     def serve_forever(self, *, poll: float) -> None: ...
     def stop(self) -> None: ...
 
@@ -45,8 +46,8 @@ class BackendThread(Generic[ServedT]):
     """A backend served on its own thread.
 
     `factory` builds the backend, a BaseMultiplexerServer, on that thread,
-    where it is then served with serve_forever(poll); start() returns once
-    it is built and connected, raising what the factory raised. stop() asks
+    where it is connected and then served with serve_forever(poll); start()
+    returns once it is built and connected, raising what the factory raised. stop() asks
     it to leave, joins the thread and re-raises what serving raised, so a
     failing handler fails the test. `backend` is the instance, `error` the
     exception if there was one.
@@ -71,13 +72,15 @@ class BackendThread(Generic[ServedT]):
         return self
 
     def _run(self) -> None:
-        """The thread: build, announce, serve, keep what went wrong."""
+        """The thread: build, connect, announce, serve, keep what went wrong."""
         try:
-            self.backend = self.factory()
+            backend = self.factory()
+            backend.connect()  # what serve_forever() would do first; a test may send as soon as start() returns
         except BaseException as error:  # reported by start()
             self.error = error
             self._built.set()
             return
+        self.backend = backend
         self._built.set()
         try:
             self.backend.serve_forever(poll=self.poll)

@@ -121,6 +121,7 @@ def main() -> None:
         args.drain_min_handled,
         args.exit_on_exception,
     )
+    backend.connect()  # the harness waits for this event's connection count before it sends
     emit(
         "connected", instance_id=backend.conn.instance_id, connections=backend.conn.connections_count(), name=args.name
     )

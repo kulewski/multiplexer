@@ -8,11 +8,11 @@ namespace multiplexer {
 namespace backend {
 
 BaseMultiplexerServer::BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type)
-    : working(true), _has_sent_response(false), __conn(new multiplexer::Client(type)), conn(__conn.get()) {
-  for (const MultiplexerAddress& address : addresses) {
-    conn->connect(address.first, address.second);
-  }
-}
+    : working(true),
+      _has_sent_response(false),
+      __conn(new multiplexer::Client(type)),
+      addresses_(addresses),
+      conn(__conn.get()) {}
 
 BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client* conn_, PeerType type)
     : working(true), _has_sent_response(false), conn(conn_) {
@@ -28,10 +28,21 @@ void BaseMultiplexerServer::loop_iter(float timeout) {
   __handle_message();
 }
 
+void BaseMultiplexerServer::connect() {
+  if (connected_) {
+    return;
+  }
+  connected_ = true;
+  for (const MultiplexerAddress& address : addresses_) {
+    conn->connect(address.first, address.second);
+  }
+}
+
 void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   conn->bind_to_current_thread();
   drain_seconds_ = drain_seconds;
   try {
+    connect();
     while (working) {
       if (draining_ && drained()) {
         break;

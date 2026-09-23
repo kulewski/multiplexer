@@ -49,7 +49,9 @@ class MultiplexerPeer(object):
 
     @log_call
     def __init__(self, addresses, type=None):
-        """Connect to every multiplexer in `addresses`, a list of (host, port) pairs.
+        """A peer of type `type` for the multiplexers in `addresses`, a list
+        of (host, port) pairs. This makes the instance id; connect()
+        connects, and BaseMultiplexerServer.serve_forever() calls it first.
 
         `type` is a peers.* constant from the generated multiplexer_constants;
         subclasses may set `multiplexer_client_type` instead of passing it.
@@ -61,7 +63,20 @@ class MultiplexerPeer(object):
                 raise ValueError("no type provided and " "self.multiplexer_client_type is not set")
         self.type = type
         self.conn = BasicClient(self.type)
-        for host, port in addresses:
+        self._addresses = list(addresses)
+        self._connected = False
+
+    def connect(self) -> None:
+        """Connect to every address given to the constructor, once;
+        serve_forever() calls it first, and a second call does nothing.
+        Call it yourself when something waits for a line you print before
+        it sends, so that the line means reachable; when you drive
+        loop_iter() yourself; or in a test that wants the backend
+        connected without a thread serving it."""
+        if self._connected:
+            return
+        self._connected = True
+        for host, port in self._addresses:
             self.conn.connect((host, port))
 
 
@@ -88,7 +103,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
     @log_call
     def __init__(self, addresses, type=None):
-        """Connect to every multiplexer in `addresses` as a backend of peer type `type`."""
+        """A backend of peer type `type` for the multiplexers in `addresses`; connect() or serve_forever() connects."""
         super(BaseMultiplexerServer, self).__init__(addresses, type)
         self.working = True
         self.last_mxmsg: MultiplexerMessage | None = None
@@ -155,8 +170,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
         stall_seconds: float | None = None,
         stall_file=None,
     ) -> None:
-        """Run the loop until `working` is cleared or a drain is over, then
-        close the connections and return.
+        """connect() unless already connected, then run the loop until
+        `working` is cleared or a drain is over, then close the connections
+        and return.
 
         Each iteration waits up to `poll` seconds for a message, handles it
         if one came, and calls periodic_task(). `drain_seconds` is how long
@@ -171,6 +187,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
         self._drain_seconds = drain_seconds
         stall_file = stall_file or sys.stderr
         try:
+            self.connect()
             while self.working:
                 if self.draining and self.drained():
                     break
@@ -351,7 +368,7 @@ class MultiplexerServer(BaseMultiplexerServer):
 
     @log_call
     def __init__(self, addresses, type=None):
-        """Connect as a backend of peer type `type`, a peers.* constant."""
+        """A backend of peer type `type`, a peers.* constant."""
         assert isinstance(type, int)
         super(MultiplexerServer, self).__init__(addresses, type)
 

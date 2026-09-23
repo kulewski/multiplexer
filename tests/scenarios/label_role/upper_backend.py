@@ -41,6 +41,7 @@ def main() -> None:
     addresses = [(host, int(port)) for host, port in (address.rsplit(":", 1) for address in args.mx)]
     backend = Upper(addresses, type=args.type)
     signal.signal(signal.SIGTERM, lambda *_: backend.stop())
+    backend.connect()  # the harness waits for this event's connection count before it sends
     emit(
         "connected", instance_id=backend.conn.instance_id, connections=backend.conn.connections_count(), name=args.name
     )

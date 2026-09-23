@@ -2,7 +2,7 @@
 // order with one worker, four requests at once with four, a reply from
 // another thread later, the search answered while busy unless told to
 // decline, a full queue dropping, a handler that throws, draining, a
-// request refused while leaving.
+// request refused while leaving, nothing connected before serve_forever.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -88,7 +88,8 @@ struct Scripted : BaseThreadedMultiplexerServer {
   std::atomic<bool> keep_serving{true};
 };
 
-// A Scripted served on its own thread, as a program would.
+// A Scripted served on its own thread, as a program would; built once it
+// is connected, since serve_forever() is what connects.
 struct Served {
   explicit Served(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
       : server(port, options), thread([this] {
@@ -97,10 +98,16 @@ struct Served {
           } catch (...) {
             failure = std::current_exception();
           }
-        }) {}
+        }) {
+    for (int waited = 0; waited < 1000 && server.client().connections_count() == 0; ++waited) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
   ~Served() {
     server.stop();
-    thread.join();
+    if (thread.joinable()) {  // a test may have joined it, to see serve_forever() return
+      thread.join();
+    }
   }
   Scripted server;
   std::exception_ptr failure;
@@ -292,7 +299,8 @@ TEST(ThreadedServer, CloseFromAHandlerIsAnErrorNotADeadlock) {
 // timeout; the search is declined too.
 TEST(ThreadedServer, ARequestArrivingWhileLeavingIsRefusedAtOnce) {
   InProcessMultiplexer mx;
-  Scripted server(mx.port);
+  Served served(mx.port);  // serving, so that "block" is in the handler when close() starts
+  Scripted& server = served.server;
   Requester requester(mx.port);
   requester.send("block");
   ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
@@ -309,16 +317,36 @@ TEST(ThreadedServer, ARequestArrivingWhileLeavingIsRefusedAtOnce) {
 
 TEST(ThreadedServer, DrainingDeclinesSearchesAndFinishesTheQueue) {
   InProcessMultiplexer mx;
-  Scripted server(mx.port);
+  Served served(mx.port);
   Requester requester(mx.port);
   requester.send("block");
   for (int index = 0; index < 3; ++index) {
     requester.send("event-" + std::to_string(index));
   }
-  ASSERT_TRUE(eventually([&] { return server.pending() == 4; }));
-  server.start_draining();
+  ASSERT_TRUE(eventually([&] { return served.server.pending() == 4; }));
+  served.server.start_draining();
   EXPECT_THROW(requester.search(1), multiplexer::Client::OperationTimedOut);
-  server.release();
-  server.serve_forever(0.05f);  // drained at once: finishes the queue and returns
-  EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "event-2"}), server.snapshot());
+  served.server.release();
+  served.thread.join();  // drained at once: serve_forever() finishes the queue and returns
+  EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "event-2"}), served.server.snapshot());
+}
+
+TEST(ThreadedServer, NothingIsConnectedOrHandledBeforeServeForever) {
+  InProcessMultiplexer mx;
+  Scripted server(mx.port);  // built, as a subclass's constructor would leave it
+  EXPECT_NE(0u, server.instance_id()) << "the id is known before serving";
+  EXPECT_EQ(0u, server.client().connections_count()) << "and nothing is connected";
+  Requester requester(mx.port);
+  try {
+    EXPECT_NE(multiplexer::types::PING, requester.search(1)) << "no backend to answer";
+  } catch (const multiplexer::Client::OperationTimedOut&) {
+    // no answer at all: as good
+  }
+  server.connect();  // a program that announces itself before serving: the workers are up
+  EXPECT_EQ(1u, server.client().connections_count());
+  EXPECT_EQ(multiplexer::types::PING, requester.search(5)) << "the search answered";
+  std::thread serving([&] { server.serve_forever(0.05f); });  // connects nothing more
+  EXPECT_EQ("LATE", requester.query("late"));
+  server.stop();
+  serving.join();
 }
