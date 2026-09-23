@@ -111,12 +111,23 @@ message RoutedMessage {
   optional bool truncated = 13;         // payload cut at the --record-payload-bytes limit
 }
 
+// The multiplexer put another rules file in use (docs/operations.md,
+// "Changing the rules"): from here on the file's numbers are those of the
+// new fingerprint, which the header's may no longer be.
+message RulesEvent {
+  optional string fingerprint = 1;      // of the rules in use from this record on
+  optional string path = 2;
+  optional uint32 message_types = 3;
+  optional uint32 peer_types = 4;
+}
+
 message Record {
   optional uint64 timestamp_us = 1;     // microseconds since the epoch, the multiplexer's clock
   oneof event {
     RecordingHeader header = 2;
     PeerEvent peer = 3;
     RoutedMessage routed = 4;
+    RulesEvent rules = 6;
   }
   optional uint64 multiplexer_id = 5;   // set on streamed records, so a tap on several multiplexers can tell them apart
 }

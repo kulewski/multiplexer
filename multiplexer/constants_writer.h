@@ -4,7 +4,7 @@
 // both do. multiplexer.constants.h holds namespaces multiplexer::types and
 // multiplexer::peers, multiplexer_constants.py the classes types and peers,
 // and the .pyi their stub for type checkers; each with a get_name() that
-// maps a number back to its name, for logs, and the rules file's SHA-1 as
+// maps a number back to its name, for logs, and the rules file's CRC-32 as
 // RULES_FINGERPRINT, which a recording's header carries too.
 //
 // Header only, templated on the Config, because the tool compiles config.h
@@ -160,7 +160,7 @@ void check_config(const Config& config) {
   detail::check_names_and_numbers_unique(config.peer_by_type());
 }
 
-// The SHA-1 of the rules file's text, so that a recording made by a
+// The CRC-32 of the rules file's text, so that a recording made by a
 // multiplexer running with a different rules file can be told apart.
 inline std::string rules_fingerprint(const std::string& source_file) {
   std::ifstream in(source_file.c_str(), std::ifstream::binary);
@@ -171,7 +171,7 @@ inline std::string rules_fingerprint(const std::string& source_file) {
 template <typename Config>
 void write_python(const Config& config, std::ostream& out, const std::string& source_file) {
   detail::write_signature("#", out, source_file);
-  out << "# SHA-1 of the rules file these constants were generated from; a recording's header carries the same.\n"
+  out << "# CRC-32 of the rules file these constants were generated from; a recording's header carries the same.\n"
       << "RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\"\n\n";
   out << "\n"
       << "class _constants_base:\n"
@@ -209,7 +209,7 @@ void write_cxx(const Config& config, std::ostream& out, const std::string& sourc
 
   detail::write_signature("//", out, source_file);
   out << "namespace multiplexer {\n"
-      << "\t// SHA-1 of the rules file these constants were generated from.\n"
+      << "\t// CRC-32 of the rules file these constants were generated from.\n"
       << "\tstatic const char *const RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\";\n\n";
   detail::write_cxx_mapping(out, config.message_description_by_id(), "types");
   detail::write_cxx_mapping(out, config.peer_by_type(), "peers");

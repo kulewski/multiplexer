@@ -6,8 +6,11 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <vector>
 
+#include "lib/exception.h"
+#include "lib/fingerprint.h"
 #include "lib/logging/logging.h"
 #include "lib/memory.h"
 #include "lib/repr.h"
@@ -23,14 +26,19 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
     : Base(io_service),
       acceptor_(io_service, asio::ip::tcp::endpoint(asio::ip::address::from_string(host), port)),
       io_service_(io_service),
+      rules_timer_(io_service),
       session_timer_(io_service) {}
 
-void Server::start() { _start_accept(); }
+void Server::start() {
+  _start_accept();
+  _arm_rules_check();
+}
 
 void Server::stop() {
   MX_DCHECK_RUN_ON(&owner_thread());
   asio::error_code ignored;
   acceptor_.close(ignored);
+  rules_timer_.cancel();
   std::vector<Connection::pointer> live;
   for (ConnectionById::iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
     if (Connection::pointer connection = entry->second.lock()) {
@@ -40,6 +48,9 @@ void Server::stop() {
   for (size_t index = 0; index < live.size(); ++index) {
     live[index]->shutdown();
   }
+  // After the peers left, so their departures are in the file; the
+  // session's deadline timer would otherwise keep the loop alive.
+  stop_recording("the multiplexer stopped");
 }
 
 void Server::_start_accept() {
@@ -280,11 +291,16 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     case types::DELIVERY_ERROR:
     case RECORDING_STATUS:
     case RECORDING_RECORD:
+    case RULES_STATUS:
       // Only meaningful with a `to` field, which was handled before this.
       return true;
 
     case RECORDING_CONTROL:
       _handle_recording_control(meta_handler);
+      return true;
+
+    case RULES_CONTROL:
+      _handle_rules_control(meta_handler);
       return true;
 
     case types::BACKEND_FOR_PACKET_SEARCH: {
@@ -471,7 +487,202 @@ std::string Server::_peer_name(std::uint32_t peer_type) const {
   if (peer_type == RECORDING_CONTROLLER) {
     return "RECORDING_CONTROLLER";
   }
+  if (peer_type == RULES_CONTROLLER) {
+    return "RULES_CONTROLLER";
+  }
   return config_.peer_name_by_type(peer_type);
+}
+
+// The rules file.
+
+Server::RulesLoad Server::load_rules(std::string* error) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  std::string text;
+  if (!_read_rules_file(&text, error)) {
+    return _rules_failed(*error, error);
+  }
+  return _apply_rules_text(text, error);
+}
+
+bool Server::_read_rules_file(std::string* text, std::string* error) {
+  if (rules_file_.empty()) {
+    *error = "no rules file was named";
+    return false;
+  }
+  std::ifstream in(rules_file_.c_str(), std::ios::in | std::ios::binary);
+  if (!in) {
+    *error = "cannot read " + rules_file_;
+    return false;
+  }
+  text->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (text->empty()) {
+    *error = "empty rules file " + rules_file_;
+    return false;
+  }
+  return true;
+}
+
+Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string* error) {
+  const std::string fingerprint = mx::fingerprint(text);
+  if (config_.initialized() && fingerprint == rules_fingerprint_) {
+    // The file on disk is the rules in use again, if it ever was not.
+    rules_last_error_.clear();
+    rules_failed_fingerprint_.clear();
+    return RulesLoad::UNCHANGED;
+  }
+  if (fingerprint == rules_failed_fingerprint_) {
+    *error = rules_last_error_;  // the same bytes that failed last time: said already
+    return RulesLoad::FAILED;
+  }
+  // Parsed apart from the rules in use, which nothing touches unless the
+  // whole file is good.
+  Config fresh;
+  try {
+    fresh.read_configuration_text(text, rules_file_);
+  } catch (const mx::Exception& exception) {
+    rules_failed_fingerprint_ = fingerprint;
+    return _rules_failed(std::string(exception.what()) + " (content " + fingerprint + ")", error);
+  }
+  const std::string previous = rules_fingerprint_;
+  config_ = std::move(fresh);
+  rules_fingerprint_ = fingerprint;
+  rules_loaded_us_ = recording::now_us();
+  rules_last_error_.clear();
+  rules_failed_fingerprint_.clear();
+
+  // The connected peers follow the new file: a type's passive flag and
+  // queue size are applied again. A peer whose type the file no longer
+  // names stays connected, since dropping it would turn an edit into an
+  // outage; the log counts them.
+  unsigned int kept = 0;
+  for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
+    Connection::pointer connection = entry->second.lock();
+    if (!connection || !connection->living()) {
+      continue;
+    }
+    const MultiplexerPeerDescription* peer = config_.peer_description(connection->peer_type());
+    if (peer) {
+      connection->set_is_passive(peer->is_passive());
+      connection->set_outgoing_queue_max_size(peer->queue_size());
+    } else if (connection->peer_type() > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE) {
+      ++kept;
+    }
+  }
+  std::string line = (previous.empty() ? "rules loaded from " : "rules reloaded from ") + rules_file_ + ": " +
+                     (previous.empty() ? "" : previous + " -> ") + fingerprint + ", " +
+                     repr(config_.message_description_by_id().size()) + " message types, " +
+                     repr(config_.peer_by_type().size()) + " peer types";
+  if (kept) {
+    line += "; " + repr(kept) + " connected peer(s) of types the file no longer names, kept";
+  }
+  MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT(line));
+  if (recorder_ || !taps_.empty()) {
+    // A recording that spans the change says so, since its header names
+    // the fingerprint the file had when the session began.
+    Record record;
+    recording::fill_rules(record, fingerprint, rules_file_, config_.message_description_by_id().size(),
+                          config_.peer_by_type().size());
+    _emit(record);
+  }
+  return RulesLoad::LOADED;
+}
+
+Server::RulesLoad Server::_rules_failed(const std::string& why, std::string* error) {
+  *error = why;
+  if (why != rules_last_error_) {
+    rules_last_error_ = why;
+    MX_LOG(ERROR, LOWVERBOSITY,
+           CTX("multiplexer.server")
+               TEXT("rules file not put in use: " + why +
+                    (rules_fingerprint_.empty() ? "" : "; keeping the rules in use (" + rules_fingerprint_ + ")")));
+  }
+  return RulesLoad::FAILED;
+}
+
+void Server::_arm_rules_check() {
+  if (rules_check_interval_ <= 0 || rules_file_.empty()) {
+    return;
+  }
+  rules_timer_.expires_after(std::chrono::microseconds(static_cast<long>(rules_check_interval_ * 1e6)));
+  rules_timer_.async_wait(
+      [weak = weak_pointer(shared_from_this())](const asio::error_code& error) { _on_rules_check(weak, error); });
+}
+
+void Server::_on_rules_check(weak_pointer server, const asio::error_code& error) {
+  if (error) {
+    return;  // cancelled: stop()
+  }
+  pointer self = server.lock();
+  if (!self || self->stopped()) {
+    return;  // stop() came after the timer had expired: do not re-arm
+  }
+  self->_check_rules_file();
+  self->_arm_rules_check();
+}
+
+// The timer's check. A file that differs from the rules in use is put in
+// use once two checks in a row have read the same new bytes: a file caught
+// between a truncate and its write, or half written, is never applied,
+// at the price of one more interval. Failures are logged when they are news.
+void Server::_check_rules_file() {
+  std::string text;
+  std::string error;
+  if (!_read_rules_file(&text, &error)) {
+    rules_pending_fingerprint_.clear();
+    _rules_failed(error, &error);
+    return;
+  }
+  const std::string fingerprint = mx::fingerprint(text);
+  if (config_.initialized() && fingerprint == rules_fingerprint_) {
+    rules_pending_fingerprint_.clear();
+    rules_last_error_.clear();
+    rules_failed_fingerprint_.clear();
+    return;
+  }
+  if (fingerprint != rules_pending_fingerprint_) {
+    rules_pending_fingerprint_ = fingerprint;  // seen once; put in use when seen again
+    return;
+  }
+  rules_pending_fingerprint_.clear();
+  _apply_rules_text(text, &error);
+}
+
+void Server::_handle_rules_control(MessageMetaHandler& meta_handler) {
+  RulesControl control;
+  RulesStatus status;
+  if (!control.ParseFromString(meta_handler.msg.message())) {
+    status.set_error("garbled RulesControl");
+  } else if (control.action() == RulesControl::RELOAD) {
+    std::string error;
+    switch (load_rules(&error)) {
+      case RulesLoad::LOADED:
+        MX_LOG(INFO, LOWVERBOSITY,
+               CTX("multiplexer.server")
+                   TEXT("rules reloaded at the request of peer " + repr(meta_handler.msg.from())));
+        status.set_reloaded(true);
+        break;
+      case RulesLoad::UNCHANGED:
+        status.set_reloaded(false);
+        break;
+      case RulesLoad::FAILED:
+        status.set_error(error);
+        break;
+    }
+  }
+  _fill_rules_status(status);
+  _reply(meta_handler, RULES_STATUS, status);
+}
+
+void Server::_fill_rules_status(RulesStatus& status) {
+  status.set_multiplexer_id(instance_id_);
+  status.set_path(rules_file_);
+  status.set_fingerprint(rules_fingerprint_);
+  status.set_loaded_us(rules_loaded_us_);
+  status.set_message_types(config_.message_description_by_id().size());
+  status.set_peer_types(config_.peer_by_type().size());
+  if (!rules_last_error_.empty()) {
+    status.set_last_error(rules_last_error_);
+  }
 }
 
 // Recording.

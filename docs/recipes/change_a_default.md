@@ -22,4 +22,5 @@ meaning in [semantics.md](../semantics.md).
    the restart scenarios wait out the real intervals.
 
 A per-peer-type queue size needs no rebuild: it is `queue_size` in the rules
-file, applied by the multiplexer when the peer connects.
+file, applied by the multiplexer when the peer connects and again to every
+connected peer when the file is reloaded.

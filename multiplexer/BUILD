@@ -422,6 +422,8 @@ cc_library(
         ":connections_manager",
         ":multiplexer_cc_proto",
         ":recorder",
+        "//lib:exception",
+        "//lib:fingerprint",
         "//lib:functors",
         "//lib:memory",
         "//lib/logging",

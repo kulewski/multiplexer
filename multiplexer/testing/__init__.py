@@ -183,6 +183,7 @@ class Mx:
         record_payload_bytes: int = 0,
         recording_dir: str | None = None,
         allow_tap: bool = False,
+        rules_check_interval: float | None = None,
     ):
         self.index = index
         self.rules = rules
@@ -194,6 +195,9 @@ class Mx:
         # for over the protocol (multiplexer.recording.start, tap).
         self.recording_dir = recording_dir
         self.allow_tap = allow_tap
+        # --rules-check-interval: how often the multiplexer reads its rules
+        # file again for a change; None keeps its default, 0 never.
+        self.rules_check_interval = rules_check_interval
         self.proc: subprocess.Popen | None = None
         self.log_path = os.path.join(output_dir(), "mx%d.log" % index)
         self.port_file = os.path.join(output_dir(), "mx%d.port" % index)
@@ -249,6 +253,8 @@ class Mx:
             command += ["--recording-dir", self.recording_dir]
         if self.allow_tap:
             command += ["--allow-tap"]
+        if self.rules_check_interval is not None:
+            command += ["--rules-check-interval", str(self.rules_check_interval)]
         self._log = open(self.log_path, "ab")
         self.proc = subprocess.Popen(command, stdout=self._log, stderr=self._log, env=child_env(native=True))
         deadline = time.time() + timeout
@@ -306,6 +312,22 @@ class Mx:
         assert self.proc is not None
         self.proc.send_signal(signal.SIGCONT)
 
+    def reload_rules(self) -> None:
+        """Make the multiplexer read its rules file again now (SIGHUP), as
+        a supervisor's reload does; a file that changed is put in use
+        without a restart. Its log says what happened."""
+        assert self.proc is not None
+        self.proc.send_signal(signal.SIGHUP)
+
+    def log_contains(self, text: str) -> bool:
+        """Whether the multiplexer's log holds `text` so far; with
+        wait_until, a way to wait for a line such as "rules reloaded"."""
+        try:
+            with open(self.log_path, "rb") as log:
+                return text.encode() in log.read()
+        except OSError:
+            return False
+
     @property
     def running(self) -> bool:
         """Whether the process is alive right now."""
@@ -354,8 +376,11 @@ class Cluster:
     Bazel for a file in the test's data, and it must be the file the
     peers' constants were generated from. A scenario under
     mx_integration_test may leave it out: the rule's `rules` attribute
-    names it. Use as a context manager: entering starts the multiplexers,
-    leaving stops every role that is still running and then them."""
+    names it. `rules_check_interval` is how often, in seconds, each
+    multiplexer reads the file again for a change (its default when None,
+    0 never), for a scenario that edits a copy of it. Use as a context
+    manager: entering starts the multiplexers, leaving stops every role
+    that is still running and then them."""
 
     _counter = 0
 
@@ -367,6 +392,7 @@ class Cluster:
         record: bool = False,
         record_payload_bytes: int = 0,
         remote_recording: bool = False,
+        rules_check_interval: float | None = None,
     ):
         if rules is None:
             if CONFIG is None or not CONFIG.rules:
@@ -391,6 +417,7 @@ class Cluster:
                 record_payload_bytes=record_payload_bytes,
                 recording_dir=self.recording_dir,
                 allow_tap=remote_recording,
+                rules_check_interval=rules_check_interval,
             )
             for index in range(count)
         ]

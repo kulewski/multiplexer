@@ -61,6 +61,15 @@ class Task {
    */
   void _add_multiplexer_client_options(mx::options::Options&);
 
+  // For subcommands that must reach every replica: connects `client` to
+  // every address each of `addresses` (host:port; a name resolves to all
+  // its addresses, one connection each) stands for, waiting up to
+  // `timeout` seconds for each handshake, and returns how many of the
+  // `addresses` reached at least one multiplexer. What could not be
+  // resolved, connected or welcomed is said on stderr.
+  unsigned int _connect_to_every_address(multiplexer::Client& client, const std::vector<std::string>& addresses,
+                                         float timeout);
+
   // The declared options, built on first use through the hook above.
   inline mx::options::Options& _options() {
     if (!options_) {

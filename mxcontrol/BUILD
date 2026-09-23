@@ -55,7 +55,6 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
-        "//lib:fingerprint",
         "//multiplexer:recorder",
         "//multiplexer:server",
         "@asio",
@@ -104,6 +103,18 @@ cc_library(
 )
 
 cc_library(
+    name = "rules_control",
+    srcs = ["rules_control.cc"],
+    deps = [
+        ":task",
+        ":tasks_holder",
+        "//multiplexer:client",
+        "//multiplexer:multiplexer_cc_proto",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "stream_logs",
     srcs = ["stream_logs.cc"],
     deps = [
@@ -139,6 +150,7 @@ maybe_strip_cc_binary(
         ":help",
         ":receive_logs",
         ":recording_control",
+        ":rules_control",
         ":start_multiplexer_server",
         ":stream_logs",
         "//lib:core_dump",
@@ -184,6 +196,7 @@ cc_binary(
         ":help",
         ":receive_logs",
         ":recording_control",
+        ":rules_control",
         ":start_multiplexer_server",
         ":stream_logs",
         "//lib:core_dump",

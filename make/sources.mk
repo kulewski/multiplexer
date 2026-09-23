@@ -35,6 +35,7 @@ MXCONTROL_SRCS := \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \
   mxcontrol/recording_control.cc \
+  mxcontrol/rules_control.cc \
   mxcontrol/start_multiplexer_server.cc \
   mxcontrol/stream_logs.cc \
   mxcontrol/task.cc \

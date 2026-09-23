@@ -576,13 +576,17 @@ class SearchTest(unittest.TestCase):
             self.assertEqual(b"pears", index.wait_for(types.SEARCH_REQUEST)[0].message)
 ```
 
-- `Cluster(count, rules, record=False, record_payload_bytes=0)` starts
-  `count` multiplexers on entering and stops every peer and multiplexer on
-  leaving. `rules` is the path of the rules file, the one your constants
-  were generated from, which the test names: under Bazel
-  `runfile("your/pkg/deployment.rules")` with the file in the test's
-  `data`. A scenario under `mx_integration_test` may leave it out, since
-  the rule's `rules` attribute names it.
+- `Cluster(count, rules, record=False, record_payload_bytes=0,
+  rules_check_interval=None)` starts `count` multiplexers on entering and
+  stops every peer and multiplexer on leaving. `rules` is the path of the
+  rules file, the one your constants were generated from, which the test
+  names: under Bazel `runfile("your/pkg/deployment.rules")` with the file
+  in the test's `data`. A scenario under `mx_integration_test` may leave
+  it out, since the rule's `rules` attribute names it. A test that edits
+  a copy of the file under the running multiplexers gives
+  `rules_check_interval`, the seconds between their reads of it (their
+  default when `None`, 0 never), and `Mx.reload_rules()` sends one
+  `SIGHUP` instead.
   `endpoints` is the list of `(host, port)` the clients take;
   `wait_for_peer(type_or_name, count=1, timeout=15)` blocks until every
   multiplexer lists that many peers of the type in its peers file, and

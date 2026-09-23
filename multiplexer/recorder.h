@@ -24,6 +24,10 @@ std::uint64_t now_us();
 
 // A peer registered (CONNECTED) or left (DISCONNECTED).
 void fill_peer(Record& record, PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
+// Another rules file was put in use: what a reader needs to know that the
+// numbers changed under it.
+void fill_rules(Record& record, const std::string& fingerprint, const std::string& path, std::uint32_t message_types,
+                std::uint32_t peer_types);
 
 // One delivery attempt of `msg`: to `recipient` of `recipient_type` (either
 // may be 0 when routing found nobody), with the outcome. The whole payload

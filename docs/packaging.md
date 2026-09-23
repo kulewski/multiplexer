@@ -46,6 +46,13 @@ docker run --rm -p 1980:1980 -v /etc/mx/deployment.rules:/etc/mx/multiplexer.rul
     ghcr.io/kulewski/multiplexer:<version>
 ```
 
+To edit the file under the running container, which the multiplexer
+notices and puts in use ([changing the
+rules](operations.md#changing-the-rules)), mount the directory, `-v
+/etc/mx:/etc/mx:ro` with the file named `multiplexer.rules` in it: a file
+mounted on its own is one inode, and an editor that saves by rename leaves
+the container looking at the old one.
+
 Any other subcommand goes after the image name, `... multiplexer:<version>
 help` for the list. [Operations](operations.md#on-kubernetes) has the
 StatefulSet that runs several of them on Kubernetes. Locally, `bazel run //docker:load` puts the image into

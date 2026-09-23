@@ -43,8 +43,9 @@ the protocol:
 The peer's first frame must be a message of type `CONNECTION_WELCOME` (2)
 whose payload is a `WelcomeMessage` with the peer's `type` and its `id`, the
 instance id it will use as `from`. Any other first message closes the
-connection, as does a peer type that is 99 or below or absent from the rules
-file. The multiplexer registers the connection, then answers with its own
+connection, as does a peer type absent from the rules file or one of the
+reserved 99, the two controllers apart (`RULES_CONTROLLER` always,
+`RECORDING_CONTROLLER` when remote recording is on). The multiplexer registers the connection, then answers with its own
 `CONNECTION_WELCOME`: type `MULTIPLEXER` (1) and its instance id. A second
 welcome on the same connection closes it.
 
@@ -76,6 +77,8 @@ Types 1 to 99 are the protocol's. A backend library answers them itself.
 | `RECORDING_CONTROL` (6) | `RecordingControl` | a peer, without `to`, asking the multiplexer it is connected to for START, STOP, STATUS, TAP or UNTAP of its recording ([operations](operations.md#recording-on-demand-over-the-protocol)); refused unless the multiplexer allows it |
 | `RECORDING_STATUS` (7) | `RecordingStatus` | the multiplexer's answer, `references` the request's id, `error` set when it was refused |
 | `RECORDING_RECORD` (8) | `Record` | the multiplexer, to every peer that tapped in, one per record, `multiplexer_id` set |
+| `RULES_CONTROL` (9) | `RulesControl` | a peer, without `to`, asking the multiplexer it is connected to for RELOAD of its rules file, or its STATUS ([operations](operations.md#changing-the-rules)) |
+| `RULES_STATUS` (10) | `RulesStatus` | the multiplexer's answer, `references` the request's id: the fingerprint, path and counts of the rules in use, `error` set when a reload was refused |
 
 ## What the multiplexer does with a frame
 

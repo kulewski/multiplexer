@@ -101,13 +101,18 @@ class ConnectionsManager {
            CTX("ConnectionsManager") TEXT("registering connection " + repr((void*)conn.get()) +
                                           " id=" + repr(conn->peer_id()) + " type=" + repr(conn->peer_type())));
     if (!static_cast<const ConnectionsManagerImplementation&>(*this).accept_peer_type(conn->peer_type())) {
-      std::cerr << "invalid peer type " << conn->peer_type() << "\n";
+      asio::error_code unknown;
+      const asio::ip::tcp::endpoint remote = conn->socket().remote_endpoint(unknown);
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("ConnectionsManager")
+                 TEXT("invalid peer type " + repr(conn->peer_type()) + " announced by " + repr(conn->peer_id()) +
+                      " from " + (unknown ? "?" : repr(remote)) + ": not in the rules; refused"));
       conn->shutdown();
       return;
     }
 
     if (conn->peer_id() == instance_id()) {
-      std::cerr << "ERROR connected to self\n";
+      MX_LOG(WARNING, LOWVERBOSITY, CTX("ConnectionsManager") TEXT("connected to self; refused"));
       conn->shutdown();
       return;
     }
@@ -198,7 +203,7 @@ class ConnectionsManager {
          next != cons.end() && (current = next++, true);) {
       typename Connection::pointer pointer = current->lock();
       if (!pointer) {
-        std::cerr << "detected dead connection; in connections_by_type_\n";
+        MX_LOG(WARNING, HIGHVERBOSITY, CTX("ConnectionsManager") TEXT("dead connection found in connections_by_type_"));
         scan_connections_by_id = true;
         cons.erase(current);
       } else if (pointer.get() == conn) {

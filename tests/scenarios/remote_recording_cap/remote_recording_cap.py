@@ -31,8 +31,8 @@ class RemoteRecordingCap(unittest.TestCase):
                     mx=cluster.addresses,
                     type=C.peers.TEST_EVENT_CLIENT,
                     send=[(C.types.TEST_EVENT, "x" * 100)] * 60,
+                    linger=5,  # a sender that closes at once loses its unread events with the connection
                 )
-                self.assertEqual(0, sender.wait())
                 # The events went in on the sender's connection, the status
                 # request on the controller's: the multiplexer may answer
                 # the latter before the last event crossed the cap.
@@ -72,6 +72,21 @@ class RemoteRecordingCap(unittest.TestCase):
                 self.assertTrue(next(recording.read(status.path, constants=C)).HasField("header"))
             finally:
                 controller.shutdown()
+
+    def test_a_multiplexer_stops_with_a_timed_session_open(self):
+        """A session with a deadline still to come does not keep the
+        multiplexer alive past SIGTERM: it is closed as the multiplexer
+        stops, and the process exits with 0 at once."""
+        with Cluster(1, remote_recording=True) as cluster:
+            controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
+            try:
+                (started,) = recording.start(controller, "open", max_seconds=600)
+                self.assertTrue(started.recording)
+            finally:
+                controller.shutdown()
+            self.assertEqual(0, cluster.mx[0].stop(timeout=5), "exited on SIGTERM, the deadline notwithstanding")
+            records = list(recording.read(started.path, constants=C))
+            self.assertTrue(records[0].HasField("header"), "the session file was closed properly")
 
     def test_a_session_from_the_command_line_can_be_stopped_remotely(self):
         with Cluster(1, record=True, remote_recording=True) as cluster:

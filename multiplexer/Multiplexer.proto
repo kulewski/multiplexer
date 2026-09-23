@@ -152,6 +152,45 @@ message DeliveryError {
     optional MultiplexerMessage original_message = 20;
 }
 
+// The protocol's message types for the rules file, in the reserved range
+// below 100, the same in every rules file. RULES_CONTROL is sent to a
+// multiplexer without `to`; it answers RULES_STATUS, `references` set to
+// the request. docs/operations.md describes reloading from the outside.
+enum RulesMessageType {
+  RULES_CONTROL = 9;
+  RULES_STATUS = 10;
+}
+
+// The reserved peer type `mxcontrol rules` connects as, accepted by every
+// multiplexer; no rules file entry needed. Treated as passive.
+enum RulesPeerType {
+  RULES_CONTROLLER = 4;
+}
+
+// What a peer asks about the rules file. RELOAD makes the multiplexer read
+// its rules file now and put it in use if it parses and differs from the
+// rules in use; STATUS only asks. Both are answered with RulesStatus.
+message RulesControl {
+  enum Action {
+    RELOAD = 1;
+    STATUS = 2;
+  }
+  required Action action = 1;
+}
+
+// The multiplexer's answer to every RulesControl: the rules in use.
+message RulesStatus {
+  optional uint64 multiplexer_id = 1;
+  optional string error = 2;          // RELOAD: why the file was not put in use; the rules in use are as they were
+  optional string path = 3;           // the rules file
+  optional string fingerprint = 4;    // of the rules in use, the CRC-32 the generated constants carry
+  optional uint64 loaded_us = 5;      // when they were read, microseconds since the epoch
+  optional uint32 message_types = 6;  // entries in use, the reserved ones included
+  optional uint32 peer_types = 7;
+  optional bool reloaded = 8;         // RELOAD: the file differed from the rules in use and replaced them
+  optional string last_error = 9;     // why the file on disk is not in use, while it is missing or does not parse
+}
+
 // type used for reading configuration file multiplexer.rules
 message MultiplexerRules {
     repeated MultiplexerMessageDescription type = 1;

@@ -138,6 +138,11 @@ INDEX = [
         "`Server::_handle_recording_control`; `mxcontrol/recording_control.cc` asks",
     ),
     (
+        "The rules file put in use again without a restart: a check timer, SIGHUP, a peer's request",
+        "multiplexer/server.cc",
+        "`Server::load_rules`; `mxcontrol/start_multiplexer_server.cc` for the signal, `mxcontrol/rules_control.cc` asks",
+    ),
+    (
         "Thread-safety annotations and the wrong-thread check",
         "lib/thread_checker.h",
         "`MX_DCHECK_RUN_ON`; `lib/thread_annotations.h`, `lib/mutex.h`",

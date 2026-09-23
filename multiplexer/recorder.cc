@@ -22,6 +22,15 @@ void fill_peer(Record& record, PeerEvent::Kind kind, std::uint64_t peer_id, std:
   event->set_peer_type(peer_type);
 }
 
+void fill_rules(Record& record, const std::string& fingerprint, const std::string& path, std::uint32_t message_types,
+                std::uint32_t peer_types) {
+  RulesEvent* event = record.mutable_rules();
+  event->set_fingerprint(fingerprint);
+  event->set_path(path);
+  event->set_message_types(message_types);
+  event->set_peer_types(peer_types);
+}
+
 void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t from_peer_type, std::uint64_t recipient,
                  std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported) {
   RoutedMessage* routed = record.mutable_routed();

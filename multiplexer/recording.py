@@ -34,6 +34,7 @@ import sys
 import time
 from typing import Any, Iterator
 
+from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
 from multiplexer.mxclient import OperationTimedOut
 
 
@@ -93,6 +94,12 @@ def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -
                     "recorded with rules %s, these constants are from %s"
                     % (record.header.rules_fingerprint, constants.RULES_FINGERPRINT)
                 )
+        elif check_rules and record.HasField("rules") and record.rules.fingerprint != constants.RULES_FINGERPRINT:
+            # The multiplexer put another file in use while recording.
+            raise RulesMismatch(
+                "the rules changed to %s while recording, these constants are from %s"
+                % (record.rules.fingerprint, constants.RULES_FINGERPRINT)
+            )
         yield record
 
 
@@ -128,6 +135,8 @@ def peer_name(peer_type: int, constants=multiplexer_constants) -> str:
     """The peer type's name from the constants, or the number."""
     if peer_type == RECORDING_CONTROLLER:
         return "RECORDING_CONTROLLER"
+    if peer_type == RULES_CONTROLLER:
+        return "RULES_CONTROLLER"
     return constants.peers.get_name(peer_type, str(peer_type)) if peer_type else "-"
 
 
@@ -150,6 +159,14 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
             header.multiplexer_id,
             header.rules_fingerprint[:12],
             header.payload_limit,
+        )
+    if kind == "rules":
+        return "%s rules %s from %s (%d message types, %d peer types)" % (
+            when,
+            record.rules.fingerprint[:12],
+            record.rules.path,
+            record.rules.message_types,
+            record.rules.peer_types,
         )
     if kind == "peer":
         peer = record.peer

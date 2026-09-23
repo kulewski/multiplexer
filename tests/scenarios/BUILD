@@ -8,6 +8,35 @@ mx_integration_test(
     scenario = "server_lifecycle/server_lifecycle.py",
 )
 
+# The rules file changing under running multiplexers, one target per trigger.
+mx_integration_test(
+    name = "rules_edited_on_disk_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+    },
+    scenario = "rules_edited_on_disk/rules_edited_on_disk.py",
+)
+
+mx_integration_test(
+    name = "rules_reload_on_sighup_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+        "event_client": "py",
+    },
+    scenario = "rules_reload_on_sighup/rules_reload_on_sighup.py",
+)
+
+mx_integration_test(
+    name = "rules_reload_by_mxcontrol_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+    },
+    scenario = "rules_reload_by_mxcontrol/rules_reload_by_mxcontrol.py",
+)
+
 mx_integration_test(
     name = "direct_queue_full_test",
     size = "medium",

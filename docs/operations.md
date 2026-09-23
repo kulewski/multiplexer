@@ -88,7 +88,9 @@ from another namespace the names carry it, `mx-0.mx.<namespace>:1980`. A
 rolling update of the StatefulSet restarts the pods one at a time and
 waits for each to be ready, which is the procedure under "Restarting one"
 below; with the peers on all three, it costs nothing. Scaling up is one
-more replica and its name in the peers' lists. A ClusterIP Service per pod,
+more replica and its name in the peers' lists. An edit of the ConfigMap
+needs no rollout: the pods put the new file in use on their own, see
+"Changing the rules" below. A ClusterIP Service per pod,
 which older libraries needed for an address that never changes, still
 works; it is just no longer required.
 
@@ -110,11 +112,72 @@ it under your process supervisor; it exits with status 0 on `SIGTERM`, and a
 restart has no side effects beyond the connections it drops.
 [mxcontrol](mxcontrol.md) lists the options.
 
-The rules file is read once. After editing it, restart every multiplexer and
-rebuild every peer, since the generated constants come from the same file.
-Adding entries is safe to roll out gradually: old peers do not send the new
-types, and a multiplexer with the old file drops a new type with a delivery
-error rather than misrouting it.
+## Changing the rules
+
+A running multiplexer puts a changed rules file in use without a restart.
+It reads the file again every 2 s (`--rules-check-interval`, 0 turns it
+off) and, once two checks in a row have read the same new bytes, parses
+the whole file and swaps it in: from then on a message type added to the
+file is routed, a peer type added is accepted at its next connection
+attempt, and a rule edited routes the next message its way. The second
+check is what keeps a file caught in the middle of being written from
+ever being applied; it costs one more interval. A file that is missing,
+empty, without a peer type, that does not parse, that repeats a number or
+a peer name, or that names a peer that does not exist, changes nothing:
+the rules in use stay, the log says why once, and `mxcontrol rules
+status` repeats the reason until a later read,
+the next check, a `SIGHUP` or a `reload`, finds the file good. At start
+such a file is fatal instead.
+
+Two more ways to say "now":
+
+- `SIGHUP`, the Unix convention, what `ExecReload=/bin/kill -HUP $MAINPID`
+  in a systemd unit sends. The log says what happened, or that the file is
+  the rules in use.
+- `mxcontrol rules reload -M host:port -M ...`, over the protocol, from
+  anywhere on the network: one line per multiplexer comes back with the
+  fingerprint of the rules now in use, `reloaded`, `unchanged`, or the
+  error. `mxcontrol rules status` asks without reloading; the fingerprint
+  is the one the generated constants carry, so the answers show whether
+  every replica runs the same file. [mxcontrol](mxcontrol.md#rules) has
+  the options.
+
+What the swap does not do: a peer already connected whose type the file no
+longer names stays connected, since dropping it would turn an edit into an
+outage; the log counts such peers, and they are gone when they next
+reconnect. A recording that spans a reload keeps the fingerprint of its
+header. And peers still learn new types only from their generated
+constants, so a new type is usable once the programs that send or serve it
+are rebuilt with the new file; roll that out at leisure, since old peers
+do not send the new types and a multiplexer with the old file drops a new
+type with a delivery error rather than misrouting it. Each multiplexer
+picks the change up on its own, seconds apart, as a rolling restart would.
+
+The multiplexers read the file at the path they were given, following
+symlinks, so any way of changing it works: an editor, `cp`, a
+configuration management tool, or a mount that changes underneath. The
+tidy way is to write the new file next to the old one and rename it over,
+which is what the kubelet does and what editors that never leave a torn
+file do; a tool that truncates and rewrites in place leaves a moment of
+emptiness, which the multiplexer refuses, and a moment of half a file,
+which the second check catches. Two things to know:
+
+- On Kubernetes the manifest above mounts the ConfigMap as a directory at
+  `/etc/mx`, which is what makes an update arrive: the kubelet writes the
+  new file into a fresh directory and swaps one symlink, and the
+  multiplexer sees the new file at its next check. A `subPath` mount of the
+  single file never updates, and neither does a ConfigMap marked
+  `immutable: true`; both need the rollout restart, which still works. The
+  kubelet's own delay, its sync period plus its cache, is up to a minute or
+  two after `kubectl apply`.
+- A file bind-mounted on its own into a container (`docker run -v
+  file:file`) keeps the inode it had, and an editor that saves by rename
+  replaces the inode, so the container keeps seeing the old file. Mount
+  the directory instead.
+
+The `rules_edited_on_disk`, `rules_reload_on_sighup` and
+`rules_reload_by_mxcontrol` scenarios in `tests/scenarios/` show each
+trigger, the first one against a ConfigMap-style mount.
 
 ## Restarting one
 
@@ -255,7 +318,11 @@ generated constants), or from Python with `multiplexer.recording.read()`,
 which yields the records and refuses a file made with other rules than the
 constants were generated from. A `RoutedMessage` says whether it was
 `DELIVERED` or why not: `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`,
-`QUEUE_FULL`.
+`QUEUE_FULL`. A rules file put in use while the session is open ([changing
+the rules](#changing-the-rules)) leaves a `rules` record with the new
+fingerprint, from which the numbers are the new file's; both readers show
+it, and `recording.read()` refuses to go on past one that differs from its
+constants.
 
 Recording costs one serialization and one buffered write per message and
 grows by the payloads; `--record-payload-bytes N` keeps only the first N

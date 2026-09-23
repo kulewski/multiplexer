@@ -4,7 +4,6 @@
 // --multiplexer as a RECORDING_CONTROLLER, resolving a host name to all its
 // addresses, so one command reaches every replica behind a name. See
 // docs/operations.md.
-#include <asio/ip/tcp.hpp>
 #include <chrono>
 #include <csignal>
 #include <fstream>
@@ -116,8 +115,6 @@ class RecordingControlTask : public Task {
   }
 
  private:
-  // Every address of every --multiplexer, resolved; returns how many connected.
-  unsigned int _connect(Client& client);
   // Queues `control` on every connection; returns the request id.
   std::uint64_t _send(Client& client, const RecordingControl& control);
   // Queues `control` on one connection.
@@ -139,41 +136,10 @@ class RecordingControlTask : public Task {
   bool stay_;
   std::string out_;
   float timeout_;
+  bool unreachable_ = false;  // an address reached none of its multiplexers: the command fails
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(recording, mxcontrol::RecordingControlTask);
-
-unsigned int RecordingControlTask::_connect(Client& client) {
-  unsigned int connected = 0;
-  for (const std::string& address : multiplexers_) {
-    std::string::size_type colon = address.rfind(':');
-    if (colon == std::string::npos) {
-      std::cerr << "invalid multiplexer address " << address << " (host:port expected)\n";
-      continue;
-    }
-    std::string host = address.substr(0, colon);
-    if (host.empty()) {
-      host = "127.0.0.1";
-    }
-    const std::string port = address.substr(colon + 1);
-    asio::ip::tcp::resolver resolver(io_service());
-    asio::ip::tcp::resolver::iterator end;
-    try {
-      asio::ip::tcp::resolver::query query(host, port);
-      for (asio::ip::tcp::resolver::iterator entry = resolver.resolve(query); entry != end; ++entry) {
-        const asio::ip::tcp::endpoint endpoint = *entry;
-        if (client.connect(endpoint, timeout_)) {
-          ++connected;
-        } else {
-          std::cerr << "cannot connect to " << endpoint << "\n";
-        }
-      }
-    } catch (const std::exception& e) {
-      std::cerr << "cannot resolve " << address << ": " << e.what() << "\n";
-    }
-  }
-  return connected;
-}
 
 std::uint64_t RecordingControlTask::_send(Client& client, const RecordingControl& control) {
   MultiplexerMessage mxmsg;
@@ -249,10 +215,15 @@ int RecordingControlTask::run() {
     return 2;
   }
   Client client(io_service(), peer_type_);
-  _connect(client);
+  const unsigned int reached = _connect_to_every_address(client, multiplexers_, timeout_);
   if (!client.connections_count()) {
     std::cerr << "no multiplexer reachable, or none accepting a recording controller (--recording-dir, --allow-tap)\n";
     return 1;
+  }
+  unreachable_ = reached < multiplexers_.size();
+  if (unreachable_) {
+    std::cerr << (multiplexers_.size() - reached) << " of " << multiplexers_.size()
+              << " multiplexer address(es) could not be reached\n";
   }
   RecordingControl control;
   if (action_ == "start") {
@@ -263,7 +234,7 @@ int RecordingControlTask::run() {
       control.set_max_bytes(*max_bytes_);
     }
     control.set_max_seconds(max_seconds_);
-    const bool ok = _control(client, control);
+    const bool ok = _control(client, control) && !unreachable_;
     if (!stay_) {
       return ok ? 0 : 1;
     }
@@ -271,11 +242,11 @@ int RecordingControlTask::run() {
   }
   if (action_ == "stop") {
     control.set_action(RecordingControl::STOP);
-    return _control(client, control) ? 0 : 1;
+    return _control(client, control) && !unreachable_ ? 0 : 1;
   }
   if (action_ == "status") {
     control.set_action(RecordingControl::STATUS);
-    return _control(client, control, true) ? 0 : 1;
+    return _control(client, control, true) && !unreachable_ ? 0 : 1;
   }
   return _tap(client);
 }
@@ -326,7 +297,7 @@ int RecordingControlTask::_stay(Client& client) {
   std::signal(SIGTERM, SIG_DFL);
   RecordingControl stop;
   stop.set_action(RecordingControl::STOP);
-  return _control(client, stop) ? 0 : 1;
+  return _control(client, stop) && !unreachable_ ? 0 : 1;
 }
 
 // Until SIGINT or SIGTERM: every RECORDING_RECORD that arrives goes to the
@@ -407,7 +378,7 @@ int RecordingControlTask::_tap(Client& client) {
   std::cout.rdbuf(cout_buffer);
   out->flush();
   std::cerr << records << " records written\n";
-  return ok ? 0 : 1;
+  return ok && !unreachable_ ? 0 : 1;
 }
 
 }  // namespace mxcontrol

@@ -39,6 +39,13 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   (one shared `recording_dir`, `recording_files()`), and `mxcontrol(*args)`
   runs the tool to completion; the `remote_recording*` and `recording_tap`
   scenarios use both.
+- The rules file under running multiplexers: a scenario gives `Cluster` a
+  copy of the file it may edit, `rules=path`, and
+  `rules_check_interval=0.1` to have it read again that often (0 never);
+  `Mx.reload_rules()` sends SIGHUP, `Mx.log_contains(text)` with
+  `wait_until` waits for the log line that says what happened. The
+  `rules_edited_on_disk`, `rules_reload_on_sighup` and
+  `rules_reload_by_mxcontrol` scenarios cover the three triggers.
 - Memory: roles emit `memory` events every `--memory-every` messages with
   the exact C heap in use (and, in Python, tracemalloc bytes and the object
   count); `Cluster(memory_log_every=N)` makes the multiplexer log its heap

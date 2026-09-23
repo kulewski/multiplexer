@@ -108,7 +108,9 @@ type {
   ([backend_drains](tests/scenarios/backend_drains/README.md)).
 - **Load balancing and fan-out from one rules file.** Round-robin across a
   backend pool, publish/subscribe to every subscriber, or direct addressing,
-  chosen per message type, no code change ([rules](docs/rules.md)).
+  chosen per message type, no code change ([rules](docs/rules.md)); the
+  file is edited under running multiplexers, which put it in use without a
+  restart ([changing the rules](docs/operations.md#changing-the-rules)).
 - **One instance, one path, when it matters.** A request addressed to one
   backend instance reaches it or fails, never another instance, and is
   found again behind another multiplexer; a lane keeps a stream of
@@ -199,7 +201,7 @@ cd examples/echo && bazel test //...    # a backend and a client, built the way 
 
 Peer types and message types are defined in `multiplexer.rules` file.
 
-**If you make any changes to any of the type ids or constants, client library files will need to be regenerated. It happens automatically if you use the `bazel run` or `bazel build`. Multiplexer itself doesn't need to be rebuilt, only restarted.**
+**If you make any changes to any of the type ids or constants, client library files will need to be regenerated. It happens automatically if you use the `bazel run` or `bazel build`. Multiplexer itself doesn't need to be rebuilt or restarted: it reads the changed file and puts it in use on its own ([changing the rules](docs/operations.md#changing-the-rules)).**
 
 ### Send message directly to a peer
 

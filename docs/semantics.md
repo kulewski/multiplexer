@@ -119,6 +119,15 @@ that changes.
   rather than by timeout.
 - **A message is bigger than 128 MiB.** The receiving side closes the
   connection.
+- **The rules file changes.** Each multiplexer reads it again every 2 s,
+  on `SIGHUP` and on `mxcontrol rules reload`, and puts a changed file in
+  use whole, between two messages; the next message is routed by the new
+  rules, a peer type added is accepted at the peer's next attempt, and a
+  connected peer whose type was removed stays until it reconnects. A file
+  that does not parse or names a peer that does not exist leaves the rules
+  in use as they were. Different multiplexers pick the change up seconds
+  apart, as a rolling restart would ([changing the
+  rules](operations.md#changing-the-rules)).
 
 ## Defaults
 

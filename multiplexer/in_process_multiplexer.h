@@ -26,8 +26,9 @@ struct InProcessMultiplexer {
       const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", listen_port);
-      server->clear_rules();
-      server->read_rules(rules);
+      server->set_rules_file(rules);
+      std::string error;
+      AssertMsg(server->load_rules(&error) == multiplexer::Server::RulesLoad::LOADED, error);
       server->start();
       bound.set_value(server->local_port());
       io_service.run();
