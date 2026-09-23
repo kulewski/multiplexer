@@ -88,7 +88,9 @@ from another namespace the names carry it, `mx-0.mx.<namespace>:1980`. A
 rolling update of the StatefulSet restarts the pods one at a time and
 waits for each to be ready, which is the procedure under "Restarting one"
 below; with the peers on all three, it costs nothing. Scaling up is one
-more replica and its name in the peers' lists. A ClusterIP Service per pod,
+more replica and its name in the peers' lists. An edit of the ConfigMap
+needs no rollout: the pods put the new file in use on their own, see
+"Changing the rules" below. A ClusterIP Service per pod,
 which older libraries needed for an address that never changes, still
 works; it is just no longer required.
 
@@ -110,11 +112,83 @@ it under your process supervisor; it exits with status 0 on `SIGTERM`, and a
 restart has no side effects beyond the connections it drops.
 [mxcontrol](mxcontrol.md) lists the options.
 
-The rules file is read once. After editing it, restart every multiplexer and
-rebuild every peer, since the generated constants come from the same file.
-Adding entries is safe to roll out gradually: old peers do not send the new
-types, and a multiplexer with the old file drops a new type with a delivery
-error rather than misrouting it.
+## Changing the rules
+
+A running multiplexer puts a changed rules file in use without a restart.
+It reads the file again every 2 s (`--rules-check-interval`, 0 turns it
+off) and, once two checks in a row have read the same new bytes, parses
+the whole file and swaps it in: from then on a message type added to the
+file is routed, a peer type added is accepted at its next connection
+attempt, a rule edited routes the next message its way, and the peers
+already connected take their type's new `queue_size` and `is_passive`,
+while an active peer gone silent is still dropped 90 s after its last
+frame, reloads or not. The second
+check is what keeps a file caught in the middle of being written from
+ever being applied; it costs one more interval. A file that is missing,
+empty, without a peer type, that does not parse, that repeats a number or
+a peer name, or that names a peer that does not exist, changes nothing:
+the rules in use stay, the log says why once, and `mxcontrol rules
+status` repeats the reason until a later read,
+the next check, a `SIGHUP` or a `reload`, finds the file good. At start
+such a file is fatal instead.
+
+Two more ways to say "now":
+
+- `SIGHUP`, the Unix convention, what `ExecReload=/bin/kill -HUP $MAINPID`
+  in a systemd unit sends. The log says what happened, or that the file is
+  the rules in use.
+- `mxcontrol rules reload -M host:port -M ...`, over the protocol, from
+  anywhere on the network: one line per multiplexer comes back with the
+  fingerprint of the rules now in use, `reloaded`, `unchanged`, or the
+  error. `mxcontrol rules status` asks without reloading; the fingerprint
+  is the one the generated constants carry, so the answers show whether
+  every replica runs the same file. [mxcontrol](mxcontrol.md#rules) has
+  the options.
+
+What the swap does not do: a peer already connected whose type the file no
+longer names stays connected, since dropping it would turn an edit into an
+outage; the log counts such peers, and they are gone when they next
+reconnect. A recording that spans a reload keeps the fingerprint of its
+header. And peers still learn new types only from their generated
+constants, so a new type is usable once the programs that send or serve it
+are rebuilt with the new file; roll that out at leisure, since old peers
+do not send the new types and a multiplexer with the old file drops a new
+type with a delivery error rather than misrouting it. Each multiplexer
+picks the change up on its own, seconds apart, as a rolling restart would.
+
+The multiplexers read the file at the path they were given, following
+symlinks, so any way of changing it works: an editor, `cp`, a
+configuration management tool, or a mount that changes underneath. Each
+check reads it on the multiplexer's io thread, the one that routes, with
+a blocking read, so keep the file on local storage, a local disk or a
+ConfigMap volume: a network or FUSE mount that stalls holds up routing,
+heartbeats and signals for as long as a read waits. Where the file must
+live on such a mount, `--rules-check-interval 0` stops the checks, and a
+`SIGHUP` or `mxcontrol rules reload` reads it when asked. The
+tidy way is to write the new file next to the old one and rename it over,
+which is what the kubelet does and what editors that never leave a torn
+file do; a tool that truncates and rewrites in place leaves a moment of
+emptiness, which the multiplexer refuses, and a moment of half a file,
+which the second check catches. Two things to know:
+
+- On Kubernetes the manifest above mounts the ConfigMap as a directory at
+  `/etc/mx`, which is what makes an update arrive: the kubelet writes the
+  new file into a fresh directory and swaps one symlink, and the
+  multiplexer sees the new file at its next check. A `subPath` mount of the
+  single file never updates, and neither does a ConfigMap marked
+  `immutable: true`; both need the rollout restart, which still works. The
+  kubelet's own delay, its sync period plus its cache, is up to a minute or
+  two after `kubectl apply`.
+- A file bind-mounted on its own into a container (`docker run -v
+  file:file`) keeps the inode it had, and an editor that saves by rename
+  replaces the inode, so the container keeps seeing the old file. Mount
+  the directory instead.
+
+The `rules_edited_on_disk`, `rules_reload_on_sighup` and
+`rules_reload_by_mxcontrol` scenarios in `tests/scenarios/` show each
+trigger, the first one against a ConfigMap-style mount;
+`rules_reload_peers` and `rules_reload_silent_backend` what a reload does
+to the peers connected.
 
 ## Restarting one
 
@@ -141,12 +215,12 @@ across a restart.
 
 A backend that exits immediately takes the requests it holds with it; the
 clients recover through the search, at the price of one timeout each. A
-backend that drains avoids that: asked to leave, it stops answering the
-backend search, so no client sends it a retried request, keeps serving what
-the multiplexer still routes to it for a few seconds, and then exits. Both
-libraries provide this: `start_draining()` from `periodic_task()`, and
-`serve_forever(drain_seconds=...)` returning once `drained()`. The echo
-example uses it.
+backend that drains avoids that: asked to leave, it tells every multiplexer
+to route it nothing new by the rules, serves what was already on its way,
+and exits as soon as every multiplexer has confirmed and its work is done.
+Both libraries provide this: `start_draining()` from `periodic_task()`, and
+`serve_forever(drain_seconds=...)` returning once `drained()`, with
+`drain_seconds` the most a drain may take. The echo example uses it.
 
 How the backend is asked to leave is the deployment's choice, checked from
 `periodic_task()` within one poll. The reliable form is a file: a preStop
@@ -154,12 +228,20 @@ hook writes it, the backend sees it, and the termination grace period is
 longer than the drain. The library handles no signals, because a Python
 handler runs only between iterations and a C++ library in the same process
 can replace it; a pure C++ backend may set a flag from a handler of its
-own. With that, a rolling restart of backends costs nobody a timeout, as
-the [backend_drains](../tests/scenarios/backend_drains/README.md) scenario
-checks. What the drain cannot avoid: the multiplexer keeps routing
-`whom: ANY` requests to a draining backend until it disconnects, so the
-drain must be long enough to answer them, and a backend that dies without
-draining still costs its clients a timeout.
+own. With that, a rolling restart of backends costs nobody a timeout or a
+retry, as the [backend_drains](../tests/scenarios/backend_drains/README.md)
+scenario checks: from the confirmation on, the multiplexer routes the
+draining backend nothing by the rules, requests, events and searches
+alike, and a peer alone of its type either drains as the last resort,
+`Routing(any=False, all=False, last_resort=True)`, or fails its callers at
+once. What was routed in the moment before a multiplexer applied the
+change is served, and a threaded backend refuses what reaches it once it
+is closing, with `DELIVERY_ERROR`, so that costs a retry rather than a
+timeout, while a `BaseMultiplexerServer` loses what arrived after its
+last read. A backend that dies without draining costs its clients a
+timeout per request it held. [How a backend leaves](leaving.md) draws the
+three phases and the routing flags; a recording notes each skip as
+`NOT_ACCEPTED`.
 
 ## Debug symbols
 
@@ -251,7 +333,15 @@ generated constants), or from Python with `multiplexer.recording.read()`,
 which yields the records and refuses a file made with other rules than the
 constants were generated from. A `RoutedMessage` says whether it was
 `DELIVERED` or why not: `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`,
-`QUEUE_FULL`.
+`QUEUE_FULL`, or `NOT_ACCEPTED` for a peer whose routing turned the path
+off ([how a backend leaves](leaving.md)). A `PeerEvent` marks a peer
+arriving, leaving, or changing its routing. A rules file put in use while
+the session is open ([changing the rules](#changing-the-rules)) leaves a
+`rules` record with the new fingerprint, from which the numbers are the
+new file's; both readers show it, and `recording.read()` refuses to go on
+past one that differs from its constants. Read a recording with readers
+as new as the multiplexer that made it: an older one shows what it does
+not know as something it does, a `NOT_ACCEPTED` route as `DELIVERED` say.
 
 Recording costs one serialization and one buffered write per message and
 grows by the payloads; `--record-payload-bytes N` keeps only the first N

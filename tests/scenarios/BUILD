@@ -8,6 +8,50 @@ mx_integration_test(
     scenario = "server_lifecycle/server_lifecycle.py",
 )
 
+# The rules file changing under running multiplexers, one target per trigger.
+mx_integration_test(
+    name = "rules_edited_on_disk_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+    },
+    scenario = "rules_edited_on_disk/rules_edited_on_disk.py",
+)
+
+mx_integration_test(
+    name = "rules_reload_on_sighup_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+        "event_client": "py",
+    },
+    scenario = "rules_reload_on_sighup/rules_reload_on_sighup.py",
+)
+
+mx_integration_test(
+    name = "rules_reload_by_mxcontrol_test",
+    roles = {
+        "backend": "py",
+        "client": "py",
+    },
+    scenario = "rules_reload_by_mxcontrol/rules_reload_by_mxcontrol.py",
+)
+
+# What a reload does to the peers already connected.
+mx_integration_test(
+    name = "rules_reload_peers_test",
+    size = "medium",
+    extra_deps = ["//multiplexer:multiplexer_py_proto"],
+    scenario = "rules_reload_peers/rules_reload_peers.py",
+)
+
+mx_integration_test(
+    name = "rules_reload_silent_backend_test",
+    size = "medium",
+    scenario = "rules_reload_silent_backend/rules_reload_silent_backend.py",
+    tags = ["slow"],
+)
+
 mx_integration_test(
     name = "direct_queue_full_test",
     size = "medium",
@@ -400,6 +444,36 @@ mx_integration_test(
     )
     for backend in LANGS
     for client in LANGS
+]
+
+# What a draining backend still takes, and the drain routing surviving a
+# multiplexer restart; the backends in both languages.
+[
+    mx_integration_test(
+        name = "drain_routing_%s" % lang,
+        size = "medium",
+        roles = {
+            "backend": lang,
+            "client": "py",
+            "event_backend": lang,
+            "event_client": "py",
+        },
+        scenario = "drain_routing/drain_routing.py",
+    )
+    for lang in LANGS
+]
+
+[
+    mx_integration_test(
+        name = "drain_survives_mx_restart_%s" % lang,
+        size = "medium",
+        roles = {
+            "backend": lang,
+            "client": "py",
+        },
+        scenario = "drain_survives_mx_restart/drain_survives_mx_restart.py",
+    )
+    for lang in LANGS
 ]
 
 # A multiplexer frozen with SIGSTOP; slow (waits out the heartbeat drop).

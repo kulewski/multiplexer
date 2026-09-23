@@ -1,8 +1,10 @@
 // The rules file in memory: peer types by number and by name, message types
 // by number with their routing rules resolved to peer type numbers.
 //
-// Read once, at start, from the protocol buffer text format described in
-// docs/rules.md. Config<std::map> is what the multiplexer and the client use;
+// Read from the protocol buffer text format described in docs/rules.md, at
+// start and, by the multiplexer, again whenever the file changes (a fresh
+// Config replaces the old one whole, see Server::load_rules). Config<std::map>
+// is what the multiplexer and the client use;
 // generate_constants.cc instantiates Config<std::multimap> so that it can
 // report duplicate numbers instead of silently keeping one. A Config built
 // without a file holds only the entries a client needs to recognize a
@@ -11,14 +13,15 @@
 #ifndef MX_MULTIPLEXER_CONFIG_H_
 #define MX_MULTIPLEXER_CONFIG_H_
 
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/text_format.h>
 
 #include <cstdint>
 #include <fstream>
-#include <iostream>
+#include <iterator>
 #include <map>
+#include <set>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "lib/assertion.h"
@@ -70,28 +73,36 @@ class Config {
   }
 
   // Replace the rules with those in `file` (protocol buffer text format).
-  // Throws mx::Exception if the file is missing or names an unknown peer.
+  // Throws mx::Exception if the file is missing or does not parse, or
+  // Config::Exception if it names an unknown peer.
   void read_configuration(const std::string& file) {
-    using std::cout;
     using std::ifstream;
-
-    MultiplexerRules rules;
 
 #ifndef IS_GENERATE_CONSTANTS
     using namespace mx::logging::consts;
-    MX_LOG(DEBUG, MEDIUMVERBOSITY, CTX("config") TEXT("reading configuration file"));
+    MX_LOG(DEBUG, HIGHVERBOSITY, CTX("config") TEXT("reading configuration file " + file));
 #endif
 
     ifstream in(file.c_str(), ifstream::in | ifstream::binary);
     if (!in) {
       MXTHROW(mx::Exception("There is no config file '" + file + "'"));
     }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    read_configuration_text(text, file);
+  }
 
-    google::protobuf::io::IstreamInputStream zcis(&in);
-    bool ok = google::protobuf::TextFormat::Parse(&zcis, &rules);
-    AssertMsg(ok, "ParseFromIstream failed");
-    Assert(in.eof());
-
+  // As above from the file's contents already read; `what` names it in the
+  // errors. The protobuf parser reports what is wrong with the text on
+  // stderr, line and column included.
+  void read_configuration_text(const std::string& text, const std::string& what) {
+    MultiplexerRules rules;
+    if (!google::protobuf::TextFormat::ParseFromString(text, &rules)) {
+      MXTHROW(mx::Exception("cannot parse " + what + " as a rules file"));
+    }
+    if (rules.peer_size() == 0) {
+      // Nothing could connect: a truncated file, or not a rules file at all.
+      MXTHROW(mx::Exception("no peer types in " + what));
+    }
     read_configuration(rules);
     initialized_ = true;
   }
@@ -105,6 +116,9 @@ class Config {
   };
 
   typedef typename map_template<std::uint32_t, MultiplexerMessageDescription>::type MessageDescriptionById;
+  // Whether this instantiation keeps one entry per number (std::map): then
+  // a repeat in the file must be refused, since the other would be lost.
+  static const bool REJECTS_DUPLICATES = std::is_same<typename map_template<int, int>::type, std::map<int, int>>::value;
   typedef typename map_template<std::string, MultiplexerPeerDescription>::type PeerDescriptionByName;
   typedef typename map_template<std::uint32_t, MultiplexerPeerDescription>::type PeerDescriptionById;
 
@@ -162,27 +176,41 @@ class Config {
 
   // Indexes the parsed rules. A routing rule names its peer type by name in
   // the file; here the number is filled in (set_peer_type), which is what
-  // the server routes on. An unknown name is fatal: better a multiplexer
-  // that does not start than one that silently drops a type.
+  // the server routes on. An unknown or missing name throws: better a
+  // multiplexer that does not start, or keeps the rules it has, than one
+  // that silently drops a type.
   void read_configuration(const MultiplexerRules& rules) {
     // validate the rules
     for (const MultiplexerMessageDescription& message_type : rules.type()) {
       for (const MultiplexerMessageDescription::RoutingRule& rule : message_type.to()) {
         if (!rule.has_peer()) {
-          std::cerr << "ERROR: MultiplexerMessageDescription::RoutingRule "
-                       "without peer name\n";
-          return;
+          MXTHROW(typename Config::Exception("type " + message_type.name() + ": a `to` rule without a peer name"));
         }
       }
     }
 
+    // A number or a name that repeats within the file is refused, as the
+    // constants generator refuses it; the generator's own multimap
+    // instantiation reports every duplicate itself and skips this.
+    std::set<std::uint32_t> peer_types_seen;
+    std::set<std::string> peer_names_seen;
+    std::set<std::uint32_t> message_types_seen;
     for (const MultiplexerPeerDescription& description : rules.peer()) {
+      if (REJECTS_DUPLICATES && !peer_types_seen.insert(description.type()).second) {
+        MXTHROW(typename Config::Exception("duplicate peer type " + std::to_string(description.type())));
+      }
+      if (REJECTS_DUPLICATES && !peer_names_seen.insert(description.name()).second) {
+        MXTHROW(typename Config::Exception("duplicate peer name " + description.name()));
+      }
       /* Multiplexer peer description */
       peer_by_type_.insert(std::make_pair(description.type(), description));
       peer_by_name_.insert(std::make_pair(description.name(), description));
     }
 
     for (const MultiplexerMessageDescription& message_type : rules.type()) {
+      if (REJECTS_DUPLICATES && !message_types_seen.insert(message_type.type()).second) {
+        MXTHROW(typename Config::Exception("duplicate message type " + std::to_string(message_type.type())));
+      }
       /* package descirption with routing rules definitions */
       MultiplexerMessageDescription& description =
           __insert(message_description_by_id_, message_type.type(), message_type);

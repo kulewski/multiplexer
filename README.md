@@ -102,13 +102,16 @@ type {
   another backend found by a search across every multiplexer, and a request
   whose connection dies is resent, all inside one call
   ([how a query is answered](docs/query.md)).
-- **Zero-downtime deployments.** A backend asked to leave drains: it declines
-  new work and finishes what it holds, so a Kubernetes rolling restart with a
-  preStop hook costs nobody a timeout
+- **Zero-downtime deployments.** A backend asked to leave drains: it tells
+  every multiplexer to route it nothing new, finishes what it holds, and
+  leaves as soon as they have confirmed, so a Kubernetes rolling restart
+  with a preStop hook costs nobody a timeout, or a retry
   ([backend_drains](tests/scenarios/backend_drains/README.md)).
 - **Load balancing and fan-out from one rules file.** Round-robin across a
   backend pool, publish/subscribe to every subscriber, or direct addressing,
-  chosen per message type, no code change ([rules](docs/rules.md)).
+  chosen per message type, no code change ([rules](docs/rules.md)); the
+  file is edited under running multiplexers, which put it in use without a
+  restart ([changing the rules](docs/operations.md#changing-the-rules)).
 - **One instance, one path, when it matters.** A request addressed to one
   backend instance reaches it or fails, never another instance, and is
   found again behind another multiplexer; a lane keeps a stream of
@@ -199,7 +202,7 @@ cd examples/echo && bazel test //...    # a backend and a client, built the way 
 
 Peer types and message types are defined in `multiplexer.rules` file.
 
-**If you make any changes to any of the type ids or constants, client library files will need to be regenerated. It happens automatically if you use the `bazel run` or `bazel build`. Multiplexer itself doesn't need to be rebuilt, only restarted.**
+**If you make any changes to any of the type ids or constants, client library files will need to be regenerated. It happens automatically if you use the `bazel run` or `bazel build`. Multiplexer itself doesn't need to be rebuilt or restarted: it reads the changed file and puts it in use on its own ([changing the rules](docs/operations.md#changing-the-rules)).**
 
 ### Send message directly to a peer
 
@@ -331,8 +334,10 @@ ports, scripted peers, and the macro this repository's own scenarios use
 ## Using it from Python
 
 `pip install mx-multiplexer` installs the package, extension included, on
-Linux; the import is `multiplexer`. A backend waits for requests and
-answers them. `serve_forever()` runs the loop
+Linux; the import is `multiplexer`, and `mxcontrol generate_constants
+your.rules --python multiplexer_constants.py` writes the `peers` and
+`types` of your rules file, which a Bazel build generates on its own. A
+backend waits for requests and answers them. `serve_forever()` runs the loop
 and calls `handle_message` for each request; `send_message` replies to the peer
 that asked.
 

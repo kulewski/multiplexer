@@ -27,8 +27,9 @@ struct InProcessMultiplexer {
       const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", 0);
-      server->clear_rules();
-      server->read_rules(rules);
+      server->set_rules_file(rules);
+      std::string error;
+      AssertMsg(server->load_rules(&error) == multiplexer::Server::RulesLoad::LOADED, error);
       server->start();
       bound.set_value(server->local_port());
       io_service.run();
@@ -120,6 +121,7 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   std::promise<std::uint64_t> backend_ready;
   std::thread backend_thread([&] {
     EchoBackend backend(addresses);
+    backend.connect();  // what serve_forever() would do first; this loop is its own
     backend_ready.set_value(backend.instance_id());
     while (keep_serving) {
       try {
@@ -151,6 +153,7 @@ TEST(Soak, ThousandsOfRequestsThroughAThreadedBackendDoNotGrowTheHeap) {
   multiplexer::backend::MultiplexerAddresses addresses;
   addresses.push_back(std::make_pair(std::string("127.0.0.1"), mx.port));
   EchoThreadedBackend backend(addresses, 2);
+  backend.connect();  // registered before the first query, however late the thread below runs
   std::thread serving([&] { backend.serve_forever(0.05f); });
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));

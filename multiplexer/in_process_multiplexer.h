@@ -16,16 +16,19 @@ namespace multiplexer {
 namespace testing {
 
 struct InProcessMultiplexer {
-  InProcessMultiplexer() {
+  // On an ephemeral port, or on `port`: a test that kills one and brings
+  // it back on the same address gives the port the first one got.
+  explicit InProcessMultiplexer(unsigned short listen_port = 0) {
     // Everything of the server's happens on its io thread, including its
     // creation: connections bind their thread checker where they are made.
     std::promise<unsigned short> bound;
-    thread = std::thread([this, &bound] {
+    thread = std::thread([this, &bound, listen_port] {
       const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
-      server = multiplexer::Server::Create(io_service, "127.0.0.1", 0);
-      server->clear_rules();
-      server->read_rules(rules);
+      server = multiplexer::Server::Create(io_service, "127.0.0.1", listen_port);
+      server->set_rules_file(rules);
+      std::string error;
+      AssertMsg(server->load_rules(&error) == multiplexer::Server::RulesLoad::LOADED, error);
       server->start();
       bound.set_value(server->local_port());
       io_service.run();

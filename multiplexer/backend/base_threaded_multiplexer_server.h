@@ -9,7 +9,15 @@
 // the search clients use to find a backend, and hands every other message
 // to a bounded queue that `workers` threads take from. With one worker
 // handling is serial, in arrival order, as on BaseMultiplexerServer, and
-// the peer stays registered under a request of any length.
+// the peer stays registered under a request of any length. The workers
+// start and the connections open in serve_forever(), so nothing reaches
+// handle_message() before the subclass is built, and no multiplexer knows
+// the backend until it serves. A request that
+// arrives while the server is leaving, routed before the multiplexer saw
+// the connection go, is refused with DELIVERY_ERROR, so its requester
+// retries elsewhere at once rather than after its timeout; one that
+// answers another is dropped, since nobody retries a reply and refusing
+// one could start a loop with a peer that answers the refusal.
 //
 // The handler is handle_message(request): a Request carries the message
 // and everything needed to answer it, held by shared_ptr so that a handler
@@ -43,6 +51,10 @@ struct ThreadedServerOptions {
   std::size_t queue_size = 1024;            // requests waiting for a worker; beyond it they are dropped
   bool decline_searches_when_full = false;  // leave a client's search unanswered while saturated
   float connect_timeout = DEFAULT_TIMEOUT;
+  // What start_draining() tells the multiplexers: any and all off keeps
+  // only addressed messages coming; all on keeps events; last_resort keeps
+  // a lone backend serving through its drain.
+  Routing drain_routing = direct_only_routing();
 };
 
 // One message being handled, and what answers it. reply() fills in `to`,
@@ -98,39 +110,53 @@ class BaseThreadedMultiplexerServer {
   typedef ThreadedServerOptions Options;
 
  protected:
-  // Connects to every address as a backend of `type` and starts the
-  // workers; a subclass calls it.
+  // A backend of `type` for the multiplexers at `addresses`; a subclass
+  // calls it. It only makes the instance id: the workers start and the
+  // connections open in connect(), which serve_forever() calls first, so
+  // nothing reaches handle_message() before the subclass is built, and
+  // no multiplexer knows the backend until it can serve.
   BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                 const Options& options = Options());
 
  public:
   virtual ~BaseThreadedMultiplexerServer();  // close()
 
-  // Until stop() or a drain is over: every `poll` seconds, or sooner when
+  // connect(); then, until
+  // stop() or a drain is over: every `poll` seconds, or sooner when
   // woken, periodic_task(); then take no new message, let the workers
   // finish the queue, close the connections and return. The calling thread
   // only polls; the handlers run on the workers. Rethrows what a handler
   // threw when on_handler_exception() returned false.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
+  // Starts the workers and connects to every address, once;
+  // serve_forever() calls it first, and a second call does nothing. Call
+  // it yourself when something waits for a line you print before it
+  // sends, so that the line means reachable, or in a test that wants the
+  // backend connected without a thread serving it.
+  void connect();
   // Take no more messages, let the workers finish what is queued, stop
-  // them and close the connections. Idempotent; the destructor calls it.
+  // them and close the connections. What still arrives, routed before
+  // the multiplexers applied the drain routing or saw the connection go,
+  // is refused with DELIVERY_ERROR, a reply dropped. Idempotent; the
+  // destructor calls it.
   // Joins the workers, so from a handler, on a worker, it throws
   // std::logic_error: a handler that wants the server gone calls stop().
   void close();
 
-  // Draining, as on BaseMultiplexerServer: stop answering searches, keep
-  // serving what arrives, leave once drained().
+  // Draining, as on BaseMultiplexerServer: tell every multiplexer the
+  // drain_routing, nothing new by the rules by default, keep serving what
+  // arrives, leave once drained().
   void start_draining();
   bool draining() const { return draining_.load(); }
   // Ask serve_forever() to return, from any thread.
   void stop();
   // Requests waiting for a worker plus those being handled, and the
-  // number a full queue refused.
+  // number dropped by a full queue or refused while leaving.
   std::size_t pending() const;
   std::size_t dropped() const { return dropped_.load(); }
 
-  std::uint64_t instance_id() const { return client_.instance_id(); }
-  ThreadedClient& client() { return client_; }  // for messages that are not replies
+  std::uint64_t instance_id() const { return client_.instance_id(); }  // known from construction
+  ThreadedClient& client() { return client_; }                         // for messages that are not replies
 
  protected:
   // Called on a worker thread with every message that is not the
@@ -140,41 +166,53 @@ class BaseThreadedMultiplexerServer {
   virtual void handle_message(const RequestPtr& request) = 0;
   // Called from serve_forever() after every poll, on its thread.
   virtual void periodic_task() {}
-  // Whether the drain is over: by default `drain_seconds` have passed
-  // since start_draining(). Override for a condition of your own.
+  // Whether the drain is over: by default once `drain_seconds` have
+  // passed since start_draining(), or, when the drain routing turns every
+  // path off and asks for no last resort, once every connected
+  // multiplexer has confirmed it and no request is queued or being
+  // handled, since nothing more is on its way; a drain that keeps a path
+  // open lasts the whole period. Override for a condition of your own.
   virtual bool drained() const;
   // Called on the worker thread when handle_message() threw, after
   // BACKEND_ERROR went to the requester. True (the default) keeps serving;
   // false makes serve_forever() return and rethrow.
   virtual bool on_handler_exception(const std::exception&) { return true; }
   // Whether to answer a client's search for a backend; on the io thread,
-  // so quick. False while draining, and with decline_searches_when_full
-  // while every worker is busy and requests wait.
+  // so quick. False with decline_searches_when_full while every worker is
+  // busy and requests wait. A draining backend needs no policy here: the
+  // multiplexers stop offering it (drain_routing).
   virtual bool should_respond_to_backend_for_packet_search() const;
 
   std::atomic<bool> working{true};
 
  private:
   void _on_message(const IncomingMessage& incoming);
+  void _start_workers();
   void _work();
   void _handle(const RequestPtr& request);
 
   const Options options_;
+  const MultiplexerAddresses addresses_;
+  const PeerType type_;
   mutable mx::Mutex mutex_;
   std::condition_variable_any cond_;
   std::deque<RequestPtr> queue_ MX_GUARDED_BY(mutex_);
   unsigned int busy_ MX_GUARDED_BY(mutex_) = 0;
   bool accepting_ MX_GUARDED_BY(mutex_) = true;
-  std::vector<std::thread> threads_;
+  std::vector<std::thread> threads_ MX_GUARDED_BY(mutex_);
   std::atomic<bool> draining_{false};
-  std::chrono::steady_clock::time_point draining_since_;
+  // When the drain started, as steady_clock ticks, written before
+  // draining_ is published: drained() may run on another thread than
+  // start_draining().
+  std::atomic<std::chrono::steady_clock::rep> draining_since_ticks_{0};
   float drain_seconds_ = 0.0f;
   mx::Mutex wake_mutex_;
   std::condition_variable_any wake_;
   std::exception_ptr failure_;
+  std::atomic<bool> connected_{false};
   std::atomic<bool> closed_{false};
   std::atomic<std::size_t> dropped_{0};
-  ThreadedClient client_;  // last: its callbacks reach the members above
+  mutable ThreadedClient client_;  // last: its callbacks reach the members above; asked from const drained()
 };
 
 }  // namespace backend

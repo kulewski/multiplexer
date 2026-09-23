@@ -11,9 +11,14 @@ file and in the peers; nothing in this repository changes.
    field. A reply type needs no `to` rule.
 2. **Build.** The constants regenerate: `peers.NAME` and `types.NAME` in
    Python, `multiplexer::peers::NAME` and `multiplexer::types::NAME` in C++.
-   A duplicate name or number fails the build here.
-3. **Restart the multiplexers** with the new file; they read it once at
-   start.
+   A duplicate name or number fails the build here. Outside Bazel, run
+   `mxcontrol generate_constants` again ([mxcontrol.md](../mxcontrol.md#generate_constants)).
+3. **Give the multiplexers the new file.** A running multiplexer reads
+   its file again every 2 s and puts a change in use on its own, or at
+   once on `SIGHUP` or `mxcontrol rules reload`
+   ([changing the rules](../operations.md#changing-the-rules)); a
+   ConfigMap edit is enough on Kubernetes. No restart, and old peers keep
+   working: they do not send the new types.
 4. **Use it.** A backend of the new peer type subclasses
    `BaseMultiplexerServer` with `type=peers.NAME`; a client sends
    `type=types.NAME`. [examples/echo](../../examples/echo) is a complete

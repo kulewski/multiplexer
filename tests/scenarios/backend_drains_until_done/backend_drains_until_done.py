@@ -1,9 +1,11 @@
-"""a backend decides for itself when its drain is over, by overriding drained().
+"""a backend decides for itself when its drain is over, by overriding drained(); alone of its type, it drains as the last resort.
 
 The only backend is asked to leave after a few requests, with a drain period
 of half a second but a rule of its own: it refuses to leave before it has
-served every request of the run. The drain lasts as long as the rule says,
-the backend serves everything, and exits cleanly only then.
+served every request of the run. Being alone of its type it drains as the
+last resort, so the multiplexer keeps routing to it what nobody else could
+take. The drain lasts as long as the rule says, the backend serves
+everything, and exits cleanly only then.
 """
 
 import unittest
@@ -29,6 +31,7 @@ class BackendDrainsUntilDone(unittest.TestCase):
                 behaviour="upper",
                 drain_seconds=0.5,
                 drain_min_handled=QUERIES,
+                drain_routing="last_resort",
             )
             backend.wait_for("connected", connections=1)
             client = spawn(

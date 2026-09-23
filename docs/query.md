@@ -263,9 +263,9 @@ graph LR
   style Q fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
-### 5. Each multiplexer asks a live backend, and each answers
+### 5. Each multiplexer asks its live backends, and each answers
 
-A multiplexer routes the search with the request type's own rule, so with `whom: ANY` each forwards it to one live backend of the type, round robin. Multiplexer 1 picks backend 2 and multiplexer 2 picks backend 3; each answers with a `PING` that references the search. The client keeps the first `PING` to arrive, backend 2's via multiplexer 1 here, and ignores the later one. It now knows backend 2's instance id and a connection that leads to it.
+A multiplexer forwards the search to every backend of the request type it has that takes new requests, whatever the rule's `whom`; here backends 2 and 3 on each, of which the picture keeps one arrow per multiplexer. Each backend answers each search with a `PING` that references it. The client keeps the first `PING` to arrive, backend 2's via multiplexer 1 here, and ignores the later ones. It now knows backend 2's instance id and a connection that leads to it.
 
 ```mermaid
 graph LR
@@ -586,7 +586,7 @@ graph LR
 
 ### 3. The client probes for the instance on every connection
 
-The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which a backend declines while it drains, or with `probe=PING` a `PING`, which a peer answers as long as it lives, for a request that must land even then. Delivery errors are requested, so a multiplexer without the instance says so. The connection dying under the first stage leads here too. A request that simply gets no answer within the timeout does not: a silent addressee is one the multiplexer still has, and a probe would find the same one.
+The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it whatever its routing, as every addressed message does, or with `probe=PING` a `PING`, which every client library answers, not only a backend. Delivery errors are requested, so a multiplexer without the instance says so. The connection dying under the first stage leads here too. A request that simply gets no answer within the timeout does not: a silent addressee is one the multiplexer still has, and a probe would find the same one.
 
 ```mermaid
 graph LR

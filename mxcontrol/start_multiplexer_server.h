@@ -7,8 +7,10 @@
 namespace mxcontrol {
 
 // run_multiplexer: run one multiplexer until SIGINT or SIGTERM. Options:
-// --rules (the rules file), --address host:port (0.0.0.0:1980; port 0 picks
-// a free port), --port-file (where to write the bound address), --record
+// --rules (the rules file) and --rules-check-interval (how often it is
+// read again for a change; SIGHUP reads it now), --address host:port
+// (0.0.0.0:1980; port 0 picks a free port), --port-file (where to write
+// the bound address), --record
 // and --record-payload-bytes (a recording from the start), --recording-dir
 // and --allow-tap (recording sessions and taps peers may ask for),
 // --peers-file (the connected peers, rewritten on every change). See
@@ -24,6 +26,9 @@ class StartMultiplexerServer : public Task {
  protected:
   virtual void _initialize_options(mx::options::Options& options) {
     options.add("rules", &rules_file_, "multiplexer.rules", "file from which routing rules will be read");
+    options.add("rules-check-interval", &rules_check_interval_, 2.0,
+                "seconds between checks of the rules file for a change, which is then put in use "
+                "without a restart; 0 never checks (SIGHUP and `mxcontrol rules reload` still do)");
     options.add("address,M", &host_port_, "0.0.0.0:1980", "local address to listen on").positional("address");
     options.add("port-file", &port_file_,
                 "once listening, write the bound address as host:port to this file "
@@ -45,6 +50,7 @@ class StartMultiplexerServer : public Task {
  private:
   std::string host_port_;
   std::string rules_file_;
+  float rules_check_interval_;
   std::string port_file_;
   unsigned int memory_log_every_;
   std::string record_file_;

@@ -4,6 +4,7 @@
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "multiplexer/Multiplexer.pb.h"
 #include "multiplexer/multiplexer.constants.h"
 
 namespace multiplexer {
@@ -52,17 +53,14 @@ void Request::notify_start() {
 
 BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                                              const Options& options)
-    : options_(options), client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
+    : options_(options),
+      addresses_(addresses),
+      type_(type),
+      client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
   if (options_.workers < 1) {
     throw std::invalid_argument("workers must be at least 1");
   }
   client_.set_search_policy([this] { return should_respond_to_backend_for_packet_search(); });
-  for (unsigned int index = 0; index < options_.workers; ++index) {
-    threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
-  }
-  for (const MultiplexerAddress& address : addresses) {
-    client_.connect(address.first, address.second, options_.connect_timeout);
-  }
 }
 
 BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() { close(); }
@@ -70,6 +68,7 @@ BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() { close(); }
 void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   drain_seconds_ = drain_seconds;
   try {
+    connect();
     for (;;) {
       {
         mx::UniqueLock lock(wake_mutex_);
@@ -91,37 +90,67 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
 }
 
 void BaseThreadedMultiplexerServer::close() {
-  for (const std::thread& thread : threads_) {
-    if (thread.get_id() == std::this_thread::get_id()) {
-      throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
+  std::vector<std::thread> threads;
+  {
+    mx::MutexLock lock(mutex_);
+    for (const std::thread& thread : threads_) {
+      if (thread.get_id() == std::this_thread::get_id()) {
+        throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
+      }
     }
   }
   if (closed_.exchange(true)) {
     return;
   }
   {
-    mx::MutexLock lock(mutex_);
+    mx::MutexLock lock(mutex_);  // before the drain shows: a request seeing draining() must find the door shut
     accepting_ = false;
     cond_.notify_all();
+    threads.swap(threads_);
   }
-  for (std::thread& thread : threads_) {
+  start_draining();
+  stop();  // a serve_forever() still running on another thread returns now rather than polling a closed client
+  for (std::thread& thread : threads) {
     thread.join();
   }
-  threads_.clear();
+  client_.flush_all(CLOSE_FLUSH_SECONDS);  // the last replies go out before the sockets close
   client_.shutdown();
 }
 
 void BaseThreadedMultiplexerServer::start_draining() {
+  // The time first, so that no thread sees draining() without it, and only
+  // by the first call: a later one must not move the start, or a program
+  // that asks on every poll would never reach drain_seconds.
+  std::chrono::steady_clock::rep unset = 0;
+  draining_since_ticks_.compare_exchange_strong(unset, std::chrono::steady_clock::now().time_since_epoch().count());
   if (!draining_.exchange(true)) {
-    draining_since_ = std::chrono::steady_clock::now();
+    if (!closed_.load()) {
+      client_.set_routing(options_.drain_routing);
+    }
     mx::MutexLock lock(wake_mutex_);
     wake_.notify_all();
   }
 }
 
 bool BaseThreadedMultiplexerServer::drained() const {
-  return draining() && std::chrono::steady_clock::now() - draining_since_ >=
-                           std::chrono::microseconds(static_cast<long>(drain_seconds_ * 1e6));
+  if (!draining()) {
+    return false;
+  }
+  if (closed_.load()) {
+    return true;  // nothing more is coming through a closed client
+  }
+  const std::chrono::steady_clock::time_point since(std::chrono::steady_clock::duration(draining_since_ticks_.load()));
+  if (std::chrono::steady_clock::now() - since >= std::chrono::microseconds(static_cast<long>(drain_seconds_ * 1e6))) {
+    return true;
+  }
+  if (!nothing_more_arrives(options_.drain_routing) || pending() != 0) {
+    return false;
+  }
+  try {
+    return client_.routing_acknowledged();
+  } catch (const ThreadedClient::NotConnected&) {
+    return true;  // shut down under us: nothing more is coming
+  }
 }
 
 void BaseThreadedMultiplexerServer::stop() {
@@ -136,9 +165,6 @@ std::size_t BaseThreadedMultiplexerServer::pending() const {
 }
 
 bool BaseThreadedMultiplexerServer::should_respond_to_backend_for_packet_search() const {
-  if (draining()) {
-    return false;
-  }
   if (options_.decline_searches_when_full) {
     mx::MutexLock lock(mutex_);
     return busy_ < options_.workers || queue_.empty();
@@ -146,10 +172,15 @@ bool BaseThreadedMultiplexerServer::should_respond_to_backend_for_packet_search(
   return true;
 }
 
-// The io thread: queue the message for a worker, or drop it when the
-// queue is full, as a full queue on the multiplexer drops.
+// The io thread: queue the message for a worker; drop it when the queue
+// is full, as a full queue on the multiplexer drops; refuse it when
+// leaving, with the DELIVERY_ERROR a multiplexer sends for a peer that is
+// gone, so that a query retries elsewhere at once. Few arrive then: the
+// multiplexers route nothing new to a draining backend once they have
+// its routing; this covers what was routed before.
 void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming) {
   RequestPtr request(new Request(&client_, incoming));
+  bool accepting;
   {
     mx::MutexLock lock(mutex_);
     if (accepting_ && queue_.size() < options_.queue_size) {
@@ -157,12 +188,58 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
       cond_.notify_one();
       return;
     }
-    request->dropped_ = true;
+    accepting = accepting_;
     ++dropped_;
-    MX_LOG(WARNING, LOWVERBOSITY,
+  }
+  request->dropped_ = true;  // said below, not by the destructor
+  const std::string what = "request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type());
+  if (accepting) {
+    MX_LOG(WARNING, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
+    return;
+  }
+  const MultiplexerMessage& msg = *incoming.third;
+  if (msg.references()) {
+    // A message that answers another is dropped: nobody retries a reply, and
+    // refusing one could start a loop, a peer whose handler raised on the
+    // refusal answering it with BACKEND_ERROR, refused in turn, until the
+    // close ended.
+    MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BaseThreadedMultiplexerServer")
-               TEXT("request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type()) +
-                    " dropped: " + (accepting_ ? "queue full" : "leaving")));
+               TEXT("reply #" + repr(msg.id()) + " of type " + repr(msg.type()) + " dropped: leaving"));
+    return;
+  }
+  MX_LOG(DEBUG, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " refused: leaving"));
+  // A rule reports delivery errors unless told not to, and so does this; a
+  // sender that set the message's own flag to false hears nothing.
+  const bool wanted = !msg.has_report_delivery_error() || msg.report_delivery_error();
+  if (wanted && msg.type() > types::MAX_MULTIPLEXER_META_PACKET) {
+    DeliveryError error;
+    error.set_packet_id(incoming.third->id());
+    error.add_failed_type(type_);
+    request->reply(error.SerializeAsString(), types::DELIVERY_ERROR);
+  }
+}
+
+void BaseThreadedMultiplexerServer::connect() {
+  if (connected_.exchange(true) || closed_.load()) {
+    return;
+  }
+  _start_workers();  // before the first connection, so that nothing waits for a worker
+  for (const MultiplexerAddress& address : addresses_) {
+    client_.connect(address.first, address.second, options_.connect_timeout);
+  }
+}
+
+// The workers, started once, from connect() and before it connects:
+// a request must never reach handle_message() on an object whose subclass
+// is not built yet, and once connected it must not wait for a worker.
+void BaseThreadedMultiplexerServer::_start_workers() {
+  mx::MutexLock lock(mutex_);
+  if (!accepting_ || !threads_.empty()) {
+    return;  // closed already, or served before
+  }
+  for (unsigned int index = 0; index < options_.workers; ++index) {
+    threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
   }
 }
 

@@ -8,11 +8,11 @@ namespace multiplexer {
 namespace backend {
 
 BaseMultiplexerServer::BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type)
-    : working(true), _has_sent_response(false), __conn(new multiplexer::Client(type)), conn(__conn.get()) {
-  for (const MultiplexerAddress& address : addresses) {
-    conn->connect(address.first, address.second);
-  }
-}
+    : working(true),
+      _has_sent_response(false),
+      __conn(new multiplexer::Client(type)),
+      addresses_(addresses),
+      conn(__conn.get()) {}
 
 BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client* conn_, PeerType type)
     : working(true), _has_sent_response(false), conn(conn_) {
@@ -28,10 +28,21 @@ void BaseMultiplexerServer::loop_iter(float timeout) {
   __handle_message();
 }
 
+void BaseMultiplexerServer::connect() {
+  if (connected_) {
+    return;
+  }
+  connected_ = true;
+  for (const MultiplexerAddress& address : addresses_) {
+    conn->connect(address.first, address.second);
+  }
+}
+
 void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   conn->bind_to_current_thread();
   drain_seconds_ = drain_seconds;
   try {
+    connect();
     while (working) {
       if (draining_ && drained()) {
         break;
@@ -41,6 +52,17 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
       } catch (Client::OperationTimedOut&) {
       }
       periodic_task();
+    }
+    // A drain serves what was already on its way: the requests the client
+    // had read off the sockets when the drain ended are handled before the
+    // connections close, whether the drain ended on the confirmation or
+    // on its cap.
+    while (draining_ && working && conn->has_incoming_messages()) {
+      try {
+        loop_iter(0);
+      } catch (Client::OperationTimedOut&) {
+        break;
+      }
     }
   } catch (...) {
     close();
@@ -55,11 +77,15 @@ void BaseMultiplexerServer::start_draining() {
   }
   draining_ = true;
   draining_since_ = std::chrono::steady_clock::now();
+  conn->set_routing(drain_routing_);
 }
 
 bool BaseMultiplexerServer::drained() const {
-  return draining_ &&
-         std::chrono::duration<float>(std::chrono::steady_clock::now() - draining_since_).count() >= drain_seconds_;
+  if (!draining_) {
+    return false;
+  }
+  return std::chrono::duration<float>(std::chrono::steady_clock::now() - draining_since_).count() >= drain_seconds_ ||
+         (nothing_more_arrives(drain_routing_) && conn->routing_acknowledged());
 }
 
 // Builds and queues a message. While a request is being handled the
@@ -198,7 +224,7 @@ void BaseMultiplexerServer::__handle_internal_message() {
       if (should_respond_to_backend_for_packet_search()) {
         send_message(Kwargs().set("message", std::string()).set("type", types::PING));
       } else {
-        no_response();  // draining: let the client find another backend
+        no_response();  // the policy declines: let the client find another backend
       }
       break;
 
@@ -223,6 +249,7 @@ void BaseMultiplexerServer::close() {
   if (conn == NULL) {
     return;
   }
+  conn->flush_all(CLOSE_FLUSH_SECONDS);  // the last replies go out before the sockets close
   conn->shutdown();
   __conn.reset();
   conn = NULL;

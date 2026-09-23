@@ -11,18 +11,33 @@ from google.protobuf import text_format
 from multiplexer import clients  # re-exported for roles
 from multiplexer import servers  # re-exported for roles
 from multiplexer import threaded_client  # re-exported for roles
+from multiplexer import threaded_server  # re-exported for roles
 from multiplexer import events_pb2
+from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut  # re-exported for roles
 
 STOP = threading.Event()
+
+
+def drain_routing(flags: str) -> Routing:
+    """--drain-routing's comma-separated flag names as a Routing."""
+    kept = {flag for flag in flags.split(",") if flag}
+    unknown = kept - {"any", "all", "last_resort"}
+    if unknown:
+        raise ValueError("unknown routing flags: %s" % ", ".join(sorted(unknown)))
+    return Routing(any="any" in kept, all="all" in kept, last_resort="last_resort" in kept)
+
+
+_emit_lock = threading.Lock()  # a threaded backend reports from its workers
 
 
 def emit(event: str, **fields: Any) -> None:
     """Print one Event (multiplexer/events.proto) as a line of protocol
     buffer text format on stdout, for the harness."""
     message = events_pb2.Event(event=event, **fields)
-    sys.stdout.write(text_format.MessageToString(message, as_one_line=True) + "\n")
-    sys.stdout.flush()
+    with _emit_lock:
+        sys.stdout.write(text_format.MessageToString(message, as_one_line=True) + "\n")
+        sys.stdout.flush()
 
 
 def parser(description: str) -> argparse.ArgumentParser:

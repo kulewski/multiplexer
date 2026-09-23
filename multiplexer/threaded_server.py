@@ -27,11 +27,11 @@ import time
 import traceback
 from typing import Any, Callable
 
-from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxclient import ConnectionWrapper, parse_message
-from multiplexer.mxlog import ERROR, LOWVERBOSITY, WARNING, log
-from multiplexer.servers import format_exception
+from multiplexer.mxlog import DEBUG, ERROR, LOWVERBOSITY, WARNING, log
+from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
 
 
@@ -120,6 +120,11 @@ class Request:
             )
 
 
+# How long close() waits for the last replies to be written before it
+# closes the sockets; a peer that stopped reading cannot hold it longer.
+CLOSE_FLUSH_SECONDS = 1.0
+
+
 class BaseThreadedMultiplexerServer:
     """Base class for a threaded backend: subclass, implement
     handle_message(request), call serve_forever(). See the module
@@ -137,15 +142,28 @@ class BaseThreadedMultiplexerServer:
         queue_size: int = 1024,
         decline_searches_when_full: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
+        drain_routing: Routing | None = None,
     ):
-        """Connect to every multiplexer in `addresses` as a backend of peer
-        type `type` and start `workers` handler threads. `queue_size`
+        """A backend of peer type `type` for the multiplexers in
+        `addresses`. This only makes the instance id: the `workers` handler
+        threads start and the connections open in serve_forever(), so
+        nothing reaches handle_message() before the subclass's __init__ is
+        done, and no multiplexer knows the backend until it serves. `queue_size`
         bounds the requests waiting for a worker; beyond it a request is
         dropped with a warning, as a full queue on the multiplexer drops,
-        and the requester retries through the search. With
-        `decline_searches_when_full`, a client's search for a backend is
-        left unanswered while every worker is busy and requests wait, so
-        the retry lands on another instance."""
+        and the requester retries through the search. A request that
+        arrives while the server is leaving (close() under way) is
+        refused with DELIVERY_ERROR instead, so the requester retries at
+        once; one that answers another is dropped, since refusing a reply
+        could start a loop (docs/leaving.md). With `decline_searches_when_full`, a client's search for a
+        backend is left unanswered while every worker is busy and
+        requests wait, so the retry lands on another instance.
+        `drain_routing` is what the backend tells the multiplexers when it
+        starts draining: by default `Routing(any=False, all=False)`,
+        nothing new by the rules, only what is addressed to it;
+        `Routing(any=False)` keeps events coming, `Routing(any=False,
+        all=False, last_resort=True)` keeps a lone backend serving through
+        its drain."""
         if type is None:
             type = self.multiplexer_client_type
             if type is None:
@@ -156,6 +174,7 @@ class BaseThreadedMultiplexerServer:
         self.workers = workers
         self.queue_size = queue_size
         self.decline_searches_when_full = decline_searches_when_full
+        self.drain_routing = drain_routing if drain_routing is not None else Routing(any=False, all=False)
         self.working = True
         self._draining_since: float | None = None
         self._drain_seconds = 0.0
@@ -167,19 +186,18 @@ class BaseThreadedMultiplexerServer:
         self._accepting = True
         self._wake = threading.Event()
         self._failure: BaseException | None = None
-        self._threads = [
-            threading.Thread(target=self._work, name="mx-worker-%d" % index, daemon=True) for index in range(workers)
-        ]
+        self._threads: list[threading.Thread] = []  # started by serve_forever()
+        self._addresses = addresses  # connected to by connect(), which serve_forever() calls first
+        self._timeout = timeout
+        self._connected = False
         self._client: ThreadedClient | None = ThreadedClient(
-            addresses,
+            [],
             type,
             timeout,
             on_message=self._on_message,
             with_connection=True,
             search_policy=self.should_respond_to_backend_for_packet_search,
         )
-        for thread in self._threads:
-            thread.start()
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
 
@@ -194,7 +212,8 @@ class BaseThreadedMultiplexerServer:
 
     @property
     def instance_id(self) -> int:
-        """This backend's instance id, what a client addresses with `to`."""
+        """This backend's instance id, what a client addresses with `to`;
+        known from construction, before connect() or serve_forever() connects."""
         return self.client.instance_id
 
     # What subclasses implement or override.
@@ -220,15 +239,28 @@ class BaseThreadedMultiplexerServer:
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
         """Whether to answer a client's search for a backend; runs on the
-        io thread, so keep it quick. False while draining, and with
+        io thread, so keep it quick. False with
         `decline_searches_when_full` while every worker is busy and
-        requests wait. Override for a condition of your own."""
-        if self.draining:
-            return False
+        requests wait. Override for a condition of your own. A draining
+        backend needs no policy here: the multiplexers stop offering it
+        (its drain_routing), which is the better mechanism."""
         if self.decline_searches_when_full:
             with self._cond:
                 return self._busy < self.workers or not self._queue
         return True
+
+    def connect(self) -> None:
+        """Start the workers and connect to every multiplexer, once;
+        serve_forever() calls it first, and a second call does nothing.
+        Call it yourself when something waits for a line you print before
+        it sends, so that the line means reachable, or in a test that
+        wants the backend connected without a thread serving it."""
+        if self._connected or self._client is None:
+            return
+        self._connected = True
+        self._start_workers()  # before the first connection, so that nothing waits for a worker
+        for endpoint in self._addresses:
+            self._client.connect(endpoint, self._timeout)
 
     # Leaving.
 
@@ -238,17 +270,32 @@ class BaseThreadedMultiplexerServer:
         return self._draining_since is not None
 
     def start_draining(self) -> None:
-        """Stop answering backend searches; keep serving what arrives until drained()."""
+        """Tell every multiplexer the `drain_routing`, nothing new by the
+        rules by default; keep serving what arrives until drained()."""
         if self._draining_since is None:
             self._draining_since = time.time()
+            if self._client is not None:
+                self._client.set_routing(self.drain_routing)
             self._wake.set()
 
     def drained(self) -> bool:
         """Whether the drain is over and serve_forever() may return: by
-        default the `drain_seconds` given to serve_forever() have passed
-        since start_draining(). Override to wait for your own condition."""
+        default once the `drain_seconds` given to serve_forever() have
+        passed since start_draining(), or, when the drain routing turns
+        every path off and asks for no last resort, once every connected
+        multiplexer has confirmed it and no request is queued or being
+        handled, since nothing more is on its way; a drain that keeps a
+        path open lasts the whole period, since work keeps arriving.
+        Override to wait for your own condition."""
         since = self._draining_since
-        return since is not None and time.time() - since >= self._drain_seconds
+        if since is None:
+            return False
+        if time.time() - since >= self._drain_seconds:
+            return True
+        client = self._client
+        if client is None:
+            return True  # closed: nothing more is coming
+        return nothing_more_arrives(self.drain_routing) and self.pending == 0 and client.routing_acknowledged()
 
     def stop(self) -> None:
         """Ask serve_forever() to return, from any thread: it finishes what
@@ -259,20 +306,22 @@ class BaseThreadedMultiplexerServer:
     @property
     def pending(self) -> int:
         """Requests waiting for a worker plus those being handled; `dropped`
-        counts the ones a full queue refused."""
+        counts the ones a full queue dropped or leaving refused."""
         with self._cond:
             return len(self._queue) + self._busy
 
     # The loop.
 
     def serve_forever(self, poll: float = 1.0, drain_seconds: float = 0.0) -> None:
-        """Run until stop() or a drain is over: every `poll` seconds, or
-        sooner when woken, call periodic_task(); then take no new message,
-        let the workers finish the queue, close the connections and
-        return. The calling thread only polls: the handlers run on the
-        workers, which is the point."""
+        """connect(), then run
+        until stop() or a drain is over: every `poll` seconds, or sooner
+        when woken, call periodic_task(); then take no new message, let
+        the workers finish the queue, close the connections and return.
+        The calling thread only polls: the handlers run on the workers,
+        which is the point."""
         self._drain_seconds = drain_seconds
         try:
+            self.connect()
             while self.working and not (self.draining and self.drained()) and self._failure is None:
                 self._wake.wait(poll)
                 self._wake.clear()
@@ -284,18 +333,24 @@ class BaseThreadedMultiplexerServer:
 
     def close(self) -> None:
         """Take no more messages, let the workers finish what is queued,
-        stop them and close the connections. Safe to call twice. Joins the
-        workers, so from a handler, on a worker, it raises RuntimeError:
-        a handler that wants the server gone calls stop()."""
+        stop them and close the connections. A request that still arrives,
+        routed before the multiplexers applied the drain routing or saw the
+        connection go, is refused with DELIVERY_ERROR, so that its
+        requester retries elsewhere at once, and a reply is dropped. Safe to
+        call twice. Joins the
+        workers, so from a handler, on a worker, it raises RuntimeError: a
+        handler that wants the server gone calls stop()."""
         if threading.current_thread() in self._threads:
             raise RuntimeError("close() called from a worker thread, which it would join; call stop() instead")
-        with self._cond:
+        with self._cond:  # before the drain shows: a request seeing `draining` must find the door shut
             self._accepting = False
             self._cond.notify_all()
+        self.start_draining()
         for thread in self._threads:
             thread.join()
         self._threads = []
         if self._client is not None:
+            self._client.flush_all(CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
             self._client.shutdown()
             self._client = None
 
@@ -306,23 +361,53 @@ class BaseThreadedMultiplexerServer:
 
     # The io thread's side and the workers' side of the queue.
 
+    def _start_workers(self) -> None:
+        """The workers, started once, from connect() and before it
+        connects: a request must never reach handle_message() before the
+        subclass's __init__ is done, and once connected it must not wait
+        for a worker."""
+        with self._cond:
+            if not self._accepting or self._threads:
+                return  # closed already, or served before
+            self._threads = [
+                threading.Thread(target=self._work, name="mx-worker-%d" % index, daemon=True)
+                for index in range(self.workers)
+            ]
+            for thread in self._threads:
+                thread.start()
+
     def _on_message(self, mxmsg: MultiplexerMessage, connection: ConnectionWrapper) -> None:
-        """The io thread: queue the message for a worker, or drop it when the queue is full."""
+        """The io thread: queue the message for a worker; drop it when the
+        queue is full, as a full queue on the multiplexer drops; refuse it
+        when leaving, with the DELIVERY_ERROR a multiplexer sends for a
+        peer that is gone, so that a query retries elsewhere at once, and
+        drop it then if it answers another message."""
         request = Request(self, mxmsg, connection)
         with self._cond:
             if self._accepting and len(self._queue) < self.queue_size:
                 self._queue.append(request)
                 self._cond.notify()
                 return
-        request.dropped = True  # the warning below says it, not __del__
-        with self._cond:
+            accepting = self._accepting
             self.dropped += 1
-        log(
-            WARNING,
-            LOWVERBOSITY,
-            text="request #%d of type %d dropped: %s"
-            % (mxmsg.id, mxmsg.type, "queue full" if self._accepting else "leaving"),
-        )
+        request.dropped = True  # said below, not by __del__
+        if accepting:
+            log(WARNING, LOWVERBOSITY, text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type))
+            return
+        if mxmsg.references:
+            # A message that answers another is dropped: nobody retries a
+            # reply, and refusing one could start a loop, a peer whose
+            # handler raised on the refusal answering it with BACKEND_ERROR,
+            # refused in turn, until the close ended.
+            log(DEBUG, LOWVERBOSITY, text="reply #%d of type %d dropped: leaving" % (mxmsg.id, mxmsg.type))
+            return
+        log(DEBUG, LOWVERBOSITY, text="request #%d of type %d refused: leaving" % (mxmsg.id, mxmsg.type))
+        # A rule reports delivery errors unless told not to, and so does this;
+        # a sender that set the message's own flag to false hears nothing.
+        wanted = not mxmsg.HasField("report_delivery_error") or mxmsg.report_delivery_error
+        if wanted and mxmsg.type > types.MAX_MULTIPLEXER_META_PACKET:
+            error = DeliveryError(packet_id=mxmsg.id, failed_type=[self.type])
+            request.reply(error, type=types.DELIVERY_ERROR)
 
     def _work(self) -> None:
         """A worker: take the next request, handle it, report what the handler raised."""

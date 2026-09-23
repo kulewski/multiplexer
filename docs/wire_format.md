@@ -43,8 +43,9 @@ the protocol:
 The peer's first frame must be a message of type `CONNECTION_WELCOME` (2)
 whose payload is a `WelcomeMessage` with the peer's `type` and its `id`, the
 instance id it will use as `from`. Any other first message closes the
-connection, as does a peer type that is 99 or below or absent from the rules
-file. The multiplexer registers the connection, then answers with its own
+connection, as does a peer type absent from the rules file or one of the
+reserved 99, the two controllers apart (`RULES_CONTROLLER` always,
+`RECORDING_CONTROLLER` when remote recording is on). The multiplexer registers the connection, then answers with its own
 `CONNECTION_WELCOME`: type `MULTIPLEXER` (1) and its instance id. A second
 welcome on the same connection closes it.
 
@@ -69,13 +70,17 @@ Types 1 to 99 are the protocol's. A backend library answers them itself.
 | Type | Payload | Who sends it, and what the receiver does |
 |---|---|---|
 | `PING` (1) | any | a peer that gets a `PING` without `references` answers with a `PING` carrying the same payload, `references` set to the request's id; a `PING` that references something is an answer and is not answered again |
-| `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake |
-| `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type; each backend answers with a `PING` referencing the search's id, addressed to the client |
+| `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake; the optional `routing` (a `Routing`: `any`, `all`, `last_resort`) says which rule-routed paths reach the peer, applied before anything is routed to it |
+| `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type whose routing takes requests (`any`), or to the last resorts when none does; each backend answers with a `PING` referencing the search's id, addressed to the client |
 | `HEARTBIT` (4) | empty | keep-alive, ignored |
 | `DELIVERY_ERROR` (5) | `DeliveryError` | the multiplexer, to a message's `from`, when nobody received it: `packet_id` names the message; `failed_type` lists the peer types with no receiver, or `failed_to` the missing instance id, or `is_known_type` false for an unknown type; `original_message` is included only if the rule asked for it. `references` is the failed message's id |
 | `RECORDING_CONTROL` (6) | `RecordingControl` | a peer, without `to`, asking the multiplexer it is connected to for START, STOP, STATUS, TAP or UNTAP of its recording ([operations](operations.md#recording-on-demand-over-the-protocol)); refused unless the multiplexer allows it |
 | `RECORDING_STATUS` (7) | `RecordingStatus` | the multiplexer's answer, `references` the request's id, `error` set when it was refused |
 | `RECORDING_RECORD` (8) | `Record` | the multiplexer, to every peer that tapped in, one per record, `multiplexer_id` set |
+| `RULES_CONTROL` (9) | `RulesControl` | a peer, without `to`, asking the multiplexer it is connected to for RELOAD of its rules file, or its STATUS ([operations](operations.md#changing-the-rules)) |
+| `RULES_STATUS` (10) | `RulesStatus` | the multiplexer's answer, `references` the request's id: the fingerprint, path and counts of the rules in use, `error` set when a reload was refused |
+| `PEER_CONTROL` (11) | `PeerControl { routing }` | a peer, without `to`, telling the multiplexer it is connected to which rule-routed paths reach it from now on, replacing what its welcome said ([how a backend leaves](leaving.md#what-a-draining-backend-still-takes)) |
+| `PEER_STATUS` (12) | `PeerStatus` | the multiplexer's answer, `references` the request's id, once the routing is in effect: `routing` as applied, `error` set when the request was ignored; queued after everything routed to the peer before the change |
 
 ## What the multiplexer does with a frame
 

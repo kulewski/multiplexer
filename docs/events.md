@@ -8,7 +8,7 @@ backends its rules name. Nothing comes back unless the client sets
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says
-`whom: ALL`, so every backend of that type gets every event.
+`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)).
 
 ## Through one connection
 
@@ -46,7 +46,7 @@ graph LR
 
 ### 2. That multiplexer delivers to every backend of the type
 
-Multiplexer 1 applies the rule: `whom: ALL`, so every backend of the type connected to it gets a copy. Since every backend is connected to every multiplexer, one connection is enough to reach them all.
+Multiplexer 1 applies the rule: `whom: ALL`, so every backend of the type connected to it gets a copy, a draining one apart, which turned fan-out off ([how a backend leaves](leaving.md)). Since every backend is connected to every multiplexer, one connection is enough to reach them all.
 
 ```mermaid
 graph LR

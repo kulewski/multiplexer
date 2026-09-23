@@ -12,9 +12,11 @@ taken from the generated constants, which is also what
         if record.HasField("routed") and record.routed.type == types.SEARCH_REQUEST:
             ...
 
-A recording carries the SHA-1 of the rules file it was made with; read()
-refuses one made with different rules than the constants were generated
-from, since type numbers would then mean other things.
+A recording carries the fingerprint, a CRC-32, of the rules file it was
+made with, in its header, and of each other file put in use while it ran,
+in a `rules` record; read() refuses one whose rules differ from those the
+constants were generated from, at the header or partway through at such a
+record, since type numbers would then mean other things.
 
 start(), stop() and status() drive recording sessions on running
 multiplexers through a client connected to them, one RecordingStatus per
@@ -34,6 +36,7 @@ import sys
 import time
 from typing import Any, Iterator
 
+from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
 from multiplexer.mxclient import OperationTimedOut
 
 
@@ -72,7 +75,10 @@ def _decode_varint(data: bytes, position: int) -> tuple[int, int]:
 def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
     """Yield every Record in the file, in order. With `check_rules`, the
     first record's rules fingerprint must match RULES_FINGERPRINT of `constants`, the
-    generated constants module of the rules file the multiplexer ran with."""
+    generated constants module of the rules file the multiplexer ran with,
+    and so must every later `rules` record's, one for a file put in use
+    while recording: RulesMismatch is raised there, after the records
+    before it were yielded."""
     with open(path, "rb") as recording:
         data = recording.read()
     position = 0
@@ -93,6 +99,12 @@ def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -
                     "recorded with rules %s, these constants are from %s"
                     % (record.header.rules_fingerprint, constants.RULES_FINGERPRINT)
                 )
+        elif check_rules and record.HasField("rules") and record.rules.fingerprint != constants.RULES_FINGERPRINT:
+            # The multiplexer put another file in use while recording.
+            raise RulesMismatch(
+                "the rules changed to %s while recording, these constants are from %s"
+                % (record.rules.fingerprint, constants.RULES_FINGERPRINT)
+            )
         yield record
 
 
@@ -128,6 +140,8 @@ def peer_name(peer_type: int, constants=multiplexer_constants) -> str:
     """The peer type's name from the constants, or the number."""
     if peer_type == RECORDING_CONTROLLER:
         return "RECORDING_CONTROLLER"
+    if peer_type == RULES_CONTROLLER:
+        return "RULES_CONTROLLER"
     return constants.peers.get_name(peer_type, str(peer_type)) if peer_type else "-"
 
 
@@ -151,14 +165,27 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
             header.rules_fingerprint[:12],
             header.payload_limit,
         )
+    if kind == "rules":
+        return "%s rules %s from %s (%d message types, %d peer types)" % (
+            when,
+            record.rules.fingerprint[:12],
+            record.rules.path,
+            record.rules.message_types,
+            record.rules.peer_types,
+        )
     if kind == "peer":
         peer = record.peer
-        return "%s peer %s id=%d type=%s" % (
+        line = "%s peer %s id=%d type=%s" % (
             when,
             PeerEvent.Kind.Name(peer.kind),
             peer.peer_id,
             peer_name(peer.peer_type, constants),
         )
+        if peer.kind == PeerEvent.ROUTING:
+            line += " any=%s all=%s last_resort=%s" % tuple(
+                "yes" if flag else "no" for flag in (peer.any, peer.all, peer.last_resort)
+            )
+        return line
     routed = record.routed
     line = "%s routed %s type=%s id=%d from=%d (%s)" % (
         when,

@@ -12,8 +12,9 @@
 // The routing order, first match wins: a `to` field; override_rrules
 // carried by the message; protocol (meta) types below 100; the rules file's
 // entries for the type. Nobody to deliver to produces a DELIVERY_ERROR back
-// to the sender when the rule asks for it. docs/wire_format.md describes the
-// same order from the outside.
+// to the sender when the rule asks for it. A peer's Routing (its welcome,
+// then PEER_CONTROL) says which rule-routed paths reach it; `to` always
+// does. docs/wire_format.md describes the same order from the outside.
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
@@ -52,8 +53,9 @@ struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits
   typedef multiplexer::Connection<Server> Connection;
 };
 
-// See the file comment. Created with Create(), started with start(),
-// driven by io_service.run() in mxcontrol/start_multiplexer_server.cc.
+// See the file comment. Created with Create(), given its rules file with
+// set_rules_file() and load_rules(), started with start(), driven by
+// io_service.run() in mxcontrol/start_multiplexer_server.cc.
 class Server : public ConnectionsManager<Server>, public std::enable_shared_from_this<Server> {
  private:
   Server(asio::io_service& io_service, const std::string& host, unsigned short port);
@@ -80,8 +82,31 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
                       std::shared_ptr<MultiplexerMessage> msg);
 
-  // Starts accepting connections.
+  // Starts accepting connections, and checking the rules file.
   void start();
+
+  // The rules file. set_rules_file() names it and load_rules() reads it:
+  // when the text differs from the rules in use, it is parsed and put in
+  // use whole, so a message type added to the file is routed and a peer
+  // type added is accepted from then on, without a restart. A file that is
+  // missing or does not parse leaves the rules in use as they were, with
+  // `error` set and kept for the status; the multiplexer serves on. Called
+  // at start by run_multiplexer, then every `rules_check_interval` seconds
+  // by a timer (an edit on disk, which is how a Kubernetes ConfigMap
+  // arrives), on SIGHUP, and on a peer's RULES_CONTROL RELOAD.
+  enum class RulesLoad { LOADED, UNCHANGED, FAILED };
+  void set_rules_file(const std::string& path) { rules_file_ = path; }
+  RulesLoad load_rules(std::string* error);
+  // How often start() then checks the file, in seconds; 0 never. The
+  // check puts a changed file in use once two checks in a row have read
+  // the same new bytes, so a file caught in the middle of being written
+  // is never applied; load_rules(), an operator's explicit ask, applies
+  // at once.
+  void set_rules_check_interval(float seconds) { rules_check_interval_ = seconds; }
+  // Whether stop() has run: the acceptor is closed and nothing re-arms.
+  bool stopped() const { return !acceptor_.is_open(); }
+  // The CRC-32 of the rules in use, as the generated constants carry it.
+  const std::string& rules_fingerprint() const { return rules_fingerprint_; }
 
   // For the soak tests: after every `every` routed messages, log the C heap
   // in use (mx::heap_in_use_bytes) as "memory: heap_in_use=<bytes>
@@ -93,9 +118,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // nothing per message. A file session is opened by start_recording(), at
   // start for --record, or by a peer's RECORDING_CONTROL START once
   // --recording-dir names where such sessions go; a peer taps in with TAP
-  // once --allow-tap is set. The rules file's fingerprint goes into the
-  // header record that opens every recording session.
-  void set_rules_fingerprint(const std::string& fingerprint) { rules_fingerprint_ = fingerprint; }
+  // once --allow-tap is set. The rules fingerprint goes into the header
+  // record that opens every recording session.
   void set_recording_dir(const std::string& dir) { recording_dir_ = dir; }
   void set_allow_tap(bool allow) { allow_tap_ = allow; }
   bool remote_recording_enabled() const { return !recording_dir_.empty() || allow_tap_; }
@@ -124,9 +148,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void stop();
 
   // Peers may not announce a reserved type (1 to 99), and must be in the
-  // rules file; the one exception is a recording controller, accepted when
-  // remote recording is on.
+  // rules file; the exceptions are a rules controller, always accepted,
+  // and a recording controller, accepted when remote recording is on.
   bool inline accept_peer_type(std::uint32_t peer_type) const {
+    if (peer_type == RULES_CONTROLLER) {
+      return true;
+    }
     if (peer_type == RECORDING_CONTROLLER) {
       return remote_recording_enabled();
     }
@@ -134,14 +161,18 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
 
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
-  // and note the arrival for the recording and the peers file. A recording
+  // and note the arrival for the recording and the peers file, with the
+  // routing its welcome carried when that turns anything off. A
   // controller is passive: it calls in when it has something to ask.
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
-    if (new_connection->peer_type() == RECORDING_CONTROLLER) {
+    if (new_connection->peer_type() == RECORDING_CONTROLLER || new_connection->peer_type() == RULES_CONTROLLER) {
       new_connection->set_is_passive(true);
     }
     new_connection->start_rest();
     _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
+    if (restricted(new_connection->routing())) {
+      _emit_peer_routing(*new_connection);
+    }
     _write_peers_file();
   }
 
@@ -183,6 +214,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     const MultiplexerMessage& msg;
     const Connection::pointer conn;
     const std::shared_ptr<const RawMessage> raw;
+    // A BACKEND_FOR_PACKET_SEARCH, forwarded to every peer of the type
+    // that takes rule-routed requests (Routing.any), not every one.
+    bool search = false;
   };
 
   // The per-message path; see the file comment for the order of the cases.
@@ -204,7 +238,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
                          const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t peer_type);
 
-  // whom: ALL and whom: ANY over one peer type's connections.
+  // whom: ALL and whom: ANY over one peer type's connections, to the peers
+  // whose Routing takes the path; the last resorts among the others get
+  // the message when no such peer could.
   unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
   unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
@@ -225,6 +261,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     _emit(record);
   }
   void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
+  void _emit_peer_routing(const Connection& conn);
   // Stamps `record`, writes it to the file session, closing the session at
   // its cap, and streams it to every tap.
   void _emit(Record& record);
@@ -259,6 +296,27 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload);
   static void _on_session_deadline(weak_pointer server, const asio::error_code& error);
 
+  // RULES_CONTROL from a peer: reload if asked, answer RULES_STATUS.
+  void _handle_rules_control(MessageMetaHandler& meta_handler);
+  // PEER_CONTROL from a peer: its routing from now on, answered with
+  // PEER_STATUS once in effect.
+  void _handle_peer_control(MessageMetaHandler& meta_handler);
+  void _fill_rules_status(RulesStatus& status);
+  // The file's bytes, or false with `error` set: no file named,
+  // unreadable, or empty (nothing at all, or caught between a truncate
+  // and the write that follows).
+  bool _read_rules_file(std::string* text, std::string* error);
+  // The rest of load_rules(): `text` compared with the rules in use,
+  // parsed apart and put in use when it differs and is good.
+  RulesLoad _apply_rules_text(const std::string& text, std::string* error);
+  // The file could not be put in use: `why` goes to the caller's `error`
+  // and is kept for the status, logged when it is news.
+  RulesLoad _rules_failed(const std::string& why, std::string* error);
+  // The rules check timer: _check_rules_file() every rules_check_interval_.
+  void _arm_rules_check();
+  static void _on_rules_check(weak_pointer server, const asio::error_code& error);
+  void _check_rules_file();
+
   // The peers file, if configured; `leaving` is excluded, since it is
   // written before the indexes drop it.
   void _write_peers_file(Connection* leaving = NULL);
@@ -271,7 +329,14 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   asio::io_service& io_service_;
   unsigned int memory_log_every_ = 0;
   unsigned long routed_messages_ = 0;
+  std::string rules_file_;
   std::string rules_fingerprint_;
+  std::uint64_t rules_loaded_us_ = 0;
+  std::string rules_last_error_;           // why the file on disk is not in use; empty while it is
+  std::string rules_failed_fingerprint_;   // the content that failed last, not parsed again while it stays
+  std::string rules_pending_fingerprint_;  // a change the timer saw once; applied when seen again
+  float rules_check_interval_ = 0;
+  asio::steady_timer rules_timer_;
   std::string recording_dir_;
   bool allow_tap_ = false;
   std::unique_ptr<Recorder> recorder_;

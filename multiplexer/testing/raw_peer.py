@@ -9,6 +9,7 @@ docs/wire_format.md is the reference; this file is its executable form.
 import random
 import socket
 import struct
+import time
 import zlib
 from typing import Any
 
@@ -96,10 +97,16 @@ class RawPeer:
         return answer, theirs
 
     def closed_by_peer(self, timeout: float = 3) -> bool:
-        """True if the other side closed the connection within `timeout`."""
-        self.sock.settimeout(timeout)
+        """True if the other side closed the connection within `timeout` in
+        all: what it sends meanwhile, a heartbeat every 3 s, is read and
+        dropped and gives the wait no more time."""
+        deadline = time.monotonic() + timeout
         try:
             while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self.sock.settimeout(left)
                 if not self.sock.recv(65536):
                     return True
         except socket.timeout:

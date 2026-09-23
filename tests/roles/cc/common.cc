@@ -63,13 +63,20 @@ void CommonOptions::add(mx::options::Options& options) {
   options.add("name", &name, "", "label used in events");
 }
 
-std::unique_ptr<Client> CommonOptions::connect() const {
-  std::unique_ptr<Client> client(new Client(type));
+multiplexer::backend::MultiplexerAddresses CommonOptions::addresses() const {
+  multiplexer::backend::MultiplexerAddresses addresses;
   for (size_t index = 0; index < mx.size(); ++index) {
     std::string::size_type colon = mx[index].rfind(':');
-    std::string host = mx[index].substr(0, colon);
-    std::uint16_t port = mx::from_string<std::uint16_t>(mx[index].substr(colon + 1));
-    client->connect(host, port);
+    addresses.push_back(
+        std::make_pair(mx[index].substr(0, colon), mx::from_string<std::uint16_t>(mx[index].substr(colon + 1))));
+  }
+  return addresses;
+}
+
+std::unique_ptr<Client> CommonOptions::connect() const {
+  std::unique_ptr<Client> client(new Client(type));
+  for (const multiplexer::backend::MultiplexerAddress& address : addresses()) {
+    client->connect(address.first, address.second);
   }
   return client;
 }

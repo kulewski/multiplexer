@@ -234,6 +234,15 @@ class SendAfterRestartTest(unittest.TestCase):
             finally:
                 client.shutdown()
 
+    def test_a_restarted_multiplexer_lists_no_peer_until_it_reconnects(self):
+        """The peers file of the old process must not survive the restart:
+        a wait for the peer would return on a registration that is gone."""
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
+            cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+            cluster.mx[0].restart()
+            self.assertEqual([], cluster.mx[0].connected_peers(), "the old list outlived the process")
+            cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)  # the reconnect, about 3 s
+
     def test_with_one_multiplexer_the_send_waits_for_the_reconnect(self):
         """The only multiplexer restarted: the send notices, waits for the
         client's reconnect timer, and the message arrives."""

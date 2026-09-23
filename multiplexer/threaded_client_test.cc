@@ -73,6 +73,54 @@ TEST(ThreadedClient, OnMessageGetsWhatIsAddressedToIt) {
   EXPECT_EQ("for you", future.get().message());
 }
 
+// A backend built on the threaded client: answers every request handed to on_message.
+struct Answering {
+  explicit Answering(unsigned short port)
+      : client(multiplexer::peers::PYTHON_TEST_SERVER, [this](const multiplexer::IncomingMessage& incoming) {
+          multiplexer::MultiplexerMessage reply =
+              client.new_message(multiplexer::types::PYTHON_TEST_RESPONSE, "answered");
+          reply.set_to(incoming.third->from());
+          reply.set_references(incoming.third->id());
+          client.send(reply, incoming.second);
+        }) {
+    client.set_search_policy([] { return true; });
+    EXPECT_TRUE(client.connect("127.0.0.1", port, 5));
+  }
+  void wait_acknowledged() {
+    for (int tries = 0; tries < 500 && !client.routing_acknowledged(); ++tries) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(client.routing_acknowledged());
+  }
+  ThreadedClient client;
+};
+
+TEST(ThreadedClient, RoutingOffTakesThePeerOutOfRuleRoutingAndBackIn) {
+  InProcessMultiplexer mx;
+  Answering backend(mx.port);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+
+  multiplexer::Routing off;
+  off.set_any(false);
+  off.set_all(false);
+  backend.client.set_routing(off);
+  backend.wait_acknowledged();
+  ThreadedClient::Result refused = client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5);
+  EXPECT_EQ(ThreadedClient::FAILED, refused.outcome) << "nobody takes the request by the rules, at once";
+
+  backend.client.set_routing(multiplexer::Routing());
+  backend.wait_acknowledged();
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+
+  // A last resort gets what nobody else could take.
+  off.set_last_resort(true);
+  backend.client.set_routing(off);
+  backend.wait_acknowledged();
+  EXPECT_EQ(ThreadedClient::REPLIED, client.query("hi", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+}
+
 TEST(ThreadedClient, PingIsAnsweredAndNotHandedOn) {
   InProcessMultiplexer mx;
   std::atomic<int> handed_on(0);
@@ -335,4 +383,32 @@ TEST(ThreadedClient, AQueryReleasesItsLaneWhenItEnds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   EXPECT_TRUE(weak.expired()) << "the query released it";
+}
+
+// A connection lost seconds before shutdown() arms a reconnect timer; the
+// timer firing after the shutdown must not open a connection that nobody
+// closes, which kept the io thread alive and the peer registered.
+TEST(ThreadedClient, ShutdownRightAfterALostConnectionReturns) {
+  InProcessMultiplexer first;
+  std::unique_ptr<InProcessMultiplexer> second(new InProcessMultiplexer());
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
+  ASSERT_TRUE(client.connect("127.0.0.1", second->port, 5));
+  unsigned short lost_port = second->port;
+  second.reset();  // gone; the client's reconnect timer is now pending
+  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (client.connections_count() != 1 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(1u, client.connections_count());
+  second.reset(new InProcessMultiplexer(lost_port));  // back on the same port, so the reconnect would succeed
+  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+  client.shutdown();
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2)) << "shutdown waited for the io thread";
+  // No connection arrives at the multiplexer that came back: the timer was
+  // cancelled by the shutdown. The count is read on the server's own thread.
+  std::this_thread::sleep_for(std::chrono::seconds(4));
+  std::promise<unsigned int> peers;
+  second->io_service.post([&] { peers.set_value(second->server->connections_count(true)); });
+  EXPECT_EQ(0u, peers.get_future().get()) << "a reconnect after shutdown";
 }

@@ -53,7 +53,22 @@ struct ConnectionsManagerTraits;
 
 namespace impl {
 std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id);
-};
+// The same with the peer's Routing in the welcome, for a client that has one set.
+std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id,
+                                                         const Routing& routing);
+};  // namespace impl
+
+// The Routing flags as text for a log line.
+inline std::string routing_text(const Routing& routing) {
+  return std::string("any=") + (routing.any() ? "yes" : "no") + " all=" + (routing.all() ? "yes" : "no") +
+         " last_resort=" + (routing.last_resort() ? "yes" : "no");
+}
+// Whether a Routing turns anything off.
+inline bool restricted(const Routing& routing) { return !routing.any() || !routing.all(); }
+// Whether two Routings say the same.
+inline bool same_routing(const Routing& first, const Routing& second) {
+  return first.any() == second.any() && first.all() == second.all() && first.last_resort() == second.last_resort();
+}
 
 template <typename ConnectionsManagerImplementation>
 class ConnectionsManager {
@@ -101,26 +116,38 @@ class ConnectionsManager {
            CTX("ConnectionsManager") TEXT("registering connection " + repr((void*)conn.get()) +
                                           " id=" + repr(conn->peer_id()) + " type=" + repr(conn->peer_type())));
     if (!static_cast<const ConnectionsManagerImplementation&>(*this).accept_peer_type(conn->peer_type())) {
-      std::cerr << "invalid peer type " << conn->peer_type() << "\n";
+      asio::error_code unknown;
+      const asio::ip::tcp::endpoint remote = conn->socket().remote_endpoint(unknown);
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("ConnectionsManager")
+                 TEXT("invalid peer type " + repr(conn->peer_type()) + " announced by " + repr(conn->peer_id()) +
+                      " from " + (unknown ? "?" : repr(remote)) + ": not in the rules; refused"));
       conn->shutdown();
       return;
     }
 
     if (conn->peer_id() == instance_id()) {
-      std::cerr << "ERROR connected to self\n";
+      MX_LOG(WARNING, LOWVERBOSITY, CTX("ConnectionsManager") TEXT("connected to self; refused"));
       conn->shutdown();
       return;
     }
 
     MX_LOG(INFO, HIGHVERBOSITY,
-           CTX("ConnectionsManager") TEXT("registered connection"
-                                          " id=" +
-                                          repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
-                                          repr(config_.peer_name_by_type(conn->peer_type())) + ")"));
+           CTX("ConnectionsManager") TEXT(
+               "registered connection"
+               " id=" +
+               repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
+               repr(config_.peer_name_by_type(conn->peer_type())) + ")" +
+               (welcome.has_routing() && restricted(welcome.routing()) ? "; " + routing_text(welcome.routing()) : "")));
 
     Config::PeerDescriptionById::const_iterator peer_description = config_.peer_by_type().find(conn->peer_type());
     if (peer_description != config_.peer_by_type().end()) {
       conn->set_is_passive(peer_description->second.is_passive());
+    }
+    // The peer's routing, applied before the connection is indexed, so
+    // that nothing is routed to a peer against what its welcome said.
+    if (welcome.has_routing()) {
+      conn->set_routing(welcome.routing());
     }
 
     // It's possible that
@@ -198,7 +225,7 @@ class ConnectionsManager {
          next != cons.end() && (current = next++, true);) {
       typename Connection::pointer pointer = current->lock();
       if (!pointer) {
-        std::cerr << "detected dead connection; in connections_by_type_\n";
+        MX_LOG(WARNING, HIGHVERBOSITY, CTX("ConnectionsManager") TEXT("dead connection found in connections_by_type_"));
         scan_connections_by_id = true;
         cons.erase(current);
       } else if (pointer.get() == conn) {
@@ -256,11 +283,15 @@ class ConnectionsManager {
     return connection_by_id_.size();
   }
 
-  // The next connection at or after `begin` that is alive and has room in
-  // its outgoing queue; expired entries are erased on the way. This is the
-  // skip-the-full-peer rule of whom: ANY.
+  // The next connection at or after `begin` that is alive, has room in
+  // its outgoing queue and takes messages routed by whom: ANY; expired
+  // entries are erased on the way. This is the skip-the-full-peer rule of
+  // whom: ANY. In the `last_resort` pass, made when the first found
+  // nobody, only the peers that take no such message but are a last
+  // resort qualify.
   static inline typename ConnectionsList::iterator choose_free_connections(ConnectionsList& connections,
-                                                                           typename ConnectionsList::iterator begin) {
+                                                                           typename ConnectionsList::iterator begin,
+                                                                           bool last_resort = false) {
     for (typename ConnectionsList::iterator current, next = begin;
          next != connections.end() && (current = next++, true);) {
       if (typename Connection::pointer conn = current->lock()) {
@@ -269,6 +300,9 @@ class ConnectionsManager {
                  CTX("ConnectionsManager") TEXT("skipping connection to " + repr(conn->peer_id()) + ": " +
                                                 (conn->living() ? "outgoing queue full" : "not living")));
           continue;
+        }
+        if (last_resort ? conn->accepts_any() || !conn->last_resort() : !conn->accepts_any()) {
+          continue;  // takes nothing by this path, or is not wanted in this pass
         }
         return current;
       } else {
@@ -315,6 +349,10 @@ class ConnectionsManager {
   /* optional helpers */
   inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type) const {
     return impl::create_welcome_message(peer_type, instance_id_);
+  }
+  inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type,
+                                                                  const Routing& routing) const {
+    return impl::create_welcome_message(peer_type, instance_id_, routing);
   }
 
  protected:

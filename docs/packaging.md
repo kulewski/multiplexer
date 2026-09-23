@@ -46,6 +46,13 @@ docker run --rm -p 1980:1980 -v /etc/mx/deployment.rules:/etc/mx/multiplexer.rul
     ghcr.io/kulewski/multiplexer:<version>
 ```
 
+To edit the file under the running container, which the multiplexer
+notices and puts in use ([changing the
+rules](operations.md#changing-the-rules)), mount the directory, `-v
+/etc/mx:/etc/mx:ro` with the file named `multiplexer.rules` in it: a file
+mounted on its own is one inode, and an editor that saves by rename leaves
+the container looking at the old one.
+
 Any other subcommand goes after the image name, `... multiplexer:<version>
 help` for the list. [Operations](operations.md#on-kubernetes) has the
 StatefulSet that runs several of them on Kubernetes. Locally, `bazel run //docker:load` puts the image into
@@ -72,9 +79,11 @@ releases: the library is compiled against the release's `libprotobuf-dev`,
 and a program using it must be too. `Recommends` names the exact version.
 The library itself depends only on the reserved peer and message types,
 ids 1 to 99 ([rules.md](rules.md)), which every rules file carries as
-shipped; your own types come from `generate_constants your.rules
-multiplexer/multiplexer.constants.h`, placed on the include path before
-the package's copy. Changing the reserved block is not supported.
+shipped; your own types come from `mxcontrol generate_constants your.rules
+--cxx multiplexer/multiplexer.constants.h`, placed on the include path
+before the package's copy (`generate_constants your.rules
+multiplexer/multiplexer.constants.h`, the build-time tool the package also
+holds, writes the same). Changing the reserved block is not supported.
 
 ## The wheels
 
@@ -90,7 +99,11 @@ file from the release page instead. Either way that is the whole
 installation; the package depends on `protobuf` from PyPI.
 The wheel includes `multiplexer.testing`, the test harness; a `Cluster`
 names its rules file and needs `MXCONTROL` in the environment pointing at
-a multiplexer binary, the static one for example.
+a multiplexer binary, the static one for example. The constants of your
+own rules file, the `peers` and `types` a Bazel build generates, come from
+that binary too: `mxcontrol generate_constants your.rules --python
+multiplexer_constants.py --pyi multiplexer_constants.pyi`, once, and
+again when the file changes ([mxcontrol.md](mxcontrol.md#generate_constants)).
 The package is typed: a `py.typed` marker and a stub next to every
 generated module and the extension, so Pylance and pyright check code
 against it without any setup.

@@ -17,7 +17,7 @@ type under a `whom: ANY` rule.
 
 ### 1. whom: ALL
 
-The rule for this message type names peer type A with `whom: ALL`, so every connected backend of type A gets a copy. This is how events are usually routed.
+The rule for this message type names peer type A with `whom: ALL`, so every connected backend of type A gets a copy, every one that takes events that is: a backend draining with the default routing has turned fan-out off and is skipped ([how a backend leaves](leaving.md)). This is how events are usually routed.
 
 ```mermaid
 graph LR
@@ -50,7 +50,7 @@ graph LR
 
 ### 2. whom: ANY
 
-The rule names peer type B with `whom: ANY`. One connected backend of type B gets the message, chosen round robin. This is how requests are usually routed: the backends of a type are interchangeable workers.
+The rule names peer type B with `whom: ANY`. One connected backend of type B gets the message, chosen round robin among those that take requests; a draining backend has turned that off and is skipped, unless nobody else could take it and it is a last resort ([how a backend leaves](leaving.md)). This is how requests are usually routed: the backends of a type are interchangeable workers.
 
 ```mermaid
 graph LR

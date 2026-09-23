@@ -136,14 +136,14 @@ recovery like this one costs about one timeout on top of the normal round trip.
                     ["Q"],
                 ),
                 Step(
-                    "Each multiplexer asks a live backend, and each answers",
-                    "A multiplexer routes the search with the request type's own rule, so "
-                    "with `whom: ANY` each forwards it to one live backend of the type, "
-                    "round robin. Multiplexer 1 picks backend 2 and multiplexer 2 picks "
-                    "backend 3; each answers with a `PING` that references the search. The "
-                    "client keeps the first `PING` to arrive, backend 2's via multiplexer 1 "
-                    "here, and ignores the later one. It now knows backend 2's instance id "
-                    "and a connection that leads to it.",
+                    "Each multiplexer asks its live backends, and each answers",
+                    "A multiplexer forwards the search to every backend of the request "
+                    "type it has that takes new requests, whatever the rule's `whom`; here "
+                    "backends 2 and 3 on each, of which the picture keeps one arrow per "
+                    "multiplexer. Each backend answers each search with a `PING` that "
+                    "references it. The client keeps the first `PING` to arrive, backend "
+                    "2's via multiplexer 1 here, and ignores the later ones. It now knows "
+                    "backend 2's instance id and a connection that leads to it.",
                     [4, 5, 6, 7, 8, 9],
                     ["B2", "B3"],
                 ),
@@ -280,9 +280,9 @@ Two instances of the type exist; the request is for instance 2.
                 Step(
                     "The client probes for the instance on every connection",
                     "The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, "
-                    "which a backend declines while it drains, or with `probe=PING` a `PING`, "
-                    "which a peer answers as long as it lives, for a request that must land "
-                    "even then. Delivery errors are requested, so a multiplexer without the "
+                    "which reaches it whatever its routing, as every addressed message does, "
+                    "or with `probe=PING` a `PING`, which every client library answers, "
+                    "not only a backend. Delivery errors are requested, so a multiplexer without the "
                     "instance says so. The connection dying under the first stage leads here "
                     "too. A request that simply gets no answer within the timeout does not: "
                     "a silent addressee is one the multiplexer still has, and a probe would "
@@ -349,7 +349,7 @@ backends its rules name. Nothing comes back unless the client sets
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says
-`whom: ALL`, so every backend of that type gets every event.
+`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)).
 """,
     sections=[
         Section(
@@ -384,8 +384,9 @@ live ones.
                 Step(
                     "That multiplexer delivers to every backend of the type",
                     "Multiplexer 1 applies the rule: `whom: ALL`, so every backend of the type "
-                    "connected to it gets a copy. Since every backend is connected to every "
-                    "multiplexer, one connection is enough to reach them all.",
+                    "connected to it gets a copy, a draining one apart, which turned fan-out "
+                    "off ([how a backend leaves](leaving.md)). Since every backend is connected "
+                    "to every multiplexer, one connection is enough to reach them all.",
                     [2, 3],
                     ["M1"],
                 ),
@@ -534,7 +535,10 @@ for silence.
                     "The peer introduces itself",
                     "A `WelcomeMessage` carries the peer's type, which must exist in the "
                     "multiplexer's rules file, and its instance id, a random 64-bit number the "
-                    "peer chose. The multiplexer registers the connection under both.",
+                    "peer chose. The multiplexer registers the connection under both. It may also "
+                    "carry a `Routing`, which rule-routed paths reach the peer; a backend reconnecting "
+                    "during its drain sends one that turns them off, and the multiplexer applies it "
+                    "before the connection can be routed to ([how a backend leaves](leaving.md)).",
                     [1],
                     ["P"],
                 ),
@@ -702,16 +706,21 @@ type under a `whom: ANY` rule.
                 Step(
                     "whom: ALL",
                     "The rule for this message type names peer type A with `whom: ALL`, "
-                    "so every connected backend of type A gets a copy. This is how events "
-                    "are usually routed.",
+                    "so every connected backend of type A gets a copy, every one that takes "
+                    "events that is: a backend draining with the default routing has turned "
+                    "fan-out off and is skipped ([how a backend leaves](leaving.md)). This is "
+                    "how events are usually routed.",
                     [0, 1, 2],
                     ["S"],
                 ),
                 Step(
                     "whom: ANY",
                     "The rule names peer type B with `whom: ANY`. One connected backend of "
-                    "type B gets the message, chosen round robin. This is how requests are "
-                    "usually routed: the backends of a type are interchangeable workers.",
+                    "type B gets the message, chosen round robin among those that take "
+                    "requests; a draining backend has turned that off and is skipped, unless "
+                    "nobody else could take it and it is a last resort ([how a backend "
+                    "leaves](leaving.md)). This is how requests are usually routed: the "
+                    "backends of a type are interchangeable workers.",
                     [3, 4],
                     ["B1"],
                 ),

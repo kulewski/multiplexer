@@ -37,6 +37,27 @@ typedef std::uint32_t PeerType;
 using mx::util::kwargs::Kwargs;
 using mx::util::kwargs::KwargsKeys;
 
+// How long close() waits for the last replies to be written before it
+// closes the sockets; a peer that stopped reading cannot hold it longer.
+static const float CLOSE_FLUSH_SECONDS = 1.0f;
+
+// The routing a draining backend asks for unless told otherwise: nothing
+// new by the rules, only what is addressed to it (Multiplexer.proto's
+// Routing; docs/leaving.md).
+inline Routing direct_only_routing() {
+  Routing routing;
+  routing.set_any(false);
+  routing.set_all(false);
+  return routing;
+}
+
+// Whether a drain with this routing may end as soon as the multiplexers
+// confirmed it: every path by the rules is off and the peer is no last
+// resort, so only addressed messages can still come.
+inline bool nothing_more_arrives(const Routing& routing) {
+  return !routing.any() && !routing.all() && !routing.last_resort();
+}
+
 // See the file comment. Subclass, implement handle_message(), and call
 // serve_forever(). Not thread-safe.
 class BaseMultiplexerServer {
@@ -47,8 +68,10 @@ class BaseMultiplexerServer {
   static const int ALL = 2;
 
  protected:
-  // Connects to every address as a peer of `type`. The second form uses a
-  // Client the caller owns and keeps.
+  // A peer of `type` for the multiplexers at `addresses`: this makes the
+  // instance id, and connect() or serve_forever() connects, so no
+  // multiplexer knows the backend before it can serve. The second form
+  // uses a Client the caller owns, keeps and connects.
   BaseMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type);
 
   BaseMultiplexerServer(multiplexer::Client* conn, PeerType type);
@@ -60,7 +83,16 @@ class BaseMultiplexerServer {
   // Throws Client::OperationTimedOut when the time passes.
   virtual void loop_iter(float timeout = DEFAULT_READ_TIMEOUT);
 
-  // The loop: until `working` is cleared or a drain is over, wait up to
+  // Connects to every address given to the constructor, once;
+  // serve_forever() calls it first, and a second call does nothing. Call
+  // it yourself when something waits for a line you print before it
+  // sends, so that the line means reachable; when you drive loop_iter()
+  // yourself; or in a test that wants the backend connected without a
+  // thread serving it.
+  void connect();
+
+  // The loop: connect() unless already connected, then until `working` is
+  // cleared or a drain is over, wait up to
   // `poll` seconds for a message, handle it if one came, call
   // periodic_task(); then close the connections. `drain_seconds` is how
   // long to keep serving after start_draining(), unless drained() is
@@ -69,13 +101,18 @@ class BaseMultiplexerServer {
   // only this thread may touch it.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
 
-  // Draining: a backend about to exit stops answering the search clients
-  // use to find a backend, so that no retried request is sent to it, while
-  // it keeps serving what the multiplexer still routes to it. Call
+  // Draining: a backend about to exit tells every multiplexer to route it
+  // nothing new by the rules, the drain routing, so that no request and
+  // no search is sent to it, while it serves what still arrives. Call
   // start_draining() from periodic_task() when asked to leave; serve_forever
   // returns once drained().
   void start_draining();
   bool draining() const { return draining_; }
+  // What start_draining() tells the multiplexers; set before it. The
+  // default keeps only addressed messages coming; `all` on keeps events,
+  // `last_resort` keeps a lone backend serving through its drain.
+  void set_drain_routing(const Routing& routing) { drain_routing_ = routing; }
+  const Routing& drain_routing() const { return drain_routing_; }
   // Asks serve_forever() to return, from any thread: it notices within one
   // poll, closes the connections and returns.
   void stop() { working = false; }
@@ -94,9 +131,13 @@ class BaseMultiplexerServer {
   virtual void periodic_task() {}
 
   // Whether the drain is over and serve_forever() may return; checked after
-  // every iteration while draining. Default: `drain_seconds` have passed
-  // since start_draining(). Override to wait for your own condition, for
-  // example `BaseMultiplexerServer::drained() && in_flight_ == 0`.
+  // every iteration while draining, so between two messages. Default:
+  // `drain_seconds` have passed since start_draining(), or, when the
+  // drain routing turns every path off and asks for no last resort, every
+  // connected multiplexer has confirmed it, so nothing more is on its way;
+  // a drain that keeps a path open lasts the whole period, since work
+  // keeps arriving. Override to wait for your own condition, for example
+  // `BaseMultiplexerServer::drained() && in_flight_ == 0`.
   virtual bool drained() const;
 
   // Called when handle_message() threw, after BACKEND_ERROR went to the
@@ -104,9 +145,10 @@ class BaseMultiplexerServer {
   // the exception propagates out of serve_forever().
   virtual bool on_handler_exception(const std::exception&) { return true; }
 
-  // Whether to answer a client's search for a backend; override for your
-  // own condition. False while draining.
-  virtual bool should_respond_to_backend_for_packet_search() const { return !draining_; }
+  // Whether to answer a client's search for a backend; true unless
+  // overridden for a condition of your own. A draining backend needs no
+  // policy here: the multiplexers stop offering it (the drain routing).
+  virtual bool should_respond_to_backend_for_packet_search() const { return true; }
 
  protected:
   template <typename Message>
@@ -169,9 +211,12 @@ class BaseMultiplexerServer {
   bool draining_ = false;
   float drain_seconds_ = 0.0f;
   std::chrono::steady_clock::time_point draining_since_;
+  Routing drain_routing_ = direct_only_routing();
 
  private:
   std::unique_ptr<multiplexer::Client> __conn;
+  const MultiplexerAddresses addresses_;
+  bool connected_ = false;
 
  protected:
   multiplexer::Client* conn;

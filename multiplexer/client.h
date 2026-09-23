@@ -121,6 +121,19 @@ class Client : public ExceptionDefinitions {
   // How host names become addresses; for tests. See BasicClient::Resolver.
   void set_resolver(BasicClient::Resolver resolver) { basic_client_->set_resolver(resolver); }
 
+  // Which of a multiplexer's routing paths reach this peer, and whether
+  // every multiplexer has it in effect; see BasicClient::set_routing. The
+  // control message goes out and the answers arrive as the loop runs,
+  // inside the calls that run it.
+  void set_routing(const Routing& routing) {
+    basic_client_->check_not_orphaned();
+    basic_client_->set_routing(routing);
+  }
+  const Routing& routing() const { return basic_client_->routing(); }
+  bool routing_acknowledged() const { return basic_client_->routing_acknowledged(); }
+  // Messages read off the sockets and not yet handed out by a receive.
+  bool has_incoming_messages() const { return basic_client_->has_incoming_messages(); }
+
   unsigned int inline connections_count() { return basic_client_->connections_count(true); }  // live ones
   std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }           // our `from`
   std::uint32_t inline client_type() const { return basic_client_->client_type(); }           // our peer type

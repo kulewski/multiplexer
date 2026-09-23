@@ -35,7 +35,10 @@ peer {
   does not expect heartbeats from them and does not drop them for
   silence. Default false, which is right for backends, `ThreadedClient`
   and `AsyncClient`, all of which run the loop all the time; a deployment
-  built on those never needs the mark.
+  built on those never needs the mark. A reload that changes the flag
+  applies it to the type's peers already connected: one made active is
+  sent heartbeats and dropped for silence from then on, one made passive
+  is not dropped for silence any more.
 
 ## A message type
 
@@ -83,14 +86,16 @@ names the backends first.
 ## What the reserved ranges hold
 
 Peer types 1 to 99 and message types 1 to 99 belong to the protocol. A peer
-that announces a type in that range is refused; a backend treats a message
-type in that range as internal and never passes it to `handle_message`.
+that announces a type in that range is refused, the two controllers below
+apart; a backend treats a message type in that range as internal and never
+passes it to `handle_message`.
 
 | Peer type | Value | Meaning |
 |---|---|---|
 | `MULTIPLEXER` | 1 | what a multiplexer announces in its welcome |
 | `ALL_TYPES` | 2 | in a rule: every peer type |
 | `RECORDING_CONTROLLER` | 3 | a peer that drives recording; accepted, as passive, only by a multiplexer started with `--recording-dir` or `--allow-tap`; defined in `Recording.proto`, not in the rules file |
+| `RULES_CONTROLLER` | 4 | what `mxcontrol rules` connects as; accepted, as passive, by every multiplexer; defined in `Multiplexer.proto`, not in the rules file |
 | `MAX_MULTIPLEXER_SPECIAL_PEER_TYPE` | 99 | end of the reserved range |
 
 | Message type | Value | Meaning |
@@ -103,10 +108,15 @@ type in that range as internal and never passes it to `handle_message`.
 | `RECORDING_CONTROL` | 6 | a peer asks a multiplexer to start, stop or report its recording, or to tap in |
 | `RECORDING_STATUS` | 7 | the multiplexer's answer |
 | `RECORDING_RECORD` | 8 | one record streamed to a peer that tapped in |
+| `RULES_CONTROL` | 9 | a peer asks a multiplexer to read its rules file again, or which rules it has in use |
+| `RULES_STATUS` | 10 | the multiplexer's answer |
+| `PEER_CONTROL` | 11 | a peer tells a multiplexer which rule-routed paths reach it from now on, what a draining backend uses |
+| `PEER_STATUS` | 12 | the multiplexer's answer, once in effect |
 | `MAX_MULTIPLEXER_META_PACKET` | 99 | end of the reserved range |
 
-The three recording types are defined in `Recording.proto` and handled by
-the multiplexer whatever the rules file says; the shipped rules files name
+The three recording types, the two rules types and the two peer types are
+defined in `Recording.proto` and `Multiplexer.proto` and handled by the
+multiplexer whatever the rules file says; the shipped rules files name
 them so that dumps and logs show names.
 
 The libraries also use two ordinary types by name, so keep them in every rules
@@ -121,10 +131,15 @@ go.
 
 ## Checks
 
-At build time `generate_constants` refuses a file where a name or a number
-repeats. At start the multiplexer refuses a rule whose `peer` names no peer
-type, and stops. A message whose type has no entry is dropped at run time and
-reported as a delivery error with `is_known_type` false.
+At build time `generate_constants`, and `mxcontrol generate_constants` for
+a build outside Bazel, refuses a file where a name or a number repeats. At
+start the multiplexer refuses a rule whose `peer` names no peer type, a
+file that does not parse, one without a peer type, or one that repeats a
+number or a peer name, and stops; a running multiplexer given such a file
+keeps the rules it has and says so ([changing the
+rules](operations.md#changing-the-rules)). A message whose type has no
+entry is dropped at run time and reported as a delivery error with
+`is_known_type` false.
 
 ## Pointing a build at your file
 
@@ -138,8 +153,9 @@ bazel build --@mx//:multiplexer_rules=//your/pkg:deployment.rules //...
 Put it in your `.bazelrc` so nobody forgets, as
 [examples/echo/.bazelrc](../examples/echo/.bazelrc) does. Inside this
 repository the flag is spelled `--//:multiplexer_rules=`. Changing the file
-regenerates the constants on the next build; a running multiplexer keeps the
-rules it started with, so restart it.
+regenerates the constants on the next build; a running multiplexer reads
+the file again on its own and puts the change in use, see [changing the
+rules](operations.md#changing-the-rules).
 
 ## Messages that carry their own rules
 

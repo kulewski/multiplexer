@@ -115,6 +115,26 @@ type {
     name: "RECORDING_RECORD"
     comment: "one Record streamed to a peer that tapped in"
 }
+type {
+    type: 9
+    name: "RULES_CONTROL"
+    comment: "a peer asks a multiplexer to read its rules file again, or which rules it has in use; payload is RulesControl"
+}
+type {
+    type: 10
+    name: "RULES_STATUS"
+    comment: "the multiplexer's answer to RULES_CONTROL; payload is RulesStatus"
+}
+type {
+    type: 11
+    name: "PEER_CONTROL"
+    comment: "a peer tells a multiplexer which routing reaches it from now on; payload is PeerControl"
+}
+type {
+    type: 12
+    name: "PEER_STATUS"
+    comment: "the multiplexer's answer to PEER_CONTROL; payload is PeerStatus"
+}
 
 type {
     type: 99

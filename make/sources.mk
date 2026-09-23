@@ -30,10 +30,12 @@ LIB_SRCS := \
 MXCONTROL_SRCS := \
   mxcontrol/driver.cc \
   mxcontrol/dump_recording.cc \
+  mxcontrol/generate_constants.cc \
   mxcontrol/help.cc \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \
   mxcontrol/recording_control.cc \
+  mxcontrol/rules_control.cc \
   mxcontrol/start_multiplexer_server.cc \
   mxcontrol/stream_logs.cc \
   mxcontrol/task.cc \
@@ -94,6 +96,7 @@ HEADERS := \
   multiplexer/client.h \
   multiplexer/config.h \
   multiplexer/connections_manager.h \
+  multiplexer/constants_writer.h \
   multiplexer/defaults.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
@@ -161,6 +164,7 @@ PY_TEST_FILES := \
   multiplexer/no_connection_test.py \
   multiplexer/pickle_test.py \
   multiplexer/serve_thread_test.py \
+  multiplexer/servers_drain_test.py \
   multiplexer/testing/fakes_test.py \
   multiplexer/testing/lanes_test.py \
   multiplexer/threaded_client_py_test.py \

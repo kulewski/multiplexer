@@ -121,10 +121,51 @@ message MultiplexerMessage {
     optional LoggingMethod.Values logging_method = 23 [default = BOTH];
 }
 
+// Which of a multiplexer's routing paths reach a peer: `any` for rules
+// with whom: ANY, `all` for rules with whom: ALL, both on by default; a
+// message with `to` always arrives. A peer that wants no new work turns
+// them off, which is what a draining backend does. With `last_resort` a
+// path that is off still carries what nobody else of the type could take.
+// The search a client sends for a backend (BACKEND_FOR_PACKET_SEARCH)
+// follows `any`, although it is forwarded to every peer of the type: it
+// exists to find a backend for a request that will then be addressed to
+// it, so a peer taking no new requests is not offered. Carried in the
+// welcome, so a connection registers with it, and changed on a live
+// connection with PEER_CONTROL. docs/leaving.md describes the use.
+message Routing {
+    optional bool any = 1 [default = true];
+    optional bool all = 2 [default = true];
+    optional bool last_resort = 3 [default = false];
+}
+
 // a message to be used in initial handshake
 message WelcomeMessage {
     required uint32 type = 1;
     required uint64 id = 2;
+    optional Routing routing = 3;  // absent: every path, as before the field existed
+}
+
+// The protocol's message types for a peer's routing, in the reserved
+// range below 100, the same in every rules file. PEER_CONTROL is sent to a
+// multiplexer without `to`; it answers PEER_STATUS, `references` set to
+// the request, once the change is in effect: everything routed to the
+// peer before the change arrives before the answer.
+enum PeerMessageType {
+    PEER_CONTROL = 11;
+    PEER_STATUS = 12;
+}
+
+// What a peer tells the multiplexer about itself: the routing that reaches
+// it from now on, replacing what its welcome said.
+message PeerControl {
+    required Routing routing = 1;
+}
+
+// The multiplexer's answer to every PeerControl.
+message PeerStatus {
+    optional uint64 multiplexer_id = 1;
+    optional Routing routing = 2;  // in effect for the peer's connection
+    optional string error = 3;     // why the request was ignored; unset when it was applied
 }
 
 // a message to be used when searching for working backend
@@ -150,6 +191,45 @@ message DeliveryError {
 
     // MultiplexerMessage that caused the error
     optional MultiplexerMessage original_message = 20;
+}
+
+// The protocol's message types for the rules file, in the reserved range
+// below 100, the same in every rules file. RULES_CONTROL is sent to a
+// multiplexer without `to`; it answers RULES_STATUS, `references` set to
+// the request. docs/operations.md describes reloading from the outside.
+enum RulesMessageType {
+  RULES_CONTROL = 9;
+  RULES_STATUS = 10;
+}
+
+// The reserved peer type `mxcontrol rules` connects as, accepted by every
+// multiplexer; no rules file entry needed. Treated as passive.
+enum RulesPeerType {
+  RULES_CONTROLLER = 4;
+}
+
+// What a peer asks about the rules file. RELOAD makes the multiplexer read
+// its rules file now and put it in use if it parses and differs from the
+// rules in use; STATUS only asks. Both are answered with RulesStatus.
+message RulesControl {
+  enum Action {
+    RELOAD = 1;
+    STATUS = 2;
+  }
+  required Action action = 1;
+}
+
+// The multiplexer's answer to every RulesControl: the rules in use.
+message RulesStatus {
+  optional uint64 multiplexer_id = 1;
+  optional string error = 2;          // RELOAD: why the file was not put in use; the rules in use are as they were
+  optional string path = 3;           // the rules file
+  optional string fingerprint = 4;    // of the rules in use, the CRC-32 the generated constants carry
+  optional uint64 loaded_us = 5;      // when they were read, microseconds since the epoch
+  optional uint32 message_types = 6;  // entries in use, the reserved ones included
+  optional uint32 peer_types = 7;
+  optional bool reloaded = 8;         // RELOAD: the file differed from the rules in use and replaced them
+  optional string last_error = 9;     // why the file on disk is not in use, while it is missing or does not parse
 }
 
 // type used for reading configuration file multiplexer.rules

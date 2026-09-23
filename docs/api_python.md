@@ -5,7 +5,12 @@ Three modules matter: `multiplexer.clients` holds `Client` for clients,
 `multiplexer.multiplexer_constants` holds `peers` and `types`, generated
 from the [rules file](rules.md) the build was pointed at. Depend on
 `@mx//multiplexer:clients` or `@mx//multiplexer:servers`, and on
-`@mx//multiplexer:multiplexer_constants`. `multiplexer.threaded_client`,
+`@mx//multiplexer:multiplexer_constants`. Outside Bazel, after `pip
+install mx-multiplexer`, the constants of your rules file come from
+`mxcontrol generate_constants your.rules --python multiplexer_constants.py
+--pyi multiplexer_constants.pyi`, a module to import from wherever it is
+written ([mxcontrol.md](mxcontrol.md#generate_constants)); the package's
+own `multiplexer.multiplexer_constants` holds the example file's. `multiplexer.threaded_client`,
 `multiplexer.aio` and `multiplexer.threaded_server` hold the threaded and
 asyncio clients and the threaded backend, each described below;
 [which class to build on](README.md#backend-or-client-which-class-to-build-on)
@@ -101,6 +106,12 @@ the time and their peer types are ordinary ones.
   `BaseMultiplexerServer`.
 - `receive_message(timeout=-1)`: waits for the next message and returns
   `(message, connection)`; `-1` waits forever. Raises `OperationTimedOut`.
+- `set_routing(routing)` and `routing_acknowledged()`: which of a
+  multiplexer's routing paths reach this peer, a `Routing` from
+  `multiplexer.Multiplexer_pb2` with `any`, `all` and `last_resort`, told
+  to every multiplexer and carried in every welcome from then on, and
+  whether every one has it in effect; what a backend's drain uses, see
+  [How a backend leaves](leaving.md#what-a-draining-backend-still-takes).
 - `instance_id`, `connections_count()`, `shutdown()`. After `shutdown()` the
   object is done.
 
@@ -144,9 +155,10 @@ to another instance of its type; one `timeout` covers the three stages,
 and a request that gets no answer at all within it is `OperationTimedOut`
 without a probe, since a silent peer is one the multiplexer still has.
 The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance,
-which a draining backend declines, so a request does not reach a backend
-on its way out; `probe=types.PING` reaches it even then, for a request
-that must land, such as tearing down a session the backend still holds.
+which reaches it whatever its routing, as every addressed message does,
+so a request addressed to a draining backend lands on it and is served;
+`probe=types.PING` differs in who answers it: every client library, not
+only a backend, for a peer that serves no requests at all.
 The instance id comes from a reply, `reply.from_`, or from the peer
 itself, `instance_id`. [How a query is answered](query.md#an-addressed-query)
 draws the stages.
@@ -198,7 +210,19 @@ class Echo(BaseMultiplexerServer):
 Echo([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_BACKEND).serve_forever()
 ```
 
-The constructor connects to every address. `serve_forever(poll=1.0,
+The constructor makes the instance id; `connect()` connects to every
+address, once, and `serve_forever()` calls it first, so no multiplexer
+knows the backend before it can serve, and a program that only constructs
+and serves never calls it. Call it yourself when something waits for a
+line you print before it sends, a test that reads `ready` from your
+stdout or a notebook that greps your log, so that the line means
+reachable: the echo backend does. Call it before you start
+`serve_forever()` on a thread of your own and send at once, as a test
+does: until that thread has connected, the first request finds no
+backend and fails with `OperationFailed`. Call it too when you drive
+`loop_iter()` yourself instead of `serve_forever()`, and in a test that
+wants a backend connected without a thread serving it. A second call
+does nothing. `serve_forever(poll=1.0,
 drain_seconds=0.0, stall_seconds=None)` runs the loop: each iteration waits
 up to `poll` seconds for a message, answers the protocol's own messages
 itself, calls `handle_message` with every other one, and then calls
@@ -220,8 +244,8 @@ that calls `serve_forever()` becomes its thread, and only that thread may
 touch it from then on. In debug builds the library checks this and fails
 an assertion on a call from another thread. A program that drives
 `loop_iter()` itself from a thread other than the one that built the
-backend calls `backend.conn.bind_to_current_thread()` first; the method is
-also on `Client`. Destruction is exempt: a client still alive at interpreter
+backend calls `backend.conn.bind_to_current_thread()` and then
+`backend.connect()` first; the former is also on `Client`. Destruction is exempt: a client still alive at interpreter
 exit is destroyed on the main thread whichever thread drove it, and that
 is fine as long as the driving thread is done with it.
 
@@ -252,19 +276,28 @@ to the requester unless a reply already went out, so the requester fails at
 once rather than timing out, and then `on_handler_exception(exc)` is
 called. It returns `True` by default and the backend keeps serving; return
 `False` and the original exception propagates out of `serve_forever()`, for
-backends that would rather be restarted than continue. `close()` drops the
+backends that would rather be restarted than continue. `close()` writes
+what is still queued, the last replies, for up to a second, then drops the
 connections; `serve_forever()` calls it on the way out.
 
 **Leaving gracefully.** From `periodic_task()`, call `start_draining()`
-when asked to leave: the backend stops answering the search clients use to
-find a backend, so no retried request is sent to it, and keeps serving the
-requests the multiplexer still routes to it. `serve_forever()` returns once
-`drained()`, by default `drain_seconds` after the drain started; override
-`drained()` to wait for a condition of your own, keeping the deadline with
-`super().drained() and ...` or not. Overriding
-`should_respond_to_backend_for_packet_search()` puts any other condition
-behind the search. Together with clients that retry through the search,
-this makes a rolling restart of backends invisible;
+when asked to leave: the backend tells every multiplexer to route it
+nothing new by the rules, its `drain_routing`, so no request and no
+search is sent to it, and serves what was already on its way.
+`serve_forever()` returns once `drained()`: by default once every
+multiplexer confirmed, so nothing more is coming, or `drain_seconds`
+after the drain started at the latest; override `drained()` to wait for
+a condition of your own, keeping the deadline with `super().drained()
+and ...` or not. `drain_routing`, a constructor argument, is what the
+drain asks for: `Routing(any=False)` keeps events coming,
+`Routing(any=False, all=False, last_resort=True)` keeps a lone backend
+serving through its drain, and either makes the drain last its
+`drain_seconds`. [How a backend leaves](leaving.md) draws the phases and
+what each costs a caller. Overriding
+`should_respond_to_backend_for_packet_search()` puts a condition of your
+own behind the search; a drain needs none. Together with clients that
+retry through the search, this makes a rolling restart of backends
+invisible;
 [backend_drains](../tests/scenarios/backend_drains/README.md) and
 [backend_drains_until_done](../tests/scenarios/backend_drains_until_done/README.md)
 show both forms, and [examples/echo/backend.py](../examples/echo/backend.py)
@@ -321,15 +354,32 @@ interface differs in one place: the handler gets a `Request` and answers
 through it, rather than through `self`.
 
 - `BaseThreadedMultiplexerServer(addresses, type=None, workers=1,
-  queue_size=1024, decline_searches_when_full=False, timeout=10)`
-  connects and starts the workers; `type` may instead be the class
-  attribute `multiplexer_client_type`. The io thread heartbeats,
+  queue_size=1024, decline_searches_when_full=False, timeout=10,
+  drain_routing=None)`
+  only makes the instance id; `type` may instead be the class attribute
+  `multiplexer_client_type`. `connect()` starts the workers and connects,
+  once, and `serve_forever()` calls it first, so nothing reaches
+  `handle_message()` before your `__init__` has finished, and no
+  multiplexer knows the backend until it can serve; `instance_id` is
+  valid from construction. When to call `connect()` yourself is as for
+  `BaseMultiplexerServer` above: something waits for a line you print
+  before it sends, a test wants the backend connected without serving
+  it, or you start `serve_forever()` on a thread of your own and send at
+  once. The io thread heartbeats,
   reconnects, answers pings and the search clients use to find a
   backend, and queues every other message for the workers. `queue_size`
   bounds the requests waiting for a worker, the same 1024 the library's
   incoming queue and the multiplexer's per-connection queue hold; beyond
   it a request is dropped with a warning, as a full queue on the
   multiplexer drops, and the requester's retry goes through the search.
+  A request that arrives while the server is leaving, `close()` under
+  way after `serve_forever()` returned, routed before the multiplexer
+  applied the drain routing, is refused with `DELIVERY_ERROR`, the
+  multiplexer's own answer for a peer that is gone, so the requester's
+  retry starts at once rather than after its timeout. A message that
+  answers another, one with `references` set, is dropped instead, since
+  nobody retries a reply and refusing one could start a loop
+  ([how a backend leaves](leaving.md#what-stays)).
 - `handle_message(request)` runs on a worker with every message that is
   not the protocol's own. `request.mxmsg` is the message and
   `request.connection` the connection it came on. `request.reply(message,
@@ -349,7 +399,8 @@ through it, rather than through `self`.
   request dropped without a reply or `no_response()` is logged when it is
   collected. `self.send_message(message, **kwargs)` sends a message that is
   not a reply, with no defaults; `self.client` is the `ThreadedClient`.
-- Searches are answered while the backend serves, as today: a busy
+- Searches are answered while the backend serves, from `serve_forever()`
+  on: a busy
   `BaseMultiplexerServer` answers a search when it gets to it, and this
   class answers at once from the io thread. `decline_searches_when_full=True`
   leaves a search unanswered while every worker is busy and requests wait,
@@ -360,16 +411,17 @@ through it, rather than through `self`.
   drain is over, calling `periodic_task()` every `poll` seconds on its own
   thread; then it takes no new message, lets the workers finish the
   queue, closes the connections and returns. `stop()`, `start_draining()`,
-  `draining`, `drained()` and `on_handler_exception(exc)` are
-  `BaseMultiplexerServer`'s, with the same meanings; a handler that raises
+  `draining`, `drained()`, `drain_routing` and `on_handler_exception(exc)`
+  are `BaseMultiplexerServer`'s, with the same meanings, `drained()`
+  also waiting for the queue to be empty; a handler that raises
   gets the requester `BACKEND_ERROR` and the exception goes to
   `on_handler_exception()` on the worker thread, and `False` from there
   makes `serve_forever()` return and re-raise. `close()` joins the
   workers, so from a handler it raises `RuntimeError` rather than join
   itself; a handler that wants the server gone calls `stop()`. `pending`
   is the number of requests waiting or being handled, `dropped` the
-  number a full queue refused; `instance_id` what a client addresses
-  with `to`.
+  number a full queue dropped or leaving refused; `instance_id` what a
+  client addresses with `to`.
 - A handler may call the blocking `query()` and a flushing `send_message()`
   on `self.client`, since it is not on the io thread, which is the point.
   `BackendThread` from `multiplexer.testing` serves this class too.
@@ -416,6 +468,9 @@ client.shutdown()
   raises `OperationTimedOut` or `NotConnected`; the flushing form must
   not be called from a callback. The same call and the same result as on
   `Client`. `lane(pinned=False, connection=None)` makes a lane.
+- `flush_all(timeout=10)` waits until every connection has written what is
+  queued on it, or `timeout` seconds, and returns whether it all went out:
+  what the backend classes do in `close()`. Not from a callback.
 - `query_pickle(data, type, timeout, callback=None, **query_kwargs)` and
   `send_pickle(data, ...)`: the pickle convention, as on `Client`; with a
   callback, it gets the unpickled reply or the exception.
@@ -436,7 +491,7 @@ client.shutdown()
 - Callbacks, `on_message` and `query`'s, hold the GIL on the io thread and
   must return quickly; they may call `query()` with a callback and
   `send_message()` without `flush`, but not the blocking `query()`, a
-  flushing `send_message()` or `shutdown()`.
+  flushing `send_message()`, `flush_all()` or `shutdown()`.
 - `shutdown()` fails every query in flight, closes the connections and
   stops the thread. The client is not fork-safe: create it after forking.
 
@@ -566,13 +621,17 @@ class SearchTest(unittest.TestCase):
             self.assertEqual(b"pears", index.wait_for(types.SEARCH_REQUEST)[0].message)
 ```
 
-- `Cluster(count, rules, record=False, record_payload_bytes=0)` starts
-  `count` multiplexers on entering and stops every peer and multiplexer on
-  leaving. `rules` is the path of the rules file, the one your constants
-  were generated from, which the test names: under Bazel
-  `runfile("your/pkg/deployment.rules")` with the file in the test's
-  `data`. A scenario under `mx_integration_test` may leave it out, since
-  the rule's `rules` attribute names it.
+- `Cluster(count, rules, record=False, record_payload_bytes=0,
+  rules_check_interval=None)` starts `count` multiplexers on entering and
+  stops every peer and multiplexer on leaving. `rules` is the path of the
+  rules file, the one your constants were generated from, which the test
+  names: under Bazel `runfile("your/pkg/deployment.rules")` with the file
+  in the test's `data`. A scenario under `mx_integration_test` may leave
+  it out, since the rule's `rules` attribute names it. A test that edits
+  a copy of the file under the running multiplexers gives
+  `rules_check_interval`, the seconds between their reads of it (their
+  default when `None`, 0 never), and `Mx.reload_rules()` sends one
+  `SIGHUP` instead.
   `endpoints` is the list of `(host, port)` the clients take;
   `wait_for_peer(type_or_name, count=1, timeout=15)` blocks until every
   multiplexer lists that many peers of the type in its peers file, and
@@ -595,11 +654,11 @@ class SearchTest(unittest.TestCase):
   pairs each message with it, so a test of a lane asserts
   `len({peer.via(m) for m in chunks}) == 1` without reading a recording.
   `instance_id` is what a client addresses with `to=`;
-  `declining_searches = True` makes the fake decline backend searches as
-  a draining backend does, while it keeps serving. A type it has no
+  `declining_searches = True` makes the fake decline backend searches, as
+  a saturated backend told to does, while it keeps serving. A type it has no
   script for is received and dropped. A handler that raises makes the
   requester get `BACKEND_ERROR` and makes `stop()` raise, so the test fails.
-- `BackendThread(factory, poll=0.05, name=None)` serves a
+- `BackendThread(factory, poll=0.05, name=None, drain_seconds=0.0)` serves a
   `BaseMultiplexerServer` of yours on its own thread: `factory()` builds it
   there, `start()` returns once it is connected, `stop()` asks it to leave
   and re-raises what serving raised; `backend` is the instance.

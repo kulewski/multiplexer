@@ -23,6 +23,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -107,6 +108,13 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
     BasicClientTraits::Endpoint expected_endpoint;
     std::vector<BasicClientTraits::Endpoint> candidates;
     std::size_t next_candidate = 0;
+    // The client's routing (see BasicClient::set_routing) as versions: the
+    // one this connection's welcome carried, and the last one the
+    // multiplexer confirmed, by its own welcome or by the PEER_STATUS
+    // answering the last PEER_CONTROL sent here, whose id this keeps.
+    unsigned int routing_in_welcome = 0;
+    unsigned int routing_acknowledged = 0;
+    std::uint64_t routing_request_id = 0;
     friend class BasicClient;
   };
 
@@ -229,9 +237,10 @@ class Lane {
 typedef std::shared_ptr<Lane> LanePtr;
 
 // How an addressed query locates its addressee when the request did not
-// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which a
-// backend declines while it drains, or a PING, which a peer answers as
-// long as it lives. docs/query.md, "An addressed query".
+// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
+// reaches it whatever its Routing, as every addressed message does, or a
+// PING, which every client library answers, not only a backend.
+// docs/query.md, "An addressed query".
 enum Probe { PROBE_SEARCH, PROBE_PING };
 
 // The three ways a client call fails; Client inherits them and the Python
@@ -291,10 +300,30 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // ConnectionsManager interface: what a Connection needs from its manager.
   std::shared_ptr<const RawMessage> get_welcome_message() {
     if (!welcome_message_) {
-      welcome_message_ = create_welcome_message(client_type_);
+      welcome_message_ = create_welcome_message(client_type_, routing_);
     }
     return welcome_message_;
   }
+
+  // Which of a multiplexer's routing paths reach this peer
+  // (Multiplexer.proto's Routing; everything by default): told to every
+  // registered connection with PEER_CONTROL now, carried in the welcome
+  // of every connection made or remade from now on, and sent after the
+  // handshake on a connection whose welcome was already out. A backend
+  // draining sets `any` and `all` off. On the owner thread.
+  void set_routing(const Routing& routing);
+  const Routing& routing() const { return routing_; }
+  // Whether every connection has the current routing in effect: the
+  // multiplexer confirmed it, by its welcome for a routing the
+  // connection's welcome carried or by PEER_STATUS for a change; a
+  // handshake still in flight counts as not confirmed. Then nothing
+  // routed to this peer by a path turned off since is on its way from
+  // those multiplexers, except as a last resort; what this client has
+  // read but not yet handed out (has_incoming_messages()) still is, so
+  // that counts as not confirmed too.
+  bool routing_acknowledged() const;
+  // Whether every living connection has written everything queued on it.
+  bool all_written() const;
 
   // Called by a Connection with every parsed message: drops ones without an
   // id or seen before, then queues or hands to the sink.
@@ -332,6 +361,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   ConnectionWrapper connect(const Endpoint& peer_endpoint, float timeout);       // async_connect + wait
   ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout);
   void connection_destroyed(Connection* conn);  // a connection ended; schedule the reconnect
+  // PEER_CONTROL with the current routing on `conn`.
+  void _send_routing(Connection::pointer conn);
+  // A PEER_STATUS from a multiplexer: the routing it now applies to us.
+  void _on_peer_status(Connection::pointer conn, const MultiplexerMessage& mxmsg);
   void reconnect_after_timeout(TimerPointer, Target target, const asio::error_code&);
 
   // How a host name becomes addresses: the system resolver unless a test
@@ -380,6 +413,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   }
   void after_connection_registration(Connection::pointer conn, const WelcomeMessage&) {
     MX_DCHECK_RUN_ON(&owner_thread());
+    // The multiplexer's welcome confirms the routing ours carried; a
+    // change made while the handshake was under way goes out now.
+    auto& data = conn->managers_private_data();
+    data.routing_acknowledged = data.routing_in_welcome;
+    if (data.routing_in_welcome != routing_version_) {
+      _send_routing(conn);
+    }
     if (connection_observer_) {
       connection_observer_(_wrap(conn), true);
     }
@@ -609,10 +649,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // received messages
   IncomingSink incoming_sink_;
   ConnectionObserver connection_observer_;
+  Routing routing_;
+  unsigned int routing_version_ = 0;  // bumped by set_routing; 0 is the default routing
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
 
   ConnectionByTarget connection_by_target_;
+  std::set<TimerPointer> reconnect_timers_;  // armed by lost connections; shutdown() cancels them
   const unsigned int fork_generation_at_creation_;
   asio::ip::tcp::resolver resolver_;
   Resolver resolver_hook_;

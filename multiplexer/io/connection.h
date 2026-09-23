@@ -175,11 +175,31 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // no loop between calls, so it is neither expected to send heartbeats nor
   // sent more than one heartbeat per message it delivers (see
   // _send_heartbit_now); cancelling the require timer is what exempts it.
+  // The same flag again changes nothing: a rules reload sets it on every
+  // connected peer, and re-arming the require timer each time would restart
+  // the drop of a peer gone silent, which reloads less than its 30 + 60 s
+  // apart would keep connected for good. start_rest() arms the timer.
   inline void set_is_passive(bool is_passive) {
     MX_DCHECK_RUN_ON(&io_thread_);
+    if (is_passive == is_passive_) {
+      return;
+    }
     is_passive_ = is_passive;
     _require_heartbit_later();
   }
+
+  // Which routing paths reach this peer (Multiplexer.proto's Routing): set
+  // by the multiplexer from the peer's welcome and its PEER_CONTROL, and
+  // consulted when it routes by a rule; a message with `to` always
+  // arrives. A client's connections to multiplexers keep the defaults.
+  inline const Routing& routing() const { return routing_; }
+  inline void set_routing(const Routing& routing) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    routing_ = routing;
+  }
+  inline bool accepts_any() const { return routing_.any(); }
+  inline bool accepts_all() const { return routing_.all(); }
+  inline bool last_resort() const { return routing_.last_resort(); }
 
   // Stops all I/O, tells the manager, and drops or hands back the outgoing
   // queue. Safe to call at any point of the lifecycle, including on a socket
@@ -667,6 +687,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   std::uint32_t peer_type_;
   std::uint64_t peer_id_;
   bool is_passive_;
+  Routing routing_;
 
   bool is_living_;
   bool shuts_down_;

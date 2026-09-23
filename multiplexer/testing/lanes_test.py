@@ -142,9 +142,10 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 client.shutdown()
                 peer.stop()
 
-    def test_a_draining_addressee_answers_a_ping_probe_only(self):
-        """A draining backend declines the default probe, so the query times
-        out; probe=PING reaches it, for a request that must land even then."""
+    def test_a_declining_addressee_answers_a_ping_probe_only(self):
+        """A backend that declines the default probe, the fake here as a
+        saturated one would, makes the query time out; probe=PING reaches
+        it, for a request that must land even then."""
         with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)

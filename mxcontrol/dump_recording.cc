@@ -52,6 +52,9 @@ std::string peer_name(const Rules* rules, std::uint32_t peer_type) {
   if (peer_type == multiplexer::RECORDING_CONTROLLER) {
     return "RECORDING_CONTROLLER";
   }
+  if (peer_type == multiplexer::RULES_CONTROLLER) {
+    return "RULES_CONTROLLER";
+  }
   if (rules) {
     Rules::PeerDescriptionById::const_iterator entry = rules->peer_by_type().find(peer_type);
     if (entry != rules->peer_by_type().end()) {
@@ -161,7 +164,16 @@ int DumpRecording::run() {
       } else if (record.has_peer()) {
         const multiplexer::PeerEvent& peer = record.peer();
         std::cout << "peer " << multiplexer::PeerEvent::Kind_Name(peer.kind()) << " id=" << peer.peer_id()
-                  << " type=" << peer_name(rules.get(), peer.peer_type()) << "\n";
+                  << " type=" << peer_name(rules.get(), peer.peer_type());
+        if (peer.kind() == multiplexer::PeerEvent::ROUTING) {
+          std::cout << " any=" << (peer.any() ? "yes" : "no") << " all=" << (peer.all() ? "yes" : "no")
+                    << " last_resort=" << (peer.last_resort() ? "yes" : "no");
+        }
+        std::cout << "\n";
+      } else if (record.has_rules()) {
+        const multiplexer::RulesEvent& rules_event = record.rules();
+        std::cout << "rules " << rules_event.fingerprint().substr(0, 12) << " from " << rules_event.path() << " ("
+                  << rules_event.message_types() << " message types, " << rules_event.peer_types() << " peer types)\n";
       } else if (record.has_routed()) {
         const multiplexer::RoutedMessage& routed = record.routed();
         std::cout << "routed " << multiplexer::RoutedMessage::Disposition_Name(routed.disposition())

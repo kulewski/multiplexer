@@ -32,9 +32,10 @@ Matcher = Callable[[MultiplexerMessage], bool]
 
 
 class Served(Protocol):
-    """What BackendThread drives: serve_forever(poll=...) until stop()."""
+    """What BackendThread drives: connect(), serve_forever(poll=..., drain_seconds=...) until stop()."""
 
-    def serve_forever(self, *, poll: float) -> None: ...
+    def connect(self) -> None: ...
+    def serve_forever(self, *, poll: float, drain_seconds: float) -> None: ...
     def stop(self) -> None: ...
 
 
@@ -45,16 +46,21 @@ class BackendThread(Generic[ServedT]):
     """A backend served on its own thread.
 
     `factory` builds the backend, a BaseMultiplexerServer, on that thread,
-    where it is then served with serve_forever(poll); start() returns once
-    it is built and connected, raising what the factory raised. stop() asks
-    it to leave, joins the thread and re-raises what serving raised, so a
-    failing handler fails the test. `backend` is the instance, `error` the
-    exception if there was one.
+    where it is connected and then served with serve_forever(poll,
+    drain_seconds); start() returns once it is built and connected,
+    raising what the factory raised. stop() asks it to leave, joins the
+    thread and re-raises what serving raised, so a failing handler fails
+    the test. `backend` is the instance, `error` the exception if there
+    was one. `drain_seconds` is the cap of a drain the test starts with
+    the backend's start_draining(); 0, the default, ends one at once.
     """
 
-    def __init__(self, factory: Callable[[], ServedT], poll: float = 0.05, name: str | None = None):
+    def __init__(
+        self, factory: Callable[[], ServedT], poll: float = 0.05, name: str | None = None, drain_seconds: float = 0.0
+    ):
         self.factory = factory
         self.poll = poll
+        self.drain_seconds = drain_seconds
         self.backend: ServedT | None = None
         self.error: BaseException | None = None
         self._built = threading.Event()
@@ -71,16 +77,18 @@ class BackendThread(Generic[ServedT]):
         return self
 
     def _run(self) -> None:
-        """The thread: build, announce, serve, keep what went wrong."""
+        """The thread: build, connect, announce, serve, keep what went wrong."""
         try:
-            self.backend = self.factory()
+            backend = self.factory()
+            backend.connect()  # what serve_forever() would do first; a test may send as soon as start() returns
         except BaseException as error:  # reported by start()
             self.error = error
             self._built.set()
             return
+        self.backend = backend
         self._built.set()
         try:
-            self.backend.serve_forever(poll=self.poll)
+            self.backend.serve_forever(poll=self.poll, drain_seconds=self.drain_seconds)
         except BaseException as error:  # reported by stop()
             self.error = error
 
@@ -141,7 +149,7 @@ class _ScriptedBackend(BaseMultiplexerServer):
         return True
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
-        """Decline while the peer plays a draining backend."""
+        """Decline while the peer plays a backend that declines searches."""
         return not self.peer.declining_searches and super().should_respond_to_backend_for_packet_search()
 
 
@@ -177,8 +185,8 @@ class FakePeer:
         self.errors: list[Exception] = []
         self._handlers: dict[int, tuple[Handler, int | None]] = {}
         self._via: dict[int, Mx] = {}  # id(mxmsg) -> the Mx it came through
-        # True: decline every search for a backend, as a draining backend
-        # does, while still serving what arrives.
+        # True: decline every search for a backend, as a backend that
+        # declines when saturated does, while still serving what arrives.
         self.declining_searches = False
         self._cond = threading.Condition()
         self._thread = BackendThread(self._build, name=self.name)

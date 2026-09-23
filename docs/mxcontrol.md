@@ -29,14 +29,15 @@ timestamp, pid, context, workflow id, text, and the source location.
 Runs one multiplexer.
 
 ```
-mxcontrol run_multiplexer [--rules FILE] [--address HOST:PORT] [--port-file PATH]
-                          [--peers-file PATH] [--record PATH] [--record-payload-bytes N]
-                          [--recording-dir DIR] [--allow-tap]
+mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address HOST:PORT]
+                          [--port-file PATH] [--peers-file PATH] [--record PATH]
+                          [--record-payload-bytes N] [--recording-dir DIR] [--allow-tap]
 ```
 
 | Option | Default | Effect |
 |---|---|---|
-| `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md) to read once at start |
+| `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md), read at start and again whenever it changes |
+| `--rules-check-interval S` | 2 | seconds between reads of the rules file; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
 | `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on; `HOST` alone keeps port 1980 |
 | `--port-file PATH` | none | after binding, write `host:port` to this file, atomically |
 | `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, rewritten atomically on every change |
@@ -51,13 +52,40 @@ learn where the multiplexer listens without guessing, which is how the
 integration tests start theirs.
 
 The multiplexer runs until it gets `SIGINT` or `SIGTERM`, then closes the
-listening socket and every connection and exits with 0. An exception thrown
-while handling one connection is logged and the process keeps serving.
+listening socket and every connection and exits with 0. `SIGHUP` makes it
+read the rules file again now, and it no longer exits on one. An exception
+thrown while handling one connection is logged and the process keeps
+serving.
 
 Each peer that connects is logged at `INFO` with its instance id and peer
 type, and again when it leaves. A message nobody could receive is
 logged at `ERROR`, or `WARNING` if the rule says so, and a full queue is
 logged at `WARNING` for every message dropped.
+
+## generate_constants
+
+Writes the peer and message types of a rules file as constants, for a
+program built outside Bazel: the Python module (classes `peers` and
+`types`), its stub for type checkers, and the C++ header (namespaces
+`multiplexer::peers` and `multiplexer::types`), whichever are asked for.
+The files are the ones a Bazel build generates from the same rules file,
+byte for byte apart from the header's include guard.
+
+```
+mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE]
+```
+
+| Option | Effect |
+|---|---|
+| `RULES` | the [rules file](rules.md) |
+| `--python FILE` | write the Python module, `multiplexer_constants.py` by convention, importable as `multiplexer_constants` from wherever it is put |
+| `--pyi FILE` | write the module's type stub, next to the module |
+| `--cxx FILE` | write the C++ header, as `multiplexer/multiplexer.constants.h` on the include path before the installed package's copy |
+
+A rules file where a name or a number repeats is refused, as at build time.
+A program installed from a release, with `pip install mx-multiplexer` or
+the Debian package, runs this once per rules file and again when the file
+changes; a Bazel build does it on its own.
 
 ## dump_recording
 
@@ -104,8 +132,8 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 One line per multiplexer comes back, `multiplexer <id>: recording <path>
 (<records> records, <bytes> bytes, label <label>)`, or `not recording`,
 with the last session and why it ended, or `error: <why>`; `status` adds
-the taps. The exit code is 0 when every multiplexer answered without an
-error. `tap` writes the records as a stream in the recording's own format,
+the taps. The exit code is 0 when every `-M` reached a multiplexer and
+every multiplexer answered without an error. `tap` writes the records as a stream in the recording's own format,
 readable by `dump_recording`, and its status lines to stderr; SIGINT
 untaps and exits.
 
@@ -114,6 +142,38 @@ mxcontrol recording start -M mx-0.mx.svc:1980 -M mx-1.mx.svc:1980 --label checko
 mxcontrol recording status -M mx.svc:1980
 mxcontrol recording tap -M mx.svc:1980 --payload-bytes 200 --out session.rec
 mxcontrol recording stop -M mx.svc:1980
+```
+
+## rules
+
+Makes running multiplexers read their rules file again, or asks which
+rules each has in use, over the protocol ([changing the
+rules](operations.md#changing-the-rules)).
+
+```
+mxcontrol rules reload|status -M HOST:PORT [-M ...] [--timeout S]
+```
+
+| Option | Effect |
+|---|---|
+| `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach; repeatable; a host name resolves to every address it has, one connection each |
+| `--timeout S` | seconds to wait for connections and answers; default 5 |
+
+It connects as the reserved `RULES_CONTROLLER` type, which every
+multiplexer accepts. One line per multiplexer comes back: `multiplexer
+<id>: rules <fingerprint> (<n> message types, <m> peer types) from <path>,
+loaded <time>`, prefixed for `reload` with `reloaded; ` when the file
+differed and is in use now or `unchanged; ` when it is what was in use
+already, or `error: <why>; keeps rules ...` when the file could not be put
+in use. `status` adds `; the file on disk is not in use: <why>` while that
+is so. The fingerprint is the CRC-32 the generated constants carry as
+`RULES_FINGERPRINT`, so the lines show whether every replica runs the file
+the peers were built from. The exit code is 0 when every `-M` reached a
+multiplexer and every multiplexer answered without an error.
+
+```
+mxcontrol rules status -M mx-0.mx.svc:1980 -M mx-1.mx.svc:1980
+mxcontrol rules reload -M mx.svc:1980
 ```
 
 ## streamlogs

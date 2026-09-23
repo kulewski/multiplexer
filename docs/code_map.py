@@ -107,13 +107,18 @@ INDEX = [
     (
         "Draining a backend before it exits",
         "multiplexer/backend/base_multiplexer_server.cc",
-        "`serve_forever`, `periodic_task`, `start_draining`, `drained`; the same names in `multiplexer/servers.py`",
+        "`serve_forever`, `periodic_task`, `start_draining`, `drained`, the drain routing; the same names in `multiplexer/servers.py`",
+    ),
+    (
+        "Which rule-routed paths reach a peer, told in its welcome and by PEER_CONTROL",
+        "multiplexer/basic_client.cc",
+        "`BasicClient::set_routing`, `routing_acknowledged`; `Server::send_to_one`, `send_to_all`, `_handle_peer_control` apply it",
     ),
     ("Reading the rules file", "multiplexer/config.h", "`Config::read_configuration`"),
     (
         "Generating the constants from the rules file",
-        "multiplexer/generate_constants.cc",
-        "`write_cxx`, `write_python`",
+        "multiplexer/constants_writer.h",
+        "`write_cxx`, `write_python`, `write_python_stub`; run by `multiplexer/generate_constants.cc` at build time and by `mxcontrol generate_constants`",
     ),
     ("Every timeout and limit", "multiplexer/defaults.h", ""),
     ("The Python binding", "multiplexer/_native.cc", "`PYBIND11_MODULE`"),
@@ -136,6 +141,11 @@ INDEX = [
         "Recording sessions and taps asked for over the protocol",
         "multiplexer/server.cc",
         "`Server::_handle_recording_control`; `mxcontrol/recording_control.cc` asks",
+    ),
+    (
+        "The rules file put in use again without a restart: a check timer, SIGHUP, a peer's request",
+        "multiplexer/server.cc",
+        "`Server::load_rules`; `mxcontrol/start_multiplexer_server.cc` for the signal, `mxcontrol/rules_control.cc` asks",
     ),
     (
         "Thread-safety annotations and the wrong-thread check",
@@ -174,9 +184,9 @@ def header_comment(path: str) -> str:
     name = os.path.basename(path)
     if ext in (".py", ".bzl"):
         m = re.match(r'\s*(?:#![^\n]*\n)?\s*(?:#[^\n]*\n\s*)*"""(.*?)"""', text, re.S)
-        if not m:
-            return ""
-        return first_paragraph(m.group(1).strip().splitlines())
+        if m:
+            return first_paragraph(m.group(1).strip().splitlines())
+        # No docstring: the leading # lines, as a generated file has.
     if ext in (".h", ".cc", ".proto"):
         lines = []
         for line in text.splitlines():

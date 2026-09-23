@@ -55,10 +55,21 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
-        "//lib:fingerprint",
         "//multiplexer:recorder",
         "//multiplexer:server",
         "@asio",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "generate_constants",
+    srcs = ["generate_constants.cc"],
+    deps = [
+        ":task",
+        ":tasks_holder",
+        "//multiplexer:config",
+        "//multiplexer:constants_writer",
     ],
     alwayslink = 1,
 )
@@ -87,6 +98,18 @@ cc_library(
         "//multiplexer:multiplexer_cc_proto",
         "//multiplexer:recording_cc_proto",
         "@asio",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "rules_control",
+    srcs = ["rules_control.cc"],
+    deps = [
+        ":task",
+        ":tasks_holder",
+        "//multiplexer:client",
+        "//multiplexer:multiplexer_cc_proto",
     ],
     alwayslink = 1,
 )
@@ -123,14 +146,30 @@ maybe_strip_cc_binary(
     deps = [
         ":driver",
         ":dump_recording",
+        ":generate_constants",
         ":help",
         ":receive_logs",
         ":recording_control",
+        ":rules_control",
         ":start_multiplexer_server",
         ":stream_logs",
         "//lib:core_dump",
         "//lib:program",
     ],
+)
+
+py_test(
+    name = "generate_constants_test",
+    size = "small",
+    srcs = ["generate_constants_test.py"],
+    data = [
+        ":mxcontrol",
+        "//:multiplexer.rules",
+        "//multiplexer:multiplexer.constants.h",
+        "//multiplexer:multiplexer_constants.py",
+        "//multiplexer:multiplexer_constants.pyi",
+    ],
+    deps = ["//multiplexer/testing"],
 )
 
 # The same binary linked statically: one file that runs on any Linux and
@@ -153,9 +192,11 @@ cc_binary(
     deps = [
         ":driver",
         ":dump_recording",
+        ":generate_constants",
         ":help",
         ":receive_logs",
         ":recording_control",
+        ":rules_control",
         ":start_multiplexer_server",
         ":stream_logs",
         "//lib:core_dump",
