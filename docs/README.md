@@ -207,9 +207,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Using the Python library](api_python.md) and
   [using the C++ library](api_cpp.md): `SyncClient`, `ThreadedClient`,
   `AsyncClient` for asyncio, and `BaseMultiplexerServer`, every call and
-  every exception; the Python page also covers
-  [testing](api_python.md#testing) with `multiplexer.testing` and reading a
-  recording.
+  every exception, threads, and
+  [forking with clients alive](api_python.md#threads-exit-and-fork); the
+  Python page also covers [testing](api_python.md#testing) with
+  `multiplexer.testing` and reading a recording.
 - [mxcontrol](mxcontrol.md): running a multiplexer, the log tools, dumping
   and driving a recording.
 - [The wire format](wire_format.md): frames, the envelope, the handshake and

@@ -21,10 +21,15 @@
 // constructing thread to a working one. Note that a negative check such as
 // DbgAssert(!checker.is_current()) also binds an unbound checker, so bind
 // explicitly before any such check can run.
+//
+// The owner is an atomic, not a field behind a lock: a check is one load
+// and a compare, on the io thread for every MX_DCHECK_RUN_ON of a debug
+// build, and a forked child, whose other threads are gone, never finds a
+// checker's lock held by one of them (lib/fork.h).
 #ifndef MX_LIB_THREAD_CHECKER_H_
 #define MX_LIB_THREAD_CHECKER_H_
 
-#include <mutex>
+#include <atomic>
 #include <thread>
 
 #include "lib/assertion.h"
@@ -39,31 +44,26 @@ class MX_CAPABILITY("thread") ThreadChecker {
   explicit ThreadChecker(Binding binding = BIND_NOW)
       : owner_(binding == BIND_NOW ? std::this_thread::get_id() : std::thread::id()) {}
 
-  // True on the owning thread. An unbound checker binds to the caller.
+  // True on the owning thread. An unbound checker binds to the caller; of
+  // two threads binding it at once, one wins and the other is not it.
   bool is_current() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (owner_ == std::thread::id()) {
-      owner_ = std::this_thread::get_id();
+    const std::thread::id self = std::this_thread::get_id();
+    std::thread::id owner = owner_.load(std::memory_order_acquire);
+    if (owner == std::thread::id() && owner_.compare_exchange_strong(owner, self, std::memory_order_acq_rel)) {
+      return true;
     }
-    return owner_ == std::this_thread::get_id();
+    return owner == self;
   }
 
   // Forget the owner; the next is_current() binds to its caller.
-  void detach() {
-    std::lock_guard<std::mutex> guard(mutex_);
-    owner_ = std::thread::id();
-  }
+  void detach() { owner_.store(std::thread::id(), std::memory_order_release); }
 
   // Make the calling thread the owner, whatever the state. For an object
   // that starts its own thread and hands itself to it.
-  void bind_to_current() {
-    std::lock_guard<std::mutex> guard(mutex_);
-    owner_ = std::this_thread::get_id();
-  }
+  void bind_to_current() { owner_.store(std::this_thread::get_id(), std::memory_order_release); }
 
  private:
-  mutable std::mutex mutex_;
-  mutable std::thread::id owner_;
+  mutable std::atomic<std::thread::id> owner_;
 };
 
 // Tells the static analysis that the checker's capability is held for the

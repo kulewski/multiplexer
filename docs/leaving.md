@@ -109,9 +109,9 @@ rolling restart of two workers.
 ## `stop()` without a drain
 
 A backend told to stop, or destroyed, closes without draining. `close()`
-tells the multiplexers to route it nothing new and refuses what still
-arrives, so the requests routed to it before they heard are retried at
-once. What a drain would have avoided is the client whose search the
+tells the multiplexers to route it nothing new, answers no search and
+refuses what still arrives, so the requests routed to it before they heard
+are retried at once. What a drain would have avoided is the client whose search the
 backend answered just before it began closing:
 
 ```mermaid

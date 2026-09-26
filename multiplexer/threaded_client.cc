@@ -242,6 +242,20 @@ void ThreadedClient::Core::_orphan_teardown() {
   new std::shared_ptr<BasicClient>(basic_client_);  // leaked on purpose, see the header
   work_.release();
   io_service_holder_.release();
+  _release_callbacks();
+}
+
+// The caller's callbacks go once nothing can call them any more, so that a
+// client that was shut down holds none of the caller's objects. In Python
+// each one refers back to the client's wrapper, which every class built on
+// it passes its own method to, and the binding holds it here, in C++, where
+// the collector cannot see the cycle: kept as long as the Core, it would
+// keep the wrapper, and so the Core, alive for good. Two callers, neither
+// with a thread to race: the io thread once its loop has ended, and a
+// forked child's teardown, where the io thread does not exist.
+void ThreadedClient::Core::_release_callbacks() MX_NO_THREAD_SAFETY_ANALYSIS {
+  on_message_ = MessageSink();
+  search_policy_ = SearchPolicy();
 }
 
 void ThreadedClient::Core::_io_thread_main() {
@@ -251,6 +265,7 @@ void ThreadedClient::Core::_io_thread_main() {
     try {
       io_service_.run();
       MX_LOG(DEBUG, HIGHVERBOSITY, CTX("ThreadedClient") TEXT("io thread done"));
+      _release_callbacks();
       return;
     } catch (const std::exception& e) {
       MX_LOG(ERROR, LOWVERBOSITY,
@@ -285,13 +300,15 @@ void ThreadedClient::Core::_post(F function) {
 
 // Runs `function` on the io thread and returns its result; for the short
 // bookkeeping calls only. Deadlocks if called on the io thread, hence the
-// assertion.
+// assertion. The fork check comes first, here and in every blocking call:
+// in a forked child nothing may come before it that a thread of the
+// parent could have held (lib/fork.h).
 template <typename F>
 auto ThreadedClient::Core::_call(F function) -> decltype(function()) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("blocking ThreadedClient call on the io thread, from a callback");
   }
-  basic_client_->check_not_orphaned();
   if (_stopped()) {
     MXTHROW(NotConnected());
   }
@@ -326,10 +343,10 @@ MultiplexerMessage ThreadedClient::Core::new_message(std::uint32_t type, const s
 // Connects and waits for the handshake: the connection observer ends the
 // wait, up or down, and a timer ends it at `timeout`.
 bool ThreadedClient::Core::connect(const std::string& host, std::uint16_t port, float timeout) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("blocking ThreadedClient::connect() called on the io thread, from a callback");
   }
-  basic_client_->check_not_orphaned();
   if (_stopped()) {
     MXTHROW(NotConnected());
   }
@@ -437,10 +454,10 @@ bool ThreadedClient::Core::routing_acknowledged() {
 }
 
 bool ThreadedClient::Core::flush_all(float timeout) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("blocking ThreadedClient::flush_all() called on the io thread, from a callback");
   }
-  basic_client_->check_not_orphaned();
   if (_stopped()) {
     return true;  // nothing left to write
   }
@@ -534,6 +551,7 @@ unsigned int ThreadedClient::Core::send(const MultiplexerMessage& msg, float tim
 }
 
 unsigned int ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane, float timeout) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("flushing ThreadedClient::send() called on the io thread, from a callback");
   }
@@ -550,6 +568,7 @@ unsigned int ThreadedClient::Core::send(const MultiplexerMessage& msg, const Con
 }
 
 unsigned int ThreadedClient::Core::send_all(const MultiplexerMessage& msg, float timeout) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("flushing ThreadedClient::send_all() called on the io thread, from a callback");
   }
@@ -572,6 +591,7 @@ void ThreadedClient::Core::send_all_serialized(std::string serialized, float tim
 
 unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serialized, bool all, float timeout,
                                                             LanePtr lane) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("flushing ThreadedClient send called on the io thread, from a callback");
   }
@@ -593,6 +613,9 @@ void ThreadedClient::Core::send_serialized_with_callback(std::string serialized,
 void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout,
                                         SendCallback done, LanePtr lane) {
   basic_client_->check_not_orphaned();
+  if (lane) {
+    lane->check_not_inherited();  // here, not on the io thread, where it would throw into nobody
+  }
   if (_stopped()) {
     MXTHROW(NotConnected());
   }
@@ -983,6 +1006,9 @@ ThreadedClient::Result ThreadedClient::Core::query(const std::string& payload, s
 void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callback, float timeout, LanePtr lane,
                                  Probe probe) {
   basic_client_->check_not_orphaned();
+  if (lane) {
+    lane->check_not_inherited();
+  }
   InFlightPtr in_flight(new InFlight());
   in_flight->prototype = msg;
   in_flight->prototype.set_from(instance_id_);
@@ -1014,6 +1040,7 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
 
 ThreadedClient::Result ThreadedClient::Core::query(const MultiplexerMessage& msg, float timeout, LanePtr lane,
                                                    Probe probe) {
+  basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error(
         "blocking ThreadedClient::query() called on the io thread, from a callback; "
@@ -1180,7 +1207,12 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
     return;
   }
   if (on_message_) {
-    _guarded([&] { on_message_(incoming); }, [&] { return "on_message, for " + describe(msg); });
+    _guarded(
+        [&] {
+          MX_DCHECK_RUN_ON(&io_thread_);
+          on_message_(incoming);
+        },
+        [&] { return "on_message, for " + describe(msg); });
     return;
   }
   if (basic_client_->drop_lines().first({BasicClient::NO_ON_MESSAGE, WARNING, msg.type(), 0}, [&] {

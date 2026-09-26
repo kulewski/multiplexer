@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
@@ -174,6 +174,9 @@ class Request:
 CLOSE_FLUSH_SECONDS = 1.0
 
 
+_ThreadedServerT = TypeVar("_ThreadedServerT", bound="BaseThreadedMultiplexerServer")
+
+
 class BaseThreadedMultiplexerServer:
     """Base class for a backend whose handlers run on worker threads:
     subclass, implement handle_message(request), call serve_forever(). See
@@ -246,7 +249,7 @@ class BaseThreadedMultiplexerServer:
             timeout,
             on_message=self._on_message,
             with_connection=True,
-            search_policy=self.should_respond_to_backend_for_packet_search,
+            search_policy=self._answers_search,
         )
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
@@ -293,11 +296,18 @@ class BaseThreadedMultiplexerServer:
         `decline_searches_when_full` while every worker is busy and
         requests wait. Override for a condition of your own. A draining
         backend needs no policy here: the multiplexers stop offering it
-        (its drain_routing), which is the better mechanism."""
+        (its drain_routing), which is the better mechanism. A closing one
+        answers no search, whatever this returns."""
         if self.decline_searches_when_full:
             with self._cond:
                 return self._busy < self.workers or not self._queue
         return True
+
+    def _answers_search(self) -> bool:
+        """The search policy the client runs, on the io thread: none
+        answered once close() began, since the request that would follow is
+        refused; else should_respond_to_backend_for_packet_search()."""
+        return self._accepting and self.should_respond_to_backend_for_packet_search()
 
     def connect(self) -> None:
         """Start the workers and connect to every multiplexer, once;
@@ -305,6 +315,7 @@ class BaseThreadedMultiplexerServer:
         Call it yourself when something waits for a line you print before
         it sends, so that the line means reachable, or in a test that
         wants the backend connected without a thread serving it."""
+        self._check_not_inherited()
         if self._connected or self._client is None:
             return
         self._connected = True
@@ -349,14 +360,20 @@ class BaseThreadedMultiplexerServer:
 
     def stop(self) -> None:
         """Ask serve_forever() to return, from any thread: it finishes what
-        the workers hold, closes the connections and returns."""
+        the workers hold, closes the connections and returns. In a forked
+        child, on a server the parent made, it only clears `working`: a
+        signal handler the parent installed may call it there."""
         self.working = False
+        client = self._client
+        if client is not None and client.orphaned():
+            return  # nothing serves here, and the event's lock may be the parent's serving thread's
         self._wake.set()
 
     @property
     def pending(self) -> int:
         """Requests waiting for a worker plus those being handled; `dropped`
         counts the ones a full queue dropped or leaving refused."""
+        self._check_not_inherited()
         with self._cond:
             return len(self._queue) + self._busy
 
@@ -369,6 +386,7 @@ class BaseThreadedMultiplexerServer:
         the workers finish the queue, close the connections and return.
         The calling thread only polls: the handlers run on the workers,
         which is the point."""
+        self._check_not_inherited()
         self._drain_seconds = drain_seconds
         try:
             self.connect()
@@ -390,6 +408,7 @@ class BaseThreadedMultiplexerServer:
         call twice. Joins the
         workers, so from a handler, on a worker, it raises RuntimeError: a
         handler that wants the server gone calls stop()."""
+        self._check_not_inherited()
         if threading.current_thread() in self._threads:
             raise RuntimeError("close() called from a worker thread, which it would join; call stop() instead")
         with self._cond:  # before the drain shows: a request seeing `draining` must find the door shut
@@ -403,6 +422,24 @@ class BaseThreadedMultiplexerServer:
             self._client.flush_all(CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
             self._client.shutdown()
             self._client = None
+
+    def __enter__(self: _ThreadedServerT) -> _ThreadedServerT:
+        """The server, for a `with` block, at whose end it is closed however
+        the block ended: `with MyServer(...) as server: server.serve_forever()`."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """close(), at the end of a `with` block; after serve_forever()'s own
+        close() a second one does nothing."""
+        self.close()
+
+    def _check_not_inherited(self) -> None:
+        """Raises UsedAfterFork in a forked child, on a server the parent
+        made, before the condition, which the parent's io thread and
+        workers take for every request and may have held at the fork."""
+        client = self._client
+        if client is not None:
+            client._check_not_orphaned()
 
     def send_message(self, message: Any, **kwargs: Any) -> int:
         """A message that is not a reply, an event from a handler for

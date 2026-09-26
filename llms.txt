@@ -34,7 +34,7 @@ Vocabulary used everywhere: a peer is a client (sends requests or events) or a b
 ## Reference
 
 - [The rules file](docs/rules.md)
-- [Using the Python library](docs/api_python.md): SyncClient, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer, BaseThreadedMultiplexerServer for handlers on worker threads; lanes, pinning and addressed queries
+- [Using the Python library](docs/api_python.md): SyncClient, ThreadedClient, AsyncClient for asyncio, BaseMultiplexerServer, BaseThreadedMultiplexerServer for handlers on worker threads; lanes, pinning and addressed queries; threads, interpreter exit and forking with clients alive
 - [Which class to build on](docs/README.md#which-class-to-build-on): every class, one table
 - [Using the C++ library](docs/api_cpp.md)
 - [mxcontrol](docs/mxcontrol.md)

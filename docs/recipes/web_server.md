@@ -22,9 +22,14 @@ _lock = threading.Lock()
 
 
 def _forget_in_child() -> None:
-    """The child of a fork must not touch the parent's client."""
-    global _client
+    """The child of a fork gets no client of the parent's, and no lock a
+    parent thread may have held at the fork. Shut down in the child, the
+    inherited client closes only the child's copies of its connections."""
+    global _client, _lock
+    if _client is not None:
+        _client.shutdown()
     _client = None
+    _lock = threading.Lock()
 
 
 os.register_at_fork(after_in_child=_forget_in_child)
@@ -42,10 +47,14 @@ def mx() -> ThreadedClient:
 Never create the client at import time: the gunicorn master and the test
 runner's parent import the application before forking, and a client made
 there is exactly what every worker inherits. An inherited client is an
-orphan in the child, every call on it raises `UsedAfterFork`, and the hook
-above makes sure the child never even sees it. The `pthread_atfork` handler
-inside the library covers forks the hook does not, such as a C library
-forking.
+orphan in the child: every call on it raises `UsedAfterFork`, and
+`shutdown()` closes only the child's copies of its connections. The hook
+calls it, since a client with a callback, as below, refers to itself
+through it and is never freed by dropping it, and makes a new lock: a fork
+can come while another thread holds the old one, making the first client,
+and nothing in the child would ever release it. The `pthread_atfork`
+handler inside the library covers forks the hook does not, such as a C
+library forking.
 
 ## Queries from request threads
 

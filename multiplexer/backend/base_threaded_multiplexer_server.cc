@@ -2,6 +2,9 @@
 // workers, the workers, and the request's replies. See the header.
 #include "multiplexer/backend/base_threaded_multiplexer_server.h"
 
+#include <new>
+
+#include "lib/exception.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
 #include "multiplexer/Multiplexer.pb.h"
@@ -60,12 +63,51 @@ BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAd
   if (options_.workers < 1) {
     throw std::invalid_argument("workers must be at least 1");
   }
-  client_.set_search_policy([this] { return should_respond_to_backend_for_packet_search(); });
+  // A closing server answers no search: the request that would follow is refused.
+  client_.set_search_policy([this] { return !closed_.load() && should_respond_to_backend_for_packet_search(); });
 }
 
-BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() { close(); }
+BaseThreadedMultiplexerServer::~BaseThreadedMultiplexerServer() {
+  if (client_.orphaned()) {
+    _forget_the_parents_threads();
+    return;
+  }
+  close();
+}
+
+// Throws UsedAfterFork in a forked child, on a server the parent made,
+// before any lock: the workers and the io thread take the mutexes for
+// every request, and a lock one of them held at the fork is held for good.
+void BaseThreadedMultiplexerServer::_check_not_inherited() const {
+  if (client_.orphaned()) {
+    MXTHROW(ThreadedClient::UsedAfterFork());
+  }
+}
+
+// A forked child's server, on its way out: the workers and the thread that
+// served are the parent's and do not exist here, and they may have held
+// the mutexes or waited on the condition variables at the fork. So the
+// thread handles are detached (destroying one joinable would terminate),
+// the condition variables get fresh state without their destructors
+// running (glibc's waits for waiters that existed at the fork, which here
+// is for good; their old state leaks), and the queued requests go
+// without a warning. client_ then tears itself down as an orphan. No lock
+// is taken: the child has no other thread that could race.
+void BaseThreadedMultiplexerServer::_forget_the_parents_threads() MX_NO_THREAD_SAFETY_ANALYSIS {
+  for (std::thread& thread : threads_) {
+    if (thread.joinable()) {
+      thread.detach();
+    }
+  }
+  new (&cond_) std::condition_variable_any();
+  new (&wake_) std::condition_variable_any();
+  for (const RequestPtr& request : queue_) {
+    request->dropped_ = true;
+  }
+}
 
 void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_seconds) {
+  _check_not_inherited();
   drain_seconds_ = drain_seconds;
   try {
     connect();
@@ -90,6 +132,7 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
 }
 
 void BaseThreadedMultiplexerServer::close() {
+  _check_not_inherited();
   std::vector<std::thread> threads;
   {
     mx::MutexLock lock(mutex_);
@@ -99,6 +142,7 @@ void BaseThreadedMultiplexerServer::close() {
       }
     }
   }
+  mx::MutexLock closing(close_mutex_);  // a second close() returns once the first is done, not before
   if (closed_.exchange(true)) {
     return;
   }
@@ -124,9 +168,7 @@ void BaseThreadedMultiplexerServer::start_draining() {
   std::chrono::steady_clock::rep unset = 0;
   draining_since_ticks_.compare_exchange_strong(unset, std::chrono::steady_clock::now().time_since_epoch().count());
   if (!draining_.exchange(true)) {
-    if (!closed_.load()) {
-      client_.set_routing(options_.drain_routing);
-    }
+    client_.set_routing(options_.drain_routing);  // close()'s too; nothing on a client already shut down
     mx::MutexLock lock(wake_mutex_);
     wake_.notify_all();
   }
@@ -155,11 +197,15 @@ bool BaseThreadedMultiplexerServer::drained() const {
 
 void BaseThreadedMultiplexerServer::stop() {
   working = false;
+  if (client_.orphaned()) {
+    return;  // a forked child's: nothing serves here, and the lock may be the parent's serving thread's
+  }
   mx::MutexLock lock(wake_mutex_);
   wake_.notify_all();
 }
 
 std::size_t BaseThreadedMultiplexerServer::pending() const {
+  _check_not_inherited();
   mx::MutexLock lock(mutex_);
   return queue_.size() + busy_;
 }
@@ -225,6 +271,7 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
 }
 
 void BaseThreadedMultiplexerServer::connect() {
+  _check_not_inherited();
   if (connected_.exchange(true) || closed_.load()) {
     return;
   }

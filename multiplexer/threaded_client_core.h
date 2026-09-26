@@ -86,6 +86,7 @@ class ThreadedClient::Core {
   typedef std::shared_ptr<InFlight> InFlightPtr;
   typedef BasicClient::BasicScheduledMessageTracker Tracker;
   void _orphan_teardown();
+  void _release_callbacks();
 
   // Sends; see "Sends" in the .cc.
   void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
@@ -162,7 +163,9 @@ class ThreadedClient::Core {
   static const std::size_t REMEMBERED_FINISHED_IDS = 1024;
   std::deque<std::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
   std::unordered_set<std::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
-  const MessageSink on_message_;
+  // The caller's callbacks, released once nothing can call them any more
+  // (_release_callbacks).
+  MessageSink on_message_ MX_GUARDED_BY(io_thread_);
   SearchPolicy search_policy_ MX_GUARDED_BY(io_thread_);
   // Sends made while no connection was live, waiting for one to come up, in
   // the order made; what waits for room waits in BasicClient.

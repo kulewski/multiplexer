@@ -19,6 +19,7 @@
 
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -30,6 +31,8 @@
 #include <vector>
 
 #include "lib/assertion.h"
+#include "lib/exception.h"
+#include "lib/fork.h"
 #include "lib/functors.h"
 #include "lib/mutex.h"
 #include "lib/spanset.h"
@@ -133,129 +136,6 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
   typedef multiplexer::Connection<BasicClient> Connection;
 };
 
-// The handle callers see for a connection: a weak reference plus what it
-// was asked to connect to and the address that resolved to. It is false
-// once the connection is gone; schedule_one() then puts a message meant
-// for it on another live connection. Replies carry the wrapper of the
-// connection they arrived on, so a peer can answer through the same
-// multiplexer.
-class ConnectionWrapper {
- public:
-  inline operator bool() const { return static_cast<bool>(lock()); }
-  // Same connection, or the same target once it is gone (the observer's
-  // "down" notification carries only the target).
-  bool is_same_connection(const ConnectionWrapper& other) const { return target_ == other.target_; }
-
- private:
-  typedef ConnectionsManagerTraits<BasicClient>::Connection Connection;
-
- public:
-  ConnectionWrapper() {}
-  ConnectionWrapper(const ConnectionWrapper&) = default;
-
- private:
-  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target& target,
-                    const BasicClientTraits::Endpoint& endpoint)
-      : conn_(conn), target_(target), endpoint_(endpoint) {}
-  Connection::pointer lock() const { return conn_.lock(); }
-
- public:
-  ConnectionWrapper& operator=(const ConnectionWrapper& other) {
-    if (this == &other) {
-      return *this;
-    }
-    conn_ = other.conn_;
-    target_ = other.target_;
-    endpoint_ = other.endpoint_;
-    return *this;
-  }
-  // What the connection was asked for, host and port, kept after it is gone.
-  const BasicClientTraits::Target& target() const { return target_; }
-  // The address that resolved to and the connection used, kept after it is
-  // gone; unspecified until a name resolved.
-  const BasicClientTraits::Endpoint& endpoint() const { return endpoint_; }
-
- private:
-  Connection::weak_pointer conn_;
-  BasicClientTraits::Target target_;
-  BasicClientTraits::Endpoint endpoint_;
-
-  friend class BasicClient;
-  friend class Client;
-  friend class ThreadedClient;
-};
-
-// One connection for a stream of messages, owned by the caller: a soft,
-// late pin, or made pinned, a hard one. A message sent or queried with a
-// lane goes through the lane's connection while it is live. Empty until
-// first use, when it pins itself to the connection the library chose; a
-// lane that is not pinned lets go at a failover, the library writing the
-// new connection into it, and adopts the connection a query's reply came
-// through, so the messages after a query follow the query. A pinned lane
-// is its first connection for good: once that connection is gone, every
-// send and query through the lane fails with NotConnected until the
-// caller makes a new lane, and a message of its that the dying connection
-// had not written is reported lost, never handed to another connection. A lane holds its connection weakly, like a
-// ConnectionWrapper, and nothing else, and the library keeps no registry
-// of lanes, so a lane lives exactly as long as the caller's pointer and
-// keeps nothing alive. Shared between the caller's thread and a
-// ThreadedClient's io thread, hence the mutex. docs/api_cpp.md, "Lanes".
-class Lane {
- public:
-  explicit Lane(bool pinned = false) : pinned_(pinned) {}
-  // Seeded with a connection, the one a reply came through.
-  explicit Lane(const ConnectionWrapper& connection, bool pinned = false)
-      : connection_(connection), pinned_(pinned), holds_(true) {}
-  Lane(const Lane&) = delete;
-  Lane& operator=(const Lane&) = delete;
-
-  bool pinned() const { return pinned_; }
-  // The connection held; empty until the first message went through.
-  ConnectionWrapper connection() const {
-    mx::MutexLock lock(mutex_);
-    return connection_;
-  }
-  // Whether a connection was ever written into the lane.
-  bool holds_connection() const {
-    mx::MutexLock lock(mutex_);
-    return holds_;
-  }
-  // Whether the connection held is live.
-  bool connected() const { return static_cast<bool>(connection()); }
-  // A pinned lane whose connection is gone: nothing goes through it any
-  // more.
-  bool closed() const {
-    mx::MutexLock lock(mutex_);
-    return pinned_ && holds_ && !connection_;
-  }
-  // The library writes the connection it used or a reply came through;
-  // public because the Python synchronous client runs the algorithm in
-  // Python. A pinned lane takes the first connection only.
-  void adopt(const ConnectionWrapper& connection) {
-    mx::MutexLock lock(mutex_);
-    if (pinned_ && holds_) {
-      return;
-    }
-    connection_ = connection;
-    holds_ = true;
-  }
-
- private:
-  mutable mx::Mutex mutex_;
-  ConnectionWrapper connection_ MX_GUARDED_BY(mutex_);
-  const bool pinned_;
-  bool holds_ MX_GUARDED_BY(mutex_) = false;
-};
-typedef std::shared_ptr<Lane> LanePtr;
-
-// How an addressed query locates its addressee when the request did not
-// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
-// reaches it whatever its Routing, as every addressed message does, or a
-// PING, which `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer` and
-// `ThreadedClient` answer; the synchronous Client does not.
-// docs/query.md, "An addressed query".
-enum Probe { PROBE_SEARCH, PROBE_PING };
-
 // The three ways a client call fails; Client inherits them and the Python
 // binding maps them to exceptions of the same names. NotConnected: no live
 // connection to send through. OperationTimedOut: the call's timer expired.
@@ -281,6 +161,163 @@ struct ExceptionDefinitions {
     const char* what() const throw() { return MxClientError::what(); }
   };
 };
+
+// The handle callers see for a connection: a weak reference plus what it
+// was asked to connect to and the address that resolved to. It is false
+// once the connection is gone; schedule_one() then puts a message meant
+// for it on another live connection. Replies carry the wrapper of the
+// connection they arrived on, so a peer can answer through the same
+// multiplexer. A wrapper made before a fork names the parent's connection
+// in the child, a socket the parent still writes, and is refused there
+// with UsedAfterFork (lib/fork.h).
+class ConnectionWrapper {
+ public:
+  inline operator bool() const { return static_cast<bool>(lock()); }
+  // Made before a fork this process is the child of.
+  bool inherited() const { return generation_ != mx::fork_generation(); }
+  // Same connection, or the same target once it is gone (the observer's
+  // "down" notification carries only the target).
+  bool is_same_connection(const ConnectionWrapper& other) const { return target_ == other.target_; }
+
+ private:
+  typedef ConnectionsManagerTraits<BasicClient>::Connection Connection;
+
+ public:
+  ConnectionWrapper() : generation_(mx::fork_generation()) {}
+  ConnectionWrapper(const ConnectionWrapper&) = default;
+
+ private:
+  ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target& target,
+                    const BasicClientTraits::Endpoint& endpoint)
+      : conn_(conn), target_(target), endpoint_(endpoint), generation_(mx::fork_generation()) {}
+  Connection::pointer lock() const { return conn_.lock(); }
+
+ public:
+  ConnectionWrapper& operator=(const ConnectionWrapper& other) {
+    if (this == &other) {
+      return *this;
+    }
+    conn_ = other.conn_;
+    target_ = other.target_;
+    endpoint_ = other.endpoint_;
+    generation_ = other.generation_;
+    return *this;
+  }
+  // What the connection was asked for, host and port, kept after it is gone.
+  const BasicClientTraits::Target& target() const { return target_; }
+  // The address that resolved to and the connection used, kept after it is
+  // gone; unspecified until a name resolved.
+  const BasicClientTraits::Endpoint& endpoint() const { return endpoint_; }
+
+ private:
+  Connection::weak_pointer conn_;
+  BasicClientTraits::Target target_;
+  BasicClientTraits::Endpoint endpoint_;
+  unsigned int generation_;  // mx::fork_generation() when it was made
+
+  friend class BasicClient;
+  friend class Client;
+  friend class Lane;
+  friend class ThreadedClient;
+};
+
+// One connection for a stream of messages, owned by the caller: a soft,
+// late pin, or made pinned, a hard one. A message sent or queried with a
+// lane goes through the lane's connection while it is live. Empty until
+// first use, when it pins itself to the connection the library chose; a
+// lane that is not pinned lets go at a failover, the library writing the
+// new connection into it, and adopts the connection a query's reply came
+// through, so the messages after a query follow the query. A pinned lane
+// is its first connection for good: once that connection is gone, every
+// send and query through the lane fails with NotConnected until the
+// caller makes a new lane, and a message of its that the dying connection
+// had not written is reported lost, never handed to another connection. A lane holds its connection weakly, like a
+// ConnectionWrapper, and nothing else, and the library keeps no registry
+// of lanes, so a lane lives exactly as long as the caller's pointer and
+// keeps nothing alive. Shared between the caller's thread and a
+// ThreadedClient's io thread, hence the mutex. A lane made before a fork,
+// or seeded with a connection from before one, is the parent's in the
+// child: every call throws UsedAfterFork there before it takes the mutex,
+// which a parent thread may have held at the fork (lib/fork.h), and so
+// does adopt() given a connection from before the fork. Decided when a
+// connection enters the lane, so that the check on every message is one
+// load. docs/api_cpp.md, "Lanes".
+class Lane {
+ public:
+  explicit Lane(bool pinned = false) : pinned_(pinned), generation_(mx::fork_generation()) {}
+  // Seeded with a connection, the one a reply came through; the lane is
+  // as old as the connection.
+  explicit Lane(const ConnectionWrapper& connection, bool pinned = false)
+      : connection_(connection), pinned_(pinned), holds_(true), generation_(connection.generation_) {}
+  Lane(const Lane&) = delete;
+  Lane& operator=(const Lane&) = delete;
+
+  bool pinned() const { return pinned_; }
+  // The connection held; empty until the first message went through.
+  ConnectionWrapper connection() const {
+    _check_made_here();
+    mx::MutexLock lock(mutex_);
+    return connection_;
+  }
+  // Whether a connection was ever written into the lane.
+  bool holds_connection() const {
+    _check_made_here();
+    mx::MutexLock lock(mutex_);
+    return holds_;
+  }
+  // Whether the connection held is live.
+  bool connected() const { return static_cast<bool>(connection()); }
+  // A pinned lane whose connection is gone: nothing goes through it any
+  // more.
+  bool closed() const {
+    _check_made_here();
+    mx::MutexLock lock(mutex_);
+    return pinned_ && holds_ && !connection_;
+  }
+  // The library writes the connection it used or a reply came through;
+  // public because the Python synchronous client runs the algorithm in
+  // Python. A pinned lane takes the first connection only.
+  void adopt(const ConnectionWrapper& connection) {
+    _check_made_here();
+    if (connection.inherited()) {
+      MXTHROW(ExceptionDefinitions::UsedAfterFork());
+    }
+    mx::MutexLock lock(mutex_);
+    if (pinned_ && holds_) {
+      return;
+    }
+    connection_ = connection;
+    holds_ = true;
+  }
+  // Throws UsedAfterFork for a lane that is the parent's in this process:
+  // made before the fork, or seeded with a connection from before it. For
+  // an entry point taking a lane, on the caller's thread, before anything
+  // reaches the io thread; one load, no lock.
+  void check_not_inherited() const { _check_made_here(); }
+
+ private:
+  // Throws UsedAfterFork for a lane from before a fork, before any lock.
+  void _check_made_here() const {
+    if (generation_ != mx::fork_generation()) {
+      MXTHROW(ExceptionDefinitions::UsedAfterFork());
+    }
+  }
+
+  mutable mx::Mutex mutex_;
+  ConnectionWrapper connection_ MX_GUARDED_BY(mutex_);
+  const bool pinned_;
+  bool holds_ MX_GUARDED_BY(mutex_) = false;
+  const unsigned int generation_;  // mx::fork_generation() when it, or its seed, was made
+};
+typedef std::shared_ptr<Lane> LanePtr;
+
+// How an addressed query locates its addressee when the request did not
+// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
+// reaches it whatever its Routing, as every addressed message does, or a
+// PING, which `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer` and
+// `ThreadedClient` answer; the synchronous Client does not.
+// docs/query.md, "An addressed query".
+enum Probe { PROBE_SEARCH, PROBE_PING };
 
 // See the file comment. Created through Client; always held by shared_ptr
 // because connections keep weak references to their manager.
@@ -360,12 +397,15 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   bool closing();
 
   // Fork, see lib/fork.h: a client a forked child inherited is an orphan
-  // there. Every public entry point checks first and throws UsedAfterFork,
-  // before touching any lock; the teardown in the child closes the child's
-  // copies of the socket descriptors with close(2) only (no goodbye, no
-  // shutdown(2), which would end the parent's connection) and touches no
-  // mutex, then the owner leaks the object so asio never sees those
-  // descriptor numbers again.
+  // there. Every public entry point that would take a lock, run the loop
+  // or touch a socket checks first and throws UsedAfterFork; the getters
+  // only read what the client knew at the fork. The teardown in the child
+  // closes the child's copies of the socket descriptors with close(2) only
+  // (no goodbye, no shutdown(2), which would end the parent's connection)
+  // and touches no mutex, then the owner leaks the object so asio never
+  // sees those descriptor numbers again. The close happens once, however
+  // many of shutdown() and the destructors run it: a second would close
+  // numbers the child has reused since.
   bool orphaned() const;
   void check_not_orphaned() const;
   void orphan_close_descriptors();
@@ -638,6 +678,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // in turn.
   BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper wrapper,
                                             float timeout) {
+    if (wrapper.inherited()) {
+      MXTHROW(UsedAfterFork());  // the parent's connection; see ConnectionWrapper
+    }
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::pointer conn;
     if ((conn = wrapper.lock()) && conn->living()) {
@@ -711,6 +754,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   std::set<TimerPointer> reconnect_timers_;        // armed by lost connections; shutdown() cancels them
   std::vector<Connection::weak_pointer> closing_;  // closed by shutdown(), still reading to their end
   const unsigned int fork_generation_at_creation_;
+  std::atomic<bool> orphan_descriptors_closed_{false};
   asio::ip::tcp::resolver resolver_;
   Resolver resolver_hook_;
 

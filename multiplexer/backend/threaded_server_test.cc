@@ -79,6 +79,10 @@ struct Scripted : BaseThreadedMultiplexerServer {
     std::lock_guard<std::mutex> lock(mutex);
     return handled;
   }
+  RequestPtr kept_request() {  // the worker sets it under the lock
+    std::lock_guard<std::mutex> lock(mutex);
+    return kept;
+  }
 
   std::mutex mutex;
   std::condition_variable released_cv;
@@ -210,12 +214,9 @@ TEST(ThreadedServer, ARequestMayBeAnsweredLaterFromAnotherThread) {
   InProcessMultiplexer mx;
   Served served(mx.port);
   std::thread answerer([&] {
-    ASSERT_TRUE(eventually([&] {
-      std::lock_guard<std::mutex> lock(served.server.mutex);
-      return static_cast<bool>(served.server.kept);
-    }));
+    ASSERT_TRUE(eventually([&] { return static_cast<bool>(served.server.kept_request()); }));
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    served.server.kept->reply("finally", multiplexer::types::PYTHON_TEST_RESPONSE);
+    served.server.kept_request()->reply("finally", multiplexer::types::PYTHON_TEST_RESPONSE);
   });
   Requester requester(mx.port);
   EXPECT_EQ("finally", requester.query("later"));
@@ -352,6 +353,77 @@ TEST(ThreadedServer, ARequestArrivingWhileLeavingIsRefusedAtOnce) {
   EXPECT_EQ(1u, server.dropped());
 }
 
+// close() without a drain tells the multiplexer the drain routing, as
+// start_draining() does: once it applied it, a search and a request come
+// back as the multiplexer's own DELIVERY_ERROR instead of reaching the
+// closing server, whose refusal would cost an addressed query its retry.
+TEST(ThreadedServer, CloseTakesTheServerOutOfRouting) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  Scripted& server = served.server;
+  Requester requester(mx.port);
+  requester.send("block");
+  ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
+  std::thread closing([&] { server.close(); });
+  // Unanswered while the multiplexer still offers it (a closing server
+  // answers no search), then the multiplexer's DELIVERY_ERROR, well
+  // before "block" gives up waiting at 10 s and the server is gone.
+  EXPECT_TRUE(eventually(
+      [&] {
+        try {
+          return requester.search(0.5) == multiplexer::types::DELIVERY_ERROR;
+        } catch (const multiplexer::Client::OperationTimedOut&) {
+          return false;
+        }
+      },
+      5));
+  EXPECT_EQ(multiplexer::types::DELIVERY_ERROR,
+            requester.answer_to(requester.message("late", multiplexer::types::PYTHON_TEST_REQUEST), 5));
+  EXPECT_EQ(1u, server.pending()) << "still closing: the worker holds \"block\"";
+  server.release();
+  closing.join();
+  EXPECT_EQ(0u, server.dropped()) << "nothing reached the closing server to be refused";
+}
+
+// A closing server answers no search, even one the multiplexer still
+// offers it: the request that would follow is refused.
+TEST(ThreadedServer, AClosingServerAnswersNoSearch) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.drain_routing = multiplexer::Routing();  // the multiplexer keeps offering it
+  Served served(mx.port, options);
+  Scripted& server = served.server;
+  Requester requester(mx.port);
+  EXPECT_EQ(multiplexer::types::PING, requester.search(5)) << "serving: answered";
+  requester.send("block");
+  ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
+  std::thread closing([&] { server.close(); });
+  ASSERT_TRUE(eventually([&] { return server.draining(); }));
+  EXPECT_THROW(requester.search(1), multiplexer::Client::OperationTimedOut) << "closing: not answered";
+  server.release();
+  closing.join();
+}
+
+// close() from another thread while a worker is busy: serve_forever()'s
+// own close() waits for that one to finish, so serve_forever() returns
+// only once the workers are done and the client shut down, where it
+// returned at once with the server half closed.
+TEST(ThreadedServer, ASecondCloseWaitsForTheFirst) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  Scripted& server = served.server;
+  Requester requester(mx.port);
+  requester.send("block");
+  ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
+  std::thread closing([&] { server.close(); });
+  ASSERT_TRUE(eventually([&] { return server.draining(); }));
+  // stop() in close() wakes serve_forever(), which calls close() too.
+  EXPECT_FALSE(eventually([&] { return served.returned.load(); }, 1)) << "returned with a worker busy";
+  server.release();
+  closing.join();
+  EXPECT_TRUE(eventually([&] { return served.returned.load(); }));
+}
+
 // A message that answers another, one with `references`, arriving while
 // the server leaves is dropped, not refused: nobody retries a reply, and
 // refusing one could start a loop with a peer that answers the refusal.
@@ -480,8 +552,8 @@ TEST(ThreadedServer, TheLastReplyIsWrittenBeforeTheClose) {
   Requester requester(mx.port);
   const multiplexer::MultiplexerMessage request = requester.message("later", multiplexer::types::PYTHON_TEST_REQUEST);
   requester.client.flush(requester.client.schedule_one(request), 5);
-  ASSERT_TRUE(eventually([&] { return served.server.kept != nullptr; }));
-  served.server.kept->reply("at-the-last-moment", multiplexer::types::PYTHON_TEST_RESPONSE);
+  ASSERT_TRUE(eventually([&] { return served.server.kept_request() != nullptr; }));
+  served.server.kept_request()->reply("at-the-last-moment", multiplexer::types::PYTHON_TEST_RESPONSE);
   served.server.stop();  // close() follows at once
   for (;;) {
     multiplexer::IncomingMessage got = requester.client.read_raw_message(5);  // throws when nothing comes

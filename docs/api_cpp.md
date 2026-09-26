@@ -294,8 +294,8 @@ Echo(addresses, options).serve_forever();
   that answers another is dropped, since refusing a reply could start a
   loop, [how a backend leaves](leaving.md#what-stays)),
   `decline_searches_when_full` (false: searches are answered while the
-  backend serves; true leaves them unanswered while every worker is busy
-  and requests wait), `connect_timeout` and `drain_routing` (what
+  backend serves, none once `close()` began; true leaves them unanswered
+  while every worker is busy and requests wait), `connect_timeout` and `drain_routing` (what
   `start_draining()` tells the multiplexers; `any` and `all` off by
   default).
 - The constructor only makes the instance id; `connect()` starts the
@@ -439,17 +439,62 @@ integration test roles do in
 `NDEBUG` the library asserts this: a call from another thread fails with an
 `AssertionError` naming the wrong-thread call.
 
+**Lifetimes.** A client or a server ends when it is destroyed, or earlier
+with `shutdown()` or `close()`: the destructors of `Client` and
+`ThreadedClient` run `shutdown()`, waiting for the multiplexers' side of
+the close, `CLOSE_READ_SECONDS` at most, a
+`BaseThreadedMultiplexerServer`'s runs `close()`, and a
+`BaseMultiplexerServer`'s client goes with it the same way. Nothing the
+library holds keeps a C++ client alive: the callbacks it was given are
+destroyed when its io thread ends.
+
 **Fork.** A client inherited by a forked child is an orphan there: its io
-thread does not exist in the child, its locks may be held by nobody, and
-its sockets are shared with the parent. Every call throws
-`UsedAfterFork`, a `NotConnected`, before touching any lock; the
-destructor closes only the child's descriptor copies, with `close(2)`, and
-leaks the rest on purpose, so nothing sends a goodbye or a `shutdown(2)`
-on the parent's connection and asio never sees those descriptor numbers
-again. A `pthread_atfork` child handler in `lib/fork.h` bumps a fork
-generation that every client compares with the one it was created under;
-one load per call, nothing when nobody forks. Create clients after
-forking.
+thread does not exist in the child, its locks may have been held at the
+fork by threads that do not exist there either, and its sockets are shared
+with the parent. Every call that would send, receive, connect, wait or
+take one of its locks throws `UsedAfterFork`, a `NotConnected`, first, and
+so does every use of a `Lane` made before the fork, or seeded with a
+`ConnectionWrapper` from before it, and every send through such a wrapper,
+even by a client made in the child; the synchronous `Client`'s getters,
+`connections_count()` say, answer with what it knew at the fork, and
+`orphaned()` tells without throwing. `shutdown()` and the destructor close
+the child's copies of the descriptors, once, with `close(2)`, and leak the
+rest on purpose, so nothing sends a goodbye or a `shutdown(2)` on the
+parent's connection and asio never sees those descriptor numbers again. Of
+a `BaseThreadedMultiplexerServer` inherited the same way, `close()`,
+`connect()`, `serve_forever()` and `pending()` throw, `stop()` only clears
+`working`, and the destructor lets go of the parent's workers without
+waiting for them. A `pthread_atfork` child handler in `lib/fork.h` bumps a
+fork generation that every client and lane compares with the one it was
+created under; one load per call, nothing when nobody forks. Create
+clients after forking.
+
+**What a forked child can still wait on.** The child of a process with
+threads has only the thread that forked; a lock another thread held at
+that instant stays held unless something resets it in the child. glibc
+resets its allocator and stdio; it does not reset its name resolver. A
+child forked while a thread of the parent was inside `getaddrinfo` can
+find a lock of the resolver held for good: every name lookup there waits
+forever, and so, in some cases, does a thread's exit. The library looks
+names up, on asio's resolver thread, whenever a client connects to a
+multiplexer by name and again at every reconnect attempt, every 3 s, while
+that multiplexer is unreachable; a child's new client connecting by name
+would then never connect, and its destructor would wait for the resolver
+thread for good. So a program that forks while clients are alive gives
+every client addresses, the parent's too, or resolves the names once
+before it makes any; an address in text, `connect("10.0.0.1", 1980)`, is
+never looked up. The same goes for the program's own threads that resolve
+names, and the dynamic loader's locks are the same kind of hazard: for a
+child that calls `dlopen` while a parent thread was loading a library,
+and, with glibc before 2.35 or GCC's unwinder before 12, for a child that
+throws, `UsedAfterFork` included, while a parent thread was throwing.
+`posix_spawn`, or `fork` followed at once by `exec`, avoids all of it.
+
+**A fork inside a callback.** A child forked inside one of the client's
+callbacks is a copy of the thread running the loop, in the middle of it:
+once the callback returns, the child runs the parent's loop on the
+parent's sockets. Such a child calls `exec` or `_exit` before the callback
+returns.
 
 **Backends on threads.** `BaseMultiplexerServer::stop()` clears `working`
 from any thread; `serve_forever()` notices within one poll. A

@@ -251,6 +251,23 @@ class ThreadedServerTest(unittest.TestCase):
         self.assertEqual(1, server.dropped)
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
 
+    def test_a_closing_server_answers_no_search(self):
+        """close() under way, on a server whose drain routing keeps the
+        multiplexer offering it: a search goes unanswered, since the
+        request that would follow is refused."""
+        _, server = self.serve(drain_routing=Routing())
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            self.assertEqual(types.PING, self.search(client.client, 5).type, "serving: answered")
+            client.send(b"block", REQUEST)
+            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+            closing = threading.Thread(target=server.close)
+            closing.start()
+            wait_until(lambda: server.draining, 10, "close() under way")
+            with self.assertRaises(OperationTimedOut):
+                self.search(client.client, 1.0)
+            server.release.set()
+            closing.join()
+
     def test_a_reply_arriving_while_leaving_is_dropped_not_refused(self):
         """A message that answers another, arriving while the server is
         leaving, is dropped: nobody retries a reply, and refusing one could

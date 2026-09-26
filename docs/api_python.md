@@ -122,9 +122,11 @@ the time and their peer types are ordinary ones.
   whether every one has it in effect; what a backend's drain uses, see
   [How a backend leaves](leaving.md#what-a-draining-backend-still-takes).
 - `instance_id`, `connections_count()`, `shutdown()`. `shutdown()` returns
-  once every multiplexer has closed its side of the connection too, a round
-  trip, a second at most, so that what was written arrives
+  once every multiplexer has closed its side of the connection too, a
+  round trip, a second at most, so that what was written arrives
   ([semantics](semantics.md#failure-modes)); after it the object is done.
+  `with SyncClient(...) as client:` shuts it down at the end of the block
+  ([lifetimes](#lifetimes)).
 
 A multiplexer restarting between two calls costs nothing when the client
 is connected to others: the next call uses another one. With a single
@@ -299,7 +301,7 @@ called. It returns `True` by default and the backend keeps serving; return
 backends that would rather be restarted than continue. `close()` writes
 what is still queued, the last replies, for up to a second, then closes the
 connections as `SyncClient.shutdown()` does; `serve_forever()` calls it on the
-way out.
+way out, and a `with` block at its end ([lifetimes](#lifetimes)).
 
 **Leaving gracefully.** From `periodic_task()`, call `start_draining()`
 when asked to leave: the backend tells every multiplexer to route it
@@ -431,7 +433,7 @@ through it, rather than through `self`.
   collected. `self.send_message(message, **kwargs)` sends a message that is
   not a reply, with no defaults; `self.client` is the `ThreadedClient`.
 - Searches are answered while the backend serves, from `serve_forever()`
-  on: a busy
+  on until `close()` begins: a busy
   `BaseMultiplexerServer` answers a search when it gets to it, and this
   class answers at once from the io thread. `decline_searches_when_full=True`
   leaves a search unanswered while every worker is busy and requests wait,
@@ -449,7 +451,8 @@ through it, rather than through `self`.
   `on_handler_exception()` on the worker thread, and `False` from there
   makes `serve_forever()` return and re-raise. `close()` joins the
   workers, so from a handler it raises `RuntimeError` rather than join
-  itself; a handler that wants the server gone calls `stop()`. `pending`
+  itself; a handler that wants the server gone calls `stop()`; a `with`
+  block calls it at its end ([lifetimes](#lifetimes)). `pending`
   is the number of requests waiting or being handled, `dropped` the
   number a full queue dropped or leaving refused; `instance_id` what a
   client addresses with `to`.
@@ -544,7 +547,12 @@ client.shutdown()
   round trip, a second at most. A client whose last reference goes in one
   of its own callbacks, a callback query that outlived the caller's
   reference say, shuts down there without waiting for its thread, which
-  ends on its own. The client is not fork-safe: create it after forking.
+  ends on its own. `with ThreadedClient(...) as client:` shuts it down at
+  the end of the block; what dropping a client does, and when one is
+  freed, is under [Lifetimes](#lifetimes). The client is not fork-safe:
+  create it after forking. `orphaned()` is whether this one was inherited
+  across a fork, where its calls raise `UsedAfterFork`
+  ([fork](#threads-exit-and-fork)).
 
 The old two-client pattern, one client sending with `from` set to a
 receiving client's id and a thread looping on the receiver, is what this
@@ -639,6 +647,42 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   Django Channels; [examples/aio](../examples/aio) is a complete asyncio
   gateway.
 
+## Lifetimes
+
+Every client and server holds connections, most an io thread too, and
+ends when told to: `shutdown()` for `SyncClient` and `ThreadedClient`,
+`close()` for `AsyncClient` and the server classes. A `with` block does
+it at its end, however the block ended, `async with` for `AsyncClient`:
+
+```python
+with ThreadedClient(addresses, type=peers.WEB) as client:
+    reply = client.query(b"pears", type=types.SEARCH_REQUEST)
+
+with SearchBackend(addresses, type=peers.SEARCH) as backend:
+    backend.serve_forever()  # closes on its way out; the block's close() then does nothing
+```
+
+- **Dropped while running.** A `ThreadedClient` given `on_message`, an
+  `AsyncClient` and a threaded server refer to themselves through a
+  callback that their running io thread holds, so dropping every reference
+  to one ends nothing: it runs, connected, a backend answering requests,
+  until it is shut down or closed, as a running `threading.Thread`, a
+  `logging.handlers.QueueListener` or a `socketserver` server does.
+  Nothing warns about one never shut down, since it is never collected
+  while it runs.
+- **Dropped and freed.** A `SyncClient`, and a `ThreadedClient` given no
+  callback, are freed when dropped: the destructor shuts the client down
+  on the thread that dropped it, waiting for the multiplexers' side of the
+  close, a second at most, so that what was written arrives.
+- **Serving.** `serve_forever()` holds its server while it serves and
+  closes it on its way out. A server only connected with `connect()`, as a
+  test may do, serves on its io thread and workers until `close()`.
+- **Shut down.** A client shut down, or a server closed, lets go of its
+  callbacks and is freed once nothing else refers to it; its sends and
+  queries fail from then on.
+- **Forks and interpreter exit** are under [Threads, exit and
+  fork](#threads-exit-and-fork).
+
 ## Threads, exit and fork
 
 A `SyncClient` belongs to one thread; a `ThreadedClient` may be
@@ -665,15 +709,60 @@ an `AsyncClient` or a `ThreadedClient` alive exits cleanly.
 
 **Fork.** A client inherited by a forked child, from gunicorn's workers,
 `multiprocessing`, or Django's parallel test runner, is an orphan there:
-its io thread does not exist in the child, its locks may be held by
-nobody, and its sockets are shared with the parent. Every call on it raises
-`UsedAfterFork`, a `NotConnected`, before touching anything; dropping it
-closes only the child's descriptor copies, never the parent's connection.
+its io thread does not exist in the child, its locks may have been held at
+the fork by threads that do not exist there either, and its sockets are
+shared with the parent. Every call on it that would send, receive,
+connect, wait or take one of its locks raises `UsedAfterFork`, a
+`NotConnected`, first, and so does every use of a lane or a connection
+from before the fork, even by a client made in the child; a `SyncClient`'s
+getters, `connections_count()` say, answer with what it knew at the fork,
+and `ThreadedClient.orphaned()` tells without raising. Of a threaded
+server, `close()`, `connect()`, `serve_forever()` and `pending` raise, and
+`stop()` only clears `working`, since a signal handler may call it; the
+function an `AsyncClient`'s `subscribe()` returned does nothing.
+`shutdown()`, or an `AsyncClient`'s `close()`, on an inherited client
+closes the child's copies of its connections, once, never the parent's
+connection. Dropping one does the same, except a client with a callback,
+an `AsyncClient`, a `ThreadedClient` given `on_message` or the one inside
+a threaded server, which refers to itself through the callback until it
+is shut down: shut it down, a server's as `server.client.shutdown()`, and
+it is freed when dropped.
 Create clients after forking, never at import: a module-level client made
-by the parent before the fork is exactly what every worker inherits. The
-detection is a fork generation counter maintained by a `pthread_atfork`
-handler, so it covers forks the library never saw, at no cost when nobody
-forks.
+by the parent before the fork is exactly what every worker inherits. A
+holder that makes the client on first use, as in [the web server
+recipe](recipes/web_server.md), shuts the inherited one down in a fork
+hook and makes its lock anew there, since the fork can come while another
+thread holds the old one; `AsyncClient.holder()` does both. The detection
+is a fork generation counter maintained by a `pthread_atfork` handler, so
+it covers forks the library never saw; a call pays one load for it, and
+nothing else runs when nobody forks.
+
+**What a forked child can still wait on.** The child of a process with
+threads has only the thread that forked; a lock another thread held at
+that instant stays held unless something resets it in the child. glibc
+resets its allocator and stdio; it does not reset its name resolver. A
+child forked while a thread of the parent was inside `getaddrinfo` can
+find a lock of the resolver held for good: every name lookup there waits
+forever, and so, in some cases, does a thread's exit. The library looks
+names up, on a thread of its own, whenever a client connects to a
+multiplexer by name, and again at every reconnect attempt, every 3 s,
+while that multiplexer is unreachable. So a program that forks while
+clients are alive gives every client addresses, the parent's too,
+`("10.0.0.1", 1980)` rather than `("mx1.internal", 1980)`, or resolves the
+names once before it makes any; an address in text is never looked up. The
+same goes for the program's own threads that resolve names, and the
+dynamic loader's locks are the same kind of hazard for a child that
+imports an extension module while a parent thread was importing one.
+`multiprocessing`'s `spawn` start method starts every child from a fresh
+interpreter, and `forkserver` forks it from a server started that way,
+which has no threads and no client unless a module preloaded into it makes
+them: none of this reaches either.
+
+**A fork inside a callback.** A child forked inside one of the client's
+callbacks, `on_message` or a query's, is a copy of the io thread in the
+middle of its loop: once the callback returns, the child runs the parent's
+loop on the parent's sockets. Such a child calls `exec` or `os._exit()`
+before the callback returns, which `subprocess` does.
 
 ## Testing
 

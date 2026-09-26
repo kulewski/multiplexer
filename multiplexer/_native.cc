@@ -27,6 +27,7 @@ template <typename Signature>
 using Callable = pybind11::function;
 }  // namespace mxtyping
 #endif
+#include <pthread.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -181,6 +182,7 @@ struct PythonClient : public Client {
   // lane and must not be handed to another connection if this one dies.
   mxtyping::Tuple<ScheduledMessageTracker, ConnectionWrapper> schedule_one_used(pybind11::bytes serialized, bool pinned,
                                                                                 float timeout) {
+    basic_client_->check_not_orphaned();  // first: an inherited client's loop and sockets are the parent's
     std::string message(serialized);
     ConnectionWrapper used;
     basic_client_->poll();  // as Client::schedule_one does
@@ -192,6 +194,7 @@ struct PythonClient : public Client {
     return mxtyping::Tuple<ScheduledMessageTracker, ConnectionWrapper>(pybind11::make_tuple(tracker, used));
   }
   bool wait_for_any_connection(float timeout) {
+    basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
     GilRelease release;
     return basic_client_->wait_for_any_connection(*timer);
@@ -200,6 +203,7 @@ struct PythonClient : public Client {
   // A (bytes, connection) pair, or None once `watch` is gone.
   std::optional<mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>> read_message_watching(float timeout,
                                                                                            ConnectionWrapper watch) {
+    basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
     BasicClient::IncomingMessagesBuffer::value_type next;
     bool got;
@@ -224,6 +228,7 @@ struct PythonClient : public Client {
   // waiting there for room when it is full: null when it is gone; `pinned`
   // as for schedule_one_used.
   ScheduledMessageTracker schedule_on(pybind11::bytes serialized, ConnectionWrapper w, bool pinned, float timeout) {
+    basic_client_->check_not_orphaned();
     std::string message(serialized);
     basic_client_->poll();
     shared_ptr<const RawMessage> raw = _serialize(&message);
@@ -694,6 +699,10 @@ PYBIND11_MODULE(_native, module) {
       "A client with an io thread of its own; see multiplexer.threaded_client for the Python API.")
       .def(pybind11::init<std::uint32_t, pybind11::object>(), pybind11::arg("peer_type"), pybind11::arg("on_message"))
       .def("instance_id", [](const multiplexer::PythonThreadedClient& client) { return client.client.instance_id(); })
+      .def(
+          "orphaned", [](const multiplexer::PythonThreadedClient& client) { return client.client.orphaned(); },
+          "Whether the client was made before a fork this process is the child of: every call raises "
+          "UsedAfterFork.")
       .def("random", [](multiplexer::PythonThreadedClient& client) { return client.client.random64(); })
       .def("connect", &multiplexer::PythonThreadedClient::connect, pybind11::arg("host"), pybind11::arg("port"),
            pybind11::arg("timeout"))
@@ -720,6 +729,10 @@ PYBIND11_MODULE(_native, module) {
       .def("shutdown", &multiplexer::PythonThreadedClient::shutdown);
 
   multiplexer::main_thread_ident = PyThread_get_thread_ident();  // the importing thread: the main one
+  // A forked child has none of the parent's threads, so none of the
+  // callbacks and waits they counted: begin_exit() would wait two seconds
+  // for them at every child's exit.
+  pthread_atfork(nullptr, nullptr, [] { multiplexer::gil_takers.store(0); });
   module.def(
       "begin_exit",
       [] {
@@ -734,6 +747,10 @@ PYBIND11_MODULE(_native, module) {
       "Tell the binding the interpreter is exiting: threads coming back from blocking waits park from now on, "
       "no callback into Python starts, and the ones in progress are waited for. "
       "Registered with atexit by mxclient.py.");
+  module.def(
+      "_gil_takers", [] { return multiplexer::gil_takers.load(); },
+      "Threads past their exit check and taking or holding the GIL from C++ (callbacks, returns from blocking "
+      "waits), which begin_exit() waits for: for tests.");
   module.def("heap_in_use_bytes", &mx::heap_in_use_bytes,
              "Bytes currently allocated from the C heap by this process (exact, glibc mallinfo2).");
 

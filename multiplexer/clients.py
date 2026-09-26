@@ -14,7 +14,7 @@ one C++ call when that level is off.
 """
 
 import pickle
-from typing import Any, Callable, Literal, overload
+from typing import Any, Callable, Literal, TypeVar, overload
 
 from multiplexer import mxclient
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
@@ -136,6 +136,9 @@ class BasicClient(mxclient.Client):
         return super(BasicClient, self).send_and_receive(*args, **kwargs)
 
 
+_SyncClientT = TypeVar("_SyncClientT", bound="SyncClient")
+
+
 class SyncClient(BasicClient):
     """A peer's connections to every multiplexer in `addresses`, a list of
     (host, port) pairs, used from one thread; named Client up to 2.3.1.
@@ -153,6 +156,15 @@ class SyncClient(BasicClient):
         super(SyncClient, self).__init__(type)
         for host, port in addresses:
             self.connect((host, port))
+
+    def __enter__(self: _SyncClientT) -> _SyncClientT:
+        """The client, for a `with` block, at whose end it is shut down
+        however the block ended."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """shutdown(), at the end of a `with` block."""
+        self.shutdown()
 
 
 # The name up to 2.3.1, kept as the same class object: isinstance,

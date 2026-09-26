@@ -40,6 +40,9 @@ void BasicClient::check_not_orphaned() const {
 }
 
 void BasicClient::orphan_close_descriptors() {
+  if (orphan_descriptors_closed_.exchange(true)) {
+    return;
+  }
   for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
        ++entry) {
     if (Connection::pointer conn = entry->second.lock()) {

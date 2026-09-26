@@ -175,6 +175,7 @@ PY_TEST_FILES := \
   multiplexer/graceful_stop_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \
+  multiplexer/lifetime_test.py \
   multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \
   multiplexer/no_connection_test.py \

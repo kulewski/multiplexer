@@ -16,6 +16,7 @@ import pickle
 import sys
 import time
 import traceback
+from typing import TypeVar
 
 from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedException  # re-exported
 from multiplexer.mxlog import *
@@ -92,6 +93,9 @@ def nothing_more_arrives(routing: Routing) -> bool:
     multiplexers confirmed it: every path by the rules is off and the
     peer is no last resort, so only addressed messages can still come."""
     return not (routing.any or routing.all or routing.last_resort)
+
+
+_ServerT = TypeVar("_ServerT", bound="BaseMultiplexerServer")
 
 
 class BaseMultiplexerServer(MultiplexerPeer):
@@ -422,6 +426,16 @@ class BaseMultiplexerServer(MultiplexerPeer):
         afterwards. Safe to call twice."""
         self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
         self.conn.shutdown()  # idempotent, so a second close() is harmless
+
+    def __enter__(self: _ServerT) -> _ServerT:
+        """The server, for a `with` block, at whose end it is closed however
+        the block ended: `with MyServer(...) as server: server.serve_forever()`."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """close(), at the end of a `with` block; after serve_forever()'s own
+        close() a second one does nothing."""
+        self.close()
 
 
 class MultiplexerServer(BaseMultiplexerServer):

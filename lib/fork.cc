@@ -8,18 +8,19 @@
 #include <atomic>
 
 namespace mx {
+
+std::atomic<unsigned int> fork_internal::generation{0};
+
 namespace {
 
-std::atomic<unsigned int> generation{0};
+void in_child() { fork_internal::generation.fetch_add(1, std::memory_order_relaxed); }
 
-void in_child() { generation.fetch_add(1, std::memory_order_relaxed); }
-
+// Registered as this file is loaded, which every reader of the count makes
+// it be: the count is defined here.
 struct Registration {
   Registration() { pthread_atfork(nullptr, nullptr, in_child); }
 } registration;
 
 }  // namespace
-
-unsigned int fork_generation() { return generation.load(std::memory_order_relaxed); }
 
 }  // namespace mx

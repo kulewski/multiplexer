@@ -226,10 +226,13 @@ class ThreadedClient : public ExceptionDefinitions {
   // Ends every in-flight query with SHUT_DOWN, closes the connections and
   // stops the io thread. Idempotent; the destructor calls it. On the io
   // thread itself it does not wait for the thread, which ends once its
-  // handlers are done.
+  // handlers are done. The callbacks the client was given, on_message and
+  // the search policy, are destroyed when the io thread ends, on that
+  // thread, and in a forked child by shutdown() itself.
   void shutdown();
-  // Whether this client was inherited across a fork: every call then
-  // throws UsedAfterFork; see BasicClient::orphaned.
+  // Whether this client was inherited across a fork: its calls then throw
+  // UsedAfterFork, and shutdown() and the destructor only close the
+  // child's descriptor copies, once; see BasicClient::orphaned.
   bool orphaned() const;
 
  private:

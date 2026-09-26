@@ -345,11 +345,14 @@ cc_test(
     size = "small",
     srcs = ["fork_test.cc"],
     data = ["//tests:testing.rules"],
+    linkopts = ["-ldl"],  # dlsym, for the pthread_mutex_lock wrapper, in libdl before glibc 2.34
     deps = [
         ":client",
         ":in_process_multiplexer",
         ":multiplexer_cc_constants",
         ":threaded_client",
+        "//lib:timer",
+        "//multiplexer/backend:base_threaded_multiplexer_server",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -527,6 +530,22 @@ py_library(
     ],
 )
 
+# What ends a client or a server: with, shutdown()/close(), and dropping.
+py_test(
+    name = "lifetime_test",
+    size = "small",
+    srcs = ["lifetime_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "leak_test",
     size = "medium",
@@ -536,6 +555,7 @@ py_test(
         "//tests:testing.rules",
     ],
     deps = [
+        ":aio",
         ":clients",
         ":multiplexer_constants",
         ":servers",
@@ -570,10 +590,12 @@ py_test(
     ],
     main = "fork_test.py",
     deps = [
+        ":aio",
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
         ":threaded_client_py",
+        ":threaded_server",
     ],
 )
 

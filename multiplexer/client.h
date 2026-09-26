@@ -83,9 +83,10 @@ class Client : public ExceptionDefinitions {
 
   // Connectivity; see BasicClient for the semantics.
   void shutdown();
-  // Whether this client was inherited across a fork, in which case every
-  // call throws UsedAfterFork and the destructor only closes the child's
-  // descriptor copies; see BasicClient::orphaned.
+  // Whether this client was inherited across a fork, in which case its
+  // calls throw UsedAfterFork, the getters aside, and shutdown() and the
+  // destructor only close the child's descriptor copies, once; see
+  // BasicClient::orphaned.
   bool orphaned() const { return basic_client_->orphaned(); }
   // Makes the calling thread the one this client is used from, for a client
   // built on one thread and driven from another; BaseMultiplexerServer's
@@ -192,6 +193,7 @@ class Client : public ExceptionDefinitions {
   }
 
   void flush(ScheduledMessageTracker tracker, mx::SimpleTimer& timer) const {
+    basic_client_->check_not_orphaned();
     std::size_t n;
     while (tracker && tracker.in_queue() && !timer.expired()) {
       n = basic_client_->run_one();
@@ -276,12 +278,6 @@ class Client : public ExceptionDefinitions {
 
   // Queues `msg` on every live connection, a full one's copy waiting for
   // its room as above; returns how many connections got a copy.
-  template <typename T>
-  unsigned int schedule_all(T& msg, float timeout = DEFAULT_TIMEOUT) {
-    basic_client_->poll();
-    return basic_client_->schedule_all(_serialize(msg), NULL, timeout);
-  }
-
   template <typename T>
   unsigned int schedule_all(const T& msg, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();

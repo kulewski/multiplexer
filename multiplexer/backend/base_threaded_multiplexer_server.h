@@ -134,13 +134,19 @@ class BaseThreadedMultiplexerServer {
   // sends, so that the line means reachable, or in a test that wants the
   // backend connected without a thread serving it.
   void connect();
-  // Take no more messages, let the workers finish what is queued, stop
-  // them and close the connections. What still arrives, routed before
-  // the multiplexers applied the drain routing or saw the connection go,
-  // is refused with DELIVERY_ERROR, a reply dropped. Idempotent; the
-  // destructor calls it.
+  // Take no more messages, tell every multiplexer the drain_routing as
+  // start_draining() does, answer no search, let the workers finish what
+  // is queued, stop them and close the connections. What still arrives,
+  // routed before the multiplexers applied the drain routing or saw the
+  // connection go, is refused with DELIVERY_ERROR, a reply dropped.
+  // Idempotent: a second call, from another thread too, returns once the
+  // first is done. The destructor calls it.
   // Joins the workers, so from a handler, on a worker, it throws
   // std::logic_error: a handler that wants the server gone calls stop().
+  // In a forked child, on a server the parent made, it throws
+  // UsedAfterFork before any lock, as connect(), serve_forever() and
+  // pending() do, stop() only clears `working`, and the destructor only
+  // lets go of what the parent's threads held (_forget_the_parents_threads).
   void close();
 
   // Draining, as on BaseMultiplexerServer: tell every multiplexer the
@@ -180,13 +186,16 @@ class BaseThreadedMultiplexerServer {
   // Whether to answer a client's search for a backend; on the io thread,
   // so quick. False with decline_searches_when_full while every worker is
   // busy and requests wait. A draining backend needs no policy here: the
-  // multiplexers stop offering it (drain_routing).
+  // multiplexers stop offering it (drain_routing). A closing one answers
+  // no search, whatever this returns.
   virtual bool should_respond_to_backend_for_packet_search() const;
 
   std::atomic<bool> working{true};
 
  private:
   void _on_message(const IncomingMessage& incoming);
+  void _check_not_inherited() const;
+  void _forget_the_parents_threads();
   void _start_workers();
   void _work();
   void _handle(const RequestPtr& request);
@@ -210,6 +219,9 @@ class BaseThreadedMultiplexerServer {
   std::condition_variable_any wake_;
   std::exception_ptr failure_;
   std::atomic<bool> connected_{false};
+  // Held over a whole close(): a second one, serve_forever()'s or the
+  // destructor's while another thread's joins the workers, waits for it.
+  mx::Mutex close_mutex_;
   std::atomic<bool> closed_{false};
   std::atomic<std::size_t> dropped_{0};
   mutable ThreadedClient client_;  // last: its callbacks reach the members above; asked from const drained()

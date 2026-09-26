@@ -236,12 +236,17 @@ class AsyncClient:
         """Run `handler(mxmsg)` on the loop for every message of `type`
         (None for every type) for which `matching(mxmsg)` is true; a
         coroutine function runs as a task. Returns the function that ends
-        the subscription."""
+        the subscription. In a forked child, on a client the parent made,
+        it raises UsedAfterFork, and the function it returned before the
+        fork does nothing: nothing is delivered there."""
+        self._threaded._check_not_orphaned()  # before the lock, which the parent's io thread takes for every message
         entry = (type, matching, handler)
         with self._lock:
             self._subscriptions.append(entry)
 
         def unsubscribe() -> None:
+            if self._threaded.orphaned():
+                return  # quietly, as in cleanup code, and never into a lock the parent's io thread may have held
             with self._lock:
                 if entry in self._subscriptions:
                     self._subscriptions.remove(entry)
@@ -253,6 +258,7 @@ class AsyncClient:
         iterator; with `type`, only those. The queue behind it exists from
         this call on and holds `queue_size` messages: when nobody reads,
         the oldest is dropped and a warning logged."""
+        self._threaded._check_not_orphaned()  # a stream nothing would ever feed, in a forked child
         self._check_loop()
         if self._queue is None:
             self._queue = asyncio.Queue(self._queue_size)
@@ -375,12 +381,18 @@ class Holder:
         os.register_at_fork(after_in_child=self._forget)
 
     def _forget(self) -> None:
-        """A forked child must not touch the parent's client."""
+        """A forked child must not touch the parent's client. One it
+        inherited is closed, which there closes only the child's copies of
+        the parent's connections: dropping it would close nothing, since
+        its callback keeps it alive."""
+        client = self._client
         self._lock = threading.Lock()
         self._client = None
         self._creating = None
         self._generation += 1
         self._pid = os.getpid()
+        if client is not None:
+            client.close()
 
     def _addresses_now(self) -> list[Endpoint]:
         return list(self._addresses() if callable(self._addresses) else self._addresses)

@@ -69,6 +69,9 @@ BasicClient::BasicScheduledMessageTracker BasicClient::schedule_one(std::shared_
 BasicClient::BasicScheduledMessageTracker BasicClient::schedule_on(std::shared_ptr<const RawMessage> raw,
                                                                    const ConnectionWrapper& wrapper, float timeout,
                                                                    std::uint64_t number, LanePtr lane) {
+  if (wrapper.inherited()) {
+    MXTHROW(UsedAfterFork());  // the parent's connection; see ConnectionWrapper
+  }
   MX_DCHECK_RUN_ON(&owner_thread());
   Connection::pointer conn = wrapper.lock();
   if (!conn || !conn->living()) {

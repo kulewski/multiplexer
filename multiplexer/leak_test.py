@@ -7,6 +7,7 @@ collection, reference counts of objects handed to the binding, and weak
 references that must die once the strong ones are dropped.
 """
 
+import asyncio
 import gc
 import os
 import subprocess
@@ -17,6 +18,7 @@ import tracemalloc
 import unittest
 import weakref
 
+from multiplexer.aio import AsyncClient
 from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
@@ -264,6 +266,33 @@ class LeakTest(unittest.TestCase):
         gc.collect()
         self.assertIsNone(weak_threaded(), "ThreadedClient still referenced after shutdown")
         self.assertIsNone(weak_synchronous(), "Client still referenced after shutdown")
+
+    def test_clients_with_callbacks_are_collectable_after_shutdown(self):
+        """A client with a callback refers to itself through it, and the
+        binding holds the callback in C++, where the collector cannot see the
+        cycle: once shut down the client lets go of its callbacks, and is
+        freed when dropped. A ThreadedClient given on_message, after a message
+        reached it, an AsyncClient, and a connected threaded backend."""
+        arrived = threading.Event()
+        threaded = ThreadedClient([self.endpoint], type=peers.WEBSITE, on_message=lambda mxmsg: arrived.set())
+        threaded.send_message(b"to itself", type=types.PYTHON_TEST_REQUEST, to=threaded.instance_id)
+        self.assertTrue(arrived.wait(10), "the message to itself never arrived")
+        threaded.shutdown()
+        loop = asyncio.new_event_loop()
+        asynchronous = AsyncClient([self.endpoint], peers.WEBSITE, loop=loop)
+        asynchronous.close()
+        backend = ThreadedBackend([self.endpoint], type=peers.PYTHON_TEST_SERVER)
+        backend.connect()
+        backend.close()
+        weak = {
+            "ThreadedClient with on_message": weakref.ref(threaded),
+            "AsyncClient": weakref.ref(asynchronous),
+            "threaded backend": weakref.ref(backend),
+        }
+        del threaded, asynchronous, backend
+        gc.collect()
+        loop.close()
+        self.assertEqual({name: True for name in weak}, {name: ref() is None for name, ref in weak.items()}, "freed")
 
 
 if __name__ == "__main__":

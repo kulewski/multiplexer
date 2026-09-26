@@ -27,11 +27,11 @@ a reply came through, preferred while it is live. docs/api_python.md,
 """
 
 import pickle
-from typing import Any, Callable, Literal, overload
+from typing import Any, Callable, Literal, TypeVar, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
-from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut, make_message
+from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut, UsedAfterFork, make_message
 from multiplexer.multiplexer_constants import types
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
 
@@ -44,6 +44,7 @@ class BackendError(Exception):
 
 Endpoint = tuple[str, int]
 QueryResult = "MultiplexerMessage | Exception"
+_ThreadedClientT = TypeVar("_ThreadedClientT", bound="ThreadedClient")
 
 
 class ThreadedClient:
@@ -96,6 +97,20 @@ class ThreadedClient:
     def instance_id(self) -> int:
         """This peer's instance id, the `from` of everything it sends."""
         return self._native.instance_id()
+
+    def orphaned(self) -> bool:
+        """Whether the client was made before a fork this process is the
+        child of, where its calls raise UsedAfterFork and shutdown() closes
+        only the child's copies of its connections. A load and a compare:
+        for a class built on this one to check first."""
+        return self._native.orphaned()
+
+    def _check_not_orphaned(self) -> None:
+        """Raises UsedAfterFork when orphaned(), in the library's words: for
+        the classes built on this one, before a lock of their own that the
+        parent's io thread takes and may have held at the fork."""
+        if self._native.orphaned():
+            raise UsedAfterFork("client used after fork; create a new one in the child")
 
     def connect(self, endpoint: Endpoint, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """Connect and wait up to `timeout` for the handshake; False is not final,
@@ -387,5 +402,17 @@ class ThreadedClient:
     def shutdown(self) -> None:
         """Fail every query in flight, close the connections, stop the thread.
         Returns once every multiplexer has closed its side too, a round
-        trip, a second at most, so that what was written arrives."""
+        trip, a second at most, so that what was written arrives. The
+        client lets go of its callbacks then, so that it is freed when
+        dropped: until shut down, one given on_message refers to itself
+        through it and stays alive."""
         self._native.shutdown()
+
+    def __enter__(self: _ThreadedClientT) -> _ThreadedClientT:
+        """The client, for a `with` block, at whose end it is shut down
+        however the block ended."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """shutdown(), at the end of a `with` block."""
+        self.shutdown()

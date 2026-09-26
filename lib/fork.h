@@ -8,9 +8,17 @@
 #ifndef MX_LIB_FORK_H_
 #define MX_LIB_FORK_H_
 
+#include <atomic>
+
 namespace mx {
 
-unsigned int fork_generation();
+namespace fork_internal {
+// The count fork_generation() reads, bumped by fork.cc's child handler;
+// here so that a check is a load, inlined, not a call.
+extern std::atomic<unsigned int> generation;
+}  // namespace fork_internal
+
+inline unsigned int fork_generation() { return fork_internal::generation.load(std::memory_order_relaxed); }
 
 }  // namespace mx
 
