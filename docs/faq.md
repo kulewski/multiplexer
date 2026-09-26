@@ -1,12 +1,12 @@
 # Questions people ask
 
-**Why must a peer built on the synchronous `Client` be passive?**
-Only the synchronous `Client` must be. It runs its event loop only inside
+**Why must a peer built on `SyncClient` be passive?**
+Only a peer on `SyncClient` must be. It runs its event loop only inside
 calls, so between calls it can neither send heartbeats nor notice a
 closed socket, and a multiplexer that expected heartbeats from it would
 drop it after 90 s of not being called; marking the peer type
 `is_passive` tells the multiplexer to expect nothing. No other class needs
-the mark: `ThreadedClient`, `AsyncClient` and both backend classes run
+the mark: `ThreadedClient`, `AsyncClient` and both server classes run
 the loop all the time, so their peer types are ordinary, active ones,
 and they reconnect on their own. A deployment that builds every peer on
 those never writes `is_passive` at all.
@@ -73,9 +73,9 @@ a slow receiver in memory, so keep large messages off `whom: ALL` types and
 give their receivers a small `queue_size`.
 
 **Can a backend built on `BaseMultiplexerServer` send requests of its own?**
-It can, but not well. Its connection is a `Client` (`self.conn` in
-Python, `conn` in C++, and the second C++ constructor lets you supply your
-own), so `query()` works from inside `handle_message`. While that nested query waits
+It can, but not well. Its connection works like a `SyncClient`
+(`self.conn` in Python, `conn` in C++, and the second C++ constructor lets
+you supply your own), so `query()` works from inside `handle_message`. While that nested query waits
 for its reply, though, every other message that arrives on the backend's
 connections is logged and dropped rather than kept for later, so concurrent
 requests to that backend are lost. Sending an event from a backend is fine.
@@ -92,12 +92,12 @@ or a long handler, the signal waits, and on an idle backend in a receive
 with no timeout it waits forever. And there is exactly one handler per
 signal per process: a C++ library in the same binary that installs its own
 replaces Python's without a trace. The loop therefore polls, and a backend
-built on one of the backend classes notices a request to leave from
+built on one of the server classes notices a request to leave from
 `periodic_task()`, by a file a preStop hook wrote or a flag another thread
 set, within one poll. A pure C++ backend may still set a `sig_atomic_t` from
 a handler of its own and read it there.
 
-**Is there a backend class that runs handlers on worker threads?**
+**Is there a server class that runs handlers on worker threads?**
 Yes: `BaseThreadedMultiplexerServer`, in `multiplexer.threaded_server` and
 `multiplexer/backend/base_threaded_multiplexer_server.h`. Its io thread
 keeps the heartbeats going while its handlers run on worker threads, so a
@@ -108,19 +108,17 @@ The handler gets a `Request` and answers through it, from any thread.
 [Which class to build on](README.md#which-class-to-build-on)
 says when to prefer it.
 
-**Can I use it from asyncio?**
-Yes: `multiplexer.aio.AsyncClient` awaits queries and sends and delivers
-events to coroutines on the loop. It is an async face on the threaded
-client: the io thread still runs the protocol, and the loop only ever
-waits on futures, so nothing blocks it. What arrives on its own is
-delivered on the loop the client was made on; queries and sends may be
-awaited from any loop, so code run through `async_to_sync` shares the
-process's client. A worker of an ASGI server makes its own at first use,
-through the holder. There is no asyncio backend class: the backend
-classes have a thread of their own by design, and a program that wants
-both sides runs such a backend on `BackendThread`. A backend that answers
-only requests addressed to its instance id can be built on `AsyncClient`
-itself.
+**Can I use it from asyncio?** Yes: `multiplexer.aio.AsyncClient` awaits
+queries and sends and delivers events to coroutines on the loop. It is an
+async face on `ThreadedClient`: the io thread still runs the protocol,
+and the loop only ever waits on futures, so nothing blocks it. What arrives
+on its own is delivered on the loop the client was made on; queries and
+sends may be awaited from any loop, so code run through `async_to_sync`
+shares the process's client. A worker of an ASGI server makes its own at
+first use, through the holder. There is no asyncio server class: the server
+classes have a thread of their own by design, and a program that wants both
+sides runs such a backend on `BackendThread`. A backend that answers only
+requests addressed to its instance id can be built on `AsyncClient` itself.
 
 **Why Bazel?**
 The rules file has to produce the same constants in C++ and Python in one

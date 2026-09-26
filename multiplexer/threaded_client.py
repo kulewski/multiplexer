@@ -10,8 +10,8 @@ Everything else that arrives, events and requests addressed to this peer
 and the delivery errors for messages that were not queries, goes to the
 on_message callback given at construction, or is logged and dropped when
 there is none; late replies, pings and searches never reach it.
-docs/api_python.md has the user's view; the synchronous
-multiplexer.clients.Client remains for programs that prefer no thread.
+docs/api_python.md has the user's view; multiplexer.clients.SyncClient
+remains for programs that prefer no thread.
 
 Callbacks, on_message and query()'s, run on the io thread, with the GIL,
 and must return quickly; they may call query() with a callback and

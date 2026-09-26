@@ -64,13 +64,21 @@ bazel run //compdb                         # compile_commands.json for clangd, a
   path; no syscalls there; error handling on the failure path only.
 - Network input is never validated with `Assert`. It is a protocol error that
   closes the offending connection.
-- A peer is a backend, driven by the library's loop, or a client. A client
-  built on the synchronous `Client` is passive and only calls in when it has
-  something to send; a `ThreadedClient` runs the loop on its own thread and
-  may use an active peer type. Do not build an active client any other way.
-  A backend is a `BaseMultiplexerServer`, one thread, or a
-  `BaseThreadedMultiplexerServer`, handlers on workers behind the threaded
-  client's io thread; `docs/README.md` says which to use when.
+- A role is what a peer does, not the class it is built on: a client sends
+  requests or events, a backend receives them and answers the requests.
+  Role words are plain lower case; class names are in code font and in
+  full: `SyncClient` (named `Client` before 2.4.0; both names work),
+  `ThreadedClient`, `AsyncClient`, and the server classes
+  `BaseMultiplexerServer` and `BaseThreadedMultiplexerServer`, which run a
+  `serve_forever()` loop that calls `handle_message()`. "Client" in a class
+  name is not the role. Never write "client class" or "backend class"; write
+  the names, or "the server classes". A peer on `SyncClient` is passive and
+  only calls in when it has something to send; an active client is a
+  `ThreadedClient` or an `AsyncClient`, never a `SyncClient` on a thread of
+  its own. A backend is usually built on a server class: a
+  `BaseMultiplexerServer`, one thread, or a `BaseThreadedMultiplexerServer`,
+  handlers on workers behind an io thread; `docs/README.md` says which class
+  to use when.
 - There is no peer authentication and `from` is not checked; the broker runs
   inside a trusted network. Do not add either without discussing it first.
 - Warnings are errors for our code (`-Wall -Wextra -Werror`), external code is

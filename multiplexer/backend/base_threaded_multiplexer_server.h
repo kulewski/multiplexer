@@ -59,7 +59,7 @@ struct ThreadedServerOptions {
 
 // One message being handled, and what answers it. reply() fills in `to`,
 // `references`, `workflow` and the connection from the request and sends
-// through the threaded client, from whichever thread calls it.
+// through its ThreadedClient, from whichever thread calls it.
 class Request {
  public:
   ~Request();  // logs a warning when nobody answered or called no_response()

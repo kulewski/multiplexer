@@ -1,7 +1,7 @@
 # How a query is answered
 
-A query is a request that expects exactly one answer: `Client.query()` in
-Python, `Client::query()` in C++. Almost always it is one message out and one
+A query is a request that expects exactly one answer: `SyncClient.query()`
+in Python, `SyncClient::query()` in C++. Almost always it is one message out and one
 message back. If the backend that took the request fails, the client finds
 another one and asks again. The three pictures below show the normal case, the
 recovery, and what happens when no backend of the right type exists at all.
@@ -586,7 +586,7 @@ graph LR
 
 ### 3. The client probes for the instance on every connection
 
-The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it whatever its routing, as every addressed message does, or with `probe=PING` a `PING`, which the backend classes, `ThreadedClient` and `AsyncClient` all answer, echoing its payload, so it also finds a peer that serves no requests (the synchronous `Client` does not answer it). Delivery errors are requested, so a multiplexer without the instance says so. The connection dying under the first stage leads here too. A request that simply gets no answer within the timeout does not: a silent addressee is one the multiplexer still has, and a probe would find the same one.
+The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it whatever its routing, as every addressed message does, or with `probe=PING` a `PING`, which the server classes, `ThreadedClient` and `AsyncClient` all answer, echoing its payload, so it also finds a peer that serves no requests (`SyncClient` does not answer it). Delivery errors are requested, so a multiplexer without the instance says so. The connection dying under the first stage leads here too. A request that simply gets no answer within the timeout does not: a silent addressee is one the multiplexer still has, and a probe would find the same one.
 
 ```mermaid
 graph LR

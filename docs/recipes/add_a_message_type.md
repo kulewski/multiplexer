@@ -5,8 +5,8 @@ file and in the peers; nothing in this repository changes.
 
 1. **Edit the rules file.** Add a `peer { type: N name: "NAME" }` block for a
    new kind of program, with `is_passive: true` if its program is built on
-   the synchronous `Client`, and a `type { type: N name: "NAME" to { peer:
-   "..." whom: ANY|ALL } }` block for a new message type. Numbers must be 100
+   `SyncClient`, and a `type { type: N name: "NAME" to { peer: "..." whom:
+   ANY|ALL } }` block for a new message type. Numbers must be 100
    or more and unique within their kind; names must be unique. [The rules
    file](../rules.md) has every field. A reply type needs no `to` rule.
 2. **Build.** The constants regenerate: `peers.NAME` and `types.NAME` in

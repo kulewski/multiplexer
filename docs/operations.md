@@ -266,10 +266,10 @@ types`, and for every file it puts in use later `rules reloaded from
 <path>: <old> -> <new>, ...`, which a test waits for with
 `Mx.log_contains()`. The libraries log their own connections at `INFO`,
 `registered connection` with the multiplexer's instance id when one is
-made and `unregistered connection` when it ends, the synchronous clients
-`connecting to` before it; a `ThreadedClient` warns `connection lost under
-query <id>; sending again`, or `; locating the addressee`, for each query
-it sends again.
+made and `unregistered connection` when it ends, and a `SyncClient` or a
+server class logs `connecting to` before it; a `ThreadedClient` warns
+`connection lost under query <id>; sending again`, or `; locating the
+addressee`, for each query it sends again.
 
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a

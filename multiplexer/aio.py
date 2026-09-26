@@ -168,7 +168,7 @@ class AsyncClient:
         with_connection: bool = False,
     ) -> Any:
         """Send a request and await its reply. Raises the same exceptions
-        as the synchronous client: NotConnected, OperationTimedOut,
+        as SyncClient: NotConnected, OperationTimedOut,
         OperationFailed, BackendError. Cancelling the await does not cancel
         the request: a backend may still receive it, its reply is dropped.
         `to`, `probe`, `multiplexer` and `with_connection` are

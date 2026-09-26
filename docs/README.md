@@ -29,14 +29,22 @@ a pool of interchangeable workers, and publish/subscribe for events.
   answering each request. A backend that only receives events answers
   nothing. It is a role, not a class: a backend can be built on
   `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer`,
-  `ThreadedClient` or `AsyncClient`.
+  `ThreadedClient`, `AsyncClient`, or in a pinch `SyncClient`.
 - **Client**: a peer that sends requests or events: a request expects
-  exactly one answer, an event expects nothing. A client built on the
-  synchronous `Client` does not run the loop between calls, so its peer type is marked
-  `is_passive` in the rules file and the multiplexer does not expect a
-  heartbeat from it. That is the only class that needs the mark: a
-  `ThreadedClient`, an `AsyncClient` and both backend classes run the loop
+  exactly one answer, an event expects nothing. A client built on
+  `SyncClient` does not run the loop between calls, so its peer type is
+  marked `is_passive` in the rules file and the multiplexer does not expect
+  a heartbeat from it. That is the only class that needs the mark:
+  `ThreadedClient`, `AsyncClient` and the two server classes run the loop
   all the time.
+- **Class names**: five classes connect a program to the multiplexers.
+  `SyncClient` (named `Client` before 2.4.0; both names work),
+  `ThreadedClient` and `AsyncClient` give you calls and hand you what
+  arrives; `BaseMultiplexerServer` and `BaseThreadedMultiplexerServer`,
+  the server classes, run a `serve_forever()` loop that calls your
+  `handle_message()`. "Client" in a class name is part of the name, not
+  the role, and "server" names no role here: which class a program is
+  built on says nothing about what it does.
 - **Peer type**: what kind of program a peer is, chosen from the rules file
   when it connects. Backends of one type are interchangeable; routing is by
   peer type.
@@ -53,7 +61,7 @@ a pool of interchangeable workers, and publish/subscribe for events.
 ## Which class to build on
 
 A program that serves requests by type must answer the search that
-typed requests are routed by. Both backend classes do; so does a
+typed requests are routed by. Both server classes do; so does a
 `ThreadedClient` given a search policy (`search_policy` in Python,
 `set_search_policy` in C++), which is how the Python
 `BaseThreadedMultiplexerServer` is built. A backend that answers only
@@ -62,26 +70,37 @@ built on `ThreadedClient` or `AsyncClient`: a service reachable by `to`
 after an introduction. Otherwise which class is a matter of how the
 program is shaped.
 
-Among the backend classes: `BaseMultiplexerServer` when every handler is
+Between the server classes: `BaseMultiplexerServer` when every handler is
 quick and requests are handled one at a time, the simplest class and the
 usual one; `BaseThreadedMultiplexerServer` when a request may run longer
 than the multiplexer's drop interval (90 s as shipped), when several
 must be handled at once, or when a handler blocks on a query of its own.
-Among the client classes: `Client` for a program with one thread and no
+Among the other three: `SyncClient` for a program with one thread and no
 event loop, the only class whose peer type needs `is_passive`;
 `ThreadedClient` for a threaded server or anything with more than one
 thread, a backend included; `AsyncClient` for asyncio.
 
-| | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `Client` |
+| | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `SyncClient` |
 |---|---|---|---|---|---|
 | who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
 | found by typed requests | yes: answers the backend search | yes | with a search policy (`search_policy`, `set_search_policy`); otherwise only a search addressed to it | no | no |
-| receives | requests routed by type, events, addressed messages | the same | requests and events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
-| handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing arrives on its own |
+| receives | requests routed by type, events, addressed messages | the same | requests and events routed to its type, addressed messages | the same, as handlers or streams | what `receive_message()` returns; while a query waits, everything but its reply is dropped |
+| handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing by itself: a loop of your own calls `receive_message()` |
 | a handler may block | no: nothing heartbeats meanwhile | yes, for as long as it needs | no: it runs on the io thread | no: it runs on the loop | |
 | sends | replies, and anything from `periodic_task()` | replies from any thread, events from any thread | queries and events from any thread | awaited | queries and events from its thread |
 | peer type | not passive | not passive | not passive | not passive | `is_passive` |
 | leaves | drain, then `serve_forever()` returns | the same, the queue finished first | `shutdown()` | `aclose()` | `shutdown()` |
+
+A backend on `SyncClient` is possible in a pinch: a loop of its own calls
+`receive_message()` and answers each request with `send_message(reply,
+type=..., to=request.from_, references=request.id)`. On its own it
+answers neither the backend search nor a `PING`, so a typed request
+reaches it only through the rules, at a query's first attempt or that
+attempt sent again after a lost connection, never through the search that
+follows a delivery error or a timeout, and an addressed query's probe
+never finds it. A backend that typed requests must find belongs on a
+server class or on a `ThreadedClient` given a search policy, and one
+reached only by `to` can be built on any of the other four.
 
 [Using the Python library](api_python.md) and [the C++ library](api_cpp.md)
 describe each.
@@ -153,7 +172,7 @@ graph LR
    implement `handle_message`, reply with `send_message` when the message is
    a request, and call `serve_forever()`. Python and C++ versions of a complete one are in
    [examples/echo](../examples/echo).
-4. **Write a client.** Create a `Client` with the addresses of all your
+4. **Write a client.** Create a `SyncClient` with the addresses of all your
    multiplexers and call `query()` for requests or `send_message()` for events.
 5. **Build against it** from your own Bazel workspace as `@mx`, with the two
    lines described in [examples/README.md](../examples/README.md), and point
@@ -186,7 +205,7 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [The rules file](rules.md): peer types, message types, routing rules, the
   reserved ranges, pointing a build at your file.
 - [Using the Python library](api_python.md) and
-  [using the C++ library](api_cpp.md): `Client`, `ThreadedClient`,
+  [using the C++ library](api_cpp.md): `SyncClient`, `ThreadedClient`,
   `AsyncClient` for asyncio, and `BaseMultiplexerServer`, every call and
   every exception; the Python page also covers
   [testing](api_python.md#testing) with `multiplexer.testing` and reading a

@@ -360,6 +360,16 @@ cc_test(
 )
 
 cc_test(
+    name = "client_names_test",
+    size = "small",
+    srcs = ["client_names_test.cc"],
+    deps = [
+        ":client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "recorder_test",
     size = "small",
     srcs = ["recorder_test.cc"],
@@ -744,6 +754,17 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "client_names_py_test",
+    size = "small",
+    srcs = ["client_names_test.py"],
+    main = "client_names_test.py",
+    deps = [
+        ":clients",
         "//multiplexer/testing",
     ],
 )

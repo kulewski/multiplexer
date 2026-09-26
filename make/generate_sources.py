@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT = os.path.join(ROOT, "make", "sources.mk")
 
 # What ships: the multiplexer with every subcommand, the Python extension,
-# the C++ backend classes, and the C++ test roles' Event proto, which the
+# the C++ server classes, and the C++ test roles' Event proto, which the
 # testing package needs.
 SHIPPED = (
     "//mxcontrol:mxcontrol_with_debug_symbols + //multiplexer:_native_with_debug_symbols.so"

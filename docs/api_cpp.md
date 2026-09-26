@@ -1,7 +1,10 @@
 # Using the C++ library
 
-`multiplexer::Client` in [multiplexer/client.h](../multiplexer/client.h)
-is the synchronous client class; `multiplexer::backend::BaseMultiplexerServer` in
+`multiplexer::SyncClient` in [multiplexer/client.h](../multiplexer/client.h)
+is the class a program on one thread connects with. It is an alias of the
+class `multiplexer::Client`, its name before 2.4.0, which compiler messages
+show and a forward declaration must name (`class Client;`), since an alias
+cannot be forward-declared. `multiplexer::backend::BaseMultiplexerServer` in
 [multiplexer/backend/base_multiplexer_server.h](../multiplexer/backend/base_multiplexer_server.h)
 is one class a backend can be built on. The constants generated from the
 [rules file](rules.md) are in `multiplexer/multiplexer.constants.h`, as
@@ -24,17 +27,17 @@ are the same as in Python: `type`, `message` (a `std::string` of bytes),
 sent again after a timeout, a search or a lost connection carries a new id,
 so a backend that must not do the same work twice keys on the payload, not
 on `id()`. A message you pass to a query is never changed, since the library
-sends copies: `Client` sends the first attempt under the message's own id,
+sends copies: `SyncClient` sends the first attempt under the message's own id,
 `ThreadedClient` draws one for every attempt, the first included, and in
 both a reply's `references()` names the attempt it answers.
 
-## Client
+## SyncClient
 
 ```cpp
 #include "multiplexer/client.h"
 #include "multiplexer/multiplexer.constants.h"
 
-multiplexer::Client client(multiplexer::peers::ECHO_CLIENT);
+multiplexer::SyncClient client(multiplexer::peers::ECHO_CLIENT);
 client.connect("10.0.0.1", 1980);
 client.connect("10.0.0.2", 1980);
 multiplexer::IncomingMessage reply = client.query("hello", multiplexer::types::ECHO_REQUEST, 10);
@@ -66,10 +69,10 @@ client.shutdown();
   found, each stage with its own `timeout`. A message with `to` set is an
   addressed query, with one `timeout` for its stages, see
   [below](#lanes-pinning-and-addressed-queries). Throws
-  `Client::OperationFailed` when no backend can be found,
-  `Client::OperationTimedOut` when a stage runs out of time,
-  `Client::NotConnected` when no connection is live. All three derive from
-  `Client::MxClientError`, which derives from `std::exception`.
+  `SyncClient::OperationFailed` when no backend can be found,
+  `SyncClient::OperationTimedOut` when a stage runs out of time,
+  `SyncClient::NotConnected` when no connection is live. All three derive from
+  `SyncClient::MxClientError`, which derives from `std::exception`.
 - `send(mxmsg, timeout, lane = nullptr)` writes an event through one
   connection and returns it, replacing a connection that dies under the
   write or waiting for the reconnect within `timeout`: the way to send an
@@ -108,7 +111,7 @@ A message built by hand must carry `set_id(client.random64())` and
 
 ### Lanes, pinning and addressed queries
 
-The same on `Client` and `ThreadedClient`; the reasoning is in
+The same on `SyncClient` and `ThreadedClient`; the reasoning is in
 [the Python API](api_python.md#lanes-pinning-and-addressed-queries).
 
 - **An addressed query** is a `query(mxmsg, ...)` whose message has
@@ -120,9 +123,9 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   covers the stages. The probe is `PROBE_SEARCH` by default, a
   `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it
   whatever its routing, as every addressed message does, or `PROBE_PING`,
-  which the backend classes and `ThreadedClient` all answer, so it also
+  which the server classes and `ThreadedClient` all answer, so it also
   finds a peer that serves no requests. The library sets `report_delivery_error` on the request. The old
-  behaviour of `Client::query` with `to`, a search by type and the
+  behaviour of `SyncClient::query` with `to`, a search by type and the
   request to whichever backend answered, is gone.
 - **A lane**, `multiplexer::Lane` in `multiplexer/basic_client.h`, held as
   `LanePtr` (a `std::shared_ptr<Lane>`), is a soft, late pin, or, made
@@ -134,7 +137,7 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   keeps its order. A lane that is not pinned takes another connection when
   its own dies. `Lane(true)` is pinned: once it is `closed()` the lane
   refuses, `send` returning 0 and `query` `NOT_CONNECTED` (`NotConnected`
-  on `Client`), and a pinned message a dying connection had not written
+  on `SyncClient`), and a pinned message a dying connection had not written
   is reported lost, never handed to another connection
   (`RawMessage::pinned`). `Lane(connection, pinned)`
   seeds a lane. `connection()`, `holds_connection()`, `connected()`,
@@ -184,7 +187,7 @@ test does: until that thread has connected, the first request finds no
 backend and fails. Call it too when you
 drive `loop_iter` yourself instead of `serve_forever`, and in a test that
 wants a backend connected without a thread serving it. A second call does
-nothing. The second constructor takes a `Client*` you created and
+nothing. The second constructor takes a `SyncClient*` you created and
 connected, for backends that also act as clients.
 `serve_forever(poll = 1.0f, drain_seconds = 0.0f)` runs the loop:
 each iteration waits up to `poll` seconds for a message, handles it if one
@@ -192,11 +195,11 @@ came, then calls the virtual `periodic_task()`, message or not, so anything
 checked there takes effect within one poll. It returns, with the
 connections closed, when the public `working` flag is cleared or a drain is
 over. `loop_iter(timeout)` does one step and throws
-`Client::OperationTimedOut` after `timeout` seconds. The thread that calls
+`SyncClient::OperationTimedOut` after `timeout` seconds. The thread that calls
 `serve_forever` becomes the backend's thread, whichever thread built it;
 in debug builds a later call from another thread fails an assertion. A
 program driving `loop_iter` itself from another thread calls
-`Client::bind_to_current_thread()` and then `connect()` first.
+`SyncClient::bind_to_current_thread()` and then `connect()` first.
 
 `send_message(Kwargs)` takes named arguments, because the message has many
 optional fields. Keys and their exact types:
@@ -248,13 +251,13 @@ rather than timing out; the backend keeps serving. A Python requester sees
 `BackendError`; a C++ requester's `query()` returns the `BACKEND_ERROR`
 message itself, so check `reply.third->type()` when the backend may fail.
 `close()` writes what is still queued, the last replies, for up to a second,
-then closes the connections as `Client::shutdown()` does.
+then closes the connections as `SyncClient::shutdown()` does.
 
 ## BaseThreadedMultiplexerServer
 
 `multiplexer::backend::BaseThreadedMultiplexerServer` in
 [multiplexer/backend/base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h)
-is the backend class whose handlers run on worker threads behind a
+is the server class whose handlers run on worker threads behind a
 heartbeating io thread; target `@mx//multiplexer/backend:base_threaded_multiplexer_server`.
 When to use it rather than `BaseMultiplexerServer` is in
 [the Python API](api_python.md#basethreadedmultiplexerserver): a request
@@ -355,7 +358,7 @@ client.shutdown();
 - `query(payload, type, timeout, lane)` blocks and returns a `Result`: `outcome`
   is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend anywhere, or the
   addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and `check()` returns
-  the reply or throws the exception `Client::query` would have. `query(msg,
+  the reply or throws the exception `SyncClient::query` would have. `query(msg,
   timeout, lane, probe)` takes the request as a whole, `to` included, and
   sets its id and from per attempt: the addressed form, and
   `query(msg, connection, ...)` prefers a connection, see
@@ -390,7 +393,7 @@ client.shutdown();
   or `timeout` seconds, and returns whether it was. What is sent meanwhile
   is not waited for, so a flush ends however busy the client is, and a
   message lost on the way, with its connection or at its own timeout, does
-  not count. What the backend classes do in `close()`. Not from callbacks.
+  not count. What the server classes do in `close()`. Not from callbacks.
 - The `MessageSink` given to the constructor runs on the io thread with
   every message that is not a reply to a query: events and requests
   addressed to this peer, and a `DELIVERY_ERROR` for a message that was
@@ -428,7 +431,7 @@ checks that (`--config=clang`).
 
 ## Threads
 
-Neither `Client` nor `BaseMultiplexerServer` is thread-safe. One `Client`
+Neither `SyncClient` nor `BaseMultiplexerServer` is thread-safe. One `SyncClient`
 belongs to one thread, and a `BaseMultiplexerServer` runs on the thread that
 calls `serve_forever()`. For parallel clients create one per thread, as the
 integration test roles do in

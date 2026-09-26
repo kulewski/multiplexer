@@ -1,4 +1,5 @@
-// The C++ client API: connect to multiplexers, send events, ask requests,
+// The synchronous C++ API, Client, which the docs call SyncClient (the
+// alias at the end): connect to multiplexers, send events, ask requests,
 // receive messages. This is what peers use directly and what the Python
 // binding (_native.cc) wraps; BaseMultiplexerServer builds backends on it.
 // docs/api_cpp.md describes it from the caller's side.
@@ -329,6 +330,11 @@ class Client : public ExceptionDefinitions {
   asio::io_service& io_service_;
   shared_ptr<BasicClient> basic_client_;
 };
+
+// SyncClient is this class's name in the docs since 2.4.0, so that no class
+// is named like the client role. Client stays the class itself: what a
+// forward declaration names and what compiler messages show.
+using SyncClient = Client;
 
 };  // namespace multiplexer
 

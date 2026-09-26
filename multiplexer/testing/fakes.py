@@ -5,7 +5,7 @@ FakePeer stands in for a backend the code under test talks to: tell it what
 to answer, run the code, then look at what it received. BackendThread serves
 a BaseMultiplexerServer of yours on its own thread, the thread the client
 library requires, and keeps what it raised. TestClient sends and queries
-from the test itself, on the synchronous client; ThreadedTestClient does
+from the test itself, on a SyncClient; ThreadedTestClient does
 the same on a ThreadedClient, so that a test sees what a production peer
 built on one sees, and keeps what arrives on its own. They complement the
 roles that run as processes (spawn): those exercise a whole program, these
@@ -17,7 +17,7 @@ import time
 from typing import Any, Callable, Generic, Protocol, TypeVar
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.clients import Client
+from multiplexer.clients import Client, SyncClient  # Client: the name before 2.4.0, importable here as before
 from multiplexer.mxclient import ConnectionWrapper, Lane
 from multiplexer.multiplexer_constants import types
 from multiplexer.servers import BaseMultiplexerServer
@@ -300,14 +300,14 @@ class FakePeer:
 class TestClient:
     """A client of `peer_type` connected to every multiplexer of `cluster`,
     for the test's own sending and querying; `client` is the underlying
-    multiplexer.clients.Client for the rest of its API. Like every
-    synchronous client it runs the loop only inside calls, so its peer type
-    should be is_passive in the rules file."""
+    multiplexer.clients.SyncClient for the rest of its API. Like every
+    SyncClient it runs the loop only inside calls, so its peer type should
+    be is_passive in the rules file."""
 
     def __init__(self, cluster: Cluster, peer_type: int):
         self.cluster = cluster
         self.peer_type = peer_type
-        self.client = Client(cluster.endpoints, type=peer_type)
+        self.client = SyncClient(cluster.endpoints, type=peer_type)
 
     @property
     def instance_id(self) -> int:
@@ -315,7 +315,7 @@ class TestClient:
         return self.client.instance_id
 
     def lane(self, pinned: bool = False, connection: ConnectionWrapper | None = None) -> Lane:
-        """A Lane for `multiplexer=`: one connection for a stream of messages; Client.lane() says the rest."""
+        """A Lane for `multiplexer=`: one connection for a stream of messages; SyncClient.lane() says the rest."""
         return self.client.lane(pinned, connection)
 
     def send(
@@ -324,7 +324,7 @@ class TestClient:
         type: int,
         to: int = 0,
         flush: bool = True,
-        multiplexer: int | Lane | ConnectionWrapper = Client.ONE,
+        multiplexer: int | Lane | ConnectionWrapper = SyncClient.ONE,
         **kwargs: Any,
     ) -> int:
         """Send `payload` (bytes, str or a protocol buffer message) as a
@@ -342,13 +342,13 @@ class TestClient:
         timeout: float = 10,
         to: int = 0,
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
-        multiplexer: int | Lane | ConnectionWrapper = Client.ONE,
+        multiplexer: int | Lane | ConnectionWrapper = SyncClient.ONE,
         with_connection: bool = False,
     ) -> Any:
         """Send `payload` as a request of `type` and return the reply; with
         `to`, addressed to that instance, located with `probe` when it
         moved; through a Lane or a ConnectionWrapper as `multiplexer`;
-        (reply, connection) with `with_connection`. Client.query() says the rest."""
+        (reply, connection) with `with_connection`. SyncClient.query() says the rest."""
         return self.client.query(
             payload,
             type=type,
@@ -382,10 +382,11 @@ class ThreadedTestClient:
     events and requests addressed to it, is kept: `received` in arrival
     order, messages(type, matching=None), wait_for(type, count=1,
     timeout=10, matching=None), via(mxmsg) and arrivals(type), as on
-    FakePeer. TestClient, on the synchronous client, never drops a late
-    reply and never answers a search, so a test of a peer built on
-    ThreadedClient that passes on it may not pass in production; this one
-    shows what production shows. `client` is the ThreadedClient underneath.
+    FakePeer. TestClient, on a SyncClient, keeps a late reply that
+    arrives between its calls and never answers a search, so a test of a
+    peer built on ThreadedClient that passes on it may not pass in
+    production; this one shows what production shows. `client` is the
+    ThreadedClient underneath.
     """
 
     def __init__(self, cluster: Cluster, peer_type: int, name: str | None = None):

@@ -54,7 +54,7 @@ class LessonConsumer(AsyncWebsocketConsumer):
 `receive` awaits the backend's reply without holding the loop; `push` is a
 coroutine the client schedules on the loop for every event the predicate
 accepts, and if it raises, the client logs it with the message's type and
-sender and the other subscriptions still run. The exceptions are the synchronous client's: catch
+sender and the other subscriptions still run. The exceptions are those of `SyncClient`: catch
 `OperationTimedOut` and `OperationFailed` where the socket should get an
 error frame rather than nothing.
 

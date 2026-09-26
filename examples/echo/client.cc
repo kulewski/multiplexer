@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
   std::string text = argc > 2 ? argv[2] : "hello multiplexer";
   std::string::size_type colon = address.rfind(':');
 
-  multiplexer::Client client(multiplexer::peers::ECHO_CLIENT);
+  multiplexer::SyncClient client(multiplexer::peers::ECHO_CLIENT);
   client.connect(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1))));
 
   // query() sends the request through one connection and returns the reply;
@@ -23,10 +23,10 @@ int main(int argc, char** argv) {
   try {
     multiplexer::IncomingMessage reply = client.query(text, multiplexer::types::ECHO_REQUEST, /*timeout=*/10);
     std::cout << reply.third->message() << std::endl;
-  } catch (const multiplexer::Client::OperationFailed&) {
+  } catch (const multiplexer::SyncClient::OperationFailed&) {
     std::cerr << "no ECHO_BACKEND is connected" << std::endl;
     return 1;
-  } catch (const multiplexer::Client::OperationTimedOut&) {
+  } catch (const multiplexer::SyncClient::OperationTimedOut&) {
     std::cerr << "no answer within the timeout" << std::endl;
     return 1;
   }

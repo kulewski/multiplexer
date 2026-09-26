@@ -120,7 +120,7 @@ type {
     comment: "this only defines a constant"
 }
 
-# The replies the backend classes send besides the caller's own, addressed
+# The replies the server classes send besides the caller's own, addressed
 # to the requester, which is why they need no rule.
 
 type {

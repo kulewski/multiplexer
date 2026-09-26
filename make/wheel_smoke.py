@@ -4,13 +4,14 @@ inside it is executable and runs as the `mxcontrol` command and as `python
 -m multiplexer.mxcontrol`; its generate_rules and generate_constants give
 back the package's own constants; the multiplexer the command starts is the
 package's binary, under the command's pid and name, with no signal ignored,
-and it ends with 0 on SIGTERM; a host name resolves; and a rules file of
-the smoke's own, the system rules with a client's and a backend's types
-after them, runs two multiplexers that answer every query. With MXCONTROL
-set, the harness runs that binary instead, and its rules and constants must
-be the package's: the check that the wheel's mxcontrol and the static one
-have not drifted apart. It runs from an empty directory, so that nothing of
-the source tree can stand in for what the wheel must carry."""
+and it ends with 0 on SIGTERM; a host name resolves; Client, the
+synchronous client's name before 2.4.0, is the class SyncClient; and a
+rules file of the smoke's own, the system rules with a client's and a
+backend's types after them, runs two multiplexers that answer every query.
+With MXCONTROL set, the harness runs that binary instead, and its rules and
+constants must be the package's: the check that the wheel's mxcontrol and
+the static one have not drifted apart. It runs from an empty directory, so
+that nothing of the source tree can stand in for what the wheel must carry."""
 
 import os
 import re
@@ -25,6 +26,7 @@ os.chdir(tempfile.mkdtemp())
 
 import multiplexer.mxcontrol
 from multiplexer import multiplexer_constants
+from multiplexer.clients import Client, SyncClient
 from multiplexer.testing import Cluster, FakePeer, ThreadedTestClient
 
 BINARY = multiplexer.mxcontrol.binary_path()
@@ -58,6 +60,9 @@ def exe(pid: int) -> str:
 # The binary is inside the package, executable.
 assert BINARY.startswith(PACKAGE + os.sep), BINARY
 assert os.access(BINARY, os.X_OK), BINARY
+
+# The synchronous client under both names is one class.
+assert Client is SyncClient, (Client, SyncClient)
 
 # The command and `python -m` run it; help lists its subcommands on stderr.
 for command in ([COMMAND, "help"], [sys.executable, "-m", "multiplexer.mxcontrol", "help"]):

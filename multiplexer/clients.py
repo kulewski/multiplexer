@@ -1,14 +1,14 @@
-"""The Python client API: Client, and MxClient to hold one.
+"""The synchronous Python API: SyncClient, and MxClient to hold one.
 
-A program built on the synchronous Client, or on an MxClient holding one,
-imports this module, whatever its role (docs/api_python.md). It builds on
+A program built on SyncClient, or on an MxClient holding one, imports this
+module, whatever its role (docs/api_python.md). SyncClient was named Client
+before 2.4.0, and Client is still the same class. It builds on
 multiplexer.mxclient, which wraps the C++ Client: everything about
 connections, queues, timeouts and the query algorithm lives there; this
 module adds the BACKEND_ERROR check and the exception classes.
-BaseMultiplexerServer, a base class for backends, is in multiplexer.servers
-and is re-exported here for the older import path.
+BaseMultiplexerServer, a base class for backends, is in multiplexer.servers.
 
-Threading: a Client belongs to one thread. @log_call on most methods logs
+Threading: a SyncClient belongs to one thread. @log_call on most methods logs
 entry and exit at DEBUG/CHATTERBOX; it checks should_log() first, so it costs
 one C++ call when that level is off.
 """
@@ -136,12 +136,13 @@ class BasicClient(mxclient.Client):
         return super(BasicClient, self).send_and_receive(*args, **kwargs)
 
 
-class Client(BasicClient):
-    """A client connected to every multiplexer in `addresses`, a list of (host, port) pairs.
+class SyncClient(BasicClient):
+    """A peer's connections to every multiplexer in `addresses`, a list of
+    (host, port) pairs, used from one thread; named Client before 2.4.0.
 
-    This client is passive: the loop runs only inside calls, so the peer
-    type must be marked is_passive in the rules file, which no other
-    class needs. See docs/api_python.md.
+    It is passive: the loop runs only inside calls, so its peer type must
+    be marked is_passive in the rules file, which no other class needs.
+    See docs/api_python.md.
     """
 
     @log_call
@@ -149,26 +150,30 @@ class Client(BasicClient):
         """`addresses`: (host, port) pairs of every multiplexer; `type`: a peers.* constant."""
         if type is None:
             raise ValueError
-        super(Client, self).__init__(type)
+        super(SyncClient, self).__init__(type)
         for host, port in addresses:
             self.connect((host, port))
 
 
-class MxClient:
-    """One synchronous Client for one peer type, created on first use.
+# The name before 2.4.0, kept as the same class object: isinstance,
+# subclassing and Client.ONE/ALL work under either name, at no cost.
+Client = SyncClient
 
-    A place to keep the client without a module-level global, and a way
-    to read the addresses lazily: `addresses` is a list of (host, port)
-    pairs or a zero-argument callable returning one, so settings can be
-    read at first use rather than at import. The Client does the rest
-    itself: every call notices a connection the multiplexer closed, uses
-    another one or waits for the reconnect, so nothing is checked or
-    rebuilt here.
+
+class MxClient:
+    """One SyncClient for one peer type, created on first use.
+
+    A place to keep one without a module-level global, and a way to read
+    the addresses lazily: `addresses` is a list of (host, port) pairs or a
+    zero-argument callable returning one, so settings can be read at first
+    use rather than at import. The SyncClient does the rest itself: every
+    call notices a connection the multiplexer closed, uses another one or
+    waits for the reconnect, so nothing is checked or rebuilt here.
 
         MX = MxClient(peers.WEB, lambda: settings.MULTIPLEXER_ADDRESSES)
         reply = MX.get().query(payload, type=types.SEARCH_REQUEST)
 
-    The Client belongs to one thread, and so does the holder: give each
+    The SyncClient belongs to one thread, and so does the holder: give each
     thread its own MxClient, or use
     multiplexer.threaded_client.ThreadedClient, which is made for sharing.
     """
@@ -183,14 +188,14 @@ class MxClient:
         """The current list of (host, port) pairs."""
         return list(self._addresses() if callable(self._addresses) else self._addresses)
 
-    def get(self) -> Client:
-        """The Client, connected to every address on first use, the same one afterwards."""
+    def get(self) -> SyncClient:
+        """The SyncClient, connected to every address on first use, the same one afterwards."""
         if self._client is None:
-            self._client = Client(self.addresses(), type=self.peer_type)
+            self._client = SyncClient(self.addresses(), type=self.peer_type)
         return self._client
 
     def shutdown(self) -> None:
-        """Close the held Client, if any; the next get() makes a new one."""
+        """Close the held SyncClient, if any; the next get() makes a new one."""
         if self._client is not None:
             self._client.shutdown()
             self._client = None

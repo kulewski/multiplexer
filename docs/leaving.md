@@ -49,11 +49,12 @@ The search follows `any`, although the multiplexer forwards it to every
 peer of the type like a fan-out: a search exists to find a backend for a
 request that will then be addressed to it, so a backend taking no new
 requests is not offered, and a last resort is offered when nobody else is.
-`set_routing()` on the client classes is the same call outside a drain, in
-both directions: a saturated backend can step out of the round robin and
-back in, and `routing_acknowledged()` says when the multiplexers have it.
-The multiplexer logs every change, records it as a `ROUTING` peer event,
-and marks a fan-out skipped for it as `NOT_ACCEPTED` in a recording.
+`set_routing()` on `SyncClient`, `ThreadedClient` and `AsyncClient` is the
+same call outside a drain, in both directions: a saturated backend can step
+out of the round robin and back in, and `routing_acknowledged()` says when
+the multiplexers have it. The multiplexer logs every change, records it as
+a `ROUTING` peer event, and marks a fan-out skipped for it as
+`NOT_ACCEPTED` in a recording.
 
 ## A drain, then the close: a rolling restart
 
@@ -178,7 +179,7 @@ slowest acceptable answer pays no more than it would have accepted anyway.
   backend had died. That window is the time between the backend's last read
   and the multiplexer noticing the close: microseconds on one host, a
   network round trip between hosts.
-- `BaseMultiplexerServer`, the plain backend class that runs its handler
+- `BaseMultiplexerServer`, the plain server class that runs its handler
   on the loop's thread, has the drain but not the refusal: what it had
   read when the drain ended is served before it closes, what arrives
   after its last read is lost the same way.
@@ -216,7 +217,7 @@ Where the pieces live: `start_draining()`, `drained()` and the
 and
 [base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h),
 the same on the plain classes; `set_routing()` and
-`routing_acknowledged()` on every client class, `BasicClient::set_routing`
+`routing_acknowledged()` on `SyncClient`, `ThreadedClient` and `AsyncClient`, `BasicClient::set_routing`
 underneath, which puts the routing in the welcome and sends
 `PEER_CONTROL`; `Server::send_to_one`, `send_to_all` and
 `_handle_peer_control` in [server.cc](../multiplexer/server.cc) on the

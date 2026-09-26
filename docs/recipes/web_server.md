@@ -3,8 +3,9 @@
 A web server such as Django under gunicorn or the development server runs
 every request on its own thread, forks workers after importing the
 application, and reloads or recycles processes while requests are in
-flight. The synchronous `Client` fits none of that: it belongs to one
-thread and is not fork-aware. `ThreadedClient` fits all of it.
+flight. `SyncClient` fits none of that: it belongs to one thread, and
+nothing makes a new one in a forked worker. `ThreadedClient` fits all of
+it.
 
 ## One client per process, created on first use
 

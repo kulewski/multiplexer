@@ -141,14 +141,14 @@ graph LR
 
 ## Through every connection
 
-`multiplexer=ALL` in Python, also available as `Client.event()`, and
+`multiplexer=ALL` in Python, also available as `SyncClient.event()`, and
 `schedule_all()` in C++. The same message goes out on each connection. Use it
 when the event must get through even if a multiplexer is unreachable from some
 backends; it costs one copy per multiplexer on every link.
 
 ### 1. One copy per connection
 
-The client queues the message on every live connection. C++ `schedule_all()` returns how many took it; a Python send returns the message id, and with `flush=True` waits until it is written, the synchronous client on every connection, the threaded and asyncio ones on the first.
+The client queues the message on every live connection. C++ `schedule_all()` returns how many took it; a Python send returns the message id, and with `flush=True` waits until it is written, the `SyncClient` on every connection, `ThreadedClient` and `AsyncClient` on the first.
 
 ```mermaid
 graph LR

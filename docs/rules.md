@@ -36,10 +36,10 @@ peer {
 - `comment`: optional, for the reader.
 - `queue_size`: how many messages the multiplexer will hold for one
   connection of this type before dropping new ones. Default 1024.
-- `is_passive`: true for peer types built on the synchronous `Client`,
+- `is_passive`: true for peer types built on `SyncClient`,
   which runs the library's loop only inside calls. The multiplexer then
   does not expect heartbeats from them and does not drop them for
-  silence. Default false, which is right for both backend classes,
+  silence. Default false, which is right for both server classes,
   `ThreadedClient` and `AsyncClient`, all of which run the loop all the
   time; a deployment built on those never needs the mark.
 
@@ -93,7 +93,7 @@ names the backends first.
 
 Peer types 1 to 99 and message types 1 to 99 belong to the protocol. A peer
 that announces a type in that range is refused, the two controllers below
-apart; the backend classes treat a message type in that range as internal
+apart; the server classes treat a message type in that range as internal
 and never pass it to `handle_message`.
 
 | Peer type | Value | Meaning |
@@ -136,7 +136,7 @@ The system rules also hold six ordinary types, which the libraries and
 | peer `LOG_RECEIVER_EXAMPLE` | 111 | `mxcontrol receive_logs`, which prints the stream |
 | `PICKLE_RESPONSE` | 112 | the reply `send_pickle()` and `reply_pickle()` send by default |
 | `REQUEST_RECEIVED` | 113 | what a backend on `BaseMultiplexerServer` sends with `notify_start()`, to say it is working on a request |
-| `BACKEND_ERROR` | 114 | what the backend classes send when a handler raised |
+| `BACKEND_ERROR` | 114 | what the server classes send when a handler raised |
 | `LOGS_STREAM` | 115 | the log entries `stream_logs` sends, to every `LOG_RECEIVER_EXAMPLE` |
 
 A Bazel build pointed at your file takes their numbers from it, and needs

@@ -71,7 +71,7 @@ that changes.
   and correlate in the payload. One reply per request.
 - **Events give no feedback** unless the rule reports delivery errors, and
   even then only that nobody was there, not that anybody processed it. A
-  flushing send (`flush=True`, `Client::send`) does guarantee the event was
+  flushing send (`flush=True`, `SyncClient::send`) does guarantee the event was
   written to a live connection, re-sending across a dead one. The report
   comes from each multiplexer that got a copy and found nobody: an event
   sent through every connection can bring one `DELIVERY_ERROR` per

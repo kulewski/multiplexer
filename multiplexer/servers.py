@@ -418,7 +418,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def close(self):
         """Write what is still queued, up to a second, then close every
-        connection as Client.shutdown() does; the server cannot be used
+        connection as SyncClient.shutdown() does; the server cannot be used
         afterwards. Safe to call twice."""
         self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
         self.conn.shutdown()  # idempotent, so a second close() is harmless
