@@ -1,10 +1,11 @@
 """Frames built around a peer's message near MAX_MESSAGE_SIZE, from Python:
-a PING whose echo would be over the limit is answered by a Python
-BaseMultiplexerServer with BACKEND_ERROR saying so, and a tap's record of a
-message near the limit has its payload cut to fit, marked truncated. Both
-used to go over the limit: the backend raised where it built the echo, and
-the multiplexer threw while routing, so the message reached no tap and its
-sender's connection was never read again.
+a PING or a search whose echo would be over the limit is answered by a
+Python BaseMultiplexerServer with BACKEND_ERROR saying so, and a tap's
+record of a message near the limit has its payload cut to fit, marked
+truncated. Both used to go over the limit: the backend raised where it
+built the echo, and the multiplexer threw while routing, so the message
+reached no tap and its sender's connection was never read again. And a
+search comes back carrying its payload, as a PING does.
 """
 
 import unittest
@@ -38,6 +39,13 @@ class Quiet(BaseMultiplexerServer):
         return True
 
 
+def fill_to_the_limit(message) -> None:
+    """Make `message` exactly MAX_MESSAGE_SIZE bytes long, serialized."""
+    message.message = b"p" * (MAX_MESSAGE_SIZE - message.ByteSize() - 16)
+    while message.ByteSize() < MAX_MESSAGE_SIZE:
+        message.message += b"p"
+
+
 def reply_to(client: Client, message_id: int, timeout: float = 20.0):
     """The next message `client` reads that references `message_id`."""
     while True:
@@ -58,15 +66,38 @@ class FramesAtTheLimitTest(unittest.TestCase):
                 client = Client(cluster.endpoints, type=peers.WEBSITE)
                 try:
                     ping = client.new_message(message=b"", type=types.PING, to=backend.conn.instance_id)
-                    ping.message = b"p" * (MAX_MESSAGE_SIZE - ping.ByteSize() - 16)
-                    while ping.ByteSize() < MAX_MESSAGE_SIZE:
-                        ping.message += b"p"
+                    fill_to_the_limit(ping)
                     client.send_message(ping, flush=True, timeout=20)
                     with self.assertRaises(BackendError) as answered:  # how the client reads BACKEND_ERROR
                         reply_to(client, ping.id)
                     self.assertIn(b"echo of a PING", answered.exception.args[0])
                     small = client.send_message(b"bounce", type=types.PING, to=backend.conn.instance_id, flush=True)
                     self.assertEqual(b"bounce", reply_to(client, small).message)
+                    self.assertEqual([], backend.exceptions)
+                finally:
+                    client.shutdown()
+
+    def test_a_search_is_answered_with_its_payload_echoed(self) -> None:
+        """A search comes back carrying its payload, as a PING does; one too big to come back gets BACKEND_ERROR."""
+        with Cluster(1, rules=RULES) as cluster:
+            with BackendThread(lambda: Quiet(cluster.endpoints, type=peers.PYTHON_TEST_SERVER)) as served:
+                backend = served.backend
+                assert backend is not None
+                client = Client(cluster.endpoints, type=peers.WEBSITE)
+                try:
+                    to = backend.conn.instance_id
+                    search = client.send_message(
+                        b"what the searcher sent", type=types.BACKEND_FOR_PACKET_SEARCH, to=to, flush=True
+                    )
+                    answer = reply_to(client, search)
+                    self.assertEqual(types.PING, answer.type)
+                    self.assertEqual(b"what the searcher sent", answer.message)
+                    big = client.new_message(message=b"", type=types.BACKEND_FOR_PACKET_SEARCH, to=to)
+                    fill_to_the_limit(big)
+                    client.send_message(big, flush=True, timeout=20)
+                    with self.assertRaises(BackendError) as answered:
+                        reply_to(client, big.id)
+                    self.assertIn(b"echo of a search", answered.exception.args[0])
                     self.assertEqual([], backend.exceptions)
                 finally:
                     client.shutdown()

@@ -265,7 +265,7 @@ graph LR
 
 ### 5. Each multiplexer asks its live backends, and each answers
 
-A multiplexer forwards the search to every backend of the request type it has that takes new requests, whatever the rule's `whom`; here backends 2 and 3 on each, of which the picture keeps one arrow per multiplexer. Each backend answers each search with a `PING` that references it. The client keeps the first `PING` to arrive, backend 2's via multiplexer 1 here, and ignores the later ones. It now knows backend 2's instance id and a connection that leads to it.
+A multiplexer forwards the search to every backend of the request type it has that takes new requests, whatever the rule's `whom`; here backends 2 and 3 on each, of which the picture keeps one arrow per multiplexer. Each backend answers each search with a `PING` that references it and carries the search back. The client keeps the first `PING` to arrive, backend 2's via multiplexer 1 here, and ignores the later ones. It now knows backend 2's instance id and a connection that leads to it.
 
 ```mermaid
 graph LR

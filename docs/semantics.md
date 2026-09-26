@@ -187,14 +187,15 @@ that changes.
   on; a client's callback that throws is logged with what it was called
   for.
 - **A message is near 128 MiB.** A few frames are built around a peer's
-  message and are a little bigger than it: the echo of a `PING`, a
-  delivery error that carries the original, a tap's record. For a message
-  near the limit they would be over it, so a `PING` whose echo would not
-  fit is answered with `BACKEND_ERROR` saying so, a delivery error leaves
-  the original out and sets `original_message_omitted`, and a tap's record
-  has its payload cut to fit, marked `truncated`. `ThreadedClient`'s
-  `query()` measures a request with the id it adds, so one within a few
-  bytes of the limit is refused at the call.
+  message and are a little bigger than it: the echo of a `PING` or of a
+  search, a delivery error that carries the original, a tap's record. For
+  a message near the limit they would be over it, so a `PING` or a search
+  whose echo would not fit is answered with `BACKEND_ERROR` saying so, a
+  delivery error leaves the original out and sets
+  `original_message_omitted`, and a tap's record has its payload cut to
+  fit, marked `truncated`. `ThreadedClient`'s `query()` measures a request
+  with the id it adds, so one within a few bytes of the limit is refused
+  at the call.
 - **The rules file changes.** Each multiplexer reads it again every 2 s,
   on `SIGHUP` and on `mxcontrol rules reload`, and puts a changed file in
   use whole, between two messages; the next message is routed by the new

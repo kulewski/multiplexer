@@ -204,6 +204,10 @@ class BaseMultiplexerServer {
  private:
   void __handle_message();
   void __handle_internal_message();
+  // Answers the message being handled, a PING or a search, with a PING
+  // carrying its payload back; `what` names it in the BACKEND_ERROR sent
+  // instead when that echo would be over MAX_MESSAGE_SIZE.
+  void _echo(const char* what);
 
  public:
   std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly

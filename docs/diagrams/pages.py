@@ -141,7 +141,8 @@ recovery like this one costs about one timeout on top of the normal round trip.
                     "type it has that takes new requests, whatever the rule's `whom`; here "
                     "backends 2 and 3 on each, of which the picture keeps one arrow per "
                     "multiplexer. Each backend answers each search with a `PING` that "
-                    "references it. The client keeps the first `PING` to arrive, backend "
+                    "references it and carries the search back. The client keeps the "
+                    "first `PING` to arrive, backend "
                     "2's via multiplexer 1 here, and ignores the later ones. It now knows "
                     "backend 2's instance id and a connection that leads to it.",
                     [4, 5, 6, 7, 8, 9],

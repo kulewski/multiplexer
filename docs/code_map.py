@@ -110,7 +110,8 @@ INDEX = [
     (
         "Frames built around a message near the size limit",
         "multiplexer/server.cc",
-        "`Server::_handle_delivery_errors`, `Server::_emit`; `ThreadedClient::Core::_on_unmatched`",
+        "`Server::_handle_delivery_errors`, `Server::_emit`; `ThreadedClient::Core::_on_unmatched`, "
+        "`BaseMultiplexerServer::_echo`",
     ),
     (
         "A client's connections closed without losing what was written",

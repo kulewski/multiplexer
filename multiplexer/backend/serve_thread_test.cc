@@ -159,6 +159,55 @@ TEST(ServeThread, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   EXPECT_FALSE(ended_by_exception.load());
 }
 
+// A search for a backend is answered with a PING carrying the search back,
+// as a PING is; it came back empty. One whose echo would be over the limit
+// gets BACKEND_ERROR saying so, and the backend serves on.
+TEST(ServeThread, ASearchIsAnsweredWithItsPayloadEchoed) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  StrictBackend backend(addresses);
+  std::atomic<bool> ended_by_exception(false);
+  std::thread server([&backend, &ended_by_exception] {
+    try {
+      backend.serve_forever(0.05f, 1.0f);
+    } catch (const std::exception&) {
+      ended_by_exception = true;
+    }
+  });
+  for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(backend.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  multiplexer::MultiplexerMessage search;
+  search.set_id(client.random64());
+  search.set_from(client.instance_id());
+  search.set_to(backend.conn_for_test()->instance_id());
+  search.set_type(multiplexer::types::BACKEND_FOR_PACKET_SEARCH);
+  search.set_message("what the searcher sent");
+  client.flush(client.schedule_one(search), 10);
+  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, search.id());
+  ASSERT_TRUE(answer) << "no answer to the search";
+  EXPECT_EQ(multiplexer::types::PING, answer->type());
+  EXPECT_EQ("what the searcher sent", answer->message());
+  search.set_id(client.random64());
+  search.set_message(std::string(multiplexer::MAX_MESSAGE_SIZE - search.ByteSizeLong() - 16, 's'));
+  while (search.ByteSizeLong() < multiplexer::MAX_MESSAGE_SIZE) {
+    search.mutable_message()->push_back('s');
+  }
+  client.flush(client.schedule_one(search), 10);
+  answer = reply_to(client, search.id());
+  ASSERT_TRUE(answer) << "no answer to the big search";
+  EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
+  EXPECT_NE(std::string::npos, answer->message().find("echo of a search")) << answer->message();
+  backend.leave = true;
+  server.join();
+  EXPECT_EQ(0, backend.exceptions.load());
+  EXPECT_FALSE(ended_by_exception.load());
+}
+
 // A draining BaseMultiplexerServer serves what it had already read: the
 // requests the synchronous client pulled off the socket while a reply was
 // being sent are handled before the connections close. Every request sent is
