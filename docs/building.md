@@ -147,7 +147,10 @@ extension's stub needs `pybind11-stubgen` importable by `PYTHON` there and
 is left out with no other consequence when it is not, and the stubs of
 the protocol buffer modules need a `protoc` of 3.20 or newer, which
 Ubuntu 22.04's 3.12 is not, so a package built there has none of those
-either.
+either. Bazel builds with such a `protoc` too:
+[bazel/system_protoc.sh](../bazel/system_protoc.sh), the default
+`//:protoc`, then leaves out the flag that asks for those stubs and writes
+in their place stubs that make every name of the module `Any`.
 [AGENTS.md](../AGENTS.md) lists the commands.
 
 ## Checking on a clean machine
