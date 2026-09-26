@@ -633,13 +633,13 @@ class Client(_mxclient.Client):
         while True:
             tracker = used = None
             if preferred:
-                tracker = self.schedule_on(raw, preferred, pinned)
+                tracker = self.schedule_on(raw, preferred, pinned, timeout_ticker())
                 used = preferred
                 preferred = None
             if not tracker and only_preferred:
                 raise NotConnected()
             if not tracker:
-                tracker, used = self.schedule_one_used(raw, pinned)
+                tracker, used = self.schedule_one_used(raw, pinned, timeout_ticker())
             if tracker:
                 self.flush(tracker, timeout=timeout_ticker())
                 if tracker.is_sent():
@@ -709,8 +709,11 @@ class Client(_mxclient.Client):
         the message reached the socket (every socket, for ALL), within
         `timeout` seconds, resending through another connection if the
         first dies under it; `embed` wraps `message` without looking at its
-        type. Raises NotConnected when no connection could take the
-        message, OperationTimedOut when a flush ran out of time. For the
+        type. A message a full connection cannot take waits for its room,
+        in order, within `timeout`, and goes in as a later call runs the
+        loop; a lane keeps its connection while that lives. Raises
+        NotConnected when no connection is live (or the pinned lane's is
+        gone), OperationTimedOut when a flush ran out of time. For the
         tracker of a queued message use schedule_one() or schedule_all()
         directly.
         """
@@ -739,7 +742,7 @@ class Client(_mxclient.Client):
         raw = mxmsg.SerializeToString()
 
         if multiplexer is Client.ALL:
-            count = self.schedule_all(raw)
+            count = self.schedule_all(raw, timeout_ticker())
             if flush and count and not self.flush_all(timeout_ticker()):
                 raise OperationTimedOut()
             return (mxmsg.id, count)
@@ -754,17 +757,17 @@ class Client(_mxclient.Client):
         if preferred is not None:
             return (mxmsg.id, self.schedule_one(raw, preferred, timeout_ticker()))
         if lane is None:
-            return (mxmsg.id, self.schedule_one(raw))
-        # Queued only, through the lane: its connection while live, else any
-        # (which the lane adopts), or nothing for a pinned lane whose
-        # connection is gone.
+            return (mxmsg.id, self.schedule_one(raw, timeout=timeout_ticker()))
+        # Queued only, through the lane: its connection while live, waiting
+        # there for room when it is full, else any (which the lane adopts),
+        # or nothing for a pinned lane whose connection is gone.
         if lane.closed:
             raise NotConnected()
         if lane.holds_connection:
-            tracker = self.schedule_on(raw, lane.connection, lane.pinned)
+            tracker = self.schedule_on(raw, lane.connection, lane.pinned, timeout_ticker())
             if tracker or lane.pinned:
                 return (mxmsg.id, tracker)
-        tracker, used = self.schedule_one_used(raw, lane.pinned)
+        tracker, used = self.schedule_one_used(raw, lane.pinned, timeout_ticker())
         if tracker:
             lane.adopt(used)
         return (mxmsg.id, tracker)

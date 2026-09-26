@@ -14,12 +14,23 @@
 
 #include <asio/buffer.hpp>
 #include <list>
+#include <stdexcept>
 #include <string>
 
 #include "lib/assertion.h"
 #include "multiplexer/defaults.h"
 
 namespace multiplexer {
+
+// A body over MAX_MESSAGE_SIZE never leaves: the receiving side would close
+// the connection. Raised where a frame is built, on the sender's thread, as
+// std::length_error, which Python sees as ValueError.
+inline void check_message_size(std::size_t size) {
+  if (size > MAX_MESSAGE_SIZE) {
+    throw std::length_error("a message of " + std::to_string(size) + " bytes, over the limit of " +
+                            std::to_string(MAX_MESSAGE_SIZE) + " (MAX_MESSAGE_SIZE)");
+  }
+}
 
 /**
  * RawMessage is a structured representation of wire format [length, crc, body].
@@ -47,7 +58,7 @@ class RawMessage {
         crc32_(Crc32(message)),
         header_(HEADER_LENGTH, 0),
         contents_(message) {
-    Assert(contents_.size() <= MAX_MESSAGE_SIZE);
+    check_message_size(contents_.size());
     initialize_header();
     switch_to_writing();
   }
@@ -60,7 +71,7 @@ class RawMessage {
         header_(HEADER_LENGTH, 0),
         contents_() {
     contents_.swap(*message);
-    Assert(contents_.size() <= MAX_MESSAGE_SIZE);
+    check_message_size(contents_.size());
     initialize_header();
     switch_to_writing();
   }

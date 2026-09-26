@@ -231,10 +231,24 @@ void BaseMultiplexerServer::__handle_internal_message() {
     case types::PING:
       if (!mxmsg.references()) {
         DbgAssert(mxmsg.id());
-        send_message(Kwargs()
-                         .set("message", mxmsg.message())
-                         //.set("flush", true)
-                         .set("type", types::PING));
+        // The echo, built as send_message() builds a reply, goes back with
+        // the payload as it came. One that would be over MAX_MESSAGE_SIZE is
+        // answered with BACKEND_ERROR saying so, rather than not at all.
+        MultiplexerMessage echo;
+        echo.set_id(conn->random64());
+        echo.set_from(conn->instance_id());
+        echo.set_message(mxmsg.message());
+        echo.set_type(types::PING);
+        echo.set_to(mxmsg.from());
+        echo.set_references(mxmsg.id());
+        echo.set_workflow(mxmsg.workflow());
+        if (echo.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+          echo.set_type(types::BACKEND_ERROR);
+          echo.set_message("the echo of a PING of " + std::to_string(mxmsg.message().size()) +
+                           " bytes would be over MAX_MESSAGE_SIZE");
+          echo.clear_workflow();
+        }
+        send_message(Kwargs().set("message", static_cast<const MultiplexerMessage*>(&echo)));
       } else {
         no_response();
       }

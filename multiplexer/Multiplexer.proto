@@ -191,6 +191,10 @@ message DeliveryError {
 
     // MultiplexerMessage that caused the error
     optional MultiplexerMessage original_message = 20;
+
+    // The original was asked for (include_original_packet_in_report) and
+    // left out, because the report would have been over MAX_MESSAGE_SIZE.
+    optional bool original_message_omitted = 21;
 }
 
 // The protocol's message types for the rules file, in the reserved range

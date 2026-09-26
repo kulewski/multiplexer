@@ -21,6 +21,7 @@ LIB_SRCS := \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
   multiplexer/io/raw_message.cc \
+  multiplexer/outbox.cc \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
   multiplexer/threaded_client.cc \
@@ -100,9 +101,11 @@ HEADERS := \
   multiplexer/defaults.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
+  multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
   multiplexer/threaded_client.h \
+  multiplexer/threaded_client_core.h \
   mxcontrol/driver.h \
   mxcontrol/help.h \
   mxcontrol/start_multiplexer_server.h \
@@ -158,6 +161,8 @@ PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/connect_by_name_test.py \
   multiplexer/fork_test.py \
+  multiplexer/frames_at_the_limit_test.py \
+  multiplexer/full_connection_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \
   multiplexer/mxlog_test.py \
@@ -169,5 +174,6 @@ PY_TEST_FILES := \
   multiplexer/testing/lanes_test.py \
   multiplexer/threaded_client_py_test.py \
   multiplexer/threaded_lanes_test.py \
+  multiplexer/threaded_sends_test.py \
   multiplexer/threaded_server_test.py \
 

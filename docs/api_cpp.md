@@ -75,13 +75,18 @@ client.shutdown();
   write or waiting for the reconnect within `timeout`: the way to send an
   event from a client that may have lost its connection since the last
   call. `send(mxmsg, connection, timeout)` prefers that connection.
-- `schedule_one(mxmsg)` queues an event on one connection and returns a
-  `ScheduledMessageTracker`; `schedule_one(mxmsg, wrapper, timeout)` picks
-  the connection. `schedule_all(mxmsg)` queues it on every connection and
-  returns how many. Queuing does not send: `flush(tracker, timeout)` runs the
-  loop until that message reached the socket, `flush_all(timeout)` until
-  every queue is empty. A tracker answers `in_queue()`, `is_sent()`,
-  `is_lost()`.
+- `schedule_one(mxmsg, timeout)` queues an event on one connection and
+  returns a `ScheduledMessageTracker`, null only when no connection is
+  live; `schedule_one(mxmsg, wrapper, timeout)` picks the connection.
+  `schedule_all(mxmsg, timeout)` queues it on every connection and returns
+  how many. A message a full connection cannot take (1024 queued) waits
+  for its room, in order, `timeout` seconds at most, as in
+  `ThreadedClient`; it goes in while a later call runs the loop, and is
+  dropped with a warning after its timeout. Queuing does not send:
+  `flush(tracker, timeout)` runs the loop until that message reached the
+  socket, `flush_all(timeout)` until everything sent before the call has,
+  what waits for room included. A tracker answers `in_queue()`,
+  `is_sent()`, `is_lost()`.
 - `receive_message(timeout = -1)` waits for the next message and returns a
   pair of the message and its connection; `-1` waits forever.
 - `set_routing(const Routing&)` and `routing_acknowledged()`: which of a
@@ -92,7 +97,10 @@ client.shutdown();
   leaves](leaving.md#what-a-draining-backend-still-takes). On
   `ThreadedClient` too, from any thread.
 - `instance_id()`, `client_type()`, `connections_count()`, `random64()`, and
-  `shutdown()`.
+  `shutdown()`, also run by the destructor: it runs the loop until every
+  multiplexer has closed its side of the connection too, a round trip,
+  `CLOSE_READ_SECONDS` at most, so that what was written arrives
+  ([semantics](semantics.md#failure-modes)).
 
 A message built by hand must carry `set_id(client.random64())` and
 `set_from(client.instance_id())`, or the receiving library drops it. The
@@ -121,12 +129,14 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   pinned, the hard one; it keeps a stream on one connection: `send(msg, lane)`, `send(msg, lane, timeout)` and
   `query(..., lane)` go through the lane's connection, the first message
   taking the connection the library chose, a query leaving the lane on
-  the connection the reply came through. A lane that is not pinned takes
-  another connection when its own dies; `Lane(true)` is pinned and
-  refuses, `send` returning 0 and `query` `NOT_CONNECTED`
-  (`NotConnected` on `Client`) once `closed()`, and a pinned message a
-  dying connection had not written is reported lost, never handed to
-  another connection (`RawMessage::pinned`). `Lane(connection, pinned)`
+  the connection the reply came through. While the lane's connection
+  lives, a message it has no room for waits there for room, so the stream
+  keeps its order. A lane that is not pinned takes another connection when
+  its own dies. `Lane(true)` is pinned: once it is `closed()` the lane
+  refuses, `send` returning 0 and `query` `NOT_CONNECTED` (`NotConnected`
+  on `Client`), and a pinned message a dying connection had not written
+  is reported lost, never handed to another connection
+  (`RawMessage::pinned`). `Lane(connection, pinned)`
   seeds a lane. `connection()`, `holds_connection()`, `connected()`,
   `closed()`, `pinned()` read it. A lane holds its connection weakly and
   the library keeps no registry, so it lives as long as your `LanePtr`; a
@@ -237,7 +247,8 @@ reply went out yet, reported the same way, so the requester fails at once
 rather than timing out; the backend keeps serving. A Python requester sees
 `BackendError`; a C++ requester's `query()` returns the `BACKEND_ERROR`
 message itself, so check `reply.third->type()` when the backend may fail.
-`close()` drops the connections.
+`close()` writes what is still queued, the last replies, for up to a second,
+then closes the connections as `Client::shutdown()` does.
 
 ## BaseThreadedMultiplexerServer
 
@@ -348,21 +359,34 @@ client.shutdown();
   call it at once; replies are matched by the ids they reference. Called
   on the io thread, from a callback, it throws `std::logic_error` rather
   than deadlock. The callback form returns at once and runs the callback
-  on the io thread.
+  on the io thread. A request that cannot be queued waits the way a
+  message does (below), and the query ends `TIMED_OUT` when a connection
+  was live but had no room in time, `NOT_CONNECTED` when none was.
 - `send(msg)` and `send_all(msg)` queue a message on one or every
-  connection and return at once; the io thread writes it right after, and a
-  message that finds no live connection waits there for one. `send(msg,
+  connection and return at once; the io thread writes it right after. A
+  message that cannot be queued yet, no connection being live or the
+  connections' queues full (1024 messages each), waits there, behind those
+  sent before it, until a connection comes up or has room, for 10 seconds
+  at most, and is dropped with a warning after that: `send_all` gives
+  every live connection its copy, a full one as soon as it has room, and
+  a lane waits for room on its own connection while that lives. `send(msg,
   lane)` and `send(msg, connection)` choose the connection. All are safe
   from callbacks. `send(msg, timeout)`, `send(msg, lane, timeout)`,
   `send(msg, connection, timeout)` and `send_all(msg, timeout)` are the
-  flushing forms: they wait until the message reached the socket,
-  resending through another connection if the first dies under it, and
-  return the number of connections written to, 0 on timeout or for a
-  pinned lane whose connection is gone; not from callbacks.
+  flushing forms: they wait until the message reached the socket, for
+  `send_all` until one copy did, the others going out from their
+  connections' queues, resending through another connection if the
+  first dies under it, and return the number of connections written to
+  by then, 0 on timeout or for a pinned lane whose connection is gone;
+  not from callbacks. A message over `MAX_MESSAGE_SIZE` is refused where
+  it is sent or queried, with `std::length_error`.
   `new_message()` fills in id and from.
-- `flush_all(timeout)` waits until every connection has written what is
-  queued on it, or `timeout` seconds, and returns whether it all went out:
-  what the backend classes do in `close()`. Not from callbacks.
+- `flush_all(timeout)` waits until everything sent before the call has
+  been written, what still waits for a connection or for room included,
+  or `timeout` seconds, and returns whether it was. What is sent meanwhile
+  is not waited for, so a flush ends however busy the client is, and a
+  message lost on the way, with its connection or at its own timeout, does
+  not count. What the backend classes do in `close()`. Not from callbacks.
 - The `MessageSink` given to the constructor runs on the io thread with
   every message that is not a reply to a query or one of the protocol's
   own: events and requests addressed to this peer. Without one such
@@ -378,10 +402,18 @@ client.shutdown();
   addressed to this peer with `to` and correlated in the payload
   ([semantics](semantics.md#delivery)).
 - Callbacks and the sink must return quickly; they may start asynchronous
-  queries and send, but not call the blocking `query`, `flush_all` or
-  `shutdown`.
+  queries, send, and call `shutdown()`, which does not wait there, but not
+  the blocking `query` or `flush_all`. One that throws, the sink, a query's
+  or a send's callback, or the search policy, is logged with what it was
+  called for, and the client goes on; a search policy that throws answers
+  no.
 - `shutdown()`, also run by the destructor, fails every query in flight
-  with `SHUT_DOWN`, closes the connections and joins the thread.
+  with `SHUT_DOWN`, closes the connections and joins the thread, which
+  ends once every multiplexer has closed its side too, a round trip,
+  `CLOSE_READ_SECONDS` at most, so that what was written arrives
+  ([semantics](semantics.md#failure-modes)). On the io thread itself, from
+  a callback or where the last reference to the client was dropped in
+  one, it cannot wait for its own thread and leaves it to end on its own.
 
 Under the hood the io thread owns a `BasicClient`; other threads reach it
 through `io_service::post` only, and the clang thread-safety analysis

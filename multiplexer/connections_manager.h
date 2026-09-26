@@ -37,6 +37,12 @@ class WelcomeMessage;
 struct DefaultConnectionsManagerTraits {
   struct ConnectionManagerPrivateDataInConnection {};
 
+  // Whether a connection tells its manager, through
+  // outgoing_queue_has_room(), that its full queue has room again: for a
+  // manager that holds messages back for a full connection. The
+  // multiplexer drops them instead, so it is not told.
+  static constexpr bool REPORTS_ROOM = false;
+
   struct MessagesBufferTraits {
     struct SendingResultNotifier {
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>

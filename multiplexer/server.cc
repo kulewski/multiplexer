@@ -226,6 +226,18 @@ void Server::_handle_delivery_errors(MessageMetaHandler& meta_handler) {
   meta_handler.delivery_error_message->SerializeToString(mxmsg.mutable_message());
   mxmsg.set_references(meta_handler.msg.id());
   mxmsg.set_workflow(meta_handler.msg.workflow());
+  // A report that would be over MAX_MESSAGE_SIZE, with the original a
+  // message near the limit asked for, leaves the original out and says
+  // so; one whose workflow alone is too big for it goes without the copy
+  // of the workflow too. Never a frame the receiver would refuse.
+  if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE && meta_handler.delivery_error_message->has_original_message()) {
+    meta_handler.delivery_error_message->clear_original_message();
+    meta_handler.delivery_error_message->set_original_message_omitted(true);
+    meta_handler.delivery_error_message->SerializeToString(mxmsg.mutable_message());
+  }
+  if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+    mxmsg.clear_workflow();
+  }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   _handle_message(meta_handler.conn, mxmsg, raw);
   meta_handler.delivery_error_message.reset();
@@ -852,6 +864,21 @@ void Server::_emit(Record& record) {
       recording::truncate(record, tap.payload_limit).SerializeToString(mxmsg.mutable_message());
     } else {
       record.SerializeToString(mxmsg.mutable_message());
+    }
+    // The record of a message near MAX_MESSAGE_SIZE would be over it: the
+    // payload is cut to fit and marked truncated, as a tap's own payload
+    // limit cuts it. One that cannot fit even so, its workflow too big, is
+    // counted as dropped.
+    if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE && record.has_routed()) {
+      const std::size_t excess = mxmsg.ByteSizeLong() - MAX_MESSAGE_SIZE;
+      const std::size_t payload = record.routed().payload().size();
+      const std::size_t fit = payload > excess + 64 ? payload - excess - 64 : 1;  // room for the lengths' bytes
+      recording::truncate(record, static_cast<unsigned int>(fit)).SerializeToString(mxmsg.mutable_message());
+    }
+    if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+      tap.dropped += 1;
+      ++index;
+      continue;
     }
     std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
     if (!connection->schedule(raw)) {

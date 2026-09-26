@@ -92,6 +92,31 @@ INDEX = [
         "`ConnectionsManager::register_connection`",
     ),
     ("Per-connection queues and dropping when full", "multiplexer/io/connection.h", "`Connection::schedule`"),
+    (
+        "A client's messages waiting for room, and flush_all()",
+        "multiplexer/outbox.cc",
+        "`BasicClient::outgoing_queue_has_room`, `BasicClient::begin_flush`",
+    ),
+    (
+        "Reading what a closed peer sent after a write failed",
+        "multiplexer/io/connection.h",
+        "`Connection::_write_failed`",
+    ),
+    (
+        "A frame whose handling throws, and a callback that throws",
+        "multiplexer/io/connection.h",
+        "`Connection::_handle_read_body`; `ThreadedClient::Core::_guarded`",
+    ),
+    (
+        "Frames built around a message near the size limit",
+        "multiplexer/server.cc",
+        "`Server::_handle_delivery_errors`, `Server::_emit`; `ThreadedClient::Core::_on_unmatched`",
+    ),
+    (
+        "A client's connections closed without losing what was written",
+        "multiplexer/io/connection.h",
+        "`Connection::close_gracefully`; `BasicClient::shutdown`",
+    ),
     ("Reconnecting after a connection drops", "multiplexer/basic_client.cc", "`BasicClient::connection_destroyed`"),
     ("Dropping duplicate messages by id", "multiplexer/basic_client.cc", "`BasicClient::handle_message`"),
     (

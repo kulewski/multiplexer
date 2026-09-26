@@ -266,7 +266,17 @@ class BaseMultiplexerServer(MultiplexerPeer):
         elif mxmsg.type == types.PING:
             if not mxmsg.references:
                 assert mxmsg.id
-                self.send_message(message=mxmsg.message, embed=True, flush=True, type=types.PING)
+                try:
+                    self.send_message(message=mxmsg.message, embed=True, flush=True, type=types.PING)
+                except ValueError:
+                    # The echo would be over MAX_MESSAGE_SIZE: say so rather than not answer at all.
+                    self.send_message(
+                        message=b"the echo of a PING of %d bytes would be over MAX_MESSAGE_SIZE" % len(mxmsg.message),
+                        embed=True,
+                        flush=True,
+                        type=types.BACKEND_ERROR,
+                        workflow=b"",
+                    )
             else:
                 self.no_response()
 
@@ -398,7 +408,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def close(self):
         """Write what is still queued, up to a second, then close every
-        connection; the server cannot be used afterwards. Safe to call twice."""
+        connection as Client.shutdown() does; the server cannot be used
+        afterwards. Safe to call twice."""
         self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
         self.conn.shutdown()  # idempotent, so a second close() is harmless
 

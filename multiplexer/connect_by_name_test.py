@@ -1,9 +1,12 @@
 """The Python clients connect by host name: the name goes to the library,
-which resolves it on every attempt and tries each address it has."""
+which resolves it on every attempt and tries each address it has, for the
+synchronous client, ThreadedClient and AsyncClient alike."""
 
+import asyncio
 import time
 import unittest
 
+from multiplexer.aio import AsyncClient
 from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
@@ -31,6 +34,26 @@ class ConnectByName(unittest.TestCase):
                     self.assertEqual(b"by name", client.query(b"hello", types.PYTHON_TEST_REQUEST, timeout=5).message)
                 finally:
                     client.shutdown()
+
+    def test_a_name_that_does_not_resolve_is_retried_not_raised(self):
+        """The threaded clients hand the name to the library, as the
+        synchronous one does: a name that does not resolve yet leaves the
+        client unconnected and retrying, like a port that refuses, instead
+        of raising out of the constructor."""
+        threaded = ThreadedClient([("mx-not-published-yet.invalid", 1980)], type=peers.PYTHON_TEST_CLIENT)
+        try:
+            self.assertEqual(0, threaded.connections_count())
+        finally:
+            threaded.shutdown()
+
+        async def construct() -> int:
+            client = AsyncClient([("mx-not-published-yet.invalid", 1980)], type=peers.PYTHON_TEST_CLIENT)
+            try:
+                return client.connections_count()
+            finally:
+                await client.aclose()
+
+        self.assertEqual(0, asyncio.run(construct()))
 
     def test_a_reply_through_a_dead_connection_leaves_one_connection_per_multiplexer(self):
         """A plain backend given a host name replies through the connection

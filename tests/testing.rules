@@ -34,9 +34,15 @@ peer {
     comment: "example peer type showing how to describe a peer which doesn't run MX library main loop for the most of the time"
 }
 
+# The unit tests' backend type. The multiplexer holds whatever a test
+# sends it: the tests that fill a client's queue send thousands of
+# messages at once, and a receiver that falls behind, on a loaded machine
+# or under a sanitizer, would lose them to the default queue of 1024. What
+# a full queue costs is tested on TEST_TINY_QUEUE.
 peer {
     type: 106
     name: "PYTHON_TEST_SERVER"
+    queue_size: 1048576
 }
 
 peer {

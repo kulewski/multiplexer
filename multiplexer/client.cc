@@ -50,6 +50,13 @@ void Client::shutdown() {
     return;
   }
   basic_client_->shutdown();
+  // The connections close the polite way, reading what still arrives until
+  // their multiplexers' end (BasicClient::shutdown): the loop runs until
+  // they have, a little past CLOSE_READ_SECONDS at most.
+  std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(CLOSE_READ_SECONDS + 0.5f);
+  while (basic_client_->closing() && !timer->expired()) {
+    basic_client_->run_one();
+  }
 }
 
 namespace multiplexer {

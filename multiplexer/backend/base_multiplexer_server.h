@@ -38,7 +38,9 @@ using mx::util::kwargs::Kwargs;
 using mx::util::kwargs::KwargsKeys;
 
 // How long close() waits for the last replies to be written before it
-// closes the sockets; a peer that stopped reading cannot hold it longer.
+// closes the connections, which takes CLOSE_READ_SECONDS more at most
+// (Client::shutdown); a multiplexer that stopped reading cannot hold it
+// longer than the two.
 static const float CLOSE_FLUSH_SECONDS = 1.0f;
 
 // The routing a draining backend asks for unless told otherwise: nothing

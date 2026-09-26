@@ -192,6 +192,7 @@ class LeakTest(unittest.TestCase):
         two workers, addressed to it so that only it answers: the object
         count and tracemalloc's total inside the backend's process."""
         backend = ThreadedBackend([self.endpoint], workers=2)
+        backend.connect()  # registered before the first query is addressed to it
         serving = threading.Thread(target=backend.serve_forever, kwargs={"poll": 0.05})
         serving.start()
         client = ThreadedClient([self.endpoint], type=peers.WEBSITE)

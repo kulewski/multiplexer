@@ -33,7 +33,14 @@ that changes.
   peer of the type is full, the message is dropped for that peer with a
   warning in the multiplexer's log. The library on the receiving side holds
   at most 1024 unread messages and drops beyond that too. A backend that
-  reads slower than clients send loses messages rather than memory.
+  reads slower than clients send loses messages rather than memory. On
+  the sending side a client's queue to each multiplexer holds 1024
+  messages as well, and every client library holds what does not fit, in
+  order, until there is room, within the message's timeout, dropping it
+  with a warning after that; a send to `ALL` gives each connection its
+  copy that way, and a lane waits for its own connection. A synchronous
+  client moves what waits along inside its next call, the only time its
+  loop runs.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
   delivery error means the search starts, the search finding nobody means
   `OperationFailed`, a stage running out of time means `OperationTimedOut`.
@@ -119,11 +126,45 @@ that changes.
   connection that multiplexer closed is retired first and the message goes
   through another, or waits for the reconnect; it is never written into
   the closed socket, which would succeed and lose it.
+- **A peer closes while a message to it is on its way.** Writing to a
+  closed connection fails, but what the peer sent before it closed is
+  still in the socket: the multiplexer and the libraries stop writing and
+  read that to the end, a few seconds at most, and route or deliver it
+  before the connection closes. A client's last events, sent just before
+  it exited, are not lost to a delivery error written back to it.
+- **A client leaves right after sending.** A socket closed with something
+  unread makes the kernel reset the connection and throw away what it had
+  not sent yet, which, with the multiplexer behind, is the client's last
+  messages. So a client's `shutdown()` closes each connection the polite
+  way: nothing more is written, the client's end of the stream follows
+  what the kernel still holds, and what the multiplexer still sends is
+  read and dropped until the multiplexer closes its side, a round trip,
+  `CLOSE_READ_SECONDS` at most. What `flush_all()` reported written
+  reaches a multiplexer that reads it within that second; one that does
+  not answer holds `shutdown()` that long.
 - **Nobody handles a type.** Every multiplexer the client is connected to
   answers the search with a delivery error, and the client learns at once
   rather than by timeout.
-- **A message is bigger than 128 MiB.** The receiving side closes the
-  connection.
+- **A message is bigger than 128 MiB.** The sending library refuses it at
+  the call, `ValueError` in Python and `std::length_error` in C++, before
+  anything is queued; a sender that frames its own bytes and gets past
+  that has the receiving side close the connection. The limit is
+  `MAX_MESSAGE_SIZE`, below; protocol buffers are built for messages far
+  smaller, so anything near it belongs in a store the message points at.
+- **Handling a message fails.** When the code handling an arriving message
+  throws, a callback of a client's or the multiplexer's routing, the
+  exception is logged, that message is dropped, and the connection reads
+  on; a client's callback that throws is logged with what it was called
+  for.
+- **A message is near 128 MiB.** A few frames are built around a peer's
+  message and are a little bigger than it: the echo of a `PING`, a
+  delivery error that carries the original, a tap's record. For a message
+  near the limit they would be over it, so a `PING` whose echo would not
+  fit is answered with `BACKEND_ERROR` saying so, a delivery error leaves
+  the original out and sets `original_message_omitted`, and a tap's record
+  has its payload cut to fit, marked `truncated`. `ThreadedClient`'s
+  `query()` measures a request with the id it adds, so one within a few
+  bytes of the limit is refused at the call.
 - **The rules file changes.** Each multiplexer reads it again every 2 s,
   on `SIGHUP` and on `mxcontrol rules reload`, and puts a changed file in
   use whole, between two messages; the next message is routed by the new
@@ -146,6 +187,7 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `DEFAULT_READ_TIMEOUT` | none | `receive_message` waits forever by default |
 | `AUTO_RECONNECT_TIME` | 3 s | between a connection dropping and the library reconnecting |
 | `HEARTBIT_INTERVAL` | 3 s | between heartbeats on an idle connection |
+| `CLOSE_READ_SECONDS` | 1 s | a client's `shutdown()`: how long a connection reads on, waiting for its multiplexer to close its side |
 | `MX_LOG_VERBOSITY` | `DEBUG:HIGH` | connections logged, traffic not; the environment variable changes it per process ([operations](operations.md#logs)) |
 | `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence from a non-passive peer before the multiplexer starts to worry |
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before it closes the connection |

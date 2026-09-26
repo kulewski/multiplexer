@@ -109,11 +109,13 @@ says when to prefer it.
 Yes: `multiplexer.aio.AsyncClient` awaits queries and sends and delivers
 events to coroutines on the loop. It is an async face on the threaded
 client: the io thread still runs the protocol, and the loop only ever
-waits on futures, so nothing blocks it. One client belongs to one loop;
-a worker of an ASGI server makes its own at first use, through the
-holder. There is no asyncio backend: a backend has a thread of its own by
-design, and a program that wants both sides runs the backend on
-`BackendThread`.
+waits on futures, so nothing blocks it. What arrives on its own is
+delivered on the loop the client was made on; queries and sends may be
+awaited from any loop, so code run through `async_to_sync` shares the
+process's client. A worker of an ASGI server makes its own at first use,
+through the holder. There is no asyncio backend: a backend has a thread
+of its own by design, and a program that wants both sides runs the
+backend on `BackendThread`.
 
 **Why Bazel?**
 The rules file has to produce the same constants in C++ and Python in one

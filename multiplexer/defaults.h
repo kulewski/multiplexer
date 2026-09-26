@@ -23,6 +23,11 @@ static const unsigned int MAX_MESSAGE_SIZE = 128 * 1024 * 1024;
 
 // Seconds of silence before a side sends a HEARTBIT.
 static const float HEARTBIT_INTERVAL = 3.0;
+// Seconds a client that shuts down goes on reading what its multiplexers
+// still send, waiting for their end of the stream: a socket closed with
+// something unread makes the kernel reset the connection and throw away
+// what it had not sent yet. See Connection::close_gracefully.
+static const float CLOSE_READ_SECONDS = 1.0;
 // Seconds without any frame from a non-passive peer before the multiplexer
 // starts the drop, and how much longer it then waits before closing.
 static const float NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL = 30;

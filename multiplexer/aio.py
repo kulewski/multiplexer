@@ -4,9 +4,12 @@ An asyncio face on ThreadedClient (threaded_client.py). The C++ io thread
 keeps the sockets, the heartbeats, the reconnects and the query algorithm;
 this module turns its callbacks into futures with
 loop.call_soon_threadsafe, so a coroutine awaits a reply or a write and
-the event loop is never blocked. One client belongs to one event loop, the
-way a synchronous Client belongs to one thread; a call from another loop
-raises RuntimeError. docs/api_python.md has the user's view and
+the event loop is never blocked. What arrives on its own is delivered on
+the loop the client was created on, which its subscriptions and
+messages() belong to; query() and send_message() may be awaited from any
+loop, as ThreadedClient may be called from any thread, which is what code
+run through asgiref's async_to_sync away from the server's loop needs.
+docs/api_python.md has the user's view and
 docs/recipes/async_web_server.md an asyncio web server.
 
     client = AsyncClient(addresses, type=peers.WEBSITE)
@@ -28,6 +31,7 @@ lane() or a ConnectionWrapper, as on ThreadedClient.
 """
 
 import asyncio
+import concurrent.futures
 import inspect
 import os
 import pickle
@@ -106,24 +110,30 @@ class AsyncClient:
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
-        """The event loop this client belongs to."""
+        """The event loop the client was created on, where what arrives on
+        its own is delivered."""
         return self._loop
 
     def _check_loop(self) -> None:
-        """A call from another loop, or from no loop, is a mistake made loud."""
+        """messages() from another loop, or from no loop, is a mistake made loud."""
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
-            raise RuntimeError("AsyncClient must be used from a coroutine on the loop it was created on") from None
+            raise RuntimeError("AsyncClient.messages() must be used on the loop the client was created on") from None
         if running is not self._loop:
-            raise RuntimeError("AsyncClient belongs to another event loop")
+            raise RuntimeError("AsyncClient.messages() belongs to the loop the client was created on")
 
-    def _future(self) -> asyncio.Future:
-        self._check_loop()
-        return self._loop.create_future()
+    @staticmethod
+    def _future() -> asyncio.Future:
+        """A future on the loop that awaits it, whichever that is."""
+        try:
+            return asyncio.get_running_loop().create_future()
+        except RuntimeError:
+            raise RuntimeError("AsyncClient's calls are awaited from a coroutine on a running loop") from None
 
-    def _settle(self, future: asyncio.Future, result: Any) -> None:
-        """From the io thread: resolve `future` on the loop, unless the
+    @staticmethod
+    def _settle(future: asyncio.Future, result: Any) -> None:
+        """From the io thread: resolve `future` on its loop, unless the
         awaiter cancelled it meanwhile."""
 
         def on_loop() -> None:
@@ -135,7 +145,7 @@ class AsyncClient:
                 future.set_result(result)
 
         try:
-            self._loop.call_soon_threadsafe(on_loop)
+            future.get_loop().call_soon_threadsafe(on_loop)
         except RuntimeError:
             pass  # the loop is closed; nobody is waiting
 
@@ -309,12 +319,13 @@ class AsyncClient:
 
     def close(self) -> None:
         """Close the connections and stop the io thread; the client is done.
-        Blocks briefly; fine at shutdown. Idempotent."""
+        Blocks for a round trip to the multiplexers, which close their side
+        too, a second at most; fine at shutdown. Idempotent."""
         self._threaded.shutdown()
 
     async def aclose(self) -> None:
         """close() in the default executor, so the loop does not wait for the join."""
-        await self._loop.run_in_executor(None, self.close)
+        await asyncio.get_running_loop().run_in_executor(None, self.close)
 
     async def __aenter__(self) -> "AsyncClient":
         return self
@@ -324,9 +335,9 @@ class AsyncClient:
 
     @classmethod
     def holder(cls, type: int, addresses: list[Endpoint] | Callable[[], list[Endpoint]], **kwargs: Any) -> "Holder":
-        """One client per process, created on the running loop at first
-        get(), forgotten in a forked child: what an ASGI server's worker
-        uses. `addresses` may be a callable, read at first use."""
+        """One client per process, bound to the running loop at first
+        get() or aget(), forgotten in a forked child: what an ASGI server's
+        worker uses. `addresses` may be a callable, read at first use."""
         return Holder(cls, type, addresses, **kwargs)
 
 
@@ -354,14 +365,21 @@ class Holder:
     ):
         self._cls, self._type, self._addresses, self._kwargs = cls, type, addresses, kwargs
         self._client: AsyncClient | None = None
-        self._creating: asyncio.Future | None = None  # aget() in progress, for the callers behind it
+        # The client aget() is making on a thread of its own: every caller
+        # awaits it until it is there, it belongs to no loop, and no
+        # caller's cancellation ends it.
+        self._creating: concurrent.futures.Future | None = None
+        self._generation = 0  # moved by close() and a fork: a client made across either is closed, not kept
+        self._lock = threading.Lock()
         self._pid = os.getpid()
         os.register_at_fork(after_in_child=self._forget)
 
     def _forget(self) -> None:
         """A forked child must not touch the parent's client."""
+        self._lock = threading.Lock()
         self._client = None
         self._creating = None
+        self._generation += 1
         self._pid = os.getpid()
 
     def _addresses_now(self) -> list[Endpoint]:
@@ -370,39 +388,80 @@ class Holder:
     def get(self) -> AsyncClient:
         """The process's client, made on the first call, on the running loop.
         Making it connects, which blocks the loop for the handshakes; a
-        first use that must not do that awaits aget() instead."""
+        first use that must not do that awaits aget() instead. While aget()
+        is making it, get() waits for that one."""
+        if self._pid != os.getpid():
+            self._forget()
+        creating = self._creating
+        if creating is not None:
+            return creating.result()
         client = self._client
-        if client is None or self._pid != os.getpid():
-            client = self._cls(self._addresses_now(), self._type, **self._kwargs)
-            self._client = client
-            self._pid = os.getpid()
+        if client is None:
+            client = self._client = self._cls(self._addresses_now(), self._type, **self._kwargs)
         return client
 
     async def aget(self) -> AsyncClient:
-        """The process's client, made in the default executor on the first
-        call so that the loop never waits for the connections; callers that
-        arrive while it is being made await the same one, so there is
-        never more than one."""
-        if self._client is not None and self._pid == os.getpid():
+        """The process's client, made on a thread on the first call so
+        that the loop never waits for the connections, and bound to the
+        running loop; callers that arrive while it is being made await the
+        same one, so there is never more than one. A caller cancelled
+        meanwhile stops waiting; the client is still made and kept."""
+        if self._pid != os.getpid():
+            self._forget()
+        if self._client is not None:
             return self._client
-        if self._creating is None or self._pid != os.getpid():
-            loop = asyncio.get_running_loop()
-            self._creating = loop.create_future()
-            self._pid = os.getpid()
+        creating = self._creating
+        if creating is None:
+            creating = self._creating = self._make(asyncio.get_running_loop())
+        return await asyncio.shield(asyncio.wrap_future(creating))
+
+    def _make(self, loop: asyncio.AbstractEventLoop) -> concurrent.futures.Future:
+        """Start making the client, bound to `loop`; the future it will be in."""
+        creating: concurrent.futures.Future = concurrent.futures.Future()
+        addresses, generation = self._addresses_now(), self._generation
+
+        def make() -> None:
             try:
-                client = await self._cls.create(self._addresses_now(), self._type, **self._kwargs)
+                client = self._cls(addresses, self._type, loop=loop, **self._kwargs)
             except BaseException as error:
-                creating, self._creating = self._creating, None
+                with self._lock:
+                    if self._creating is creating:
+                        self._creating = None
                 creating.set_exception(error)
-                raise
-            self._client = client
-            creating, self._creating = self._creating, None
-            creating.set_result(client)
-            return client
-        return await self._creating
+                return
+            with self._lock:
+                kept = generation == self._generation
+                if kept:
+                    self._client = client
+                if self._creating is creating:
+                    self._creating = None
+            if kept:
+                creating.set_result(client)
+            else:
+                client.close()
+                creating.set_exception(RuntimeError("the holder was closed while its client was being made"))
+
+        threading.Thread(target=make, name="mx-holder", daemon=True).start()
+        return creating
+
+    def _detach(self) -> AsyncClient | None:
+        """Take the held client out, and disown one being made."""
+        with self._lock:
+            client, self._client = self._client, None
+            self._creating = None
+            self._generation += 1
+        return client
 
     def close(self) -> None:
-        """Close the held client, if any."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        """Close the held client, if any; one being made is closed when it
+        is there, and its callers get RuntimeError. The next get() or
+        aget() makes a new one."""
+        client = self._detach()
+        if client is not None:
+            client.close()
+
+    async def aclose(self) -> None:
+        """close() in the default executor, so the loop does not wait for the join."""
+        client = self._detach()
+        if client is not None:
+            await client.aclose()

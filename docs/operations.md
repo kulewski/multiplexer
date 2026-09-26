@@ -382,7 +382,9 @@ a `RECORDING_RECORD` message (8) carrying the `Record`, with
 queue is the only buffer: a peer that reads too slowly loses records, which
 the multiplexer counts in the status as `dropped`, and routing is never
 held up. A tap costs one serialization and one queued frame per record for
-each tap.
+each tap. The record of a message near `MAX_MESSAGE_SIZE` would be over it,
+so its payload is cut to fit and marked `truncated`, as a tap's own payload
+limit cuts it.
 
 **Several replicas.** Every multiplexer answers for itself, so a controller
 connects to each: `mxcontrol recording` takes `-M host:port` repeatedly and

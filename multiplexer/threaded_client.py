@@ -26,7 +26,6 @@ a reply came through, preferred while it is live. docs/api_python.md,
 """
 
 import pickle
-import socket
 from typing import Any, Callable, Literal, overload
 
 from multiplexer import _native
@@ -98,8 +97,11 @@ class ThreadedClient:
 
     def connect(self, endpoint: Endpoint, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """Connect and wait up to `timeout` for the handshake; False is not final,
-        the io thread keeps trying."""
-        return self._native.connect(socket.gethostbyname(endpoint[0]), endpoint[1], timeout)
+        the io thread keeps trying. The host name goes to the library, which
+        resolves it on every attempt, so a name that does not resolve yet is
+        retried like a port that refuses, and a multiplexer that comes back
+        under another address is found."""
+        return self._native.connect(endpoint[0], endpoint[1], timeout)
 
     def connections_count(self) -> int:
         """How many multiplexers are connected right now."""
@@ -124,8 +126,12 @@ class ThreadedClient:
         return self._native.routing_acknowledged()
 
     def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
-        """Wait until every connection has written what is queued on it,
-        or `timeout` seconds; True when everything went out. What a
+        """Wait until everything sent before the call has been written, or
+        `timeout` seconds; True when it has. A message still waiting for a
+        connection or for room counts, as does what is queued on a
+        connection; what is sent after the call does not, so a flush ends
+        however busy the client is. A message lost on the way, with its
+        connection or at its own timeout, is not waited for. What a
         backend does before shutdown(), so that its last replies are not
         cut with the sockets. Not from the io thread."""
         return self._native.flush_all(timeout)
@@ -169,22 +175,27 @@ class ThreadedClient:
         MultiplexerMessage or a payload wrapped with the remaining kwargs,
         such as type= and to=. It goes on one connection, or on every one
         with multiplexer=ALL, on a Lane's connection (the lane taking the
-        connection chosen when it has none or lost its own, unless pinned),
+        connection chosen when it has none, lost its own or has it full,
+        unless pinned),
         or on a ConnectionWrapper's while it is live and another after;
-        the io thread writes it right after, and a message that finds no
-        live connection waits on the io thread for one within `timeout`.
+        the io thread writes it right after. A message that cannot be
+        queued yet, no connection being live or the connections' queues
+        full, waits on the io thread behind those sent before it, within
+        `timeout`: for ALL, a full connection gets its copy once it has
+        room, and a pinned lane waits for room on its own connection.
         Without `flush` the call returns at once and is safe from
         callbacks; through a pinned lane whose connection is gone it raises
         NotConnected at once instead. With `flush=True` it waits until the
-        message reached the socket, resending through another connection
-        if the first dies under it, and raises OperationTimedOut when
-        `timeout` passes first, or NotConnected when no connection was live
-        at all, or the pinned lane given is gone. With
-        `flush=True` and a `callback`, it returns at once instead and
+        message reached the socket, for ALL until one copy did, resending
+        through another connection if the first dies under it, and raises
+        OperationTimedOut when `timeout` passes first, or NotConnected when
+        no connection was live at all, or the pinned lane given is gone.
+        With `flush=True` and a `callback`, it returns at once instead and
         `callback(written)` runs on the io thread once the message reached
-        the socket(s), with the number of connections written, 0 when
-        `timeout` passed first; safe from callbacks, and what
-        multiplexer.aio awaits."""
+        the socket, for ALL once one copy did, the others going out from
+        their connections' queues, with the number of connections written
+        by then, 0 when `timeout` passed first; safe from callbacks, and
+        what multiplexer.aio awaits. flush_all() waits for every copy."""
         mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
         raw = mxmsg.SerializeToString()
         every = multiplexer is ThreadedClient.ALL
@@ -193,13 +204,13 @@ class ThreadedClient:
             lane = Lane(multiplexer)  # preferred, then any
         if not flush:
             if every:
-                self._native.send_all(raw)
+                self._native.send_all(raw, timeout=timeout)
             elif lane is not None:
                 if lane.closed:
                     raise NotConnected()
-                self._native.send(raw, lane)
+                self._native.send(raw, lane, timeout=timeout)
             else:
-                self._native.send(raw)
+                self._native.send(raw, timeout=timeout)
             return mxmsg.id
         if callback is not None:
             self._native.send_with_callback(raw, every, timeout, callback, lane)
@@ -372,5 +383,7 @@ class ThreadedClient:
         return self.send_message(pickle.dumps(data), **kwargs)
 
     def shutdown(self) -> None:
-        """Fail every query in flight, close the connections, stop the thread."""
+        """Fail every query in flight, close the connections, stop the thread.
+        Returns once every multiplexer has closed its side too, a round
+        trip, a second at most, so that what was written arrives."""
         self._native.shutdown()

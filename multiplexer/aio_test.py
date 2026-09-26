@@ -191,16 +191,28 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"AFTER", (await self.client.query(b"after", types.PYTHON_TEST_REQUEST, timeout=15)).message)
         self.assertLess(time.monotonic() - started, 9, "within the reconnect delay")
 
-    async def test_another_loop_is_refused(self):
+    async def test_queries_and_sends_are_awaited_from_any_loop(self):
+        """What asgiref's async_to_sync does away from the server's loop: a
+        new loop per call, on another thread. Queries and sends work there;
+        messages(), whose queue lives on the client's loop, does not."""
         client = self.client
 
-        def elsewhere():
-            return asyncio.run(client.query(b"x", types.PYTHON_TEST_REQUEST))
+        async def through_another_loop():
+            reply = await client.query(b"elsewhere", types.PYTHON_TEST_REQUEST)
+            await client.send_message(b"sent", type=types.PYTHON_TEST_REQUEST)
+            return reply.message
 
+        def elsewhere():
+            return asyncio.run(through_another_loop())
+
+        for _ in range(3):  # a new loop each time, as async_to_sync makes
+            self.assertEqual(b"ELSEWHERE", await asyncio.get_running_loop().run_in_executor(None, elsewhere))
         with self.assertRaises(RuntimeError):
-            await asyncio.get_running_loop().run_in_executor(None, elsewhere)
-        with self.assertRaises(RuntimeError):
-            await asyncio.get_running_loop().run_in_executor(None, lambda: client._check_loop())
+            await asyncio.get_running_loop().run_in_executor(None, lambda: asyncio.run(self._messages_elsewhere()))
+
+    async def _messages_elsewhere(self):
+        """messages() called from a loop that is not the client's."""
+        self.client.messages()
 
 
 class HolderTest(unittest.TestCase):
@@ -234,6 +246,56 @@ class HolderTest(unittest.TestCase):
 
             try:
                 asyncio.run(scenario())
+            finally:
+                holder.close()
+
+    def test_a_cancelled_first_aget_costs_nobody_else(self):
+        """The first caller gives up while the client is being made: the
+        caller behind it still gets it; a caller alone giving up leaves it
+        made and kept for the next one; a close meanwhile closes it."""
+        made: list[AsyncClient] = []
+
+        class Slow(AsyncClient):
+            def __init__(self, *args, **kwargs):
+                made.append(self)
+                time.sleep(0.2)  # a slow handshake: time for the first caller to give up
+                super().__init__(*args, **kwargs)
+
+        with Cluster(1, rules=RULES) as cluster:
+            holder = Slow.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
+
+            async def give_up_first() -> AsyncClient:
+                first, second = asyncio.ensure_future(holder.aget()), asyncio.ensure_future(holder.aget())
+                await asyncio.sleep(0.05)
+                first.cancel()
+                client = await second
+                self.assertTrue(first.cancelled(), "the first caller's own wait ended")
+                return client
+
+            async def give_up_alone() -> None:
+                alone = asyncio.ensure_future(holder.aget())
+                await asyncio.sleep(0.05)
+                alone.cancel()
+                await asyncio.sleep(0.3)  # the making goes on without anybody waiting
+                self.assertIs(made[-1], await holder.aget(), "kept, not made again")
+
+            async def close_meanwhile() -> None:
+                waiting = asyncio.ensure_future(holder.aget())
+                await asyncio.sleep(0.05)
+                holder.close()
+                with self.assertRaises(RuntimeError):
+                    await waiting
+
+            try:
+                client = asyncio.run(give_up_first())
+                self.assertEqual([client], made, "one client, made once")
+                holder.close()
+                asyncio.run(give_up_alone())
+                self.assertEqual(2, len(made))
+                holder.close()
+                asyncio.run(close_meanwhile())
+                self.assertEqual(3, len(made))
+                cluster.wait_for_peer_gone(peers.PYTHON_TEST_CLIENT, 5)  # the disowned one closed itself
             finally:
                 holder.close()
 

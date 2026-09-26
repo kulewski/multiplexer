@@ -8,6 +8,7 @@ itself, and the blocking query() raises RuntimeError from a callback.
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -20,6 +21,28 @@ from multiplexer.threaded_client import ThreadedClient
 def runfile(path: str) -> str:
     """A file of this repository inside the test's runfiles tree."""
     return os.path.join(os.environ["TEST_SRCDIR"], os.environ.get("TEST_WORKSPACE", "mx"), path)
+
+
+# A program whose client is kept alive only by its own pending query: the
+# last reference goes when the query's callback has run, on the io thread.
+DROPPED_IN_A_CALLBACK = """
+import sys
+import time
+
+from multiplexer.threaded_client import ThreadedClient
+
+host, port = sys.argv[1].rsplit(":", 1)
+
+
+def ask_and_forget():
+    client = ThreadedClient([(host, int(port))], type=%(website)d)
+    client.query(b"x", %(request)d, timeout=1, callback=lambda result: print("callback ran", flush=True))
+
+
+ask_and_forget()
+time.sleep(2)
+print("still running", flush=True)
+"""
 
 
 class ThreadedClientTest(unittest.TestCase):
@@ -99,6 +122,23 @@ class ThreadedClientTest(unittest.TestCase):
         client.query(b"hello", type=types.PYTHON_TEST_REQUEST, callback=on_result, timeout=2)
         self.assertTrue(outcome.get(timeout=10).startswith("RuntimeError"))
         client.shutdown()
+
+    def test_a_client_dropped_in_its_own_callback_ends_quietly(self) -> None:
+        """A client whose last reference goes in its own callback, as when a
+        callback query outlives the caller's reference, used to abort the
+        process: its destructor joined the io thread it ran on."""
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+        program = DROPPED_IN_A_CALLBACK % {"website": peers.WEBSITE, "request": types.PYTHON_TEST_REQUEST}
+        result = subprocess.run(
+            [sys.executable, "-c", program, "%s:%d" % self.endpoint],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        said = [line for line in result.stderr.splitlines() if not line.startswith(("[DEBUG]", "[INFO]"))]
+        self.assertEqual(0, result.returncode, "exit %d\n%s" % (result.returncode, "\n".join(said[-20:])))
+        self.assertEqual(["callback ran", "still running"], result.stdout.split("\n")[:2])
 
     def test_many_threads_query_at_once(self) -> None:
         """Twenty threads query one client at the same time; each gets its own outcome."""

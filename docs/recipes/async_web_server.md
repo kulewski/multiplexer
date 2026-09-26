@@ -40,7 +40,7 @@ class LessonConsumer(AsyncWebsocketConsumer):
         self.unsubscribe = mx.subscribe(types.LESSON_EVENT, self.push, matching=lambda m: m.message.startswith(self.key))
 
     async def receive(self, text_data=None, bytes_data=None):
-        mx = await MX.aget()   # made in the executor on the worker's first use, never on the loop
+        mx = await MX.aget()   # made on a thread at the worker's first use, never on the loop
         reply = await mx.query(self.key + b" " + bytes_data, types.LESSON_REQUEST, timeout=10)
         await self.send(bytes_data=reply.message)
 

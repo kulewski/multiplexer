@@ -289,7 +289,10 @@ cc_library(
 
 cc_library(
     name = "threaded_client",
-    srcs = ["threaded_client.cc"],
+    srcs = [
+        "threaded_client.cc",
+        "threaded_client_core.h",
+    ],
     hdrs = ["threaded_client.h"],
     visibility = ["//visibility:public"],
     deps = [
@@ -384,7 +387,11 @@ cc_test(
 
 cc_library(
     name = "basic_client",
-    srcs = ["basic_client.cc"],
+    srcs = [
+        "basic_client.cc",
+        "outbox.cc",
+        "outbox.h",
+    ],
     hdrs = ["basic_client.h"],
     deps = [
         ":connections_manager",
@@ -624,6 +631,32 @@ py_test(
 )
 
 py_test(
+    name = "frames_at_the_limit_test",
+    size = "medium",
+    srcs = ["frames_at_the_limit_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":recording",
+        ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "full_connection_test",
+    size = "medium",
+    srcs = ["full_connection_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "mxlog_test",
     size = "small",
     srcs = ["mxlog_test.py"],
@@ -686,11 +719,25 @@ py_test(
 )
 
 py_test(
+    name = "threaded_sends_test",
+    size = "medium",
+    srcs = ["threaded_sends_test.py"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "connect_by_name_test_py",
     size = "small",
     srcs = ["connect_by_name_test.py"],
     main = "connect_by_name_test.py",
     deps = [
+        ":aio",
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
