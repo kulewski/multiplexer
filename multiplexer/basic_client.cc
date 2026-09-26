@@ -5,12 +5,14 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include "lib/fork.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
 #include "multiplexer/multiplexer.constants.h"
+#include "multiplexer/outbox.h"
 
 using namespace mx;
 using namespace multiplexer;
@@ -23,7 +25,10 @@ BasicClient::BasicClient(asio::io_service& io_service, std::uint32_t client_type
       shuts_down_(false),
       incoming_queue_max_size_(DEFAULT_INCOMING_QUEUE_MAX_SIZE),
       fork_generation_at_creation_(mx::fork_generation()),
-      resolver_(io_service) {}
+      resolver_(io_service),
+      outbox_(new Outbox(io_service)) {}
+
+BasicClient::~BasicClient() {}
 
 bool BasicClient::orphaned() const { return mx::fork_generation() != fork_generation_at_creation_; }
 
@@ -145,19 +150,6 @@ void BasicClient::_on_peer_status(Connection::pointer conn, const MultiplexerMes
   }
 }
 
-bool BasicClient::all_written() const {
-  MX_DCHECK_RUN_ON(&owner_thread());
-  for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
-       ++entry) {
-    if (Connection::pointer conn = entry->second.lock()) {
-      if (conn->living() && !conn->outgoing_queue_empty()) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 bool BasicClient::routing_acknowledged() const {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (has_incoming_messages()) {
@@ -204,9 +196,20 @@ void BasicClient::shutdown() {
     if (Connection::pointer conn = entry->second.lock()) {
       // this does modify connection_by_target_, so we have to use two
       // iterators
-      conn->shutdown();
+      if (conn->close_gracefully(CLOSE_READ_SECONDS)) {
+        closing_.push_back(conn);
+      }
     }
   }
+  _drop_outbox();  // what still waits goes nowhere now
+}
+
+bool BasicClient::closing() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  closing_.erase(std::remove_if(closing_.begin(), closing_.end(),
+                                [](const Connection::weak_pointer& conn) { return conn.expired(); }),
+                 closing_.end());
+  return !closing_.empty();
 }
 
 // Called from Connection::shutdown for any reason: the multiplexer closed,
@@ -218,6 +221,7 @@ void BasicClient::shutdown() {
 void BasicClient::connection_destroyed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
+  _displace(conn);  // what waited for it goes to another after its queue, in handle_orphaned_outgoing_messages
   const Target target = conn->managers_private_data().target;
   Connection::pointer c;
   ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
@@ -225,12 +229,9 @@ void BasicClient::connection_destroyed(Connection* conn) {
     connection_by_target_.erase(target_entry);
   }
 
-  if (connection_observer_) {
-    connection_observer_(
-        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
-  }
   if (!shuts_down_) {
-    // auto reconnect after AUTO_RECONNECT_TIME seconds
+    // auto reconnect after AUTO_RECONNECT_TIME seconds; armed before the
+    // observer runs, so that nothing the observer does can skip it
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
                                    target.first + ":" + repr(target.second)));
@@ -239,6 +240,10 @@ void BasicClient::connection_destroyed(Connection* conn) {
     timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code& error) {
       self->reconnect_after_timeout(timer, target, error);
     });
+  }
+  if (connection_observer_) {
+    connection_observer_(
+        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
   }
 }
 

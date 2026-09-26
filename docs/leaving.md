@@ -52,11 +52,12 @@ The search follows `any`, although the multiplexer forwards it to every
 peer of the type like a fan-out: a search exists to find a backend for a
 request that will then be addressed to it, so a backend taking no new
 requests is not offered, and a last resort is offered when nobody else is.
-`set_routing()` on the client classes is the same call outside a drain, in
-both directions: a saturated backend can step out of the round robin and
-back in, and `routing_acknowledged()` says when the multiplexers have it.
-The multiplexer logs every change, records it as a `ROUTING` peer event,
-and marks a fan-out skipped for it as `NOT_ACCEPTED` in a recording.
+`set_routing()` on `SyncClient`, `ThreadedClient` and `AsyncClient` is the
+same call outside a drain, in both directions: a saturated backend can step
+out of the round robin and back in, and `routing_acknowledged()` says when
+the multiplexers have it. The multiplexer logs every change, records it as
+a `ROUTING` peer event, and marks a fan-out skipped for it as
+`NOT_ACCEPTED` in a recording.
 
 ## A drain, then the close: a rolling restart
 
@@ -97,12 +98,13 @@ routing by then; the confirmation is what tells A that nothing more is
 coming, so its drain lasted as long as its work, a few milliseconds here,
 not a guessed number of seconds. No caller waited for anything. The one
 request that can still be refused is one routed in the moment between the
-multiplexer applying the routing and A's `close()`, none here; a threaded
-backend answers it with the delivery error a multiplexer sends when nobody
-could take a message, and the client, which treats a delivery error on its
-first attempt as the signal to search, has B's answer a few milliseconds
-later. The inference walkthrough measures exactly this, three hundred
-requests through a rolling restart of two workers.
+multiplexer applying the routing and A's `close()`, none here; a backend
+built on `BaseThreadedMultiplexerServer` answers it with the delivery
+error a multiplexer sends when nobody could take a message, and the
+client, which treats a delivery error on its first attempt as the signal
+to search, has B's answer a few milliseconds later. The inference
+walkthrough measures exactly this, three hundred requests through a
+rolling restart of two workers.
 
 ## `stop()` without a drain
 
@@ -183,14 +185,14 @@ slowest acceptable answer pays no more than it would have accepted anyway.
   backend had died. That window is the time between the backend's last read
   and the multiplexer noticing the close: microseconds on one host, a
   network round trip between hosts.
-- `BaseMultiplexerServer`, the plain backend that runs its handler on the
-  loop's thread, has the drain but not the refusal: what it had read
-  when the drain ended is served before it closes, what arrives after its
-  last read is lost the same way. `BaseThreadedMultiplexerServer` refuses
-  because its io thread keeps reading while the workers finish. With a
-  drain, next to nothing arrives then. Both classes write what they still
-  hold, the last replies, before they close their sockets, for up to a
-  second.
+- `BaseMultiplexerServer`, the plain server class that runs its handler
+  on the loop's thread, has the drain but not the refusal: what it had
+  read when the drain ended is served before it closes, what arrives
+  after its last read is lost the same way.
+  `BaseThreadedMultiplexerServer` refuses because its io thread keeps
+  reading while the workers finish. With a drain, next to nothing arrives
+  then. Both classes write what they still hold, the last replies, before
+  they close their sockets, for up to a second.
 - The refusal is for what someone would retry. A message that answers
   another, one with `references` set, a reply or a `BACKEND_ERROR`, is
   dropped instead: nobody retries a reply, and refusing one could start a
@@ -221,7 +223,7 @@ Where the pieces live: `start_draining()`, `drained()` and the
 and
 [base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h),
 the same on the plain classes; `set_routing()` and
-`routing_acknowledged()` on every client class, `BasicClient::set_routing`
+`routing_acknowledged()` on `SyncClient`, `ThreadedClient` and `AsyncClient`, `BasicClient::set_routing`
 underneath, which puts the routing in the welcome and sends
 `PEER_CONTROL`; `Server::send_to_one`, `send_to_all` and
 `_handle_peer_control` in [server.cc](../multiplexer/server.cc) on the

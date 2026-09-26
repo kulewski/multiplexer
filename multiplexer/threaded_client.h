@@ -36,18 +36,24 @@
 // bounded number of them; so `references` means "this is the reply", and a
 // follow-up that is not the reply must not reference the request but be
 // addressed to the peer and correlated in the payload), REQUEST_RECEIVED
-// for an unknown id is dropped, a
-// PING without references is answered, a BACKEND_FOR_PACKET_SEARCH
-// addressed to this instance is answered with a PING, one routed by type
-// is dropped (this peer is no backend), and the rest, events and requests
-// addressed to this peer, go to on_message, or are logged and dropped when
-// there is none. Nothing is ever queued for a reader that may never come.
+// for an unknown id is dropped, a PING without references, or a
+// BACKEND_FOR_PACKET_SEARCH addressed to this instance, is answered with a
+// PING carrying its payload back (BACKEND_ERROR when that echo would be
+// over MAX_MESSAGE_SIZE), a search routed by type is dropped unless a
+// search policy is set (set_search_policy), and the rest, events and
+// requests addressed to this peer, go to on_message, or are logged and
+// dropped when there is none. Nothing is ever queued for a reader that may
+// never come.
 //
 // Threading, as declared: everything under io_thread_ runs on the io thread
 // only, reached from other threads through io_service::post. Callbacks and
 // on_message run on the io thread and must return quickly; they may call
 // the asynchronous query() and send() but not the blocking query(), which
 // throws std::logic_error there rather than deadlock the thread it runs on.
+// One that throws is logged and the client goes on. shutdown() may be
+// called there, and the destructor may run there, when the last reference
+// to the client goes in a callback: neither waits for the thread, which
+// ends on its own, the state it uses held until then (threaded_client_core.h).
 #ifndef MX_MULTIPLEXER_THREADED_CLIENT_H_
 #define MX_MULTIPLEXER_THREADED_CLIENT_H_
 
@@ -92,16 +98,16 @@ class ThreadedClient : public ExceptionDefinitions {
   // reply to a query or one of the protocol's own (see the file comment);
   // without it such messages are logged and dropped.
   explicit ThreadedClient(std::uint32_t peer_type, MessageSink on_message = MessageSink());
-  ~ThreadedClient();  // shutdown() if not done, then joins the io thread
+  ~ThreadedClient();  // shutdown() if not done
 
   // A backend built on this client answers the search clients use to find
   // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
   // by type or addressed to this instance, is answered with a PING when
   // `answer()` returns true (on the io thread, so it must be quick) and
-  // dropped otherwise, the way a saturated backend declines with
-  // decline_searches_when_full. Without a policy the client is no
-  // backend: it answers only a search addressed to it and drops the rest.
-  // Call before connecting.
+  // dropped otherwise, the way BaseThreadedMultiplexerServer declines when
+  // saturated, with decline_searches_when_full. Without a policy, a
+  // ThreadedClient answers only a search addressed to it and drops the
+  // rest. Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
   // How host names become addresses; for tests. See BasicClient::Resolver.
@@ -115,10 +121,14 @@ class ThreadedClient : public ExceptionDefinitions {
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();
-  // Waits until every connection has written what is queued on it, or
-  // `timeout` seconds; true when everything went out. What a backend
-  // calls before shutdown(), so that its last replies are not cut with
-  // the sockets. Not from the io thread.
+  // Waits until everything sent before the call has been written, or
+  // `timeout` seconds; true when it has. A send still waiting for a
+  // connection or for room counts, as does what is queued on a connection;
+  // what is sent after the call does not, so a flush ends however busy the
+  // client is. A message lost on the way, with its connection or at its own
+  // timeout, is not waited for. What a backend calls before shutdown(), so
+  // that its last replies are not cut with the sockets. Not from the io
+  // thread.
   bool flush_all(float timeout);
 
   std::uint64_t instance_id() const { return instance_id_; }
@@ -126,20 +136,33 @@ class ThreadedClient : public ExceptionDefinitions {
   std::uint64_t random64();  // thread-safe
 
   // Connects and waits up to `timeout` for the handshake; true when the
-  // connection is registered. False is not final: the io thread keeps
-  // reconnecting every AUTO_RECONNECT_TIME seconds on its own.
+  // connection is registered, false as soon as it failed. False is not
+  // final: the io thread keeps reconnecting every AUTO_RECONNECT_TIME
+  // seconds on its own. Not from the io thread.
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
   unsigned int connections_count();
+  // How many message ids the client watches for an answer: those of the
+  // queries in flight, every attempt's and every search's. Zero once every
+  // query has ended; for tests. Not from the io thread.
+  std::size_t watched_ids();
+  // How many times the io thread has tried a message again after it could
+  // not be queued at once, sends and queries: what waiting for room costs.
+  // It grows with the messages that waited, never with their square; for
+  // tests. Not from the io thread.
+  std::uint64_t retries();
 
   // Sending. The message must carry its id and from; new_message() fills
   // those in. send() queues it on one live connection (round robin),
   // send_all() on every one, and both return at once: the write happens on
-  // the io thread right after, so they are safe from callbacks. With no
-  // live connection the message waits, on the io thread, for one to come
-  // up within DEFAULT_TIMEOUT and is dropped with a warning after that.
-  // With a lane, on the lane's connection, which takes the connection
-  // chosen when it has none or lost its own; a pinned lane whose
-  // connection is gone drops the message with a warning, the lane being
+  // the io thread right after, so they are safe from callbacks. A message
+  // that cannot be queued yet waits on the io thread, behind those sent
+  // before it, for a connection to come up, or, when the connections'
+  // queues are full, for room, within DEFAULT_TIMEOUT, and is dropped with
+  // a warning after that; send_all() gives every live connection its
+  // copy, a full one as soon as it has room. With a lane, on the lane's
+  // connection, which takes the connection chosen when it has none, lost
+  // its own or has it full; a pinned lane waits for room on its own, and
+  // once that is gone drops the message with a warning, the lane being
   // closed() for the caller to see.
   void send(const MultiplexerMessage& msg);
   void send(const MultiplexerMessage& msg, LanePtr lane);
@@ -150,18 +173,20 @@ class ThreadedClient : public ExceptionDefinitions {
   // The flushing forms, from any thread but the io thread: wait until the
   // message reached the socket, on one connection (sent again through
   // another if the first dies under it, the way the synchronous Client's
-  // flush does), on the lane's, on `connection` or another, or on every
-  // connection, or until `timeout` passes. Return the number of
-  // connections it was written to; 0 means none in time, or a pinned lane
-  // whose connection is gone.
+  // flush does), on the lane's, on `connection` or another; send_all()
+  // until one copy is written, the others going out from their
+  // connections' queues, so that a multiplexer frozen with its socket open
+  // holds nobody to the timeout; or until `timeout` passes. Return the
+  // number of connections written by then; 0 means none in time, or a
+  // pinned lane whose connection is gone. flush_all() waits for every copy.
   unsigned int send(const MultiplexerMessage& msg, float timeout);
   unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
   // The same for an already serialized MultiplexerMessage (the Python
-  // side).
-  void send_serialized(std::string serialized, LanePtr lane = LanePtr());
-  void send_all_serialized(std::string serialized);
+  // side), waiting for a connection or for room within `timeout`.
+  void send_serialized(std::string serialized, LanePtr lane = LanePtr(), float timeout = DEFAULT_TIMEOUT);
+  void send_all_serialized(std::string serialized, float timeout = DEFAULT_TIMEOUT);
   unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr());
   // The flushing send with a callback instead of a wait, safe from any
   // thread including the io thread: `done(written)` runs on the io thread
@@ -195,91 +220,19 @@ class ThreadedClient : public ExceptionDefinitions {
                Probe probe = PROBE_SEARCH);
 
   // Ends every in-flight query with SHUT_DOWN, closes the connections and
-  // stops the io thread. Idempotent; the destructor calls it.
+  // stops the io thread. Idempotent; the destructor calls it. On the io
+  // thread itself it does not wait for the thread, which ends once its
+  // handlers are done.
   void shutdown();
   // Whether this client was inherited across a fork: every call then
   // throws UsedAfterFork; see BasicClient::orphaned.
-  bool orphaned() const { return basic_client_->orphaned(); }
+  bool orphaned() const;
 
  private:
-  struct InFlight;
-  struct PendingSend;
-  typedef std::shared_ptr<PendingSend> PendingSendPtr;
-  void _orphan_teardown();
-  void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
-                    LanePtr lane);
-  void _attempt_send(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _advance_sends() MX_RUN_ON(io_thread_);
-  BasicClient::BasicScheduledMessageTracker _schedule(const std::shared_ptr<const RawMessage>& raw, const LanePtr& lane,
-                                                      ConnectionWrapper* used, bool* refused) MX_RUN_ON(io_thread_);
-  typedef std::shared_ptr<InFlight> InFlightPtr;
-
-  void _io_thread_main();
-  template <typename F>
-  void _post(F function);
-  template <typename F>
-  auto _call(F function) -> decltype(function());
-
-  void _on_incoming(const BasicClient::IncomingMessagesBuffer::value_type& incoming) MX_RUN_ON(io_thread_);
-  void _flush_poll(std::shared_ptr<std::promise<bool>> done, std::chrono::steady_clock::time_point deadline,
-                   std::shared_ptr<asio::steady_timer> timer) MX_RUN_ON(io_thread_);
-  void _on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
-
-  void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
-  void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
-  void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
-  void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
-  void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
-  void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
-  float _stage_timeout(const InFlightPtr& in_flight) const MX_RUN_ON(io_thread_);
-  void _on_deadline(InFlightPtr in_flight, unsigned int generation, const asio::error_code& error)
-      MX_RUN_ON(io_thread_);
-  void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage* reply) MX_RUN_ON(io_thread_);
-  void _track(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
-  void _remember_finished(std::uint64_t id) MX_RUN_ON(io_thread_);
-  void _on_unmatched(const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
-
+  class Core;  // the state, which the io thread co-owns: threaded_client_core.h
+  std::shared_ptr<Core> core_;
   const std::uint32_t peer_type_;
-  // Held by pointer so that an orphan (a client inherited across a fork,
-  // see BasicClient::orphaned) can leak it instead of running asio's
-  // destructors with the parent's locks in an unknown state.
-  std::unique_ptr<asio::io_service> io_service_holder_;
-  asio::io_service& io_service_;
-  std::unique_ptr<asio::io_service::work> work_;
-  std::shared_ptr<BasicClient> basic_client_;
   const std::uint64_t instance_id_;
-
-  mx::ThreadChecker io_thread_{mx::ThreadChecker::BIND_LATER};
-  std::unordered_map<std::uint64_t, InFlightPtr> by_id_ MX_GUARDED_BY(io_thread_);
-  std::vector<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_);  // every query, tracked by id or waiting
-  // The ids of recently finished queries, so that a late reply to one is
-  // recognised and dropped instead of reaching on_message: a bounded ring,
-  // small because a late reply arrives within a timeout of its query, and
-  // one that slips through only costs on_message an unexpected message.
-  static const std::size_t REMEMBERED_FINISHED_IDS = 1024;
-  std::deque<std::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
-  std::unordered_set<std::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
-  const MessageSink on_message_;
-  SearchPolicy search_policy_ MX_GUARDED_BY(io_thread_);
-  // Sends not yet written: waiting for a connection, or flushing ones
-  // waiting for their write. Polled every few milliseconds by
-  // send_timer_ while any exist, and on every connection coming up.
-  std::vector<PendingSendPtr> pending_sends_ MX_GUARDED_BY(io_thread_);
-  std::unique_ptr<asio::steady_timer> send_timer_ MX_GUARDED_BY(io_thread_);
-  bool shut_down_ MX_GUARDED_BY(io_thread_) = false;
-
-  mx::Mutex random_mutex_;
-  mx::Random64 random_ MX_GUARDED_BY(random_mutex_);
-
-  // shutdown() is the only thing that touches the thread; every other entry
-  // point checks stopped_ first so that nothing posts to a stopped loop.
-  mx::Mutex lifecycle_mutex_;
-  bool stopped_ MX_GUARDED_BY(lifecycle_mutex_) = false;
-  std::thread thread_;
-  bool _stopped() MX_EXCLUDES(lifecycle_mutex_) {
-    mx::MutexLock lock(lifecycle_mutex_);
-    return stopped_;
-  }
 };
 
 }  // namespace multiplexer

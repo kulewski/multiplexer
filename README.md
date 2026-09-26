@@ -60,9 +60,8 @@ graph LR
 ```
 
 The rules behind the picture, in the format [rules.md](docs/rules.md)
-describes; the web servers are `is_passive` because they use the
-synchronous client, which calls in only to send; no other class needs the
-mark:
+describes; the web servers are `is_passive` because they use
+`SyncClient`, which calls in only to send; no other class needs the mark:
 
 ```
 peer {
@@ -127,17 +126,19 @@ type {
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with
   Protocol Buffers ([wire format](docs/wire_format.md)).
-- **Thread-safe clients for C++ and Python, and asyncio.** A synchronous
-  client for simple programs, a threaded client with callback-based
-  asynchronous queries for servers, safe to share between threads, and an
-  `AsyncClient` for asyncio programs that awaits queries and sends and
+- **Connections for C++ and Python, and asyncio.** `SyncClient` for a
+  program on one thread; `ThreadedClient`, with callback-based
+  asynchronous queries, for servers, safe to share between threads; and
+  `AsyncClient` for asyncio programs, which awaits queries and sends and
   delivers events to coroutines on the loop; all fork-aware and clean at
   interpreter exit ([Python API](docs/api_python.md), [C++ API](docs/api_cpp.md)).
-- **Two backend classes.** One that runs the loop and the handler on one
-  thread, for quick handlers, and one whose handlers run on worker threads
-  behind a heartbeating io thread, for requests that take minutes,
-  several at once, or a handler that blocks on a query of its own
-  ([which to use](docs/README.md#backend-or-client-which-class-to-build-on)).
+- **Two server classes that run the loop for you.** `BaseMultiplexerServer`
+  runs the loop and your `handle_message()` on one thread, for quick
+  handlers; `BaseThreadedMultiplexerServer` runs handlers on worker threads
+  behind a heartbeating io thread, for requests that take minutes, several
+  at once, or a handler that blocks on a query of its own. Either is the
+  usual base of a backend; a backend can also be built on `ThreadedClient`
+  or `AsyncClient` ([which to use](docs/README.md#which-class-to-build-on)).
 - **Tested for every failure mode.** One documented integration scenario per
   failure, AddressSanitizer, ThreadSanitizer, LeakSanitizer, clang thread-safety
   analysis and a soak test ([scenarios](tests/scenarios/README.md)).
@@ -323,9 +324,9 @@ load("@mx//bazel:setup.bzl", "mx_setup")
 mx_setup()
 ```
 
-Then depend on `@mx//multiplexer:clients` (a client) or
-`@mx//multiplexer:servers` (a backend) from Python, `@mx//multiplexer:client`
-from C++; import and include paths are unchanged. [examples/](examples/) holds
+Then depend on `@mx//multiplexer:clients` (`SyncClient`) or
+`@mx//multiplexer:servers` (`BaseMultiplexerServer`) from Python,
+`@mx//multiplexer:client` from C++; import and include paths are unchanged. [examples/](examples/) holds
 complete workspaces built that way, starting with [examples/echo](examples/echo).
 Your tests get `@mx//multiplexer/testing`: real multiplexers on ephemeral
 ports, scripted peers, and the macro this repository's own scenarios use
@@ -337,9 +338,10 @@ ports, scripted peers, and the macro this repository's own scenarios use
 Linux; the import is `multiplexer`, and `mxcontrol generate_constants
 your.rules --python multiplexer_constants.py` writes the `peers` and
 `types` of your rules file, which a Bazel build generates on its own. A
-backend waits for requests and answers them. `serve_forever()` runs the loop
-and calls `handle_message` for each request; `send_message` replies to the peer
-that asked.
+backend waits for requests and answers them. This one is built on
+`BaseMultiplexerServer`: `serve_forever()` runs the loop and calls
+`handle_message` for each request; `send_message` replies to the peer that
+asked.
 
 ```python
 from multiplexer.servers import BaseMultiplexerServer
@@ -358,10 +360,10 @@ A client sends a request and gets the answer back; give it the addresses of
 all your multiplexers.
 
 ```python
-from multiplexer.clients import Client
+from multiplexer.clients import SyncClient
 from multiplexer.multiplexer_constants import peers, types
 
-client = Client([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.PYTHON_TEST_CLIENT)
+client = SyncClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.PYTHON_TEST_CLIENT)
 response = client.query(b"hello", type=types.PYTHON_TEST_REQUEST, timeout=10)
 print(response.message)  # b"HELLO"
 ```

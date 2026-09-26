@@ -7,8 +7,8 @@
 // It runs no thread of its own: every wait_* or flush call runs the shared
 // io_service until its condition holds or its timer expires, and between
 // calls nothing happens. That is why a peer built on it must be marked
-// is_passive in the rules file unless it keeps calling in (a backend's
-// serve_forever loop does).
+// is_passive in the rules file unless it keeps calling in
+// (BaseMultiplexerServer's serve_forever loop does).
 //
 // Tricky parts, each commented at the spot: the tribool message tracker that
 // reports sent/lost per message; the round-robin choice of a connection in
@@ -19,6 +19,7 @@
 
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -66,6 +67,10 @@ template <>
 struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerTraits {
   typedef DefaultConnectionsManagerTraits Base;
 
+  // A ThreadedClient holds back what a full connection cannot take and
+  // queues it as soon as the connection says it has room.
+  static constexpr bool REPORTS_ROOM = true;
+
   struct MessagesBufferTraits : public Base::MessagesBufferTraits {
     typedef ConnectionsManagerTraits::Base::MessagesBufferTraits Base;
 
@@ -84,16 +89,22 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
 
     struct SendingResultNotifier : public Base::SendingResultNotifier {
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_success(ConnectionsManagerImplementationWeakPointer, QueueType& qe) const {
+      void notify_success(ConnectionsManagerImplementationWeakPointer manager, QueueType& qe) const {
         if (temporary_value_type::first_type state = qe.first.lock()) {
           *state = SendState::SENT;
+          if (auto owner = manager.lock()) {
+            owner->tracked_message_done(state, true);  // somebody holds the tracker: maybe waiting on it
+          }
         }
       }
 
       template <typename ConnectionsManagerImplementationWeakPointer, typename QueueType>
-      void notify_error(ConnectionsManagerImplementationWeakPointer, QueueType& qe) const {
+      void notify_error(ConnectionsManagerImplementationWeakPointer manager, QueueType& qe) const {
         if (temporary_value_type::first_type state = qe.first.lock()) {
           *state = SendState::LOST;
+          if (auto owner = manager.lock()) {
+            owner->tracked_message_done(state, false);
+          }
         }
       }
     };
@@ -123,9 +134,9 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
 
 // The handle callers see for a connection: a weak reference plus what it
 // was asked to connect to and the address that resolved to. It is false
-// once the connection is gone, and scheduling through it may reconnect to
-// the remembered target (see schedule_one). Replies carry the wrapper of
-// the connection they arrived on, so a peer can answer through the same
+// once the connection is gone; schedule_one() then puts a message meant
+// for it on another live connection. Replies carry the wrapper of the
+// connection they arrived on, so a peer can answer through the same
 // multiplexer.
 class ConnectionWrapper {
  public:
@@ -239,7 +250,8 @@ typedef std::shared_ptr<Lane> LanePtr;
 // How an addressed query locates its addressee when the request did not
 // reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
 // reaches it whatever its Routing, as every addressed message does, or a
-// PING, which every client library answers, not only a backend.
+// PING, which `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer` and
+// `ThreadedClient` answer; the synchronous Client does not.
 // docs/query.md, "An addressed query".
 enum Probe { PROBE_SEARCH, PROBE_PING };
 
@@ -287,6 +299,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
       IncomingMessagesBuffer;
   typedef MessagesBufferTraits::SchedulingResultFunctor::result_type BasicScheduledMessageTracker;
 
+  ~BasicClient();  // where the outbox (multiplexer/outbox.h) is complete
+
   // public constructor-like function
   typedef std::shared_ptr<BasicClient> pointer;
   typedef std::weak_ptr<BasicClient> weak_pointer;
@@ -322,8 +336,6 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // read but not yet handed out (has_incoming_messages()) still is, so
   // that counts as not confirmed too.
   bool routing_acknowledged() const;
-  // Whether every living connection has written everything queued on it.
-  bool all_written() const;
 
   // Called by a Connection with every parsed message: drops ones without an
   // id or seen before, then queues or hands to the sink.
@@ -338,7 +350,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // connection that fails or drops is retried from connection_destroyed
   // after AUTO_RECONNECT_TIME, whenever the loop runs, resolving the name
   // again each time, so a multiplexer that moved is found at the next try.
-  void shutdown();  // close every connection; idempotent
+  // Closes every connection, the polite way (Connection::close_gracefully):
+  // each goes on reading what its multiplexer still sends, while the loop
+  // runs, until that multiplexer's end or CLOSE_READ_SECONDS, so that what
+  // was written before arrives; closing() says whether any still is.
+  // Idempotent.
+  void shutdown();
+  bool closing();
 
   // Fork, see lib/fork.h: a client a forked child inherited is an orphan
   // there. Every public entry point checks first and throws UsedAfterFork,
@@ -410,6 +428,43 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   void set_connection_observer(ConnectionObserver observer) {
     MX_DCHECK_RUN_ON(&owner_thread());
     connection_observer_ = observer;
+  }
+  // Told, on the owner thread, when a frame whose tracker somebody still
+  // holds has been written to its socket (`written`) or lost with its
+  // connection, with the tracker's state: a flushing send waiting on it
+  // ends then, or goes through another connection. Called from inside the
+  // connection's handlers, so an observer only takes note.
+  typedef std::function<void(const std::shared_ptr<SendState>& state, bool written)> TrackedObserver;
+  void set_tracked_observer(TrackedObserver observer) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    tracked_observer_ = observer;
+  }
+  void tracked_message_done(const std::shared_ptr<SendState>& state, bool written) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    _check_flushes();  // the frame may be one a flush follows
+    if (tracked_observer_) {
+      tracked_observer_(state, written);
+    }
+  }
+  // Called by a connection whose outgoing queue was full and has room
+  // again, from inside its write handler: what waits for it goes in, in
+  // order, as far as the room goes. See "The outbox" in outbox.cc.
+  void outgoing_queue_has_room(Connection* conn);
+  // A tracker for the frame queued last on `conn`, which everything queued
+  // there before it is written ahead of; null when the queue is empty.
+  // What a caller waiting until everything queued so far is out follows.
+  BasicScheduledMessageTracker track_last_queued(const Connection::pointer& conn) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    Connection::MessagesBuffer::value_type* entry = conn->last_queued();
+    if (!entry) {
+      return BasicScheduledMessageTracker();
+    }
+    BasicScheduledMessageTracker state = entry->first.lock();
+    if (!state) {
+      state = std::make_shared<SendState>(SendState::QUEUED);
+      entry->first = state;  // the queue holds the state weakly, as for any tracker
+    }
+    return state;
   }
   void after_connection_registration(Connection::pointer conn, const WelcomeMessage&) {
     MX_DCHECK_RUN_ON(&owner_thread());
@@ -490,50 +545,49 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     }
   }
 
-  // Outgoing messages. schedule_all queues the frame on every live connection
-  // with room and returns how many; the receivers drop the copies by id.
-  unsigned int schedule_all(std::shared_ptr<const RawMessage> raw) {
-    MX_DCHECK_RUN_ON(&owner_thread());
-    unsigned int c = 0;
-    for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
-      if (Connection::pointer conn = entry->second.lock()) {
-        if (conn->outgoing_queue_full() || !conn->living()) {
-          continue;
-        }
-        if (conn->schedule(raw)) {
-          ++c;
-        }
-      }
-    }
-    return c;
-  }
+  // Outgoing messages; see "The outbox" in outbox.cc. A message goes into a
+  // connection's queue when the connection has room and nothing waits for
+  // it before; otherwise it waits in the connection's backlog, in order,
+  // until the connection has room, `timeout` seconds at most, after which
+  // it is dropped, its tracker reading LOST. The tracker reads QUEUED
+  // either way until the message is written. `number` is its place in the
+  // order sent, which flush_all() goes by; 0 takes the next one. What
+  // waits for a connection that dies goes to another, which `lane`, when
+  // given, adopts; a pinned message (RawMessage::pinned) is lost instead,
+  // and so is an ALL send's copy, the others having gone elsewhere.
+  //
+  // schedule_all: a copy on every live connection; how many, the
+  // connections in `used` and the copies' trackers in `trackers` when
+  // given. The receivers drop the copies by id.
+  unsigned int schedule_all(std::shared_ptr<const RawMessage> raw, std::vector<ConnectionWrapper>* used = NULL,
+                            float timeout = DEFAULT_TIMEOUT, std::uint64_t number = 0,
+                            std::vector<BasicScheduledMessageTracker>* trackers = NULL);
+  // schedule_one: on one connection, round robin over those with room and
+  // nothing waiting, the one used moved to the back; with none such, the
+  // live one with the least waiting. Null only when no connection is live.
+  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper* used = NULL,
+                                            float timeout = DEFAULT_TIMEOUT, std::uint64_t number = 0,
+                                            LanePtr lane = LanePtr());
+  // The next number in the order sent, for a caller that holds a message
+  // before it is scheduled (ThreadedClient, waiting for a connection).
+  std::uint64_t next_number();
+  // How many times a message was moved on after waiting: from a backlog
+  // into its queue, or from a dead connection to another. For tests.
+  std::uint64_t retries() const;
 
-  // Queues the frame on one connection, round robin over the multiplexers:
-  // the connection used is moved to the back of the list, and connections
-  // that are dead or full are skipped. Returns a null tracker when none took
-  // it.
-  BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper* used = NULL) {
-    MX_DCHECK_RUN_ON(&owner_thread());
-    Connection::pointer conn;
-    ConnectionsList& connections = connections_by_type_[peers::MULTIPLEXER];
-    for (ConnectionsList::iterator entry = connections.begin();
-         (entry = choose_free_connections(connections, entry)) != connections.end(); ++entry) {
-      if (!(conn = entry->lock())) {
-        continue;
-      }
-      BasicScheduledMessageTracker tracker = conn->schedule(raw);
-      if (!tracker) {
-        continue;
-      }
-      // round-robin: move *entry to the end of multiplexers list
-      connections.splice(connections.end(), connections, entry);
-      if (used) {
-        *used = _wrap(conn);
-      }
-      return tracker;
-    }
-    return BasicScheduledMessageTracker();
-  }
+  // flush_all(): a flush waits for the messages numbered up to the last one
+  // at its start, those still waiting and the last of them queued on each
+  // connection. `done` is told once, when they are out; flushed() says so
+  // too; end_flush() forgets a flush, one that ran out of time. hold() and
+  // release() count messages of the caller's own that wait before they are
+  // scheduled, so that a flush waits for them as well.
+  struct Flush;
+  typedef std::shared_ptr<Flush> FlushPtr;
+  FlushPtr begin_flush(std::function<void()> done = std::function<void()>());
+  bool flushed(const FlushPtr& flush) const;
+  void end_flush(const FlushPtr& flush);
+  void hold(std::uint64_t number, unsigned int copies);
+  void release(std::uint64_t number, unsigned int copies);
 
   // Runs the loop until some connection is registered or the timer expires:
   // this is where a synchronous client's reconnect timers get to fire when
@@ -563,9 +617,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     MXTHROW(OperationTimedOut());
   }
 
-  // Queues the frame on a specific connection, the one a request arrived on
-  // or a reply came from. If that connection is gone, reconnects to its
-  // endpoint within `timeout` and tries once more; with no timeout, throws.
+  // Queues the frame on a preferred connection, the one a request arrived on
+  // or a reply came from, while it lives; once it is gone, on another, as
+  // any message is, waiting up to `timeout` for one to come back when none
+  // is live; with none by then, throws NotConnected. Never a connection of
+  // its own to the old one's address: the client already reconnects to
+  // that multiplexer under the target it was given, a host name perhaps,
+  // and a second connection to it would replace the first and be replaced
+  // in turn.
   BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper wrapper,
                                             float timeout) {
     MX_DCHECK_RUN_ON(&owner_thread());
@@ -573,54 +632,35 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if ((conn = wrapper.lock()) && conn->living()) {
       // A connection closed by the peer while the loop did not run still
       // reads as living here; Client polls the loop before calling this.
-      return (BasicScheduledMessageTracker)conn->schedule(raw);
-    } else {
-      assert(Endpoint().port() == 0);
-      if (wrapper.endpoint_.port() && timeout > 0) {
-        wrapper = this->connect(wrapper.endpoint_, timeout);
-        return schedule_one(raw, wrapper, 0);
-      } else {
-        MXTHROW(NotConnected());
+      return schedule_on(raw, wrapper, timeout > 0 ? timeout : DEFAULT_TIMEOUT);
+    }
+    BasicScheduledMessageTracker tracker = schedule_one(raw);
+    if (!tracker && timeout > 0) {
+      std::unique_ptr<mx::SimpleTimer> timer = create_timer(timeout);
+      if (wait_for_any_connection(*timer)) {
+        tracker = schedule_one(raw);
       }
     }
+    if (!tracker) {
+      MXTHROW(NotConnected());
+    }
+    return tracker;
   }
 
-  // A connection that shuts down with unsent messages offers them here; they
-  // are spread round robin over the live connections, and whatever no
-  // connection takes stays in the buffer and is reported lost by the caller.
-  // A message pinned to its connection (RawMessage::pinned, a pinned lane's)
-  // is never handed over: it is reported lost, which is what the pin means.
-  template <typename MessagesBuffer>
-  void inline handle_orphaned_outgoing_messages(MessagesBuffer& outgoing_messages) {
-    MX_DCHECK_RUN_ON(&owner_thread());
-    std::list<Connection::pointer> working_connections;
-    for (Connection::weak_pointer connwp : connections_by_type_[peers::MULTIPLEXER]) {
-      if (Connection::pointer conn = connwp.lock()) {
-        if (conn->living()) {
-          working_connections.push_back(conn);
-        }
-      }
-    }
+  // On `wrapper`'s connection and never another, as a lane does, waiting
+  // there when it is full: null only when that connection is gone.
+  BasicScheduledMessageTracker schedule_on(std::shared_ptr<const RawMessage> raw, const ConnectionWrapper& wrapper,
+                                           float timeout = DEFAULT_TIMEOUT, std::uint64_t number = 0,
+                                           LanePtr lane = LanePtr());
 
-    for (typename MessagesBuffer::value_type& message : outgoing_messages) {
-      if (message.second->pinned()) {
-        continue;
-      }
-
-      for (size_t n = working_connections.size(); n; --n) {
-        if (working_connections.front()->take_over(message)) {
-          // move front element to the end
-          working_connections.splice(working_connections.end(), working_connections, working_connections.begin());
-          message.first.reset();
-        } else {
-          working_connections.pop_front();
-        }
-      }
-      if (working_connections.empty()) {
-        break;
-      }
-    }
-  }
+  // A connection that shuts down offers what it had not written here, even
+  // nothing: each message goes to another live connection, round robin,
+  // waiting there when it is full, and after them what waited in the dead
+  // connection's backlog. A message pinned to its connection
+  // (RawMessage::pinned, a pinned lane's) is never handed over: left in the
+  // buffer, it is reported lost by the connection, which is what the pin
+  // means; so is everything when no connection is live.
+  void handle_orphaned_outgoing_messages(Connection::MessagesBuffer& outgoing_messages);
 
   mx::Random64::result_type random64() { return random_(); }         // a message id
   std::uint32_t inline client_type() const { return client_type_; }  // this peer's type
@@ -649,13 +689,15 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // received messages
   IncomingSink incoming_sink_;
   ConnectionObserver connection_observer_;
+  TrackedObserver tracked_observer_;
   Routing routing_;
   unsigned int routing_version_ = 0;  // bumped by set_routing; 0 is the default routing
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
 
   ConnectionByTarget connection_by_target_;
-  std::set<TimerPointer> reconnect_timers_;  // armed by lost connections; shutdown() cancels them
+  std::set<TimerPointer> reconnect_timers_;        // armed by lost connections; shutdown() cancels them
+  std::vector<Connection::weak_pointer> closing_;  // closed by shutdown(), still reading to their end
   const unsigned int fork_generation_at_creation_;
   asio::ip::tcp::resolver resolver_;
   Resolver resolver_hook_;
@@ -666,6 +708,28 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // sent through every multiplexer arrives once per multiplexer; the copies
   // are dropped here so the caller sees each id once.
   mx::SpanSet<std::uint64_t, 2048> last_seen_message_ids_;
+
+  // What the connections cannot take yet; see "The outbox" in outbox.cc.
+  struct Outbox;
+  std::unique_ptr<Outbox> outbox_;
+  struct Waiting;
+  typedef std::shared_ptr<Waiting> WaitingPtr;
+  struct Backlog;
+  Backlog* _backlog(const Connection* conn);
+  Connection::pointer _choose_connection();
+  BasicScheduledMessageTracker _place_on(const Connection::pointer& conn, std::shared_ptr<const RawMessage> raw,
+                                         BasicScheduledMessageTracker state, std::uint64_t number,
+                                         std::chrono::steady_clock::time_point deadline, bool copy, LanePtr lane);
+  void _queued(std::uint64_t number, const BasicScheduledMessageTracker& state, const Connection* conn);
+  void _lose(const WaitingPtr& waiting);
+  void _displace(Connection* conn);
+  void _replace_displaced();
+  void _expire_at(const WaitingPtr& waiting);
+  void _arm_expiry();
+  void _expire();
+  void _wait_flushes(std::uint64_t number, int copies);
+  void _check_flushes();
+  void _drop_outbox();
 };
 
 };  // namespace multiplexer

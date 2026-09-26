@@ -3,8 +3,8 @@ threads behind a heartbeating io thread.
 
 BaseMultiplexerServer (servers.py) runs the loop and the handler on one
 thread, so while handle_message() runs nothing heartbeats, and a backend
-whose one request takes longer than the multiplexer's drop interval
-(docs/semantics.md) is dropped mid-work. This class puts the io on a
+built on it whose one request takes longer than the multiplexer's drop
+interval (docs/semantics.md) is dropped mid-work. This class puts the io on a
 ThreadedClient's thread, which heartbeats, reconnects, answers pings and
 the search clients use to find a backend, and hands every other message
 to a bounded queue that `workers` threads take from. With workers=1
@@ -68,11 +68,11 @@ class Request:
         `flush=True` waits for the write. Returns the message id.
 
         One reply per request: `references` means "this is the reply", and
-        a threaded or asyncio requester drops what references a query it
-        has seen answered. A follow-up that is not the reply, a stream of
-        results after the answer for instance, goes through
-        self.server.send_message(..., to=request.mxmsg.from_) with no
-        `references`, correlated in the payload."""
+        a requester built on ThreadedClient or AsyncClient drops what
+        references a query it has seen answered. A follow-up that is not
+        the reply, a stream of results after the answer for instance, goes
+        through self.server.send_message(..., to=request.mxmsg.from_) with
+        no `references`, correlated in the payload."""
         self.answered = True
         kwargs.setdefault("to", self.mxmsg.from_)
         kwargs.setdefault("references", self.mxmsg.id)
@@ -126,9 +126,9 @@ CLOSE_FLUSH_SECONDS = 1.0
 
 
 class BaseThreadedMultiplexerServer:
-    """Base class for a threaded backend: subclass, implement
-    handle_message(request), call serve_forever(). See the module
-    docstring and docs/api_python.md.
+    """Base class for a backend whose handlers run on worker threads:
+    subclass, implement handle_message(request), call serve_forever(). See
+    the module docstring and docs/api_python.md.
     """
 
     # the peer type, if a subclass wants to fix it instead of passing `type`

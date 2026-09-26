@@ -1,12 +1,14 @@
-"""The Python backend API: BaseMultiplexerServer, which a backend subclasses.
+"""The Python backend base class: BaseMultiplexerServer, which a backend may subclass.
 
-A backend hands control to serve_forever(): the loop reads one message at a
-time, answers the protocol's own messages itself, and calls handle_message()
-with the rest; while a message is being handled, send_message() defaults to
-replying to it. The C++ BaseMultiplexerServer mirrors this class, including
-what happens when a handler raises. docs/api_python.md is the user's view.
+A BaseMultiplexerServer hands control to serve_forever(): the loop reads one
+message at a time, answers the protocol's own messages itself, and calls
+handle_message() with the rest; while a message is being handled,
+send_message() defaults to replying to it. The C++ BaseMultiplexerServer
+mirrors this class, including what happens when a handler raises.
+docs/api_python.md is the user's view.
 
-Threading: a backend runs on the thread that calls serve_forever().
+Threading: a BaseMultiplexerServer runs on the thread that calls
+serve_forever().
 """
 
 import faulthandler
@@ -250,23 +252,40 @@ class BaseMultiplexerServer(MultiplexerPeer):
         self.__handle_message()
 
     @log_call
+    def __echo(self, mxmsg, what: str) -> None:
+        """Answer `mxmsg` with a PING carrying its payload back; with
+        BACKEND_ERROR saying so, `what` naming it, when that echo would be
+        over MAX_MESSAGE_SIZE, rather than not at all."""
+        try:
+            self.send_message(message=mxmsg.message, embed=True, flush=True, type=types.PING)
+        except ValueError:
+            self.send_message(
+                message=b"the echo of a %s of %d bytes would be over MAX_MESSAGE_SIZE"
+                % (what.encode(), len(mxmsg.message)),
+                embed=True,
+                flush=True,
+                type=types.BACKEND_ERROR,
+                workflow=b"",
+            )
+
     def __handle_internal_message(self):
-        # A client searching for a backend gets a PING referencing its search:
-        # that is how it learns this backend is alive and where to repeat the
-        # request. A PING without references is an echo request.
-        """Answer the protocol's own messages: a PING referencing a client's search for a backend, an echo of a PING without references."""
+        # Each is answered with a PING referencing it and carrying its payload
+        # back (__echo): a client searching for a backend learns that way that
+        # this backend is alive and where to repeat the request; a PING
+        # without references is an echo request.
+        """Answer the protocol's own messages: a client's search for a backend, and a PING without references, each with its payload echoed."""
         mxmsg = self.last_mxmsg
         assert mxmsg is not None
         if mxmsg.type == types.BACKEND_FOR_PACKET_SEARCH:
             if self.should_respond_to_backend_for_packet_search():
-                self.send_message(message="", embed=True, flush=True, type=types.PING)
+                self.__echo(mxmsg, "search")
             else:
                 self.no_response()  # the policy declines: let the client find another backend
 
         elif mxmsg.type == types.PING:
             if not mxmsg.references:
                 assert mxmsg.id
-                self.send_message(message=mxmsg.message, embed=True, flush=True, type=types.PING)
+                self.__echo(mxmsg, "PING")
             else:
                 self.no_response()
 
@@ -305,8 +324,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     )
 
         except Exception as e:
-            # Same as the C++ backend: tell the requester instead of leaving it
-            # to time out, then ask on_handler_exception() whether to go on.
+            # Same as the C++ BaseMultiplexerServer: tell the requester instead
+            # of leaving it to time out, then ask on_handler_exception() whether
+            # to go on.
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % e)
             if not self._has_sent_response:
@@ -398,7 +418,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def close(self):
         """Write what is still queued, up to a second, then close every
-        connection; the server cannot be used afterwards. Safe to call twice."""
+        connection as SyncClient.shutdown() does; the server cannot be used
+        afterwards. Safe to call twice."""
         self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
         self.conn.shutdown()  # idempotent, so a second close() is harmless
 

@@ -5,7 +5,7 @@ import subprocess
 import time
 import unittest
 
-from multiplexer.clients import Client
+from multiplexer.clients import SyncClient
 from multiplexer.multiplexer_constants import peers, types
 
 
@@ -63,9 +63,9 @@ class EchoTest(unittest.TestCase):
         self.assertEqual(b"ready\n", self.backend.stdout.readline())
 
     def query_in_process(self, backend_binary: str) -> None:
-        """Query the backend from this process with the Python Client."""
+        """Query the backend from this process with the Python SyncClient."""
         self.start_backend(backend_binary)
-        client = Client([self.endpoint], type=peers.ECHO_CLIENT)
+        client = SyncClient([self.endpoint], type=peers.ECHO_CLIENT)
         response = client.query(b"hello multiplexer", type=types.ECHO_REQUEST, timeout=10)
         client.shutdown()
         self.assertEqual(types.ECHO_RESPONSE, response.type)

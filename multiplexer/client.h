@@ -1,4 +1,5 @@
-// The C++ client API: connect to multiplexers, send events, ask requests,
+// The synchronous C++ API, Client, which the docs call SyncClient (the
+// alias at the end): connect to multiplexers, send events, ask requests,
 // receive messages. This is what peers use directly and what the Python
 // binding (_native.cc) wraps; BaseMultiplexerServer builds backends on it.
 // docs/api_cpp.md describes it from the caller's side.
@@ -159,16 +160,19 @@ class Client : public ExceptionDefinitions {
 
   // Sending. schedule_* only queue; the write happens while any call runs
   // the loop, so a caller that wants the message out before it goes idle
-  // uses flush() or flush_all(). `msg` may be a MultiplexerMessage, an
-  // already serialized std::string, or a RawMessage.
+  // uses flush() or flush_all(). A message a full connection cannot take
+  // waits for its room, in order, `timeout` seconds at most, and goes in
+  // as a later call runs the loop (see BasicClient); a null tracker means
+  // no connection is live. `msg` may be a MultiplexerMessage, an already
+  // serialized std::string, or a RawMessage.
   // Each of these polls the loop first (BasicClient::poll), so that a
   // connection the multiplexer closed while this client sat idle is retired
   // rather than written into.
   template <typename T>
-  ScheduledMessageTracker schedule_one(const T& msg) {
+  ScheduledMessageTracker schedule_one(const T& msg, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
     basic_client_->poll();
-    return ScheduledMessageTracker(basic_client_->schedule_one(_serialize(msg)));
+    return ScheduledMessageTracker(basic_client_->schedule_one(_serialize(msg), NULL, timeout));
   }
 
   template <typename T>
@@ -195,38 +199,18 @@ class Client : public ExceptionDefinitions {
     }
   }
 
-  // Runs the loop until every connection's queue is empty; false on timeout.
+  // Runs the loop until everything sent before the call is written, what
+  // still waits for room included, or `timeout` passes; false then. See
+  // BasicClient::begin_flush().
   bool flush_all(float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
-
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
-    std::size_t n;
-
-    BasicClient::Connection::pointer conn;
-    std::list<BasicClient::Connection::weak_pointer> current_connections;
-    for (BasicClient::ConnectionById::const_iterator entry = basic_client_->begin(); entry != basic_client_->end();
-         ++entry) {
-      current_connections.push_back(entry->second);
+    BasicClient::FlushPtr flush = basic_client_->begin_flush();
+    while (!basic_client_->flushed(flush) && !timer->expired()) {
+      basic_client_->run_one();
     }
-    std::list<BasicClient::Connection::weak_pointer>::iterator entry = current_connections.begin(),
-                                                               connend = current_connections.end();
-
-    while (entry != connend) {
-      if (timer->expired()) {
-        return false;
-      }
-
-      // find a Connection that has some outgoing messages
-      while (entry != connend && (!(conn = entry->lock()) || conn->outgoing_queue_empty())) {
-        ++entry;
-      }
-
-      if (entry != connend) {
-        n = basic_client_->run_one();
-        Assert(n);
-      }
-    }
-    return true;
+    basic_client_->end_flush(flush);
+    return basic_client_->flushed(flush);
   }
 
   // Writes `msg` to one connection and returns it, waiting up to `timeout`:
@@ -290,18 +274,19 @@ class Client : public ExceptionDefinitions {
     return _query(mxmsg, timeout, lane, PROBE_SEARCH);
   }
 
-  // Queues `msg` on every live connection; returns how many took it.
+  // Queues `msg` on every live connection, a full one's copy waiting for
+  // its room as above; returns how many connections got a copy.
   template <typename T>
-  unsigned int schedule_all(T& msg) {
+  unsigned int schedule_all(T& msg, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->poll();
-    return basic_client_->schedule_all(_serialize(msg));
+    return basic_client_->schedule_all(_serialize(msg), NULL, timeout);
   }
 
   template <typename T>
-  unsigned int schedule_all(const T& msg) {
+  unsigned int schedule_all(const T& msg, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
     basic_client_->poll();
-    return basic_client_->schedule_all(_serialize(msg));
+    return basic_client_->schedule_all(_serialize(msg), NULL, timeout);
   }
 
   mx::Random64::result_type random64() const { return basic_client_->random64(); }  // a message id
@@ -312,12 +297,15 @@ class Client : public ExceptionDefinitions {
   IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all = false,
-                                    bool handle_delivery_errors = false, std::uint64_t accept_id = 0,
+                                    bool handle_delivery_errors = false,
+                                    const std::vector<uint64_t>& also_accept = std::vector<uint64_t>(),
                                     std::uint32_t ignore_type = 0, std::uint64_t ignore_id = -1,
-                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr());
+                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr(),
+                                    std::vector<uint64_t>* sent_ids = NULL);
   IncomingMessage _send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer& timer,
                                         std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
-                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane);
+                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane,
+                                        std::vector<uint64_t>* sent_ids = NULL);
   ConnectionWrapper _send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
                               LanePtr lane = LanePtr());
   MultiplexerMessage _probe_for(const MultiplexerMessage& query, Probe probe);
@@ -342,6 +330,11 @@ class Client : public ExceptionDefinitions {
   asio::io_service& io_service_;
   shared_ptr<BasicClient> basic_client_;
 };
+
+// SyncClient is this class's name in the docs after 2.3.1, so that no class
+// is named like the client role. Client stays the class itself: what a
+// forward declaration names and what compiler messages show.
+using SyncClient = Client;
 
 };  // namespace multiplexer
 

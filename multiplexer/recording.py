@@ -22,10 +22,10 @@ start(), stop() and status() drive recording sessions on running
 multiplexers through a client connected to them, one RecordingStatus per
 multiplexer back; tap() yields every record as it is routed. The
 multiplexers must allow it (`--recording-dir`, `--allow-tap`); the client
-is any multiplexer.clients.Client, for example one of the reserved
+is any multiplexer.clients.SyncClient, for example one of the reserved
 controller type:
 
-    client = Client(endpoints, type=RECORDING_CONTROLLER)
+    client = SyncClient(endpoints, type=RECORDING_CONTROLLER)
     for status in start(client, "checkout-bug"):
         print(status.multiplexer_id, status.path)
 """

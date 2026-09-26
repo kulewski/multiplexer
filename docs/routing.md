@@ -149,7 +149,7 @@ graph LR
 
 ### 5. Nobody can receive it
 
-No rule for the type, or a rule whose peer type has no connected backend: the message is dropped, and the client gets `DELIVERY_ERROR` if it set `report_delivery_error`. A query's search relies on this.
+No rule for the type, or a rule whose peer type has no connected backend: the message is dropped, and the sender gets `DELIVERY_ERROR` when the rule sets `report_delivery_error`, as it does by default; a message addressed with `to` reports by its own flag instead. A query's search relies on this.
 
 ```mermaid
 graph LR

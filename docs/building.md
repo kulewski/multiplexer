@@ -68,7 +68,11 @@ build --@mx//:protobuf_runtime=//third_party/protobuf:libprotobuf
 
 Inside this repository the flags are `--//:protoc` and
 `--//:protobuf_runtime`. The two must match each other, as with the
-system packages.
+system packages. A consuming workspace compiles its own `.proto` files
+with `@mx//:protoc` and links them against `@mx//:protobuf_runtime`, with
+a `genrule` as the multiplexer's own are built, so that its generated
+code and the library's come from one `protoc` and link one runtime,
+whichever the flags select.
 
 ### Build configurations
 

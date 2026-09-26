@@ -4,9 +4,9 @@
 // BaseMultiplexerServer in clients.py; both behave the same way, including
 // what happens when a handler throws. docs/api_cpp.md is the user's view.
 //
-// A backend is driven by serve_forever(): it blocks in the client's
-// read, so heartbeats and reconnects happen on their own and the peer type
-// need not be passive. One message is handled at a time. After every
+// A BaseMultiplexerServer is driven by serve_forever(): it blocks in the
+// client's read, so heartbeats and reconnects happen on their own and the
+// peer type need not be passive. One message is handled at a time. After every
 // iteration, message or poll timeout, periodic_task() runs: the place for
 // work on the backend's own schedule and for noticing a request to leave.
 // The library installs no signal handlers; a handler of your own should
@@ -38,7 +38,9 @@ using mx::util::kwargs::Kwargs;
 using mx::util::kwargs::KwargsKeys;
 
 // How long close() waits for the last replies to be written before it
-// closes the sockets; a peer that stopped reading cannot hold it longer.
+// closes the connections, which takes CLOSE_READ_SECONDS more at most
+// (Client::shutdown); a multiplexer that stopped reading cannot hold it
+// longer than the two.
 static const float CLOSE_FLUSH_SECONDS = 1.0f;
 
 // The routing a draining backend asks for unless told otherwise: nothing
@@ -202,6 +204,10 @@ class BaseMultiplexerServer {
  private:
   void __handle_message();
   void __handle_internal_message();
+  // Answers the message being handled, a PING or a search, with a PING
+  // carrying its payload back; `what` names it in the BACKEND_ERROR sent
+  // instead when that echo would be over MAX_MESSAGE_SIZE.
+  void _echo(const char* what);
 
  public:
   std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly

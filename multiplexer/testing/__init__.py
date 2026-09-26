@@ -20,9 +20,11 @@ A scenario is a unittest file that calls main(); mx_integration_test
 role), --rules (the rules file) and --params, available as CONFIG.
 """
 
+import atexit
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -71,14 +73,34 @@ def runfile(path: str) -> str:
     return os.path.join(root, os.environ.get("TEST_WORKSPACE", "__main__"), path)
 
 
+_process_output: tuple[int, str] | None = None  # outside Bazel: (the owning pid, the directory)
+
+
 def output_dir() -> str:
     """Where logs and events go: Bazel's undeclared outputs directory, its
-    temporary directory, or a fresh temporary directory outside Bazel."""
-    directory = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or os.environ.get("TEST_TMPDIR")
+    temporary directory, or $MX_TEST_OUTPUT when set, all kept; else, outside
+    Bazel, one temporary directory for the process, removed when the process
+    exits, by that process only, not by a forked child."""
+    directory = (
+        os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+        or os.environ.get("TEST_TMPDIR")
+        or os.environ.get("MX_TEST_OUTPUT")
+    )
     if not directory:
-        directory = tempfile.mkdtemp(prefix="mxtest-")
+        global _process_output
+        if _process_output is None or _process_output[0] != os.getpid():
+            _process_output = (os.getpid(), tempfile.mkdtemp(prefix="mxtest-"))
+            atexit.register(_remove_output, *_process_output)
+        directory = _process_output[1]
     os.makedirs(directory, exist_ok=True)
     return directory
+
+
+def _remove_output(owner: int, directory: str) -> None:
+    """At exit: the process's temporary output directory goes, unless a
+    forked child is the one exiting."""
+    if os.getpid() == owner:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def cpu_seconds(pid: int) -> float:
@@ -171,7 +193,9 @@ CONFIG: Config | None = None
 
 class Mx:
     """One multiplexer process, started on an ephemeral port unless told
-    otherwise. Its log goes to mx<index>.log in the output directory."""
+    otherwise. Its log goes to <prefix>mx<index>.log in the output
+    directory; a Cluster gives its multiplexers a prefix of their own,
+    c<n>-, so that two clusters alive at once never share a file."""
 
     def __init__(
         self,
@@ -184,6 +208,7 @@ class Mx:
         recording_dir: str | None = None,
         allow_tap: bool = False,
         rules_check_interval: float | None = None,
+        prefix: str = "",
     ):
         self.index = index
         self.rules = rules
@@ -199,13 +224,14 @@ class Mx:
         # file again for a change; None keeps its default, 0 never.
         self.rules_check_interval = rules_check_interval
         self.proc: subprocess.Popen | None = None
-        self.log_path = os.path.join(output_dir(), "mx%d.log" % index)
-        self.port_file = os.path.join(output_dir(), "mx%d.port" % index)
+        stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
+        self.log_path = stem + ".log"
+        self.port_file = stem + ".port"
         # --peers-file: one line per connected peer, rewritten by the
         # multiplexer on every change; connected_peers() reads it.
-        self.peers_file = os.path.join(output_dir(), "mx%d.peers" % index)
+        self.peers_file = stem + ".peers"
         # --record, when asked for: the recording, readable with multiplexer.recording.
-        self.record_file = os.path.join(output_dir(), "mx%d.rec" % index)
+        self.record_file = stem + ".rec"
 
     @property
     def host(self) -> str:
@@ -418,6 +444,7 @@ class Cluster:
                 recording_dir=self.recording_dir,
                 allow_tap=remote_recording,
                 rules_check_interval=rules_check_interval,
+                prefix="c%d-" % Cluster._counter,
             )
             for index in range(count)
         ]

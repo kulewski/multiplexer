@@ -40,7 +40,7 @@ Then depend on `@mx//multiplexer:clients` and `@mx//multiplexer:multiplexer_cons
 from Python, or `@mx//multiplexer:client`, `@mx//multiplexer/backend:base_multiplexer_server`
 and `@mx//multiplexer:multiplexer_cc_constants` from C++. Import paths and
 include paths are the same as inside the multiplexer's own workspace:
-`from multiplexer.clients import Client`, `#include "multiplexer/client.h"`.
+`from multiplexer.clients import SyncClient`, `#include "multiplexer/client.h"`.
 
 Your peer and message types live in your own rules file; point the build at
 it in your `.bazelrc`:

@@ -199,8 +199,8 @@ void BaseMultiplexerServer::__handle_message() {
   } catch (std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception in handle_message: ") + error.what()));
     if (!_has_sent_response) {
-      // Same as the Python backend: tell the requester instead of leaving it
-      // to time out.
+      // Same as the Python BaseMultiplexerServer: tell the requester instead
+      // of leaving it to time out.
       report_error(error.what());
     }
     if (!on_handler_exception(error)) {
@@ -209,20 +209,43 @@ void BaseMultiplexerServer::__handle_message() {
   }
 }
 
+// The echo, built as send_message() builds a reply, goes back with the
+// payload as it came. One that would be over MAX_MESSAGE_SIZE is answered
+// with BACKEND_ERROR saying so, rather than not at all.
+void BaseMultiplexerServer::_echo(const char* what) {
+  const MultiplexerMessage& mxmsg = *last_mxmsg;
+  MultiplexerMessage echo;
+  echo.set_id(conn->random64());
+  echo.set_from(conn->instance_id());
+  echo.set_message(mxmsg.message());
+  echo.set_type(types::PING);
+  echo.set_to(mxmsg.from());
+  echo.set_references(mxmsg.id());
+  echo.set_workflow(mxmsg.workflow());
+  if (echo.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+    echo.set_type(types::BACKEND_ERROR);
+    echo.set_message(std::string("the echo of a ") + what + " of " + std::to_string(mxmsg.message().size()) +
+                     " bytes would be over MAX_MESSAGE_SIZE");
+    echo.clear_workflow();
+  }
+  send_message(Kwargs().set("message", static_cast<const MultiplexerMessage*>(&echo)));
+}
+
 void BaseMultiplexerServer::report_error(const std::string& message) {
   send_message(Kwargs().set("message", message).set("type", types::BACKEND_ERROR));
 }
 
-// The protocol messages a backend must answer: a client's search for a
-// backend gets a PING referencing it, which is how the client learns this
-// backend is alive and where to send the request; a PING without
-// references is an echo request and is answered with the same payload.
+// The protocol messages this class answers itself, each with a PING that
+// references it and carries its payload back (_echo): a client's search
+// for a backend, which is how the client learns this backend is alive and
+// where to send the request, and a PING without references, an echo
+// request.
 void BaseMultiplexerServer::__handle_internal_message() {
   const MultiplexerMessage& mxmsg = *last_mxmsg;
   switch (mxmsg.type()) {
     case types::BACKEND_FOR_PACKET_SEARCH:
       if (should_respond_to_backend_for_packet_search()) {
-        send_message(Kwargs().set("message", std::string()).set("type", types::PING));
+        _echo("search");
       } else {
         no_response();  // the policy declines: let the client find another backend
       }
@@ -231,10 +254,7 @@ void BaseMultiplexerServer::__handle_internal_message() {
     case types::PING:
       if (!mxmsg.references()) {
         DbgAssert(mxmsg.id());
-        send_message(Kwargs()
-                         .set("message", mxmsg.message())
-                         //.set("flush", true)
-                         .set("type", types::PING));
+        _echo("PING");
       } else {
         no_response();
       }

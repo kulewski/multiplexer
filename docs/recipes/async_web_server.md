@@ -40,7 +40,7 @@ class LessonConsumer(AsyncWebsocketConsumer):
         self.unsubscribe = mx.subscribe(types.LESSON_EVENT, self.push, matching=lambda m: m.message.startswith(self.key))
 
     async def receive(self, text_data=None, bytes_data=None):
-        mx = await MX.aget()   # made in the executor on the worker's first use, never on the loop
+        mx = await MX.aget()   # made on a thread at the worker's first use, never on the loop
         reply = await mx.query(self.key + b" " + bytes_data, types.LESSON_REQUEST, timeout=10)
         await self.send(bytes_data=reply.message)
 
@@ -54,7 +54,7 @@ class LessonConsumer(AsyncWebsocketConsumer):
 `receive` awaits the backend's reply without holding the loop; `push` is a
 coroutine the client schedules on the loop for every event the predicate
 accepts, and if it raises, the client logs it with the message's type and
-sender and the other subscriptions still run. The exceptions are the synchronous client's: catch
+sender and the other subscriptions still run. The exceptions are those of `SyncClient`: catch
 `OperationTimedOut` and `OperationFailed` where the socket should get an
 error frame rather than nothing.
 
@@ -63,7 +63,11 @@ error frame rather than nothing.
 Every consumer in a worker shares the worker's one client, so a backend
 sending an event reaches the worker, not the socket. The payload carries
 what identifies the socket, the session key above, and the subscription's
-predicate routes it; a socket held by another worker is reached the way
+predicate routes it. The predicate runs on the client's io thread for
+every event that arrives, before anything reaches the loop, so it stays a
+quick test like the one above, touching nothing of the loop's; an event
+it refuses costs the loop nothing. A socket held by another worker is
+reached the way
 Channels reaches it, through the channel layer, from a handler that
 forwards what it matched. Subscribe in `connect`, unsubscribe in
 `disconnect`, or the handler keeps a closed consumer alive.

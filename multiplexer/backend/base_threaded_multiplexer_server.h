@@ -2,8 +2,8 @@
 // threads behind a heartbeating io thread.
 //
 // BaseMultiplexerServer runs the loop and the handler on one thread, so
-// while handle_message runs nothing heartbeats, and a backend whose one
-// request takes longer than the multiplexer's drop interval
+// while handle_message runs nothing heartbeats, and a backend built on it
+// whose one request takes longer than the multiplexer's drop interval
 // (docs/semantics.md) is dropped mid-work. This class puts the io on a
 // ThreadedClient's thread, which heartbeats, reconnects, answers pings and
 // the search clients use to find a backend, and hands every other message
@@ -59,7 +59,7 @@ struct ThreadedServerOptions {
 
 // One message being handled, and what answers it. reply() fills in `to`,
 // `references`, `workflow` and the connection from the request and sends
-// through the threaded client, from whichever thread calls it.
+// through its ThreadedClient, from whichever thread calls it.
 class Request {
  public:
   ~Request();  // logs a warning when nobody answered or called no_response()
@@ -72,10 +72,10 @@ class Request {
   // The reply: `payload` as a message of `type`, or a message you built,
   // whose id and from are set and whose to, references and workflow are
   // filled in when empty. One reply per request: `references` means "this
-  // is the reply", and a threaded requester drops what references a query
-  // it has seen answered; a follow-up that is not the reply goes through
-  // the server's client() with `to` set and no `references`, correlated
-  // in the payload.
+  // is the reply", and a requester built on ThreadedClient drops what
+  // references a query it has seen answered; a follow-up that is not the
+  // reply goes through the server's client() with `to` set and no
+  // `references`, correlated in the payload.
   void reply(const std::string& payload, std::uint32_t type);
   void reply(MultiplexerMessage msg);
   // The message needs no reply, as an event does.

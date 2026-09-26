@@ -25,6 +25,11 @@ build:asan --//:is_asan=true --copt=-fsanitize=address --linkopt=-fsanitize=addr
 build:tsan --copt=-fsanitize=thread --linkopt=-fsanitize=thread -c dbg
 # gcc warns about libstdc++ fences it cannot instrument; not our code.
 build:tsan --copt=-Wno-tsan
+# A sanitized test runs several times slower than a plain one, and a loaded
+# machine slows it further: under either sanitizer a small test has 300 s,
+# where it has 60 s otherwise.
+test:asan --test_timeout=300,300,900,3600
+test:tsan --test_timeout=300,300,900,3600
 
 # Static thread-safety analysis (lib/thread_annotations.h) needs clang.
 # Uses the installed clang-18; everything else stays the same.

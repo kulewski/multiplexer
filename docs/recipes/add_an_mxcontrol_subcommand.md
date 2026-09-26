@@ -9,7 +9,7 @@
    (`lib/options.h`: `add()`, `add_switch()`, `positional()`, `hidden()`,
    `required()`). Call `_add_multiplexer_client_options()` there
    if the command is itself a peer, then `_multiplexer_client(peer_type)`
-   in `run()` returns a `Client` connected to every `--multiplexer` given.
+   in `run()` returns a `SyncClient` connected to every `--multiplexer` given.
    `receive_logs.cc` is the smallest complete example, `stream_logs.cc` the
    next.
 2. **Register it** at file scope with

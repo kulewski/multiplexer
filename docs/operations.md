@@ -231,17 +231,17 @@ can replace it; a pure C++ backend may set a flag from a handler of its
 own. With that, a rolling restart of backends costs nobody a timeout or a
 retry, as the [backend_drains](../tests/scenarios/backend_drains/README.md)
 scenario checks: from the confirmation on, the multiplexer routes the
-draining backend nothing by the rules, requests, events and searches
-alike, and a peer alone of its type either drains as the last resort,
+draining backend nothing by the rules, requests, events and searches alike,
+and a peer alone of its type either drains as the last resort,
 `Routing(any=False, all=False, last_resort=True)`, or fails its callers at
-once. What was routed in the moment before a multiplexer applied the
-change is served, and a threaded backend refuses what reaches it once it
-is closing, with `DELIVERY_ERROR`, so that costs a retry rather than a
-timeout, while a `BaseMultiplexerServer` loses what arrived after its
-last read. A backend that dies without draining costs its clients a
-timeout per request it held. [How a backend leaves](leaving.md) draws the
-three phases and the routing flags; a recording notes each skip as
-`NOT_ACCEPTED`.
+once. What was routed in the moment before a multiplexer applied the change
+is served, and a backend built on `BaseThreadedMultiplexerServer` refuses
+what reaches it once it is closing, with `DELIVERY_ERROR`, so that costs a
+retry rather than a timeout, while a `BaseMultiplexerServer` loses what
+arrived after its last read. A backend that dies without draining costs its
+clients a timeout per request it held. [How a backend leaves](leaving.md)
+draws the three phases and the routing flags; a recording notes each skip
+as `NOT_ACCEPTED`.
 
 ## Debug symbols
 
@@ -260,6 +260,17 @@ the level, timestamp, pid, context, workflow id, message and source
 location. The multiplexer logs every peer that registers and leaves at `INFO`, every
 undelivered message at `ERROR` or `WARNING` according to the
 rule, and every message dropped for a full queue at `WARNING`.
+
+A few lines are worth knowing by their text. At start the multiplexer
+logs `rules loaded from <path>: <fingerprint>, <n> message types, <m> peer
+types`, and for every file it puts in use later `rules reloaded from
+<path>: <old> -> <new>, ...`, which a test waits for with
+`Mx.log_contains()`. The libraries log their own connections at `INFO`,
+`registered connection` with the multiplexer's instance id when one is
+made and `unregistered connection` when it ends, and a `SyncClient` or a
+server class logs `connecting to` before it; a `ThreadedClient` warns
+`connection lost under query <id>; sending again`, or `; locating the
+addressee`, for each query it sends again.
 
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a
@@ -395,7 +406,9 @@ a `RECORDING_RECORD` message (8) carrying the `Record`, with
 queue is the only buffer: a peer that reads too slowly loses records, which
 the multiplexer counts in the status as `dropped`, and routing is never
 held up. A tap costs one serialization and one queued frame per record for
-each tap.
+each tap. The record of a message near `MAX_MESSAGE_SIZE` would be over it,
+so its payload is cut to fit and marked `truncated`, as a tap's own payload
+limit cuts it.
 
 **Several replicas.** Every multiplexer answers for itself, so a controller
 connects to each: `mxcontrol recording` takes `-M host:port` repeatedly and
@@ -421,6 +434,7 @@ your peers send. Lower `queue_size` for peer types that receive large
 messages.
 
 Backends are where the work is; add more of a type and `whom: ANY` spreads
-requests over them. A backend handles one message at a time, so a slow
-handler is a slow backend, and a request that takes longer than the client's
-timeout is repeated to another backend by the search.
+requests over them. A backend built on `BaseMultiplexerServer` handles one
+message at a time, so a slow handler is a slow backend, and a request that
+takes longer than the client's timeout is repeated to another backend by the
+search.

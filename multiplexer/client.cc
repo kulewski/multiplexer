@@ -2,6 +2,8 @@
 // it is built on. The design is in client.h.
 #include "multiplexer/client.h"
 
+#include <algorithm>
+
 #include "multiplexer/Multiplexer.pb.h"
 
 using namespace multiplexer;
@@ -48,6 +50,13 @@ void Client::shutdown() {
     return;
   }
   basic_client_->shutdown();
+  // The connections close the polite way, reading what still arrives until
+  // their multiplexers' end (BasicClient::shutdown): the loop runs until
+  // they have, a little past CLOSE_READ_SECONDS at most.
+  std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(CLOSE_READ_SECONDS + 0.5f);
+  while (basic_client_->closing() && !timer->expired()) {
+    basic_client_->run_one();
+  }
 }
 
 namespace multiplexer {
@@ -72,10 +81,14 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   std::unique_ptr<mx::SimpleTimer> timer;
 
   IncomingMessage result;
+  // Every id the request goes out under, the first and each resend after a
+  // lost connection: a reply to any of them answers the query.
+  std::vector<uint64_t> attempts;
 
   try {
     timer = basic_client_->create_timer(timeout);
-    result = _send_and_receive(query, *timer, false, false, 0, 0, -1, ConnectionWrapper(), lane);
+    result = _send_and_receive(query, *timer, false, false, std::vector<uint64_t>(), 0, -1, ConnectionWrapper(), lane,
+                               &attempts);
     if (result.third->type() != types::DELIVERY_ERROR) {
       adopt(lane, result.second);
       return result;
@@ -91,7 +104,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
 
   timer = basic_client_->create_timer(timeout);
   const bool pinned = lane && lane->pinned();
-  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, query.id(), types::REQUEST_RECEIVED, -1,
+  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, -1,
                              ConnectionWrapper(), lane);
 
   if (result.third->type() == types::DELIVERY_ERROR) {
@@ -99,7 +112,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
     // took the request is gone too: nothing can answer any more.
     MXTHROW(OperationFailed());
   }
-  if (result.third->references() == query.id()) {
+  if (std::find(attempts.begin(), attempts.end(), result.third->references()) != attempts.end()) {
     adopt(lane, result.second);
     return result;
   }
@@ -109,9 +122,9 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   }
 
   // Repeat the request to the backend that answered first, by instance id
-  // and through the connection its PING came on. A late reply to the
-  // original request is accepted too (accept_id); a late PING from another
-  // backend is ignored (ignore_id).
+  // and through the connection its PING came on. A late reply to an earlier
+  // attempt is accepted too; a late PING from another backend is ignored
+  // (ignore_id).
   MultiplexerMessage direct_query;
   direct_query.set_from(instance_id());
   direct_query.set_id(random64());
@@ -120,7 +133,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   direct_query.set_message(query.message());
 
   timer = basic_client_->create_timer(timeout);
-  result = _send_and_receive(direct_query, *timer, false, false, query.id(), types::REQUEST_RECEIVED, mxmsg.id(),
+  result = _send_and_receive(direct_query, *timer, false, false, attempts, types::REQUEST_RECEIVED, mxmsg.id(),
                              result.second, lane);
   if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());
@@ -151,10 +164,9 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   }
   request.set_report_delivery_error(true);  // "not behind this multiplexer" must come back as a message
 
-  std::vector<uint64_t> accept_ids;
-  accept_ids.push_back(request.id());
-  IncomingMessage result =
-      _send_and_receive_one(request, *timer, accept_ids, types::REQUEST_RECEIVED, -1, ConnectionWrapper(), lane);
+  std::vector<uint64_t> attempts;  // every id the request goes out under; a reply to any of them answers
+  IncomingMessage result = _send_and_receive_one(request, *timer, std::vector<uint64_t>(), types::REQUEST_RECEIVED, -1,
+                                                 ConnectionWrapper(), lane, &attempts);
   if (result.third->type() != types::DELIVERY_ERROR) {
     adopt(lane, result.second);
     return result;
@@ -164,12 +176,12 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   // requested, so that a multiplexer without the instance says so.
   MultiplexerMessage mxmsg = _probe_for(request, probe);
   const bool pinned = lane && lane->pinned();
-  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, request.id(), types::REQUEST_RECEIVED, -1,
+  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, -1,
                              ConnectionWrapper(), lane);
   if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());  // no multiplexer has the instance
   }
-  if (result.third->references() == request.id()) {
+  if (std::find(attempts.begin(), attempts.end(), result.third->references()) != attempts.end()) {
     adopt(lane, result.second);
     return result;  // a late reply to the request after all
   }
@@ -181,8 +193,8 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   // on; the lane adopts it.
   MultiplexerMessage again = request;
   again.set_id(random64());
-  result = _send_and_receive(again, *timer, false, false, request.id(), types::REQUEST_RECEIVED, mxmsg.id(),
-                             result.second, lane);
+  result = _send_and_receive(again, *timer, false, false, attempts, types::REQUEST_RECEIVED, mxmsg.id(), result.second,
+                             lane);
   if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());
   }
@@ -212,23 +224,21 @@ MultiplexerMessage Client::_probe_for(const MultiplexerMessage& query, Probe pro
   return mxmsg;
 }
 
-// Sends once and waits for a message referencing it (or accept_id). With
+// Sends once and waits for a message referencing it (or an id in
+// also_accept). With
 // schedule_all and handle_delivery_errors, one DELIVERY_ERROR per
 // connection is expected before giving up: that is how "every multiplexer
 // said no" is detected. Messages of ignore_type (REQUEST_RECEIVED) are
 // skipped; others that reference ignore_id are skipped silently, the rest
 // are logged and dropped.
 IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all,
-                                          bool handle_delivery_errors, std::uint64_t accept_id,
+                                          bool handle_delivery_errors, const std::vector<uint64_t>& also_accept,
                                           std::uint32_t ignore_type, std::uint64_t ignore_id,
-                                          ConnectionWrapper connection, LanePtr lane) {
+                                          ConnectionWrapper connection, LanePtr lane, std::vector<uint64_t>* sent_ids) {
   IncomingMessage result;
 
-  std::vector<uint64_t> accept_ids;
+  std::vector<uint64_t> accept_ids(also_accept);
   accept_ids.push_back(mxmsg.id());
-  if (accept_id) {
-    accept_ids.push_back(accept_id);
-  }
 
   if (schedule_all) {
     int sends = this->schedule_all(mxmsg);
@@ -249,7 +259,7 @@ IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::S
     }
     MXTHROW(OperationTimedOut());
   }
-  return _send_and_receive_one(mxmsg, timer, accept_ids, ignore_type, ignore_id, connection, lane);
+  return _send_and_receive_one(mxmsg, timer, accept_ids, ignore_type, ignore_id, connection, lane, sent_ids);
 }
 
 // Sends `mxmsg` through one connection and waits for a reply. A
@@ -261,12 +271,20 @@ IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::S
 // fire, and the message is sent again with a fresh id through whatever
 // connection is available, until the deadline. `connection` is the one to
 // prefer (a reply's origin); any other is used if it is gone. Through a
-// pinned lane there is no other: the loss is NotConnected.
+// pinned lane there is no other: the loss is NotConnected. `sent_ids` gets
+// every id the message went out under.
 IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer& timer,
                                               std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
-                                              std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane) {
+                                              std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane,
+                                              std::vector<uint64_t>* sent_ids) {
+  if (std::find(accept_ids.begin(), accept_ids.end(), mxmsg.id()) == accept_ids.end()) {
+    accept_ids.push_back(mxmsg.id());
+  }
   for (;;) {
     ConnectionWrapper used = _send_one(mxmsg, timer, connection, lane);
+    if (sent_ids) {
+      sent_ids->push_back(mxmsg.id());
+    }
     bool lost = false;
     IncomingMessage result = _receive(timer, accept_ids, ignore_type, ignore_id, &used, &lost);
     if (!lost) {
@@ -310,12 +328,8 @@ ConnectionWrapper Client::_send_one(const MultiplexerMessage& mxmsg, mx::SimpleT
     ConnectionWrapper used;
     BasicScheduledMessageTracker tracker;
     if (preferred) {
-      if (BasicClient::Connection::pointer conn = preferred.lock()) {
-        if (conn->living()) {
-          tracker = conn->schedule(raw);
-          used = preferred;
-        }
-      }
+      tracker = basic_client_->schedule_on(raw, preferred);
+      used = preferred;
       preferred = ConnectionWrapper();  // one try; any connection after that
     }
     if (!tracker && only_preferred) {

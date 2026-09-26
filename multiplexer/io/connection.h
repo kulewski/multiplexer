@@ -9,10 +9,11 @@
 //
 // Lifecycle: Create() -> start() or start_only_read() + start_rest() -> ...
 // -> shutdown(), after which the object only waits for its pending handlers
-// to return. Every asynchronous handler holds a shared_ptr to the connection
-// (via shared_from_this), so a Connection is destroyed only when no I/O is in
-// flight; the manager keeps weak_ptrs. Nothing here is thread-safe: one
-// io_service, one thread.
+// to return; close_gracefully(), or a failed write, first reads on to the
+// peer's end of the stream, a bounded time. Every asynchronous handler holds
+// a shared_ptr to the connection (via shared_from_this), so a Connection is
+// destroyed only when no I/O is in flight; the manager keeps weak_ptrs.
+// Nothing here is thread-safe: one io_service, one thread.
 //
 // Protocol pieces that live here: the CONNECTION_WELCOME handshake, the
 // heartbeat timers with the passive-peer exemption, and the rule that any
@@ -29,6 +30,7 @@
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <string>
 
@@ -83,6 +85,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         is_living_(false),
         shuts_down_(false),
         is_registered_(false),
+        told_gone_(false),
+        delivering_(true),
         manager_(manager),
         should_send_heartbit_(true),
         outgoing_channel_state_(ChannelState::FREE),
@@ -203,7 +207,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
   // Stops all I/O, tells the manager, and drops or hands back the outgoing
   // queue. Safe to call at any point of the lifecycle, including on a socket
-  // that was never opened, and idempotent. Pending handlers see BROKEN.
+  // that was never opened, and idempotent. Pending handlers see BROKEN. A
+  // connection whose write failed did the telling and the handing back
+  // already, and reads on until the peer's end first (_write_failed).
   void shutdown() {
     MX_DCHECK_RUN_ON(&io_thread_);
     MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("shutdown called on " + repr((void*)this)));
@@ -212,19 +218,16 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       return;
     }
 
-    // mark as dead
+    // Mark as dead before the manager hears of it: what its callbacks do
+    // may reach this connection again, as a client's resend of a query
+    // through the lane that still holds it does, and living() must say no
+    // by then, so that schedule() drops the frame and another connection
+    // takes it, rather than the assertion below throwing out of the
+    // callback and leaving the shutdown, and the reconnect, undone.
     shuts_down_ = true;
-    ManagerPointer manager = manager_.lock();
-
-    // notify our Manager
-    if (is_registered_ && manager) {
-      manager->unregister_connection(this);
-    }
-    is_registered_ = false;
-    if (manager) {
-      manager->connection_destroyed(this);
-    }
     is_living_ = false;
+    _tell_manager_gone();
+    is_registered_ = false;
 
     // stop doing I/O
     outgoing_queue_max_size_ = 0;
@@ -245,6 +248,98 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
     // die and let live or somehow ;)
     manager_.reset();
+  }
+
+ private:
+  // Tells the manager, once, that the connection is gone: unregistered if it
+  // was registered, then destroyed. What its callbacks do is theirs: an
+  // exception out of one is logged, and the rest of the shutdown, the
+  // socket, the timers and the queue, happens all the same.
+  void _tell_manager_gone() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (told_gone_) {
+      return;
+    }
+    told_gone_ = true;
+    ManagerPointer manager = manager_.lock();
+    try {
+      if (is_registered_ && manager) {
+        manager->unregister_connection(this);
+      }
+      if (manager) {
+        manager->connection_destroyed(this);
+      }
+    } catch (const std::exception& error) {
+      MX_LOG(ERROR, LOWVERBOSITY,
+             TEXT("the manager's callback raised on the shutdown of " + repr((void*)this) + ": " + error.what()));
+    }
+  }
+
+  // A write failed: the peer is gone or going, and nothing more can be
+  // written. What it sent before may still wait in the socket, readable
+  // after a reset, so the connection reads on until the peer's end,
+  // HEARTBIT_INTERVAL at most, and hands it to the manager before it
+  // shuts down: the last messages of a peer that closed while a message to
+  // it was on its way are not lost to that write. A connection whose
+  // handshake is not done has nothing to read on for and shuts down at
+  // once.
+  void _write_failed() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (shuts_down_ || told_gone_) {
+      return;
+    }
+    if (!is_registered_) {
+      shutdown();
+      return;
+    }
+    _read_to_the_end(HEARTBIT_INTERVAL, /*deliver=*/true);
+  }
+
+  // Stops writing and reads on until the peer's end of the stream, `bound`
+  // seconds at most, then shuts down. The manager is told the connection
+  // is gone and its queue handed back, as by shutdown(), and this end of
+  // the stream goes out after what the kernel still holds. What is read
+  // meanwhile goes to the manager when `deliver`, or is dropped.
+  void _read_to_the_end(float bound, bool deliver) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    // Dead to the manager before it hears of it, as in shutdown().
+    is_living_ = false;
+    outgoing_channel_state_ = ChannelState::BROKEN;
+    delivering_ = deliver;
+    _tell_manager_gone();
+    _orphan_outgoing_messages();
+    asio::error_code ignored;
+    socket_.shutdown(asio::ip::tcp::socket::shutdown_send, ignored);
+    require_heartbit_timer_.cancel(ignored);
+    _do_later(send_heartbit_timer_, bound, [self = this->shared_from_this()](const asio::error_code& error) {
+      if (error != asio::error::operation_aborted && !self->shuts_down_) {
+        self->shutdown();  // the peer's end never came
+      }
+    });
+  }
+
+ public:
+  // Ends the connection the polite way, for a peer that is leaving: the
+  // manager is told at once and the queue handed back, as by shutdown(),
+  // and nothing more is written; what the kernel still holds goes out ahead
+  // of this end of the stream, and what arrives meanwhile is read and
+  // dropped until the peer's end, `bound` seconds at most. A socket closed
+  // with something unread makes the kernel reset the connection and throw
+  // away what it had not sent yet; closed after the peer's end, it has
+  // nothing unread, and what was written before arrives. True when it
+  // reads on; false when it shut down at once, before its handshake was
+  // done, or was already closing.
+  bool close_gracefully(float bound) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (shuts_down_ || told_gone_) {
+      return false;
+    }
+    if (!is_registered_) {
+      shutdown();
+      return false;
+    }
+    _read_to_the_end(bound, /*deliver=*/false);
+    return true;
   }
 
   // Queues a frame for writing and starts the write if the channel is free.
@@ -298,9 +393,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     return scheduling_result_type_functor_(value);
   }
 
-  // Re-queues an entry that another connection gave up on shutdown (see
-  // _orphan_outgoing_messages); the client uses it to move messages from a
-  // dead multiplexer connection to a live one.
+  // Queues an entry the manager built itself: a message that waited for
+  // room, or one another connection gave up on shutdown (see
+  // _orphan_outgoing_messages), with its tracker. False when the
+  // connection is dead or full.
   bool inline take_over(typename MessagesBuffer::value_type internal) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (!is_living_ || outgoing_queue_full()) {
@@ -323,6 +419,13 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   inline bool outgoing_queue_empty() const {
     MX_DCHECK_RUN_ON(&io_thread_);
     return outgoing_queue_.empty();
+  }
+  // The entry queued last, which everything queued before it is written
+  // ahead of; null when the queue is empty. For a manager that follows
+  // it, a client waiting until what it queued so far is out.
+  typename MessagesBuffer::value_type* last_queued() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return outgoing_queue_.empty() ? nullptr : &outgoing_queue_.back();
   }
   inline bool living() const { return is_living_; }
   inline bool shuts_down() const { return shuts_down_; }
@@ -423,10 +526,12 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     Assert(incoming_channel_state_ == ChannelState::FREE);
 
     incoming_channel_state_ = ChannelState::READING_HEADER;
+    // The handler holds the frame as well as the connection: a composed read
+    // goes on in steps after shutdown() dropped incoming_message_, and must
+    // still have its buffer.
     asio::async_read(socket_, asio::buffer(incoming_message_->get_header_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
-                       self->_handle_read_header(error, bytes);
-                     });
+                     [self = this->shared_from_this(), frame = incoming_message_](
+                         const asio::error_code& error, size_t bytes) { self->_handle_read_header(error, bytes); });
   }
   void _handle_read_header(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -460,9 +565,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     incoming_channel_state_ = ChannelState::READING_BODY;
     _require_heartbit_later();
     asio::async_read(socket_, asio::buffer(incoming_message_->get_body_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
-                       self->_handle_read_body(error, bytes);
-                     });
+                     [self = this->shared_from_this(), frame = incoming_message_](
+                         const asio::error_code& error, size_t bytes) { self->_handle_read_body(error, bytes); });
   }
   void _handle_read_body(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -489,7 +593,17 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
     } else {
       _require_heartbit_later();
-      _receive_message();
+      // Whatever handling the frame throws, the connection reads on: the
+      // exception used to leave it registered, writing and never reading
+      // again. The clients catch their callbacks' own exceptions; this is
+      // the net for anything else, the frame logged and dropped.
+      try {
+        _receive_message();
+      } catch (const std::exception& e) {
+        MX_LOG(ERROR, LOWVERBOSITY,
+               CTX("connection")
+                   TEXT("handling a frame from peer " + repr(peer_id_) + " failed, frame dropped: " + e.what()));
+      }
       _start_read();
     }
   }
@@ -500,6 +614,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     // multiplexer can forward it to other connections without re-serializing.
     std::shared_ptr<const RawMessage> message = incoming_message_;
     incoming_message_.reset(new RawMessage());
+    if (!delivering_) {
+      return;  // leaving: read only so that nothing is left unread when the socket closes
+    }
 
     ManagerPointer manager = manager_.lock();
     if (!manager) {
@@ -584,9 +701,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   }
 
   /* Sending. One async_write in flight at a time, always for the queue's
-   * front; _handle_write pops it, notifies the manager's tracker and starts
-   * the next. A short or failed write ends the connection, since the frame
-   * boundary would be lost. */
+   * front; _handle_write pops it, notifies the manager's tracker, starts
+   * the next and, for a manager that asks (REPORTS_ROOM), says when a full
+   * queue has room again. A short or failed write ends the connection,
+   * since the frame boundary would be lost. */
   void _process_send_queue() {
     MX_DCHECK_RUN_ON(&io_thread_);
     // check if the outgoing channel is free and we have anything to send
@@ -599,9 +717,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       // start writing
       outgoing_channel_state_ = ChannelState::BUSY;
       Assert(raw->get_message_buffer().size());
-      // The handler holds a shared_ptr to this, so the connection outlives the write.
+      // The handler holds the connection and the frame: the write goes on in
+      // steps after shutdown() handed the queue over or dropped it.
       asio::async_write(socket_, raw->get_message_buffer(),
-                        [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
+                        [self = this->shared_from_this(), raw](const asio::error_code& error, size_t bytes) {
                           self->_handle_write(error, bytes);
                         });
     }
@@ -620,11 +739,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     if (bytes_transferred == 0) {
       // is it exceptional?
       MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("i have managed to write nothing. Shut down"));
-      shutdown();
+      _write_failed();
       return;
     }
     if (error) {
-      shutdown();
+      _write_failed();
       return;
     }
 
@@ -638,29 +757,37 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         to_raw_converter(outgoing_queue_.front());
     if (bytes_transferred != raw->get_header_length() + raw->get_body_length()) {
       MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("i have managed to write partial. Shut down"));
-      shutdown();
+      _write_failed();
       return;
     }
 
     message_sending_notifier_.notify_success(manager_, outgoing_queue_.front());
+    const bool was_full = outgoing_queue_full();
     outgoing_queue_.pop_front();
     _send_heartbit_later();
 
     _process_send_queue();
+    // A full queue with room again is news for a manager holding messages
+    // back for it; the multiplexer's traits compile this out.
+    if constexpr (ConnectionsManagerTraits::REPORTS_ROOM) {
+      if (was_full && !outgoing_queue_full()) {
+        if (ManagerPointer manager = manager_.lock()) {
+          manager->outgoing_queue_has_room(this);
+        }
+      }
+    }
   }
 
   // On shutdown, offers the unsent queue to the manager (the client moves the
-  // entries to another connection) and reports the rest as lost.
+  // entries to another connection, and what waited for this one after
+  // them, so it is told even of an empty queue) and reports the rest as lost.
   void inline _orphan_outgoing_messages() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (outgoing_queue_.empty()) {
-      return;
-    }
     if (ManagerPointer manager = manager_.lock()) {
       manager->handle_orphaned_outgoing_messages(outgoing_queue_);
-      if (outgoing_queue_.empty()) {
-        return;
-      }
+    }
+    if (outgoing_queue_.empty()) {
+      return;
     }
     // we haven't managed to transfer messages ownership to the manager for
     // eventual resending
@@ -692,6 +819,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   bool is_living_;
   bool shuts_down_;
   bool is_registered_;
+  bool told_gone_;   // the manager heard the connection is gone: once, see _tell_manager_gone()
+  bool delivering_;  // what is read goes to the manager; not while leaving, see close_gracefully()
   std::weak_ptr<ConnectionsManagerImplementation> manager_;
   bool should_send_heartbit_;
 
