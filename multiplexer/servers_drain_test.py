@@ -16,7 +16,7 @@ from multiplexer.mxclient import OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, TestClient, runfile, wait_until
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE

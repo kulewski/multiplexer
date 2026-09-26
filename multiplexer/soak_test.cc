@@ -19,13 +19,13 @@ using multiplexer::ThreadedClient;
 
 namespace {
 
-// A multiplexer with the example rules, on its own thread.
+// A multiplexer with the tests' rules, on its own thread.
 struct InProcessMultiplexer {
   InProcessMultiplexer() {
     std::promise<unsigned short> bound;
     thread = std::thread([this, &bound] {
       const char* srcdir = getenv("TEST_SRCDIR");
-      std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
+      std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "tests/testing.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", 0);
       server->set_rules_file(rules);
       std::string error;

@@ -1,5 +1,6 @@
 """setup.py of the wheel `make wheel` builds: the multiplexer package with
-its extension, plus lib.logging, the generated protocol buffer module the
+its extension and mxcontrol, which pip puts on PATH as the `mxcontrol`
+command, plus lib.logging, the generated protocol buffer module the
 package imports. Copied next to the package with the version filled in,
 together with README.md, which becomes the PyPI page with its links made
 absolute. The distribution is `mx-multiplexer`, because `multiplexer` on
@@ -44,7 +45,7 @@ setup(
     distclass=BinaryDistribution,
     name="mx-multiplexer",
     version=VERSION,
-    description="Client and backend libraries for Multiplexer, a stateless TCP message broker between services",
+    description="Multiplexer, a stateless TCP message broker between services: the broker and its Python libraries",
     long_description=readme_for_pypi(),
     long_description_content_type="text/markdown",
     author="Krzysztof Kulewski",
@@ -75,10 +76,12 @@ setup(
     ],
     packages=find_packages(),
     package_data={
-        "multiplexer": ["_native.so", "py.typed", "*.pyi"],
+        "multiplexer": ["_native.so", "bin/mxcontrol", "py.typed", "*.pyi"],
         "multiplexer.testing": ["*.pyi"],
         "lib.logging": ["*.pyi"],
     },
+    # The command runs the package's binary in its own place (multiplexer/mxcontrol.py).
+    entry_points={"console_scripts": ["mxcontrol = multiplexer.mxcontrol:main"]},
     install_requires=["protobuf"],
     python_requires=">=3.10",
 )

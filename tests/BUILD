@@ -1,7 +1,9 @@
-# Integration test support: rules file and constants generated from it.
+# The tests' rules file, the system rules plus the tests' types, and the
+# integration tests' constants generated from it. .bazelrc points
+# //:multiplexer_rules at it, and the unit tests run their multiplexers on it.
 exports_files(
     ["testing.rules"],
-    visibility = ["//tests:__subpackages__"],
+    visibility = ["//visibility:public"],
 )
 
 genrule(

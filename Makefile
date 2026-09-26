@@ -5,8 +5,10 @@
 # which files exist; everything else about the build is in this file.
 #
 #   make -j            build/bin/mxcontrol, build/libmultiplexer.a, build/python/
-#   make check         the C++ and Python unit tests, against what was built
-#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip
+#   make check         the C++ and Python unit tests, against a build of their own
+#                      whose constants come from tests/testing.rules
+#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip, with mxcontrol
+#                      inside, stripped
 #   make install       mxcontrol, generate_constants, the library, the headers and
 #                      a pkg-config file under PREFIX
 #   make RULES=your.rules ...   generate the constants from your rules file
@@ -23,6 +25,7 @@ PYTHON ?= python3
 PROTOC ?= protoc
 CXX ?= g++
 AR ?= ar
+STRIP ?= strip
 VERSION ?= 2.3.1
 # The optimisation and debug flags; the rest is what the code needs.
 CXXFLAGS ?= -O2 -g -DNDEBUG
@@ -59,7 +62,10 @@ GEN_PY := $(PROTO_PY) $(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multipl
 GEN_PYI := $(PROTO_PYI) $(GEN)/multiplexer/multiplexer_constants.pyi $(GEN)/multiplexer/type_id_constants.pyi
 
 LIB_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(LIB_SRCS)) $(patsubst $(GEN)/%.cc,$(OBJ)/%.o,$(PROTO_CC))
-MXCONTROL_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(MXCONTROL_SRCS))
+# The system rules compiled into mxcontrol for generate_rules: a generated
+# source, listed here by hand, as PROTO_CC is.
+SYSTEM_RULES_CC := $(GEN)/mxcontrol/system_rules_text.cc
+MXCONTROL_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(MXCONTROL_SRCS)) $(OBJ)/mxcontrol/system_rules_text.o
 GENERATE_CONSTANTS_OBJS := $(patsubst %.cc,$(OBJ)/%.o,$(GENERATE_CONSTANTS_SRCS)) \
                            $(patsubst $(GEN)/%.cc,$(OBJ)/%.o,$(PROTO_CC))
 NATIVE_OBJ := $(OBJ)/multiplexer/_native.o
@@ -74,7 +80,8 @@ GENERATE_CONSTANTS := $(BUILD)/bin/generate_constants
 PY_PACKAGE := $(patsubst %,$(PY)/%,$(PY_FILES)) $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PY)) \
               $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PYI)) $(PY)/multiplexer/py.typed $(NATIVE_PYI) \
               $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py \
-              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so
+              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so \
+              $(PY)/multiplexer/bin/mxcontrol
 PY_TESTS := $(patsubst %,$(PY)/%,$(PY_TEST_FILES))
 
 .PHONY: all python check check-cc check-py wheel install clean
@@ -116,6 +123,16 @@ $(CONSTANTS_H): $(RULES) $(GENERATE_CONSTANTS)
 $(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multiplexer/multiplexer_constants.pyi: $(RULES) $(GENERATE_CONSTANTS)
 	@mkdir -p $(dir $@)
 	$(GENERATE_CONSTANTS) $< $@
+
+# Always the system rules, whichever RULES the constants come from.
+$(SYSTEM_RULES_CC): multiplexer.rules mxcontrol/embed_rules.sh
+	@mkdir -p $(dir $@)
+	sh mxcontrol/embed_rules.sh multiplexer.rules $@
+
+# The package's mxcontrol, where multiplexer/mxcontrol.py looks for it;
+# executable, or pip would install it as data.
+$(PY)/multiplexer/bin/mxcontrol: $(MXCONTROL)
+	install -D -m 755 $< $@
 
 $(PY)/multiplexer/py.typed:
 	@mkdir -p $(dir $@)
@@ -193,6 +210,15 @@ $(BUILD)/tests/%: %.cc $(LIBRARY)
 
 $(CC_TEST_BINS): | $(GEN_H)
 
+# The tests use types of their own, which the system rules do not have: they
+# run against a build of their own, in $(BUILD)/check, whose constants come
+# from tests/testing.rules, as the repository's Bazel builds' do, so that
+# nothing built for installing or packaging carries them. One make in that
+# directory, whichever of the three is asked for.
+ifeq ($(CHECK_BUILD),)
+check check-cc check-py:
+	$(MAKE) BUILD=$(BUILD)/check RULES=tests/testing.rules CHECK_BUILD=1 $@
+else
 check: check-cc check-py
 
 # Each test's output goes to a .log next to its binary; a failure prints it.
@@ -201,24 +227,28 @@ check-cc: $(CC_TEST_BINS)
 	    if $$test > $$test.log 2>&1; then echo "passed: $$test"; else cat $$test.log; echo "FAILED: $$test"; exit 1; fi; \
 	done
 
-# The Python tests find the multiplexer and the rules file the way they do
+# The Python tests find the multiplexer and the rules files the way they do
 # under Bazel, through TEST_SRCDIR, pointed at a runfiles tree made of links.
 RUNFILES := $(BUILD)/runfiles
 check-py: python $(PY_TESTS) $(MXCONTROL)
-	@rm -rf $(RUNFILES) && mkdir -p $(RUNFILES)/mx/mxcontrol $(BUILD)/tmp
+	@rm -rf $(RUNFILES) && mkdir -p $(RUNFILES)/mx/mxcontrol $(RUNFILES)/mx/tests $(BUILD)/tmp
 	@ln -s $(abspath $(MXCONTROL)) $(RUNFILES)/mx/mxcontrol/mxcontrol
-	@ln -s $(abspath $(RULES)) $(RUNFILES)/mx/multiplexer.rules
+	@ln -s $(abspath multiplexer.rules) $(RUNFILES)/mx/multiplexer.rules
+	@ln -s $(abspath tests/testing.rules) $(RUNFILES)/mx/tests/testing.rules
 	cd $(PY) && PYTHONPATH=. MXCONTROL=$(abspath $(MXCONTROL)) TEST_SRCDIR=$(abspath $(RUNFILES)) TEST_WORKSPACE=mx \
 	    TEST_TMPDIR=$(abspath $(BUILD)/tmp) $(PYTHON) -m unittest $(subst /,.,$(patsubst %.py,%,$(PY_TEST_FILES)))
+endif
 
 # The wheel: the package without the tests, with setup.py and
 # pyproject.toml from make/ and the README, which setup.py turns into the
-# PyPI page.
+# PyPI page. Its extension and its mxcontrol are stripped; build/python
+# keeps the symbols.
 
 wheel: python
 	rm -rf $(BUILD)/wheel && mkdir -p $(BUILD)/wheel $(BUILD)/dist
 	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
+	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so $(BUILD)/wheel/multiplexer/bin/mxcontrol
 	sed 's/@VERSION@/$(VERSION)/' make/setup.py > $(BUILD)/wheel/setup.py
 	cp make/pyproject.toml README.md $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .

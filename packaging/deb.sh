@@ -7,8 +7,9 @@
 #
 #   packaging/deb.sh [outdir]      -> outdir/multiplexer_<version>~<codename>_<arch>.deb
 #
-# The package holds mxcontrol and generate_constants, libmultiplexer.a with
-# the headers under /usr/include/mx, and the pkg-config file. It is built
+# The package holds mxcontrol and generate_constants, stripped,
+# libmultiplexer.a without its debug information, the headers under
+# /usr/include/mx, and the pkg-config file. It is built
 # against the release's own libprotobuf, which is why there is one per
 # release: protobuf C++ promises no compatibility between versions, so a
 # program using the library must compile against the same libprotobuf-dev.
@@ -29,6 +30,17 @@ trap 'rm -rf "$staging"' EXIT
 make -j"$(nproc)" all
 make -j"$(nproc)" check-cc
 make install DESTDIR="$staging" PREFIX=/usr
+# What is published is stripped: the executables of their symbols, the
+# library of its debug information only, since a program links against its
+# symbol table. Then the stripped executables are run once.
+strip "$staging/usr/bin/mxcontrol" "$staging/usr/bin/generate_constants"
+strip --strip-debug --enable-deterministic-archives "$staging/usr/lib/libmultiplexer.a"
+packaging/check_binaries.sh "$staging/usr/bin/mxcontrol" "$staging/usr/bin/generate_constants"
+packaging/check_binaries.sh --archive "$staging/usr/lib/libmultiplexer.a"
+"$staging/usr/bin/mxcontrol" help 2> /dev/null
+constants="$(mktemp --suffix=.h)"
+"$staging/usr/bin/generate_constants" multiplexer.rules "$constants"
+rm -f "$constants"
 
 mkdir -p "$staging/DEBIAN" "$staging/usr/share/doc/multiplexer"
 cp LICENSE "$staging/usr/share/doc/multiplexer/copyright"

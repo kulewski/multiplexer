@@ -8,6 +8,8 @@
 #              docs/code_map.py regenerates the code map from header comments,
 #              docs/check_mermaid.py --fast catches Mermaid syntax slips
 #   make    -> make/generate_sources.py regenerates the Makefile's source lists
+#   rules   -> every *.rules file starts with the system rules, multiplexer.rules,
+#              as `mxcontrol generate_rules` writes them (--check)
 #
 # Usage: ./format.sh          rewrite files in place
 #        ./format.sh --check  exit 1 if anything would change (for CI)
@@ -23,6 +25,7 @@ mapfile -t py < <(find . "${prune[@]}" -name '*.py' -print | sort)
 mapfile -t cc < <(find . "${prune[@]}" \( -name '*.h' -o -name '*.cc' \) -print | sort)
 mapfile -t bzl < <(find . "${prune[@]}" \( -name BUILD -o -name WORKSPACE -o -name '*.bzl' \) -print | sort)
 mapfile -t yml < <(find . "${prune[@]}" \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
+mapfile -t rules < <(find . "${prune[@]}" -name '*.rules' -print | sort)
 
 status=0
 if (( check )); then
@@ -38,6 +41,12 @@ if (( check )); then
 for path in sys.argv[1:]:
     with open(path) as f:
         yaml.safe_load(f)' "${yml[@]}" || status=1
+  python3 -c 'import sys
+system = open("multiplexer.rules", "rb").read()
+for path in sys.argv[1:]:
+    if not open(path, "rb").read().startswith(system):
+        print(path + ": does not start with the system rules, multiplexer.rules", file=sys.stderr)
+        sys.exit(1)' "${rules[@]}" || status=1
   (( status == 0 )) && echo "format: all ${#py[@]} Python, ${#cc[@]} C++, ${#bzl[@]} Bazel and ${#yml[@]} YAML files are clean"
 else
   python3 docs/diagrams/generate.py

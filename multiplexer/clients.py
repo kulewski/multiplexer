@@ -170,7 +170,7 @@ class MxClient:
     call notices a connection the multiplexer closed, uses another one or
     waits for the reconnect, so nothing is checked or rebuilt here.
 
-        MX = MxClient(peers.WEBSITE, lambda: settings.MULTIPLEXER_ADDRESSES)
+        MX = MxClient(peers.WEB, lambda: settings.MULTIPLEXER_ADDRESSES)
         reply = MX.get().query(payload, type=types.SEARCH_REQUEST)
 
     The SyncClient belongs to one thread, and so does the holder: give each

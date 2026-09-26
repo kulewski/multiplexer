@@ -6,9 +6,12 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
 
 ## Layout
 
-- `testing.rules`: the example rules plus a test section (peers and types
-  from 201 up). `tests/BUILD` generates `testing_constants.py` from it, so the
-  tests never depend on the rules file a deployment builds with.
+- `testing.rules`: the system rules plus the tests' types, those of the
+  unit tests under `multiplexer/` and a test section (peers and types from
+  201 up). The repository's builds generate the package's constants from it
+  (`.bazelrc`, and `make check`'s build of its own), and `tests/BUILD`
+  generates `testing_constants.py` from it, so the tests never depend on the
+  rules file a deployment builds with.
 - The harness is [multiplexer/testing](../multiplexer/testing), a public
   package any workspace that depends on `@mx` can import: `Cluster(n)`
   starts n multiplexers on ephemeral ports through `--address 127.0.0.1:0

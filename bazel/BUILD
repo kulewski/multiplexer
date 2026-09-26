@@ -8,6 +8,13 @@ sh_binary(
     visibility = ["//visibility:public"],
 )
 
+sh_test(
+    name = "system_protoc_test",
+    size = "small",
+    srcs = ["system_protoc_test.sh"],
+    data = ["system_protoc.sh"],
+)
+
 # The system libprotobuf, headers from the system include path; see
 # //:protobuf_runtime for pointing the build at another one.
 cc_library(

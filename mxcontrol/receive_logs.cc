@@ -1,6 +1,6 @@
 // receivelogs: the smallest complete backend. Connects as
 // LOG_RECEIVER_EXAMPLE, prints every message it receives in protobuf text
-// format, and answers with a PING. With the example rules it receives what
+// format, and answers with a PING. With the system rules it receives what
 // streamlogs sends; give any peer type a rule and it is a tap on that type.
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 

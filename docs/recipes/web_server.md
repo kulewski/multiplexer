@@ -35,7 +35,7 @@ def mx() -> ThreadedClient:
     global _client
     with _lock:
         if _client is None:
-            _client = ThreadedClient(settings.MULTIPLEXER_ADDRESSES, type=peers.WEBSITE)
+            _client = ThreadedClient(settings.MULTIPLEXER_ADDRESSES, type=peers.WEB)
         return _client
 ```
 
@@ -67,7 +67,7 @@ io thread through `on_message`, so no receiver thread exists to stop at
 exit or to be killed on reload:
 
 ```python
-_client = ThreadedClient(settings.MULTIPLEXER_ADDRESSES, type=peers.WEBSITE, on_message=handle_event)
+_client = ThreadedClient(settings.MULTIPLEXER_ADDRESSES, type=peers.WEB, on_message=handle_event)
 ```
 
 `handle_event(mxmsg)` runs on the io thread with the GIL and must return
@@ -87,6 +87,6 @@ recycle until the graceful timeout kills it.
 
 ## The peer type
 
-`WEBSITE` above may be passive or not. `ThreadedClient` sends heartbeats
+`WEB` above may be passive or not. `ThreadedClient` sends heartbeats
 either way; a non-passive type additionally lets the multiplexer drop a
 hung worker after the heartbeat timeout instead of routing to it forever.

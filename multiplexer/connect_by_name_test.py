@@ -14,7 +14,7 @@ from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.testing import runfile
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 
 class ConnectByName(unittest.TestCase):

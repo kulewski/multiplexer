@@ -6,9 +6,14 @@ reads it at start, and every build of a peer generates its constants from it.
 
 It is a protocol buffer in text format, message `MultiplexerRules` in
 [Multiplexer.proto](../multiplexer/Multiplexer.proto). `#` starts a comment.
-The file in this repository, [multiplexer.rules](../multiplexer.rules), is an
-example to start from; [examples/echo/echo.rules](../examples/echo/echo.rules)
-extends it with two peer types and two message types.
+Every rules file starts from the system rules, the peer and message types
+the multiplexer, the libraries and `mxcontrol` use themselves, which
+`mxcontrol generate_rules your.rules` writes: they are the file in this
+repository, [multiplexer.rules](../multiplexer.rules). A deployment adds its
+own types after them, as [examples/echo/echo.rules](../examples/echo/echo.rules)
+adds two peer types and two message types, and may edit its copy of a system
+entry, to send `LOGS_STREAM` to a log collector of its own as well, say,
+keeping the entries' numbers and names, which the libraries use.
 
 ## A peer type
 
@@ -23,7 +28,8 @@ peer {
 ```
 
 - `type`: the number a peer sends in its welcome message. Unique among peer
-  types. 1 to 99 are reserved; use 100 or more.
+  types. 1 to 99 belong to the protocol and 108 and 111 to the system rules
+  ([below](#the-system-rules-above-99)); use any other number from 100 up.
 - `name`: the constant generated for it, so `peers.ECHO_BACKEND` in Python and
   `multiplexer::peers::ECHO_BACKEND` in C++. Unique among peer types. Rules
   refer to peer types by this name.
@@ -55,7 +61,8 @@ type {
 ```
 
 - `type`: the number in every message of this type. Unique among message
-  types. 1 to 99 are reserved; use 100 or more.
+  types. 1 to 99 belong to the protocol and 112 to 115 to the system rules
+  ([below](#the-system-rules-above-99)); use any other number from 100 up.
 - `name`: the constant, `types.ECHO_REQUEST` in Python and
   `multiplexer::types::ECHO_REQUEST` in C++. Unique among message types.
 - `to`: zero or more routing rules, each applied to every message of the type.
@@ -121,25 +128,27 @@ defined in `Recording.proto` and `Multiplexer.proto` and handled by the
 multiplexer whatever the rules file says; the shipped rules files name
 them so that dumps and logs show names.
 
-The libraries also use two ordinary types by name, so keep them in every rules
-file: `REQUEST_RECEIVED`, which a backend built on `BaseMultiplexerServer`
-may send with `notify_start()` to say it is working on a request, and
-`BACKEND_ERROR`, which the Python backend classes send when `handle_message`
-raised. A Bazel build takes their numbers from your file. A program installed from a release does not: the wheel and the
-Debian package carry the example file's constants, so there
-`REQUEST_RECEIVED` must stay 113 and `BACKEND_ERROR` 114, and no type of
-yours may take either number; a reply of yours numbered 114 would be raised
-as `BackendError`.
+## The system rules above 99
 
-Three more are needed by a Bazel build pointed at your file, not only by the
-programs that use them: `mxcontrol` is compiled with every subcommand, so
-`@mx//mxcontrol` needs `LOG_STREAMER`, `LOG_RECEIVER_EXAMPLE` and
-`LOGS_STREAM`, which its two log commands name, and the Python backend
-modules read `PICKLE_RESPONSE` when they are imported, so every Python
-program that imports them needs it, not only the `MultiplexerServer` that
-exchanges pickles. Everything else in the example file, the
-`PYTHON_TEST_*` and `*_COLLECTOR` entries, is there as illustration and can
-go.
+The system rules also hold six ordinary types, which the libraries and
+`mxcontrol` use by name:
+
+| Type | Value | Used by |
+|---|---|---|
+| peer `LOG_STREAMER` | 108 | `mxcontrol stream_logs`, which the Python library's log streaming starts |
+| peer `LOG_RECEIVER_EXAMPLE` | 111 | `mxcontrol receive_logs`, which prints the stream |
+| `PICKLE_RESPONSE` | 112 | the reply `send_pickle()` and `reply_pickle()` send by default |
+| `REQUEST_RECEIVED` | 113 | what a backend on `BaseMultiplexerServer` sends with `notify_start()`, to say it is working on a request |
+| `BACKEND_ERROR` | 114 | what the server classes send when a handler raised |
+| `LOGS_STREAM` | 115 | the log entries `stream_logs` sends, to every `LOG_RECEIVER_EXAMPLE` |
+
+A Bazel build pointed at your file takes their numbers from it, and needs
+all six: `@mx//mxcontrol` is compiled with every subcommand, and the Python
+backend modules read `PICKLE_RESPONSE` when they are imported. A program
+installed from a release carries the system rules' constants, so there the
+numbers are these, and no type of yours may take one: a reply of yours
+numbered 114 would be raised as `BackendError`. The three replies travel
+addressed to the requester, so they need no rule.
 
 ## Checks
 
@@ -156,7 +165,7 @@ entry is dropped at run time and reported as a delivery error with
 ## Pointing a build at your file
 
 The build reads the file named by the flag `//:multiplexer_rules`, which
-defaults to the example in this repository:
+defaults to the system rules, this repository's `multiplexer.rules`:
 
 ```
 bazel build --@mx//:multiplexer_rules=//your/pkg:deployment.rules //...
@@ -164,7 +173,10 @@ bazel build --@mx//:multiplexer_rules=//your/pkg:deployment.rules //...
 
 Put it in your `.bazelrc` so nobody forgets, as
 [examples/echo/.bazelrc](../examples/echo/.bazelrc) does. Inside this
-repository the flag is spelled `--//:multiplexer_rules=`. Changing the file
+repository the flag is spelled `--//:multiplexer_rules=`, and the
+repository's own `.bazelrc` points it at
+[tests/testing.rules](../tests/testing.rules), the system rules plus the
+types its tests use. Changing the file
 regenerates the constants on the next build; a running multiplexer reads
 the file again on its own and puts the change in use, see [changing the
 rules](operations.md#changing-the-rules).

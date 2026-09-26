@@ -12,7 +12,7 @@ run through asgiref's async_to_sync away from the server's loop needs.
 docs/api_python.md has the user's view and
 docs/recipes/async_web_server.md an asyncio web server.
 
-    client = AsyncClient(addresses, type=peers.WEBSITE)
+    client = AsyncClient(addresses, type=peers.WEB)
     reply = await client.query(b"pears", types.SEARCH_REQUEST)
     await client.send_message(b"seen", type=types.SEARCH_EVENT)
     unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # coroutine or function

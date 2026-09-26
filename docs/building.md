@@ -96,7 +96,7 @@ sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libasio-dev \
     python3-pip python3-setuptools python3-wheel
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 make check                   # the C++ and Python unit tests, against what was built
-make wheel                   # build/dist/mx_multiplexer-<version>-<python>-<platform>.whl
+make wheel                   # build/dist/mx_multiplexer-<version>-<python>-<platform>.whl, mxcontrol inside, stripped
 sudo make install            # mxcontrol, the library and the headers under /usr/local
 make RULES=your.rules -j     # the constants from your rules file, as --//:multiplexer_rules does
 ```
@@ -107,20 +107,24 @@ What comes out, and how a program uses it:
 |---|---|
 | `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
 | `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles and links with `$(pkg-config --cflags --libs multiplexer)`, which `make install` also puts under `PREFIX/lib/pkgconfig`, together with `generate_constants` for your own rules file; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
-| `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension included |
-| `build/dist/*.whl` | `pip install` it; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
+| `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension and `mxcontrol` included |
+| `build/dist/*.whl` | `pip install` it: the package and the `mxcontrol` command; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
 
 `make check` runs the C++ unit tests with googletest and the Python ones
-with `unittest`, including the ones that start a multiplexer, which they
-find through `MXCONTROL`: `multiplexer.testing` runs the binary that
-variable names when it is set, so a test of yours outside Bazel starts
-real multiplexers with `MXCONTROL=build/bin/mxcontrol`. `make/` holds the
-pieces: `sources.mk`, the source lists generated from the BUILD
-files by `./format.sh` (so the two builds cannot disagree about which
-files exist), `setup.py` and `pyproject.toml` for the wheel, and `wheel_smoke.py`, which
-`docker/check.sh make` runs with the wheel installed in a fresh virtual
-environment. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
-`PREFIX`, `PYTHON` and `PROTOC` are variables like `RULES`.
+with `unittest`, in a build of its own under `build/check` whose constants
+come from `tests/testing.rules`, the system rules plus the tests' types, so
+that nothing built for installing or packaging carries those. The tests
+that start a multiplexer run the one `multiplexer.testing` finds: the
+binary `MXCONTROL` names when it is set, else the package's own
+`mxcontrol`, which `build/python` holds, so a test of yours outside Bazel
+starts real multiplexers with nothing set. `make/` holds the pieces:
+`sources.mk`, the source lists generated from the BUILD files by
+`./format.sh` (so the two builds cannot disagree about which files
+exist), `setup.py` and `pyproject.toml` for the wheel, and
+`wheel_smoke.py`, which `docker/check.sh make` runs with the wheel
+installed in a fresh virtual environment, once with the wheel's
+`mxcontrol` and once with `MXCONTROL=build/bin/mxcontrol`. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
+`PREFIX`, `PYTHON`, `PROTOC` and `STRIP` are variables like `RULES`.
 
 Not built this way: the test roles and scenarios under `tests/`, the
 examples, the sanitizer and analysis configurations. Those are Bazel's.
@@ -143,7 +147,10 @@ extension's stub needs `pybind11-stubgen` importable by `PYTHON` there and
 is left out with no other consequence when it is not, and the stubs of
 the protocol buffer modules need a `protoc` of 3.20 or newer, which
 Ubuntu 22.04's 3.12 is not, so a package built there has none of those
-either.
+either. Bazel builds with such a `protoc` too:
+[bazel/system_protoc.sh](../bazel/system_protoc.sh), the default
+`//:protoc`, then leaves out the flag that asks for those stubs and writes
+in their place stubs that make every name of the module `Any`.
 [AGENTS.md](../AGENTS.md) lists the commands.
 
 ## Checking on a clean machine

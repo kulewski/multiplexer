@@ -1,5 +1,5 @@
 # The container image of the multiplexer: the static mxcontrol and the
-# example rules file on distroless static, running as nonroot.
+# system rules file on distroless static, running as nonroot.
 #
 #   bazel run //docker:load          # into the local docker as multiplexer:dev
 #   bazel run //docker:push          # to ghcr.io, tagged with the version

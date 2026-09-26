@@ -32,6 +32,7 @@ MXCONTROL_SRCS := \
   mxcontrol/driver.cc \
   mxcontrol/dump_recording.cc \
   mxcontrol/generate_constants.cc \
+  mxcontrol/generate_rules.cc \
   mxcontrol/help.cc \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \
@@ -126,6 +127,7 @@ PY_FILES := \
   multiplexer/aio.py \
   multiplexer/clients.py \
   multiplexer/mxclient.py \
+  multiplexer/mxcontrol.py \
   multiplexer/mxlog/__init__.py \
   multiplexer/mxlog/streaming.py \
   multiplexer/protocolbuffers.py \
@@ -167,6 +169,7 @@ PY_TEST_FILES := \
   multiplexer/full_connection_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \
+  multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \
   multiplexer/no_connection_test.py \
   multiplexer/pickle_test.py \

@@ -1,9 +1,14 @@
 # mxcontrol
 
-`mxcontrol` is the one binary this repository installs: it runs the
-multiplexer and a few tools next to it. Build it with `bazel build
-//mxcontrol`, or `bazel build @mx//mxcontrol` from a workspace that consumes
-the repository. It is a small tool with subcommands:
+`mxcontrol` runs the multiplexer and a few tools next to it. Every way of
+getting the multiplexer brings it: `pip install mx-multiplexer` puts the
+`mxcontrol` command on the environment's PATH, `python -m
+multiplexer.mxcontrol` being the same without PATH; every release has a
+static one for any x86_64 Linux and an image that runs it; the Debian
+packages install it in `/usr/bin`; and a build makes it, `bazel build
+//mxcontrol`, `bazel build @mx//mxcontrol` from a workspace that consumes
+the repository, or `make`, into `build/bin/mxcontrol`
+([packaging](packaging.md)). It is a small tool with subcommands:
 
 ```
 mxcontrol <general options> <command> <command options>
@@ -86,6 +91,24 @@ A rules file where a name or a number repeats is refused, as at build time.
 A program installed from a release, with `pip install mx-multiplexer` or
 the Debian package, runs this once per rules file and again when the file
 changes; a Bazel build does it on its own.
+
+## generate_rules
+
+Writes the system rules, the peer and message types the multiplexer, the
+libraries and `mxcontrol` use themselves, as a new rules file to add a
+deployment's own types to ([the rules file](rules.md)). The text is
+compiled into `mxcontrol`, so every one writes the rules it was built with,
+the same in every artifact of a release.
+
+```
+mxcontrol generate_rules FILE
+```
+
+FILE must not exist: a rules file is edited after it is written, so an
+existing one is never replaced, and the command exits 1 instead. With
+FILE `-` the rules go to stdout, which is how the image writes them:
+`docker run --rm ghcr.io/kulewski/multiplexer:<version> generate_rules - >
+your.rules`.
 
 ## dump_recording
 

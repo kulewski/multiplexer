@@ -1,4 +1,5 @@
-"""Unit tests for multiplexer.mxlog: entries with data must not fail."""
+"""Unit tests for multiplexer.mxlog: entries with data must not fail, and
+the log streamer's child never returns into its caller's code."""
 
 import io
 import os
@@ -55,6 +56,26 @@ class VerbosityEnvironmentTest(unittest.TestCase):
         self.assertEqual("YYYY", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "DEBUG:CHATTERBOX"}))
         self.assertEqual("YYNN", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "medium"}))
         self.assertEqual("YYYN", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "DEBUG:LOUD"}), "ignored")
+
+
+class StreamingTest(unittest.TestCase):
+    """The streamer's forked child, when it cannot become mxcontrol."""
+
+    def test_a_streamer_that_cannot_start_runs_none_of_its_callers_code(self):
+        # The caller catches what the call raises, as a server's error
+        # handler would, then goes on. The child used to raise out of the
+        # failed exec into that handler and go on too: two lines. Stdout is
+        # read to its end, which waits for the forked child as well.
+        script = (
+            "from multiplexer.mxlog.streaming import enable_single_thread_log_streaming\n"
+            "try:\n"
+            "    enable_single_thread_log_streaming([('127.0.0.1', 1)], mxcontrol='/nonexistent/mxcontrol')\n"
+            "except OSError:\n"
+            "    pass\n"
+            "print('after', flush=True)\n"
+        )
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(["after"], result.stdout.split(), result.stderr)
 
 
 if __name__ == "__main__":

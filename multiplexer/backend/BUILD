@@ -31,7 +31,7 @@ cc_test(
     name = "threaded_server_test",
     size = "medium",
     srcs = ["threaded_server_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":base_threaded_multiplexer_server",
         "//multiplexer:client",
@@ -46,7 +46,7 @@ cc_test(
     name = "serve_thread_test",
     size = "small",
     srcs = ["serve_thread_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":base_multiplexer_server",
         "//multiplexer:in_process_multiplexer",
