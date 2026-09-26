@@ -1,11 +1,15 @@
 // InProcessMultiplexer: a multiplexer on a free port, driven by a thread of
 // its own, for unit tests that need a real one without the integration
-// harness. Uses the tests' rules file, tests/testing.rules.
+// harness. Uses the tests' rules file, tests/testing.rules. Also what a
+// test that fills a connection whose far end reads nothing sends first,
+// whatever this machine's TCP buffers: FILL_FRAMES frames of fill_size().
 #ifndef MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 #define MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 
 #include <asio/io_service.hpp>
+#include <cstddef>
 #include <cstdlib>
+#include <fstream>
 #include <future>
 #include <string>
 #include <thread>
@@ -44,6 +48,33 @@ struct InProcessMultiplexer {
   unsigned short port = 0;
   std::thread thread;
 };
+
+// The most the two sockets of one connection may hold: the largest send
+// buffer and the largest receive buffer the kernel allows, the third field
+// of /proc/sys/net/ipv4/tcp_wmem and tcp_rmem, 8 MiB each where /proc does
+// not say.
+inline std::size_t socket_bytes() {
+  std::size_t total = 0;
+  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
+    std::ifstream limits(path);
+    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
+    limits >> least >> initial >> largest;
+    total += largest;
+  }
+  return total;
+}
+
+// A test that needs messages to wait for room first sends FILL_FRAMES frames
+// of fill_size() bytes: together twice socket_bytes(), so that the sockets
+// are full however far the kernel grew them, in so few frames that a queue
+// counting messages keeps room for the test's own. Filled with frames of
+// the test's own size instead, a connection took hundreds of thousands of
+// them where the kernel allows large buffers.
+constexpr int FILL_FRAMES = 32;
+inline std::size_t fill_size(std::size_t least = 64 * 1024) {
+  const std::size_t each = (2 * socket_bytes() + FILL_FRAMES - 1) / FILL_FRAMES;
+  return each > least ? each : least;
+}
 
 }  // namespace testing
 }  // namespace multiplexer

@@ -11,10 +11,10 @@ import unittest
 
 from tests import harness
 from tests.harness import Cluster, constants as C
+from multiplexer.testing.buffers import fill_frames
 from multiplexer.testing.raw_peer import RawPeer
 from multiplexer.Multiplexer_pb2 import DeliveryError
 
-MESSAGES = 24
 PAYLOAD = b"x" * (1024 * 1024)
 
 
@@ -27,8 +27,8 @@ class DirectQueueFull(unittest.TestCase):
             receiver.handshake()
             sender = RawPeer(cluster.endpoints[0], C.peers.TEST_EVENT_CLIENT)
             sender.handshake()
-            for _ in range(MESSAGES):
-                sender.send(PAYLOAD, C.types.TEST_EVENT, to=receiver.instance_id, report_delivery_error=True)
+            for payload in fill_frames() + [PAYLOAD] * 4:  # the sockets, then past the queue of one
+                sender.send(payload, C.types.TEST_EVENT, to=receiver.instance_id, report_delivery_error=True)
             error = sender.receive_type(C.types.DELIVERY_ERROR, timeout=20)
             report = DeliveryError()
             report.ParseFromString(error.message)

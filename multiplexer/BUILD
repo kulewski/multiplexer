@@ -273,6 +273,29 @@ cc_library(
     ],
 )
 
+# Lines about dropped messages, at most about two per kind and second.
+cc_library(
+    name = "log_summary",
+    srcs = ["log_summary.cc"],
+    hdrs = ["log_summary.h"],
+    deps = [
+        "//lib/logging",
+        "@asio",
+    ],
+)
+
+cc_test(
+    name = "log_summary_test",
+    size = "small",
+    srcs = ["log_summary_test.cc"],
+    deps = [
+        ":log_summary",
+        "//lib/logging",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "connections_manager",
     srcs = ["connections_manager.cc"],
@@ -405,6 +428,7 @@ cc_library(
     hdrs = ["basic_client.h"],
     deps = [
         ":connections_manager",
+        ":log_summary",
         ":multiplexer_cc_constants",
         "//lib:fork",
         "//lib:mutex",
@@ -437,6 +461,7 @@ cc_library(
     visibility = ["//mxcontrol:__pkg__"],
     deps = [
         ":connections_manager",
+        ":log_summary",
         ":multiplexer_cc_proto",
         ":recorder",
         "//lib:exception",
@@ -662,6 +687,55 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "drop_lines_test",
+    size = "medium",
+    srcs = ["drop_lines_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+# A welcome long after the connection opened still registers; about 95 s.
+py_test(
+    name = "late_welcome_test",
+    size = "large",
+    srcs = ["late_welcome_test.py"],
+    tags = ["slow"],
+    deps = [
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "graceful_stop_test",
+    size = "medium",
+    srcs = ["graceful_stop_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "unrouted_test",
+    size = "medium",
+    srcs = ["unrouted_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":threaded_client_py",
         "//multiplexer/testing",
     ],
 )

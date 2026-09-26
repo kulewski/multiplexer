@@ -21,6 +21,7 @@ LIB_SRCS := \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
   multiplexer/io/raw_message.cc \
+  multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
@@ -102,6 +103,7 @@ HEADERS := \
   multiplexer/defaults.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
+  multiplexer/log_summary.h \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
@@ -135,6 +137,7 @@ PY_FILES := \
   multiplexer/release.py \
   multiplexer/servers.py \
   multiplexer/testing/__init__.py \
+  multiplexer/testing/buffers.py \
   multiplexer/testing/fakes.py \
   multiplexer/testing/raw_peer.py \
   multiplexer/threaded_client.py \
@@ -155,6 +158,7 @@ CC_TEST_SRCS := \
   multiplexer/client_names_test.cc \
   multiplexer/connect_by_name_test.cc \
   multiplexer/fork_test.cc \
+  multiplexer/log_summary_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
@@ -164,9 +168,11 @@ PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_by_name_test.py \
+  multiplexer/drop_lines_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
+  multiplexer/graceful_stop_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \
   multiplexer/mxcontrol_test.py \
@@ -181,4 +187,5 @@ PY_TEST_FILES := \
   multiplexer/threaded_lanes_test.py \
   multiplexer/threaded_sends_test.py \
   multiplexer/threaded_server_test.py \
+  multiplexer/unrouted_test.py \
 

@@ -108,8 +108,14 @@ mxcontrol run_multiplexer --address 10.0.0.1:1980 --rules /etc/mx/deployment.rul
 ```
 
 It has no other dependencies: no state directory, no companion process. Run
-it under your process supervisor; it exits with status 0 on `SIGTERM`, and a
-restart has no side effects beyond the connections it drops. Any release
+it under your process supervisor. On `SIGTERM` it stops accepting, sends
+what it holds to the peers that read, closes each connection once its
+queue is written, and exits with status 0, within `--drain-seconds` (5 s)
+and a second; a second `SIGTERM` stops it at once. A supervisor's stop
+timeout must allow that much: Kubernetes waits 30 s by default
+(`terminationGracePeriodSeconds`), systemd 90 s (`TimeoutStopSec`) and
+`docker stop` 10 s. A restart has no side effects beyond the connections it
+drops. Any release
 artifact carries it ([packaging](packaging.md)); the `mxcontrol` command
 that `pip install mx-multiplexer` installs replaces itself with the binary
 within milliseconds, keeping its pid, so a supervisor may run either it or
@@ -199,8 +205,12 @@ to the peers connected.
 Restart multiplexers one at a time. With the others up, the restart costs
 nothing: a request in flight on the dead connection goes out again through
 another at once, and every peer is back on the restarted multiplexer within
-about 3 s. Messages the multiplexer held for delivery at that moment are
-lost.
+about 3 s. What the multiplexer held for delivery when it was told to stop
+still reaches the peers that read, before their connections close; what
+it held for a peer that did not read within `--drain-seconds` is lost, as
+is everything it held when it was killed instead. What a peer sends in the
+moment before it sees its connection close is lost too: a request then
+goes out again through another connection, an event does not.
 
 With a single multiplexer there is nothing to fall back to. A threaded
 client sends its in-flight requests again as soon as it is reconnected, a
@@ -267,9 +277,33 @@ compiles with `-g` and installs unstripped.
 
 The multiplexer and both libraries log to stderr, one entry per line, with
 the level, timestamp, pid, context, workflow id, message and source
-location. The multiplexer logs every peer that registers and leaves at `INFO`, every
-undelivered message at `ERROR` or `WARNING` according to the
-rule, and every message dropped for a full queue at `WARNING`.
+location. The multiplexer logs every peer that registers and leaves at `INFO`, a
+message a rule queued nowhere at `ERROR`, or `WARNING` when the rule's
+`delivery_error_is_error` is false, saying why (below), and a copy a full
+connection refuses at `WARNING`, as `outgoing queue full, dropping message
+to peer ID of type N (NAME)`.
+
+A line about a message that went nowhere is logged at once the first time,
+and about once a second after that, while it goes on happening, as the
+same line with a count: `routing while none present of type 106 (BACKEND)
+[1999 more in the last 1.0 s]`. A kind of line that has nothing to say for
+a whole second is logged at once again the next time. So a receiver that
+falls behind, or a type nobody serves, costs the log about two lines a
+second for each kind, where it used to cost up to three for every message,
+each one a write to stderr on the multiplexer's only thread. The kinds are
+told apart by what the line names: the peer type and the reason for a
+message a rule queued nowhere, the addressee for one sent to an instance
+that is not connected, the peer for a full queue, the type for an unknown
+type; beyond 256 kinds at once, the rest share one count, `[N more lines of
+other kinds in the last 1.0 s]`. The libraries count their own lines about
+dropped messages the same way: `incoming_queue_full, dropping` when a
+synchronous client's 1024 unread messages are not read in time, a
+`ThreadedClient` given no `on_message` callback, and the requests a server
+class's full queue drops (the Python `BaseThreadedMultiplexerServer` says
+its count when the queue takes a request again). The line the multiplexer
+used to log for every `DELIVERY_ERROR` it sent back, `errors when
+delivering <id>`, is a `CHATTERBOX` entry now, since the line saying why
+is logged where the failure is found.
 
 A few lines are worth knowing by their text. At start the multiplexer
 logs `rules loaded from <path>: <fingerprint>, <n> message types, <m> peer
@@ -278,9 +312,22 @@ types`, and for every file it puts in use later `rules reloaded from
 `Mx.log_contains()`. The libraries log their own connections at `INFO`,
 `registered connection` with the multiplexer's instance id when one is
 made and `unregistered connection` when it ends, and a `SyncClient` or a
-server class logs `connecting to` before it; a `ThreadedClient` warns
+server class logs `connecting to` before it. A stop logs `stopping: N
+connection(s) close once what is queued for them is written, within S s`,
+then, if some peer did not read in time, `N connection(s) still held
+messages at the deadline; closing them`, and at its end `stopped: every
+connection closed in N ms`, followed by `; dropped N message(s) still
+queued for peers and M that arrived while their connection closed` at
+`WARNING` when it dropped anything. A multiplexer out of file descriptors
+logs `cannot accept a connection: Too many open files` and tries again
+every 0.1 s. A `ThreadedClient` warns
 `connection lost under query <id>; sending again`, or `; locating the
-addressee`, for each query it sends again.
+addressee`, for each query it sends again. A message a rule queued nowhere
+gives one of three lines: `routing while none present of type N (NAME)`
+when no peer of the type is connected; `routing off on every peer of type
+N (NAME)` when every one has turned rule routing off, as while it drains;
+and `queue full on every peer of type N (NAME) that takes it` when every
+peer that would take it is full.
 
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a
@@ -295,8 +342,9 @@ stderr has the same shape.
 entries have a verbosity, and the default shows a process's connections
 coming and going, at `HIGHVERBOSITY`, and not its traffic: the
 per-message entries, a request and the connection it took, a message
-routed, a connection skipped because it is full, are at `CHATTERBOX` and
-off unless asked for. The environment variable `MX_LOG_VERBOSITY`, read
+routed, a connection skipped because it is full, a message a full queue
+refused, a `DELIVERY_ERROR` sent back, are at `CHATTERBOX` and off unless
+asked for. The environment variable `MX_LOG_VERBOSITY`, read
 once when the library loads, sets this without a rebuild or a call:
 `MX_LOG_VERBOSITY=DEBUG:CHATTERBOX` turns the traffic log on for one
 process, `MX_LOG_VERBOSITY=DEBUG:LOW` quiets a chatty one, and a bare

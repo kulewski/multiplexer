@@ -74,6 +74,7 @@ class ThreadedClient::Core {
                Probe probe = PROBE_SEARCH);
   void shutdown();
   bool orphaned() const { return basic_client_->orphaned(); }
+  LogSummary& drop_lines() { return basic_client_->drop_lines(); }  // the io thread only
 
  private:
   struct InFlight;

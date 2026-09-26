@@ -1,6 +1,7 @@
 // run_multiplexer: creates the Server, reads the rules, binds, optionally
 // writes the port file, and runs the io_service until a signal stops it;
-// SIGHUP reloads the rules on the way.
+// SIGHUP reloads the rules on the way. The first SIGTERM or SIGINT drains,
+// a second one stops at once.
 #include "mxcontrol/start_multiplexer_server.h"
 
 #include <asio.hpp>
@@ -29,17 +30,29 @@ void write_port_file(const std::string& path, const std::string& address) {
   AssertMsg(std::rename(tmp.c_str(), path.c_str()) == 0, "cannot rename port file to " + path);
 }
 
-void stop_on_signal(multiplexer::Server::pointer server, asio::signal_set& reload, const asio::error_code& error,
-                    int signal_number) {
+// SIGTERM or SIGINT: the server stops, sending what it holds within
+// `drain_seconds`, while the next such signal stops it at once. Once every
+// connection has ended, giving up the waits for signals lets
+// io_service.run() return on its own.
+void stop_on_signal(multiplexer::Server::pointer server, asio::signal_set& signals, asio::signal_set& reload,
+                    float drain_seconds, const asio::error_code& error, int signal_number) {
   if (error) {
     return;
   }
+  if (server->stopped()) {
+    MX_LOG(INFO, LOWVERBOSITY, TEXT("received signal " + mx::repr(signal_number) + " again, stopping at once"));
+    server->stop();
+    return;
+  }
   MX_LOG(INFO, LOWVERBOSITY, TEXT("received signal " + mx::repr(signal_number) + ", shutting down"));
-  // Closing the acceptor and the connections, and giving up the wait for
-  // SIGHUP, lets io_service.run() return on its own once every pending
-  // operation has completed.
-  server->stop();
-  reload.cancel();
+  signals.async_wait([server, &signals, &reload](const asio::error_code& next_error, int next_signal) {
+    stop_on_signal(server, signals, reload, 0, next_error, next_signal);
+  });
+  server->stop(drain_seconds, [&signals, &reload] {
+    asio::error_code ignored;
+    signals.cancel(ignored);
+    reload.cancel(ignored);
+  });
 }
 
 // SIGHUP: the rules file is read again now, the Unix way to say a
@@ -97,8 +110,9 @@ int StartMultiplexerServer::run() {
   asio::signal_set reload(io_service, SIGHUP);
   reload.async_wait([server, &reload](const asio::error_code& error, int) { reload_on_signal(server, reload, error); });
   asio::signal_set signals(io_service, SIGINT, SIGTERM);
-  signals.async_wait([server, &reload](const asio::error_code& error, int signal_number) {
-    stop_on_signal(server, reload, error, signal_number);
+  const float drain_seconds = drain_seconds_ > 0 ? drain_seconds_ : 0;
+  signals.async_wait([server, &signals, &reload, drain_seconds](const asio::error_code& error, int signal_number) {
+    stop_on_signal(server, signals, reload, drain_seconds, error, signal_number);
   });
   server->set_rules_file(rules_file_);
   {

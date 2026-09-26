@@ -24,6 +24,7 @@ BasicClient::BasicClient(asio::io_service& io_service, std::uint32_t client_type
       client_type_(client_type),
       shuts_down_(false),
       incoming_queue_max_size_(DEFAULT_INCOMING_QUEUE_MAX_SIZE),
+      drop_lines_(io_service, "BasicClient"),
       fork_generation_at_creation_(mx::fork_generation()),
       resolver_(io_service),
       outbox_(new Outbox(io_service)) {}
@@ -77,8 +78,10 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     return;
   }
   if (incoming_queue_full()) {
-    MX_LOG(WARNING, HIGHVERBOSITY,
-           CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping #" + repr(mxmsg->id())));
+    if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
+      MX_LOG(WARNING, LogSummary::VERBOSITY,
+             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping #" + repr(mxmsg->id())));
+    }
     return;  // drop
   }
   incoming_messages_.push_back(incoming);
@@ -202,6 +205,7 @@ void BasicClient::shutdown() {
     }
   }
   _drop_outbox();  // what still waits goes nowhere now
+  drop_lines_.flush();
 }
 
 bool BasicClient::closing() {

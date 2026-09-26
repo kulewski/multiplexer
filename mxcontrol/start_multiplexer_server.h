@@ -13,8 +13,9 @@ namespace mxcontrol {
 // the bound address), --record
 // and --record-payload-bytes (a recording from the start), --recording-dir
 // and --allow-tap (recording sessions and taps peers may ask for),
-// --peers-file (the connected peers, rewritten on every change). See
-// docs/mxcontrol.md.
+// --peers-file (the connected peers, rewritten on every change),
+// --drain-seconds (how long a stop goes on sending what is queued; see
+// Server::stop). See docs/mxcontrol.md.
 class StartMultiplexerServer : public Task {
  public:
   virtual int run();
@@ -45,6 +46,9 @@ class StartMultiplexerServer : public Task {
                        "let peers receive every record over their connection (RECORDING_CONTROL TAP)");
     options.add("peers-file", &peers_file_,
                 "rewrite this file with the connected peers on every registration and unregistration");
+    options.add("drain-seconds", &drain_seconds_, 5.0,
+                "on SIGTERM or SIGINT, seconds to go on routing and sending what is queued before each "
+                "connection closes, then exit; a second signal, or 0, stops at once");
   }
 
  private:
@@ -58,6 +62,7 @@ class StartMultiplexerServer : public Task {
   std::string recording_dir_;
   bool allow_tap_ = false;
   std::string peers_file_;
+  float drain_seconds_;
 };
 
 };  // namespace mxcontrol

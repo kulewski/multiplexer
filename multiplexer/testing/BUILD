@@ -5,6 +5,7 @@ py_library(
     name = "testing",
     srcs = [
         "__init__.py",
+        "buffers.py",
         "fakes.py",
         "raw_peer.py",
     ],

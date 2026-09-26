@@ -699,7 +699,8 @@ class SearchTest(unittest.TestCase):
 ```
 
 - `Cluster(count, rules, record=False, record_payload_bytes=0,
-  rules_check_interval=None)` starts `count` multiplexers on entering and
+  rules_check_interval=None, drain_seconds=None)` starts `count`
+  multiplexers on entering and
   stops every peer and multiplexer on leaving. `rules` is the path of the
   rules file, the one your constants were generated from, which the test
   names: under Bazel `runfile("your/pkg/deployment.rules")` with the file
@@ -708,7 +709,9 @@ class SearchTest(unittest.TestCase):
   a copy of the file under the running multiplexers gives
   `rules_check_interval`, the seconds between their reads of it (their
   default when `None`, 0 never), and `Mx.reload_rules()` sends one
-  `SIGHUP` instead. The multiplexers run the binary `MXCONTROL` names when
+  `SIGHUP` instead; `drain_seconds` is their `--drain-seconds`, how long a
+  stop goes on sending what is queued (their default when `None`). The
+  multiplexers run the binary `MXCONTROL` names when
   it is set, else the `mxcontrol` that came with the package, the wheel's
   or, under Bazel, `@mx//mxcontrol` in the runfiles; PATH is never
   searched, so a test runs the multiplexer of the library it imports, and
@@ -721,7 +724,8 @@ class SearchTest(unittest.TestCase):
   `wait_for_peer_gone(type_or_name, timeout=15)` until none does; each
   `Mx` in `mx` has `connected_peers()`, `stop()`, `kill()`, `restart()`,
   `pause()`, `resume()`, `log_path` and, with `record=True`, `record_file`:
-  `stop()` sends `SIGTERM` and `kill()` `SIGKILL`; `start()` starts a
+  `stop()` sends `SIGTERM` and waits for the exit, through the drain, and
+  `kill()` `SIGKILL`; `start()` starts a
   stopped or killed one again on the same port and returns once it
   listens, and `restart()` is both; `pause()` freezes it with `SIGSTOP`, a
   hung multiplexer whose sockets stay open, and `resume()` thaws it;
@@ -808,6 +812,18 @@ usually assumed something the protocol does not promise. What holds:
   them; a short timeout belongs to a step that is expected to time out,
   which load cannot make pass. Never shorten a success wait to make a test
   quick: a passing test costs no waiting at all.
+- **Fill a connection with a few large frames.** A test that needs
+  messages to wait for room, behind a multiplexer frozen with `pause()`
+  or a peer that reads nothing, first fills the sockets between them,
+  and what they hold depends on the machine: up to the largest send and
+  receive buffers its kernel allows, tens of megabytes on some.
+  `fill_frames()` from `multiplexer.testing.buffers` is 32 frames that
+  together carry twice that, so they fill the sockets wherever the test
+  runs and leave a queue of 1024 messages room for the test's own;
+  `past_the_queue(payload)` is those, then twice such a queue of
+  `payload`. Filled with frames of the test's own size, the same
+  connection took hundreds of thousands of them, past the queue and the
+  test's time.
 - **Measured tests measure the machine.** The scenarios that check CPU
   time, latency or memory are marked and kept apart; a test of yours that
   asserts on a duration will follow the load of the machine that runs it.
