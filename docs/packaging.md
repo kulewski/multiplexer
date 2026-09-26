@@ -14,7 +14,7 @@ published; [operations](operations.md#debug-symbols) says how to debug.
 | `mxcontrol-<version>-linux-amd64` with its `.sha256` | running a multiplexer, or its tools, on any Linux | nothing: statically linked |
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
 | `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev` and `libasio-dev` to build against the library |
-| `mx_multiplexer-<version>-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers | `pip`; the `protobuf` package comes with it |
+| `mx_multiplexer-<version>-cp3XY-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers, and `mxcontrol`: a multiplexer, `generate_rules`, `generate_constants`, the test harness's binary | `pip` on x86_64 Linux with glibc 2.28 or newer; the `protobuf` package comes with it |
 | the source archive GitHub makes for the tag | everything else, through Bazel or `make` | [building.md](building.md) |
 
 Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
@@ -30,7 +30,9 @@ container. Static
 glibc cannot resolve host names without the running system's name-service
 modules, so inside the image, or on a system with a different glibc, give
 mxcontrol's client subcommands addresses rather than names. The
-multiplexer itself listens on an address and never resolves one.
+multiplexer itself listens on an address and never resolves one. The
+wheels' `mxcontrol` is another link of the same source, against the
+system's glibc, so it resolves names.
 
 ## The container image
 
@@ -97,22 +99,40 @@ supported.
 
 `packaging/build_wheels.sh` builds them in the `manylinux_2_28` container:
 protobuf 3.21.12 compiled once from source and linked statically into the
-extension, then `make wheel` per CPython, which strips the extension, and
-`auditwheel`, which verifies that the wheel needs nothing from the system
-beyond what manylinux allows.
+extension and into `mxcontrol`, which is linked once and is the same file
+in every CPython's wheel, then `make wheel` per CPython, which strips both,
+and `auditwheel`, which verifies that the wheel needs nothing from the
+system beyond what manylinux allows and tags it `manylinux_2_28`. Each
+wheel is then installed into a fresh environment of its CPython and
+smoke-tested (`make/wheel_smoke.py`) at that glibc, the oldest it promises.
+A wheel is about 2.3 MB.
+
 `pip install mx-multiplexer` installs them from PyPI, where every release
 is published under that name, because `multiplexer` on PyPI belongs to an
 unrelated package; the import is `multiplexer` all the same. `pip install
-mx_multiplexer-<version>-cp312-manylinux_2_28_x86_64.whl` installs the
-file from the release page instead. Either way that is the whole
-installation; the package depends on `protobuf` from PyPI.
-The wheel includes `multiplexer.testing`, the test harness; a `Cluster`
-names its rules file and needs `MXCONTROL` in the environment pointing at
-a multiplexer binary, the static one for example. The constants of your
-own rules file, the `peers` and `types` a Bazel build generates, come from
-that binary too: `mxcontrol generate_constants your.rules --python
-multiplexer_constants.py --pyi multiplexer_constants.pyi`, once, and
-again when the file changes ([mxcontrol.md](mxcontrol.md#generate_constants)).
+mx_multiplexer-<version>-cp312-cp312-manylinux_2_28_x86_64.whl` installs
+the file from the release page instead. Either way that is the whole
+installation; the package depends on `protobuf` from PyPI. It carries:
+
+- `mxcontrol`, the multiplexer and its tools, which pip puts on the
+  environment's PATH as the `mxcontrol` command: the command runs the
+  package's binary in its own place, so its pid, signals and exit status
+  are the multiplexer's. `python -m multiplexer.mxcontrol` does the same
+  without PATH, `multiplexer.mxcontrol.binary_path()` names the binary for
+  a program or a supervisor that runs it directly, and `pipx install
+  mx-multiplexer` or `uv tool install mx-multiplexer` give a command
+  outside any environment. A Debian package's `/usr/bin/mxcontrol` comes
+  after an active environment's on PATH.
+- `multiplexer.testing`, the test harness: a `Cluster` names its rules
+  file and runs the package's `mxcontrol`, or the binary `MXCONTROL` names
+  when it is set ([testing](api_python.md#testing)).
+- The constants of the system rules; those of your own rules file, the
+  `peers` and `types` a Bazel build generates, come from the same
+  `mxcontrol`: `mxcontrol generate_rules your.rules` writes the file to
+  start from, and `mxcontrol generate_constants your.rules --python
+  multiplexer_constants.py --pyi multiplexer_constants.pyi` the constants,
+  once, and again when the file changes
+  ([mxcontrol.md](mxcontrol.md#generate_constants)).
 The package is typed: a `py.typed` marker and a stub next to every
 generated module and the extension, so Pylance and pyright check code
 against it without any setup.
@@ -134,7 +154,11 @@ or with `gh workflow run release.yml -f tag=v<version>rc1`: the same build
 from the chosen branch, the files named after the tag given, without the
 push to ghcr.io and without a release, and with the wheels uploaded to
 test.pypi.org instead of PyPI, installed from there into a fresh
-environment and smoke-tested against the run's own static `mxcontrol`.
+environment and smoke-tested with the `mxcontrol` it carries and then with
+the run's own static one, whose rules and constants must be the wheel's.
+Every run, a tag's too, smoke-tests the wheels of the oldest and the newest
+CPython the same way on a distribution of their own before anything is
+published.
 TestPyPI never accepts a version it has seen, so the tag given is a
 release candidate that will not be tagged, never the version itself. A
 failed run is re-run from its page once the fix is on the branch; the tag

@@ -27,7 +27,7 @@ class GenerateConstants : public Task {
            "(classes peers and types), the module's stub for type checkers, and a C++ header\n"
            "(namespaces multiplexer::peers and multiplexer::types), whichever of the three are asked\n"
            "for. A rules file where a name or a number repeats is refused. This is what a Bazel build\n"
-           "does for you; a program installed from a release runs it once per rules file.\n";
+           "does for you; a program installed with pip or from a release runs it once per rules file.\n";
   }
   virtual int run();
 

@@ -142,7 +142,9 @@ graph LR
 
 1. **Write a rules file.** `mxcontrol generate_rules your.rules` writes the
    system rules, which every rules file starts from; add your own peer types
-   and message types after them, with their routing. [The rules file](rules.md)
+   and message types after them, with their routing. `pip install
+   mx-multiplexer` installs the `mxcontrol` command; every release carries
+   one too ([packaging](packaging.md)). [The rules file](rules.md)
    describes the format.
 2. **Run one or more multiplexers**, each with that rules file:
    `mxcontrol run_multiplexer --address 0.0.0.0:1980 --rules your.rules`

@@ -30,6 +30,8 @@ py_library(
     name = "streaming",
     srcs = ["streaming.py"],
     imports = ["../.."],
+    visibility = ["//multiplexer:__pkg__"],
+    deps = ["//multiplexer:mxcontrol_py"],
 )
 
 py_library(

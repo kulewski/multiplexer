@@ -6,9 +6,10 @@ backend can be built on, and `multiplexer.multiplexer_constants` holds
 `peers` and `types`, generated from the [rules file](rules.md) the build
 was pointed at. Depend on `@mx//multiplexer:clients` or
 `@mx//multiplexer:servers`, and on `@mx//multiplexer:multiplexer_constants`.
-Outside Bazel, after `pip install mx-multiplexer`, the constants of your
-rules file come from `mxcontrol generate_constants your.rules --python
-multiplexer_constants.py --pyi multiplexer_constants.pyi`, a module to
+Outside Bazel, after `pip install mx-multiplexer`, which also installs
+the `mxcontrol` command, the constants of your rules file come from
+`mxcontrol generate_constants your.rules --python multiplexer_constants.py
+--pyi multiplexer_constants.pyi`, a module to
 import from wherever it is written
 ([mxcontrol.md](mxcontrol.md#generate_constants)); the package's own
 `multiplexer.multiplexer_constants` holds the system rules' constants, which
@@ -683,7 +684,7 @@ from multiplexer.testing import Cluster, FakePeer, TestClient
 
 class SearchTest(unittest.TestCase):
     def test_search_goes_to_the_index(self):
-        with Cluster(1) as cluster, FakePeer(cluster, peers.INDEX) as index, TestClient(cluster, peers.WEB) as client:
+        with Cluster(1, rules="deployment.rules") as cluster, FakePeer(cluster, peers.INDEX) as index, TestClient(cluster, peers.WEB) as client:
             index.reply_with(types.SEARCH_REQUEST, b"3 hits", types.SEARCH_RESPONSE)
             reply = client.query(b"pears", types.SEARCH_REQUEST)
             self.assertEqual(b"3 hits", reply.message)
@@ -700,7 +701,13 @@ class SearchTest(unittest.TestCase):
   a copy of the file under the running multiplexers gives
   `rules_check_interval`, the seconds between their reads of it (their
   default when `None`, 0 never), and `Mx.reload_rules()` sends one
-  `SIGHUP` instead.
+  `SIGHUP` instead. The multiplexers run the binary `MXCONTROL` names when
+  it is set, else the `mxcontrol` that came with the package, the wheel's
+  or, under Bazel, `@mx//mxcontrol` in the runfiles; PATH is never
+  searched, so a test runs the multiplexer of the library it imports, and
+  one with nothing to run fails before starting anything, naming
+  `MXCONTROL`. `multiplexer.mxcontrol.binary_path()` names the package's
+  binary for a program that starts one itself.
   `endpoints` is the list of `(host, port)` the clients take;
   `wait_for_peer(type_or_name, count=1, timeout=15)` blocks until every
   multiplexer lists that many peers of the type in its peers file, and

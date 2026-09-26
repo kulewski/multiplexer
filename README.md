@@ -244,7 +244,8 @@ Two ways, and the choice is only whether you build it:
   image `ghcr.io/kulewski/multiplexer:<version>` with nothing in it but
   the binary, a Debian package per Debian and Ubuntu release with
   `mxcontrol`, the C++ library, its headers and a pkg-config file, and
-  manylinux wheels of the Python package for every CPython from 3.10,
+  manylinux wheels of the Python package, `mxcontrol` inside, for every
+  CPython from 3.10,
   which `pip install mx-multiplexer` fetches from PyPI.
   [docs/packaging.md](docs/packaging.md) says how to use each;
   [docs/operations.md](docs/operations.md#on-kubernetes) how to run the
@@ -295,7 +296,7 @@ from the distribution's own compiler, protobuf, Asio and pybind11:
 ```
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a with headers, build/python/
 make check                   # the C++ and Python unit tests, against what was built
-make wheel                   # a pip wheel of the Python package
+make wheel                   # a pip wheel of the Python package, mxcontrol inside
 sudo make install            # mxcontrol, the library and the headers under /usr/local
 make RULES=your.rules -j     # the constants from your rules file
 ```
@@ -334,9 +335,10 @@ ports, scripted peers, and the macro this repository's own scenarios use
 ## Using it from Python
 
 `pip install mx-multiplexer` installs the package, extension included, on
-Linux; the import is `multiplexer`, and `mxcontrol generate_constants
-your.rules --python multiplexer_constants.py` writes the `peers` and
-`types` of your rules file, which a Bazel build generates on its own. A
+Linux, and the `mxcontrol` command, which runs a multiplexer; the import is
+`multiplexer`, and `mxcontrol generate_constants your.rules --python
+multiplexer_constants.py` writes the `peers` and `types` of your rules
+file, which a Bazel build generates on its own. A
 backend waits for requests and answers them. This one is built on
 `BaseMultiplexerServer`: `serve_forever()` runs the loop and calls
 `handle_message` for each request; `send_message` replies to the peer that

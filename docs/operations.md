@@ -109,7 +109,11 @@ mxcontrol run_multiplexer --address 10.0.0.1:1980 --rules /etc/mx/deployment.rul
 
 It has no other dependencies: no state directory, no companion process. Run
 it under your process supervisor; it exits with status 0 on `SIGTERM`, and a
-restart has no side effects beyond the connections it drops.
+restart has no side effects beyond the connections it drops. Any release
+artifact carries it ([packaging](packaging.md)); the `mxcontrol` command
+that `pip install mx-multiplexer` installs replaces itself with the binary
+within milliseconds, keeping its pid, so a supervisor may run either it or
+the binary `multiplexer.mxcontrol.binary_path()` names.
 [mxcontrol](mxcontrol.md) lists the options.
 
 ## Changing the rules

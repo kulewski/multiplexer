@@ -660,7 +660,10 @@ py_test(
     name = "mxlog_test",
     size = "small",
     srcs = ["mxlog_test.py"],
-    deps = ["//multiplexer/mxlog"],
+    deps = [
+        "//multiplexer/mxlog",
+        "//multiplexer/mxlog:streaming",
+    ],
 )
 
 py_library(
@@ -741,6 +744,27 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+# The mxcontrol that came with the package, and the command that runs it:
+# the wheel's package data, or //mxcontrol beside the package in runfiles.
+py_library(
+    name = "mxcontrol_py",
+    srcs = ["mxcontrol.py"],
+    data = ["//mxcontrol"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "mxcontrol_test",
+    size = "small",
+    srcs = ["mxcontrol_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":mxcontrol_py",
         "//multiplexer/testing",
     ],
 )

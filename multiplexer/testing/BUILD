@@ -19,6 +19,7 @@ py_library(
         "//multiplexer:events_py_proto",
         "//multiplexer:multiplexer_constants",
         "//multiplexer:multiplexer_py_proto",
+        "//multiplexer:mxcontrol_py",
         "//multiplexer:servers",
         "//multiplexer:threaded_client_py",
     ],

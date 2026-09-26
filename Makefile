@@ -7,7 +7,8 @@
 #   make -j            build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 #   make check         the C++ and Python unit tests, against a build of their own
 #                      whose constants come from tests/testing.rules
-#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip, stripped
+#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip, with mxcontrol
+#                      inside, stripped
 #   make install       mxcontrol, generate_constants, the library, the headers and
 #                      a pkg-config file under PREFIX
 #   make RULES=your.rules ...   generate the constants from your rules file
@@ -79,7 +80,8 @@ GENERATE_CONSTANTS := $(BUILD)/bin/generate_constants
 PY_PACKAGE := $(patsubst %,$(PY)/%,$(PY_FILES)) $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PY)) \
               $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PYI)) $(PY)/multiplexer/py.typed $(NATIVE_PYI) \
               $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py \
-              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so
+              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so \
+              $(PY)/multiplexer/bin/mxcontrol
 PY_TESTS := $(patsubst %,$(PY)/%,$(PY_TEST_FILES))
 
 .PHONY: all python check check-cc check-py wheel install clean
@@ -126,6 +128,11 @@ $(GEN)/multiplexer/multiplexer_constants.py $(GEN)/multiplexer/multiplexer_const
 $(SYSTEM_RULES_CC): multiplexer.rules mxcontrol/embed_rules.sh
 	@mkdir -p $(dir $@)
 	sh mxcontrol/embed_rules.sh multiplexer.rules $@
+
+# The package's mxcontrol, where multiplexer/mxcontrol.py looks for it;
+# executable, or pip would install it as data.
+$(PY)/multiplexer/bin/mxcontrol: $(MXCONTROL)
+	install -D -m 755 $< $@
 
 $(PY)/multiplexer/py.typed:
 	@mkdir -p $(dir $@)
@@ -234,13 +241,14 @@ endif
 
 # The wheel: the package without the tests, with setup.py and
 # pyproject.toml from make/ and the README, which setup.py turns into the
-# PyPI page. Its extension is stripped; build/python keeps the symbols.
+# PyPI page. Its extension and its mxcontrol are stripped; build/python
+# keeps the symbols.
 
 wheel: python
 	rm -rf $(BUILD)/wheel && mkdir -p $(BUILD)/wheel $(BUILD)/dist
 	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
-	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so
+	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so $(BUILD)/wheel/multiplexer/bin/mxcontrol
 	sed 's/@VERSION@/$(VERSION)/' make/setup.py > $(BUILD)/wheel/setup.py
 	cp make/pyproject.toml README.md $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .

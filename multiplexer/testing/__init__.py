@@ -38,6 +38,7 @@ from typing import Any, Callable, Iterable
 from google.protobuf import text_format
 
 from multiplexer import events_pb2
+from multiplexer.mxcontrol import binary_path as _packaged_mxcontrol
 
 Event = dict[str, Any]
 
@@ -54,9 +55,29 @@ def mx_runfile(path: str) -> str:
 
 
 def mxcontrol_path() -> str:
-    """The multiplexer binary: `$MXCONTROL` when set, for a build without
-    Bazel (make), else the one in this repository's runfiles."""
-    return os.environ.get("MXCONTROL") or mx_runfile("mxcontrol/mxcontrol")
+    """The multiplexer binary: `$MXCONTROL` when set, else the mxcontrol that
+    came with the package (the wheel's, or Bazel's in this repository's
+    runfiles), else where those runfiles would hold it. PATH is never
+    searched."""
+    if os.environ.get("MXCONTROL"):
+        return os.environ["MXCONTROL"]
+    try:
+        return _packaged_mxcontrol()
+    except FileNotFoundError:
+        return mx_runfile("mxcontrol/mxcontrol")
+
+
+def _runnable_mxcontrol() -> str:
+    """mxcontrol_path(), checked before anything is started or opened for
+    it: FileNotFoundError saying where the binary was looked for and how to
+    name one when there is nothing there to run."""
+    path = mxcontrol_path()
+    if shutil.which(path) is None:
+        raise FileNotFoundError(
+            "no multiplexer binary at %s (%s): set MXCONTROL to one, or install mx-multiplexer 2.4.0 or newer, "
+            "which carries it" % (path, "from MXCONTROL" if os.environ.get("MXCONTROL") else "with this package")
+        )
+    return path
 
 
 def runfile(path: str) -> str:
@@ -260,7 +281,7 @@ class Mx:
         if self.record and os.path.exists(self.record_file):
             os.unlink(self.record_file)  # a previous test's recording; the file is appended to
         command = [
-            mxcontrol_path(),
+            _runnable_mxcontrol(),
             "run_multiplexer",
             "--address",
             self.address,
@@ -736,7 +757,7 @@ def mxcontrol(*args: str, timeout: float = 30, expect: int | None = 0) -> subpro
     must be that, or the assertion fails with both streams in the message;
     None accepts any."""
     result = subprocess.run(
-        [mxcontrol_path()] + list(args),
+        [_runnable_mxcontrol()] + list(args),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
