@@ -59,7 +59,6 @@ class RunfilesTest(unittest.TestCase):
     def test_mx_runfile_is_the_repository_root(self):
         """mx_runfile() finds this repository by where this package sits, so
         it works whatever the consuming workspace calls it."""
-        self.assertTrue(os.path.exists(mx_runfile("multiplexer.rules")))
         self.assertTrue(os.path.exists(mx_runfile("mxcontrol/mxcontrol")))
         self.assertEqual(mx_runfile("multiplexer/testing/__init__.py"), os.path.abspath(testing.__file__))
 

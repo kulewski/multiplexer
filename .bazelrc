@@ -2,6 +2,12 @@
 # debug info.
 build --cxxopt=-std=c++17
 
+# The repository's own builds generate the package's constants from the
+# tests' rules file, the system rules plus the types the tests use; a
+# consumer of @mx never reads this file and gets the system rules, and the
+# release names them for what it publishes.
+build --//:multiplexer_rules=//tests:testing.rules
+
 # Warnings are errors for our own code and the generated protobuf sources.
 # External code is compiled silently and its headers are system headers, so
 # nothing in Asio, pybind11 or zstd can fail a build. One-off escape hatch:

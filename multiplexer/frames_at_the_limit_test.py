@@ -18,7 +18,7 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, runfile
 
-RULES = runfile("multiplexer.rules")
+RULES = runfile("tests/testing.rules")
 
 
 class Quiet(BaseMultiplexerServer):

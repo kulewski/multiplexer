@@ -74,6 +74,29 @@ cc_library(
     alwayslink = 1,
 )
 
+# The system rules, compiled in for generate_rules: always this
+# repository's file, never the one //:multiplexer_rules names.
+genrule(
+    name = "system_rules_text",
+    srcs = ["//:multiplexer.rules"],
+    outs = ["system_rules_text.cc"],
+    cmd = "sh $(location embed_rules.sh) $(location //:multiplexer.rules) $@",
+    tools = ["embed_rules.sh"],
+)
+
+cc_library(
+    name = "generate_rules",
+    srcs = [
+        "generate_rules.cc",
+        ":system_rules_text",
+    ],
+    deps = [
+        ":task",
+        ":tasks_holder",
+    ],
+    alwayslink = 1,
+)
+
 cc_library(
     name = "dump_recording",
     srcs = ["dump_recording.cc"],
@@ -141,12 +164,16 @@ cc_library(
 maybe_strip_cc_binary(
     name = "mxcontrol",
     srcs = ["main.cc"],
-    data = ["//:multiplexer_rules"],
+    data = [
+        "//:multiplexer.rules",
+        "//:multiplexer_rules",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":driver",
         ":dump_recording",
         ":generate_constants",
+        ":generate_rules",
         ":help",
         ":receive_logs",
         ":recording_control",
@@ -159,15 +186,27 @@ maybe_strip_cc_binary(
 )
 
 py_test(
+    name = "generate_rules_test",
+    size = "small",
+    srcs = ["generate_rules_test.py"],
+    data = [
+        ":mxcontrol",
+        "//:multiplexer.rules",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
     name = "generate_constants_test",
     size = "small",
     srcs = ["generate_constants_test.py"],
     data = [
         ":mxcontrol",
-        "//:multiplexer.rules",
         "//multiplexer:multiplexer.constants.h",
         "//multiplexer:multiplexer_constants.py",
         "//multiplexer:multiplexer_constants.pyi",
+        "//tests:testing.rules",
     ],
     deps = ["//multiplexer/testing"],
 )
@@ -182,7 +221,10 @@ py_test(
 maybe_strip_cc_binary(
     name = "mxcontrol_static",
     srcs = ["main.cc"],
-    data = ["//:multiplexer_rules"],
+    data = [
+        "//:multiplexer.rules",
+        "//:multiplexer_rules",
+    ],
     linkopts = [
         "-static",
         "-Wl,--whole-archive,-lpthread,--no-whole-archive",
@@ -194,6 +236,7 @@ maybe_strip_cc_binary(
         ":driver",
         ":dump_recording",
         ":generate_constants",
+        ":generate_rules",
         ":help",
         ":receive_logs",
         ":recording_control",

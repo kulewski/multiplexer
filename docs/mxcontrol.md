@@ -87,6 +87,24 @@ A program installed from a release, with `pip install mx-multiplexer` or
 the Debian package, runs this once per rules file and again when the file
 changes; a Bazel build does it on its own.
 
+## generate_rules
+
+Writes the system rules, the peer and message types the multiplexer, the
+libraries and `mxcontrol` use themselves, as a new rules file to add a
+deployment's own types to ([the rules file](rules.md)). The text is
+compiled into `mxcontrol`, so every one writes the rules it was built with,
+the same in every artifact of a release.
+
+```
+mxcontrol generate_rules FILE
+```
+
+FILE must not exist: a rules file is edited after it is written, so an
+existing one is never replaced, and the command exits 1 instead. With
+FILE `-` the rules go to stdout, which is how the image writes them:
+`docker run --rm ghcr.io/kulewski/multiplexer:<version> generate_rules - >
+your.rules`.
+
 ## dump_recording
 
 Prints recordings, one line per record; several files, the sessions of

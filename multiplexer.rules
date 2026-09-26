@@ -1,8 +1,16 @@
 # vim:ft=conf:
 
-# peer definitions
-#
-#   PEERS 1 - 99 reserved for Multiplexer and special types
+# The system rules: the peer and message types the multiplexer, the
+# libraries and mxcontrol use themselves. Every rules file starts from this
+# one, which `mxcontrol generate_rules FILE` writes, and adds the
+# deployment's own types after it, numbered 100 and up, apart from the
+# entries below that use that range: peer types 108 and 111 and message
+# types 112 to 115. A deployment may also edit its copy, to send LOGS_STREAM
+# to a log collector of its own as well, say. docs/rules.md describes the
+# format.
+
+# Peer types 1 to 99 belong to the protocol.
+
 peer {
     type: 1
     name: "MULTIPLEXER"
@@ -21,32 +29,9 @@ peer {
     comment: "this only defines a constant"
 }
 
-#   PEERS 100-999 are plain peers
-
-# peers 100-105 reserved
-
-peer {
-    type: 102
-    name: "WEBSITE"
-    is_passive: true
-    comment: "example peer type showing how to describe a peer which doesn't run MX library main loop for the most of the time"
-}
-
-# The unit tests' backend type. The multiplexer holds whatever a test
-# sends it: the tests that fill a client's queue send thousands of
-# messages at once, and a receiver that falls behind, on a loaded machine
-# or under a sanitizer, would lose them to the default queue of 1024. What
-# a full queue costs is tested on TEST_TINY_QUEUE (tests/testing.rules).
-peer {
-    type: 106
-    name: "PYTHON_TEST_SERVER"
-    queue_size: 1048576
-}
-
-peer {
-    type: 107
-    name: "PYTHON_TEST_CLIENT"
-}
+# Log streaming: what `mxcontrol stream_logs` connects as, sending the log
+# entries of the Python library's log streaming, and what `mxcontrol
+# receive_logs` connects as, printing them.
 
 peer {
     type: 108
@@ -55,23 +40,12 @@ peer {
 }
 
 peer {
-    type: 109
-    name: "LOG_COLLECTOR"
-}
-
-peer {
-    type: 110
-    name: "EVENTS_COLLECTOR"
-}
-
-peer {
     type: 111
     name: "LOG_RECEIVER_EXAMPLE"
 }
 
-# packages and routing rules definitions
-#
-#   PACKAGES 1 - 99 reserved for Multiplexer meta packages
+# Message types 1 to 99 belong to the protocol.
+
 type {
     type: 1
     name: "PING"
@@ -146,85 +120,36 @@ type {
     comment: "this only defines a constant"
 }
 
-# PACKAGES 100 - 999 normal package
-
-# types 100-109 reserved
-
-type {
-    type: 110
-    name: "PYTHON_TEST_REQUEST"
-    to {
-	    peer: "PYTHON_TEST_SERVER"
-    }
-}
-
-type {
-    type: 111
-    name: "PYTHON_TEST_RESPONSE"
-}
+# The replies the backend classes send besides the caller's own, addressed
+# to the requester, which is why they need no rule.
 
 type {
     type: 112
     name: "PICKLE_RESPONSE"
+    comment: "a reply whose payload is a pickled Python object, which send_pickle() and reply_pickle() send by default"
 }
 
 type {
     type: 113
     name: "REQUEST_RECEIVED"
-    comment: "packet sent by the backend immediately after receiving a request and stright to the requesting peer"
+    comment: "packet sent by the backend immediately after receiving a request and straight to the requesting peer"
 }
 
 type {
     type: 114
     name: "BACKEND_ERROR"
-    comment: "packet sent by the backend when request handling function finishes and no packet response packet is sent"
+    comment: "packet sent by the backend when request handling function finishes and no response packet is sent"
 }
+
+# Log streaming: the log entries `mxcontrol stream_logs` sends, to every
+# receiver.
 
 type {
     type: 115
     name: "LOGS_STREAM"
     comment: "payload is LogEntriesMessage"
     to {
-	    peer: "LOG_COLLECTOR"
+        peer: "LOG_RECEIVER_EXAMPLE"
         whom: ALL
     }
-    to {
-	    peer: "LOG_RECEIVER_EXAMPLE"
-	    whom: ALL
-    }
 }
-
-type {
-    type: 116
-    name: "LOGS_STREAM_RESPONSE"
-    # currently unused
-}
-
-type {
-    type: 117
-    name: "SEARCH_COLLECTED_LOGS_REQUEST"
-    comment: "payload is SearchCollectedLogs; logs are returned in LogEntriesMessage"
-    to {
-	    peer: "LOG_COLLECTOR"
-	    whom: ANY
-    }
-}
-
-type {
-    type: 118
-    name: "SEARCH_COLLECTED_LOGS_RESPONSE"
-}
-
-# types 119-125 reserved
-
-type {
-    type: 126
-    name: "REPLAY_EVENTS_REQUEST"
-    comment: "this is a no-response request"
-    to {
-	    peer: "EVENTS_COLLECTOR"
-	    whom: ANY
-    }
-}
-
-# types 127-128 reserved

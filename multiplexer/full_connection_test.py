@@ -14,7 +14,7 @@ from multiplexer.mxclient import OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.testing import runfile
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 EVENT = types.PYTHON_TEST_REQUEST
 CHUNK = b"x" * (16 * 1024)

@@ -24,8 +24,9 @@ file and in the peers; nothing in this repository changes.
    `type=types.NAME`. [examples/echo](../../examples/echo) is a complete
    pair.
 
-In this repository the example file is [multiplexer.rules](../../multiplexer.rules)
-and the integration tests use [tests/testing.rules](../../tests/testing.rules),
-which adds `TEST_*` entries at 201 and up. A test that needs a new type adds
+In this repository [multiplexer.rules](../../multiplexer.rules) is the system
+rules, which every rules file starts from, and the tests use
+[tests/testing.rules](../../tests/testing.rules), which adds the unit tests'
+types and `TEST_*` entries at 201 and up. A test that needs a new type adds
 it there, in the `TEST_` range, and refers to it as `C.types.TEST_NAME`
 through the generated `tests/testing_constants.py`.

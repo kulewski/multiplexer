@@ -17,7 +17,7 @@ from multiplexer.testing import Cluster, FakePeer, TestClient
 from multiplexer.testing import runfile
 from multiplexer.threaded_client import BackendError
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 
 class AsyncClientTest(unittest.IsolatedAsyncioTestCase):

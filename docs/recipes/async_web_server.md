@@ -18,7 +18,7 @@ from django.conf import settings
 from multiplexer.aio import AsyncClient
 from multiplexer.multiplexer_constants import peers
 
-MX = AsyncClient.holder(peers.WEBSITE, lambda: settings.MULTIPLEXER_ADDRESSES)
+MX = AsyncClient.holder(peers.WEB, lambda: settings.MULTIPLEXER_ADDRESSES)
 ```
 
 The peer type may be an active one: the io thread heartbeats. A passive

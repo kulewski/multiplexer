@@ -11,7 +11,8 @@ rules file come from `mxcontrol generate_constants your.rules --python
 multiplexer_constants.py --pyi multiplexer_constants.pyi`, a module to
 import from wherever it is written
 ([mxcontrol.md](mxcontrol.md#generate_constants)); the package's own
-`multiplexer.multiplexer_constants` holds the example file's.
+`multiplexer.multiplexer_constants` holds the system rules' constants, which
+the library uses itself.
 `multiplexer.threaded_client`, `multiplexer.aio` and
 `multiplexer.threaded_server` hold `ThreadedClient`, `AsyncClient` and
 `BaseThreadedMultiplexerServer`, each described below;
@@ -560,7 +561,7 @@ nothing ever blocks the event loop. Depend on `@mx//multiplexer:aio`.
 from multiplexer.aio import AsyncClient
 from multiplexer.multiplexer_constants import peers, types
 
-client = AsyncClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.WEBSITE)
+client = AsyncClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.WEB)
 reply = await client.query(b"pears", types.SEARCH_REQUEST, timeout=10)
 await client.send_message(b"seen", type=types.SEARCH_EVENT)
 unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine function, or a plain one
@@ -682,7 +683,7 @@ from multiplexer.testing import Cluster, FakePeer, TestClient
 
 class SearchTest(unittest.TestCase):
     def test_search_goes_to_the_index(self):
-        with Cluster(1) as cluster, FakePeer(cluster, peers.INDEX) as index, TestClient(cluster, peers.WEBSITE) as client:
+        with Cluster(1) as cluster, FakePeer(cluster, peers.INDEX) as index, TestClient(cluster, peers.WEB) as client:
             index.reply_with(types.SEARCH_REQUEST, b"3 hits", types.SEARCH_RESPONSE)
             reply = client.query(b"pears", types.SEARCH_REQUEST)
             self.assertEqual(b"3 hits", reply.message)

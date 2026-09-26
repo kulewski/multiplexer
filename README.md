@@ -217,22 +217,22 @@ File `multiplexer.rules` allows you to define how messages of particular types a
 ```
 # Peers
 peer {
-    type: 106
-    name: "PYTHON_TEST_SERVER"
+    type: 300
+    name: "ECHO_BACKEND"
 }
 
 # Messages
 type {
-    type: 110
-    name: "PYTHON_TEST_REQUEST"
+    type: 300
+    name: "ECHO_REQUEST"
     to {
-        peer: "PYTHON_TEST_SERVER"
+        peer: "ECHO_BACKEND"
         whom: ANY
     }
 }
 ```
 
-This means: every messages of type `PYTHON_TEST_REQUEST` will be sent to one of the connected `PYTHON_TEST_SERVER` peers (round-robin).
+This means: every message of type `ECHO_REQUEST` will be sent to one of the connected `ECHO_BACKEND` peers (round-robin).
 If you need the message to be sent to all peers of a particular type, use `whom: ALL`. [docs/rules.md](docs/rules.md) describes every field.
 
 ## Getting it
@@ -279,7 +279,7 @@ port and report it, and exits with 0 on SIGTERM.
 
 ### Your own peer and message types
 
-`multiplexer.rules` in this repository is an example. Keep your deployment's rules file in your own repository and point the build at it:
+`multiplexer.rules` in this repository is the system rules, which every rules file starts from (`mxcontrol generate_rules your.rules` writes them). Keep your deployment's rules file in your own repository and point the build at it:
 
 ```
 bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //...
@@ -344,15 +344,15 @@ asked.
 
 ```python
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.multiplexer_constants import peers, types
+from multiplexer_constants import peers, types
 
 
 class Echo(BaseMultiplexerServer):
     def handle_message(self, mxmsg):
-        self.send_message(message=mxmsg.message.upper(), type=types.PYTHON_TEST_RESPONSE)
+        self.send_message(message=mxmsg.message.upper(), type=types.ECHO_RESPONSE)
 
 
-Echo([("127.0.0.1", 1980)], type=peers.PYTHON_TEST_SERVER).serve_forever()
+Echo([("127.0.0.1", 1980)], type=peers.ECHO_BACKEND).serve_forever()
 ```
 
 A client sends a request and gets the answer back; give it the addresses of
@@ -360,18 +360,18 @@ all your multiplexers.
 
 ```python
 from multiplexer.clients import Client
-from multiplexer.multiplexer_constants import peers, types
+from multiplexer_constants import peers, types
 
-client = Client([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.PYTHON_TEST_CLIENT)
-response = client.query(b"hello", type=types.PYTHON_TEST_REQUEST, timeout=10)
+client = Client([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.ECHO_CLIENT)
+response = client.query(b"hello", type=types.ECHO_REQUEST, timeout=10)
 print(response.message)  # b"HELLO"
 ```
 
 An event is sent the same way without waiting for an answer:
 `client.send_message(b"payload", type=types.SOME_EVENT)`. To address one
 specific peer, pass `to=<its instance id>`; that bypasses the routing rules.
-The peer and message names come from the rules file the build was pointed at;
-these are from the example file in this repository.
+The peer and message names come from your rules file; these are from
+[examples/echo/echo.rules](examples/echo/echo.rules).
 
 The C++ client offers the same calls: `Client::query`, `schedule_one`,
 `schedule_all`, and `BaseMultiplexerServer` for backends. See

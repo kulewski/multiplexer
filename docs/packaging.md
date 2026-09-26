@@ -35,7 +35,7 @@ multiplexer itself listens on an address and never resolves one.
 ## The container image
 
 `docker/BUILD` builds it with rules_oci, from the static binary and the
-example rules file on `gcr.io/distroless/static-debian12`, which holds no
+system rules file on `gcr.io/distroless/static-debian12`, which holds no
 libc, no shell and no package manager: the only code in the image is
 mxcontrol. It runs as `nonroot`, listens on 1980, and its command is
 
@@ -83,14 +83,15 @@ There is one package per release because protobuf C++ promises no
 compatibility between versions, not even ABI stability between micro
 releases: the library is compiled against the release's `libprotobuf-dev`,
 and a program using it must be too. `Recommends` names the exact version.
-The library itself depends on the reserved peer and message types, ids 1
-to 99, which every rules file carries as shipped, and on `REQUEST_RECEIVED`
-113 and `BACKEND_ERROR` 114, which it sends and recognizes by those numbers
-whatever your file says ([rules.md](rules.md)); your own types come from `mxcontrol generate_constants your.rules
+The library's constants are the system rules', which it uses by those
+numbers whatever your file says ([rules.md](rules.md)); your rules file
+starts from them, as `mxcontrol generate_rules your.rules` writes them, and
+your own types' constants come from `mxcontrol generate_constants your.rules
 --cxx multiplexer/multiplexer.constants.h`, placed on the include path
 before the package's copy (`generate_constants your.rules
 multiplexer/multiplexer.constants.h`, the build-time tool the package also
-holds, writes the same). Changing the reserved block is not supported.
+holds, writes the same). Changing a system entry's number or name is not
+supported.
 
 ## The wheels
 

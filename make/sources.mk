@@ -32,6 +32,7 @@ MXCONTROL_SRCS := \
   mxcontrol/driver.cc \
   mxcontrol/dump_recording.cc \
   mxcontrol/generate_constants.cc \
+  mxcontrol/generate_rules.cc \
   mxcontrol/help.cc \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \

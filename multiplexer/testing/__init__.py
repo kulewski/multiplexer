@@ -398,8 +398,8 @@ class Mx:
 
 class Cluster:
     """`count` independent multiplexers with the same rules file, which the
-    test names: `rules` is a path, `runfile("multiplexer.rules")` under
-    Bazel for a file in the test's data, and it must be the file the
+    test names: `rules` is a path, `runfile("my.rules")` under Bazel for
+    a file in the test's data, and it must be the file the
     peers' constants were generated from. A scenario under
     mx_integration_test may leave it out: the rule's `rules` attribute
     names it. `rules_check_interval` is how often, in seconds, each

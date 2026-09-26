@@ -1,6 +1,6 @@
 // InProcessMultiplexer: a multiplexer on a free port, driven by a thread of
 // its own, for unit tests that need a real one without the integration
-// harness. Uses the repository's multiplexer.rules.
+// harness. Uses the tests' rules file, tests/testing.rules.
 #ifndef MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 #define MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
 
@@ -24,7 +24,7 @@ struct InProcessMultiplexer {
     std::promise<unsigned short> bound;
     thread = std::thread([this, &bound, listen_port] {
       const char* srcdir = getenv("TEST_SRCDIR");
-      std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "multiplexer.rules";
+      std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "tests/testing.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", listen_port);
       server->set_rules_file(rules);
       std::string error;

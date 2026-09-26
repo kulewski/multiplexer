@@ -18,7 +18,7 @@ from multiplexer.threaded_client import ThreadedClient
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
 from multiplexer.testing import runfile
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE

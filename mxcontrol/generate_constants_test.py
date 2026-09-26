@@ -11,10 +11,12 @@ import unittest
 from multiplexer.testing import mx_runfile, runfile
 
 MXCONTROL = mx_runfile("mxcontrol/mxcontrol")
-# The build runs the tool from the workspace root on the bare file name,
-# which the generated files' signature lines record; the same here.
-ROOT = os.path.dirname(runfile("multiplexer.rules"))
-RULES = "multiplexer.rules"
+# The build runs the tool from the workspace root on the rules file's path,
+# which the generated files' signature lines record; the same here. The
+# repository's build generates the constants from the tests' rules file
+# (.bazelrc).
+RULES = "tests/testing.rules"
+ROOT = os.path.dirname(os.path.dirname(runfile(RULES)))
 GENERATED = {
     "py": runfile("multiplexer/multiplexer_constants.py"),
     "pyi": runfile("multiplexer/multiplexer_constants.pyi"),

@@ -18,7 +18,7 @@ from multiplexer.testing import Cluster
 from multiplexer.testing import runfile
 from multiplexer.threaded_client import ThreadedClient
 
-RULES = runfile("multiplexer.rules")  # the file the constants were generated from
+RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 EVENT = types.PYTHON_TEST_REQUEST
 

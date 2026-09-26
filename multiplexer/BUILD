@@ -321,7 +321,7 @@ cc_test(
     name = "fork_test",
     size = "small",
     srcs = ["fork_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":client",
         ":in_process_multiplexer",
@@ -335,7 +335,7 @@ cc_test(
     name = "threaded_client_test",
     size = "small",
     srcs = ["threaded_client_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":client",
         ":in_process_multiplexer",
@@ -349,7 +349,7 @@ cc_test(
     name = "connect_by_name_test",
     size = "small",
     srcs = ["connect_by_name_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":client",
         ":in_process_multiplexer",
@@ -373,7 +373,7 @@ cc_test(
     name = "soak_test",
     size = "small",
     srcs = ["soak_test.cc"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":multiplexer_cc_constants",
         ":server",
@@ -497,8 +497,8 @@ py_test(
     size = "medium",
     srcs = ["leak_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     deps = [
         ":clients",
@@ -514,8 +514,8 @@ py_test(
     size = "small",
     srcs = ["pickle_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     deps = [
         ":clients",
@@ -530,8 +530,8 @@ py_test(
     size = "small",
     srcs = ["fork_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     main = "fork_test.py",
     deps = [
@@ -547,8 +547,8 @@ py_test(
     size = "medium",
     srcs = ["interpreter_exit_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     deps = [
         ":clients",
@@ -598,8 +598,8 @@ py_test(
     size = "small",
     srcs = ["threaded_client_py_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     deps = [
         ":clients",
@@ -613,8 +613,8 @@ py_test(
     size = "small",
     srcs = ["serve_thread_test.py"],
     data = [
-        "//:multiplexer.rules",
         "//mxcontrol",
+        "//tests:testing.rules",
     ],
     deps = [
         ":multiplexer_constants",
@@ -681,7 +681,7 @@ py_test(
     name = "servers_drain_test",
     size = "medium",
     srcs = ["servers_drain_test.py"],
-    data = ["//:multiplexer.rules"],
+    data = ["//tests:testing.rules"],
     deps = [
         ":clients",
         ":multiplexer_constants",

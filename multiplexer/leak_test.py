@@ -67,7 +67,7 @@ class LeakTest(unittest.TestCase):
                 "--address",
                 "127.0.0.1:0",
                 "--rules",
-                runfile("multiplexer.rules"),
+                runfile("tests/testing.rules"),
                 "--port-file",
                 self.port_file,
             ],

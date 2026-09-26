@@ -140,9 +140,9 @@ graph LR
 
 ## How to use it
 
-1. **Write a rules file.** Start from `multiplexer.rules` at the root: keep the
-   entries below 100, which the protocol itself needs, and add your own peer
-   types and message types with their routing. [The rules file](rules.md)
+1. **Write a rules file.** `mxcontrol generate_rules your.rules` writes the
+   system rules, which every rules file starts from; add your own peer types
+   and message types after them, with their routing. [The rules file](rules.md)
    describes the format.
 2. **Run one or more multiplexers**, each with that rules file:
    `mxcontrol run_multiplexer --address 0.0.0.0:1980 --rules your.rules`
@@ -155,7 +155,10 @@ graph LR
    multiplexers and call `query()` for requests or `send_message()` for events.
 5. **Build against it** from your own Bazel workspace as `@mx`, with the two
    lines described in [examples/README.md](../examples/README.md), and point
-   the build at your rules file with `--@mx//:multiplexer_rules=`.
+   the build at your rules file with `--@mx//:multiplexer_rules=`; or install
+   a release, `pip install mx-multiplexer` or the Debian package, and write
+   the constants of your rules file with `mxcontrol generate_constants`
+   ([packaging](packaging.md)).
 
 ## Start here
 
