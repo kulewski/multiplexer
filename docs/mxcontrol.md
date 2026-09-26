@@ -50,17 +50,27 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--record-payload-bytes N` | 0 (whole payloads) | keep only the first N bytes of each recorded payload |
 | `--recording-dir DIR` | off | let peers start and stop recording sessions over the protocol, written under `DIR`; see [recording on demand](operations.md#recording-on-demand-over-the-protocol) |
 | `--allow-tap` | off | let peers receive every record over their connection |
+| `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0 stops at once |
 
 `--address` takes an IP address, not a host name. With port 0 the system picks
 a free port; together with `--port-file` that lets a test or a supervisor
 learn where the multiplexer listens without guessing, which is how the
 integration tests start theirs.
 
-The multiplexer runs until it gets `SIGINT` or `SIGTERM`, then closes the
-listening socket and every connection and exits with 0. `SIGHUP` makes it
-read the rules file again now, and it no longer exits on one. An exception
-thrown while handling one connection is logged and the process keeps
-serving.
+The multiplexer runs until it gets `SIGINT` or `SIGTERM`. Then it closes
+the listening socket, and every connection that has not introduced itself
+yet. Every other connection goes on as before, read, routed and routed to,
+until what is queued for it is written; then it closes the polite way:
+the multiplexer's end of the stream follows everything written, and what
+the peer still sends is read and dropped until the peer's own end, 1 s at
+most. A peer that does not read by `--drain-seconds` loses what is still
+queued for it, and its connection is closed. Once every connection has
+ended, the process exits with 0, within `--drain-seconds` and a second; a
+second `SIGINT` or `SIGTERM` stops it at once, as does `--drain-seconds 0`.
+Its last line says how long the stop took and what it dropped, if
+anything. `SIGHUP` makes it read the rules file again now, and it no longer
+exits on one. An exception thrown while handling one connection is logged
+and the process keeps serving.
 
 Each peer that connects is logged at `INFO` with its instance id and peer
 type, and again when it leaves. A message nobody could receive is

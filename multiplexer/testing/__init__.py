@@ -230,6 +230,7 @@ class Mx:
         allow_tap: bool = False,
         rules_check_interval: float | None = None,
         prefix: str = "",
+        drain_seconds: float | None = None,
     ):
         self.index = index
         self.rules = rules
@@ -244,6 +245,9 @@ class Mx:
         # --rules-check-interval: how often the multiplexer reads its rules
         # file again for a change; None keeps its default, 0 never.
         self.rules_check_interval = rules_check_interval
+        # --drain-seconds: how long a stop goes on sending what is queued;
+        # None keeps the multiplexer's default, 0 stops at once.
+        self.drain_seconds = drain_seconds
         self.proc: subprocess.Popen | None = None
         stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
         self.log_path = stem + ".log"
@@ -302,6 +306,8 @@ class Mx:
             command += ["--allow-tap"]
         if self.rules_check_interval is not None:
             command += ["--rules-check-interval", str(self.rules_check_interval)]
+        if self.drain_seconds is not None:
+            command += ["--drain-seconds", str(self.drain_seconds)]
         self._log = open(self.log_path, "ab")
         self.proc = subprocess.Popen(command, stdout=self._log, stderr=self._log, env=child_env(native=True))
         deadline = time.time() + timeout
@@ -319,10 +325,11 @@ class Mx:
         return self
 
     def stop(self, timeout: float = 10) -> int | None:
-        """Ask the process to exit (SIGTERM, which it handles by closing
-        everything and exiting 0), wait up to `timeout`, and return its exit
-        code. Falls back to kill() if it does not exit in time. None if it
-        was never started; the old exit code if it had already exited."""
+        """Ask the process to exit (SIGTERM, which it handles by sending
+        what it holds, within its --drain-seconds, then closing everything
+        and exiting 0), wait up to `timeout`, and return its exit code.
+        Falls back to kill() if it does not exit in time. None if it was
+        never started; the old exit code if it had already exited."""
         if self.proc is None or self.proc.poll() is not None:
             return None if self.proc is None else self.proc.returncode
         self.proc.terminate()
@@ -425,7 +432,9 @@ class Cluster:
     mx_integration_test may leave it out: the rule's `rules` attribute
     names it. `rules_check_interval` is how often, in seconds, each
     multiplexer reads the file again for a change (its default when None,
-    0 never), for a scenario that edits a copy of it. Use as a context
+    0 never), for a scenario that edits a copy of it; `drain_seconds`,
+    how long a stop goes on sending what is queued (its default when
+    None, 0 at once). Use as a context
     manager: entering starts the multiplexers, leaving stops every role
     that is still running and then them."""
 
@@ -440,6 +449,7 @@ class Cluster:
         record_payload_bytes: int = 0,
         remote_recording: bool = False,
         rules_check_interval: float | None = None,
+        drain_seconds: float | None = None,
     ):
         if rules is None:
             if CONFIG is None or not CONFIG.rules:
@@ -466,6 +476,7 @@ class Cluster:
                 allow_tap=remote_recording,
                 rules_check_interval=rules_check_interval,
                 prefix="c%d-" % Cluster._counter,
+                drain_seconds=drain_seconds,
             )
             for index in range(count)
         ]

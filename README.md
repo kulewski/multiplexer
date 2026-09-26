@@ -275,7 +275,8 @@ bazel run //mxcontrol run_multiplexer
 The integration tests under [tests/](tests/) start real multiplexers and play
 peers in Python and C++; see [tests/README.md](tests/README.md). `mxcontrol
 run_multiplexer` accepts `--address host:0 --port-file PATH` to pick a free
-port and report it, and exits with 0 on SIGTERM.
+port and report it, and on SIGTERM sends what it holds, closes its
+connections and exits with 0.
 
 `--config=debug` keeps debug info and frame pointers; `--config=release` builds optimized, stripped binaries. Run the server inside `screen` or `tmux` if you want to get back to the session later.
 

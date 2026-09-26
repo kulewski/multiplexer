@@ -704,6 +704,30 @@ py_test(
     ],
 )
 
+# A welcome long after the connection opened still registers; about 95 s.
+py_test(
+    name = "late_welcome_test",
+    size = "large",
+    srcs = ["late_welcome_test.py"],
+    tags = ["slow"],
+    deps = [
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "graceful_stop_test",
+    size = "medium",
+    srcs = ["graceful_stop_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "unrouted_test",
     size = "medium",

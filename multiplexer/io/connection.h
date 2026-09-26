@@ -10,7 +10,8 @@
 // Lifecycle: Create() -> start() or start_only_read() + start_rest() -> ...
 // -> shutdown(), after which the object only waits for its pending handlers
 // to return; close_gracefully(), or a failed write, first reads on to the
-// peer's end of the stream, a bounded time. Every asynchronous handler holds
+// peer's end of the stream, a bounded time, and close_when_flushed() first
+// writes what is queued. Every asynchronous handler holds
 // a shared_ptr to the connection (via shared_from_this), so a Connection is
 // destroyed only when no I/O is in flight; the manager keeps weak_ptrs.
 // Nothing here is thread-safe: one io_service, one thread.
@@ -55,9 +56,9 @@ struct ConnectionsManagerTraits;
 // The connection itself; see the file comment. `ConnectionsManagerImplementation`
 // is Server or BasicClient, and must provide: instance_id(),
 // get_welcome_message(), register_connection(), after_connection_registration(),
-// unregister_connection(), connection_destroyed(), handle_message() and
-// handle_orphaned_outgoing_messages(). See connections_manager.h for the
-// shared implementation of most of them.
+// unregister_connection(), connection_destroyed(), connection_closed(),
+// handle_message() and handle_orphaned_outgoing_messages(). See
+// connections_manager.h for the shared implementation of most of them.
 template <class ConnectionsManagerImplementation>
 class Connection : public std::enable_shared_from_this<Connection<ConnectionsManagerImplementation>> {
  public:
@@ -87,6 +88,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         is_registered_(false),
         told_gone_(false),
         delivering_(true),
+        close_when_flushed_(false),
+        close_bound_(0),
+        dropped_while_closing_(0),
         manager_(manager),
         should_send_heartbit_(true),
         outgoing_channel_state_(ChannelState::FREE),
@@ -157,6 +161,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     // until the peer's ACK arrives. Off on both sides.
     asio::error_code ignored;
     socket_.set_option(asio::ip::tcp::no_delay(true), ignored);
+    // No deadline for the welcome: a synchronous client sends it only when
+    // a call of its runs the loop, which may be long after its connect
+    // completed, and a connection dropped meanwhile would cost it that
+    // multiplexer until a later call reconnects.
     _start_read();
   }
 
@@ -202,7 +210,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // queue. Safe to call at any point of the lifecycle, including on a socket
   // that was never opened, and idempotent. Pending handlers see BROKEN. A
   // connection whose write failed did the telling and the handing back
-  // already, and reads on until the peer's end first (_write_failed).
+  // already, and reads on until the peer's end first (_write_failed). The
+  // manager hears last, through connection_closed(), that the connection
+  // has ended for good.
   void shutdown() {
     MX_DCHECK_RUN_ON(&io_thread_);
     MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("shutdown called on " + repr((void*)this)));
@@ -239,6 +249,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     // cancel outgoing messages
     _orphan_outgoing_messages();
 
+    if (ManagerPointer manager = manager_.lock()) {
+      manager->connection_closed(this);
+    }
     // die and let live or somehow ;)
     manager_.reset();
   }
@@ -334,6 +347,31 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     _read_to_the_end(bound, /*deliver=*/false);
     return true;
   }
+
+  // Ends the connection once what is queued is written, for a multiplexer
+  // that stops: until then the connection goes on as it was, read, written
+  // to and routed to; then it closes as close_gracefully(bound) does, so
+  // that this end of the stream follows everything written. A connection
+  // whose handshake is not done shuts down at once.
+  void close_when_flushed(float bound) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (shuts_down_ || told_gone_) {
+      return;
+    }
+    if (!is_registered_) {
+      shutdown();
+      return;
+    }
+    close_when_flushed_ = true;
+    close_bound_ = bound;
+    if (outgoing_queue_.empty()) {
+      close_gracefully(bound);
+    }
+  }
+
+  // Messages, not counting heartbeats, that arrived after the connection
+  // began closing and were dropped (see close_gracefully).
+  std::uint64_t dropped_while_closing() const { return dropped_while_closing_; }
 
   // Queues a frame for writing and starts the write if the channel is free.
   // Returns what the manager's traits say a scheduling result is: a tribool
@@ -449,7 +487,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
   void _send_heartbit_now(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == asio::error::operation_aborted || shuts_down_) {
+    // Not while closing either: a wait that had expired just before the
+    // connection began closing gracefully runs all the same, and would
+    // log that the heartbeat could not be queued.
+    if (error == asio::error::operation_aborted || shuts_down_ || !is_living_) {
       return;
     }
     // To a passive peer, at most one heartbeat per frame received: it reads
@@ -610,7 +651,13 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     std::shared_ptr<const RawMessage> message = incoming_message_;
     incoming_message_.reset(new RawMessage());
     if (!delivering_) {
-      return;  // leaving: read only so that nothing is left unread when the socket closes
+      // leaving: read only so that nothing is left unread when the socket
+      // closes; what was a message, rather than a heartbeat, is counted
+      MultiplexerMessage dropped;
+      if (dropped.ParseFromString(message->get_message()) && dropped.type() != types::HEARTBIT) {
+        ++dropped_while_closing_;
+      }
+      return;
     }
 
     ManagerPointer manager = manager_.lock();
@@ -688,6 +735,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         // types::CONNECTION_WELCOME
 
       case types::HEARTBIT:
+        if (!is_registered_) {
+          // The welcome must come first, from any peer; a library sends
+          // its heartbeats only after it.
+          shutdown();
+        }
         return true;
 
       default:
@@ -759,6 +811,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     message_sending_notifier_.notify_success(manager_, outgoing_queue_.front());
     const bool was_full = outgoing_queue_full();
     outgoing_queue_.pop_front();
+    if (close_when_flushed_ && outgoing_queue_.empty()) {
+      close_gracefully(close_bound_);  // everything is written: now this end of the stream
+      return;
+    }
     _send_heartbit_later();
 
     _process_send_queue();
@@ -814,8 +870,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   bool is_living_;
   bool shuts_down_;
   bool is_registered_;
-  bool told_gone_;   // the manager heard the connection is gone: once, see _tell_manager_gone()
-  bool delivering_;  // what is read goes to the manager; not while leaving, see close_gracefully()
+  bool told_gone_;           // the manager heard the connection is gone: once, see _tell_manager_gone()
+  bool delivering_;          // what is read goes to the manager; not while leaving, see close_gracefully()
+  bool close_when_flushed_;  // close_gracefully(close_bound_) once the queue is written
+  float close_bound_;
+  std::uint64_t dropped_while_closing_;
   std::weak_ptr<ConnectionsManagerImplementation> manager_;
   bool should_send_heartbit_;
 

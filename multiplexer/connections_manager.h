@@ -254,6 +254,11 @@ class ConnectionsManager {
   // schedules its reconnect here.
   void inline connection_destroyed(Connection*) {}
 
+  // Hook for the derived class at the very end of a connection's
+  // shutdown(), after any reading on to the peer's end: the multiplexer
+  // waits for every connection to get here when it stops.
+  void inline connection_closed(Connection*) {}
+
   // Hook for the derived class, at the start of unregister_connection for a
   // connection that was registered; the multiplexer records the peer
   // leaving.

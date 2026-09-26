@@ -171,6 +171,7 @@ PY_TEST_FILES := \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
+  multiplexer/graceful_stop_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/leak_test.py \
   multiplexer/mxcontrol_test.py \

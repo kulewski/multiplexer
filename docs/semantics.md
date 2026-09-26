@@ -100,6 +100,15 @@ that changes.
   them twice and the caller sees nothing; backends and clients reconnect to
   the restarted multiplexer within about 3 s. [Connecting to a
   multiplexer](handshake.md) shows it.
+- **A multiplexer is stopped.** On `SIGTERM` it accepts nothing new and
+  closes each connection once what is queued for it is written, so what it
+  held for the peers that read still arrives; a peer that reads nothing by
+  `--drain-seconds` loses what was queued for it. The peers do not know it
+  is leaving until their connection closes: what one sends in that last
+  moment is lost, a request going out again through another connection
+  as when a multiplexer dies. Neither loss, nor what the queue of a peer
+  dropped for silence held, is reported to the sender with a
+  `DELIVERY_ERROR`.
 - **A multiplexer moves.** A peer given a host name resolves it inside the
   library on every attempt, at startup and at every reconnect, and tries
   each address the name has in turn; so an instance that comes back under

@@ -108,8 +108,14 @@ mxcontrol run_multiplexer --address 10.0.0.1:1980 --rules /etc/mx/deployment.rul
 ```
 
 It has no other dependencies: no state directory, no companion process. Run
-it under your process supervisor; it exits with status 0 on `SIGTERM`, and a
-restart has no side effects beyond the connections it drops. Any release
+it under your process supervisor. On `SIGTERM` it stops accepting, sends
+what it holds to the peers that read, closes each connection once its
+queue is written, and exits with status 0, within `--drain-seconds` (5 s)
+and a second; a second `SIGTERM` stops it at once. A supervisor's stop
+timeout must allow that much: Kubernetes waits 30 s by default
+(`terminationGracePeriodSeconds`), systemd 90 s (`TimeoutStopSec`) and
+`docker stop` 10 s. A restart has no side effects beyond the connections it
+drops. Any release
 artifact carries it ([packaging](packaging.md)); the `mxcontrol` command
 that `pip install mx-multiplexer` installs replaces itself with the binary
 within milliseconds, keeping its pid, so a supervisor may run either it or
@@ -188,8 +194,12 @@ trigger, the first one against a ConfigMap-style mount.
 Restart multiplexers one at a time. With the others up, the restart costs
 nothing: a request in flight on the dead connection goes out again through
 another at once, and every peer is back on the restarted multiplexer within
-about 3 s. Messages the multiplexer held for delivery at that moment are
-lost.
+about 3 s. What the multiplexer held for delivery when it was told to stop
+still reaches the peers that read, before their connections close; what
+it held for a peer that did not read within `--drain-seconds` is lost, as
+is everything it held when it was killed instead. What a peer sends in the
+moment before it sees its connection close is lost too: a request then
+goes out again through another connection, an event does not.
 
 With a single multiplexer there is nothing to fall back to. A threaded
 client sends its in-flight requests again as soon as it is reconnected, a
@@ -291,7 +301,15 @@ types`, and for every file it puts in use later `rules reloaded from
 `Mx.log_contains()`. The libraries log their own connections at `INFO`,
 `registered connection` with the multiplexer's instance id when one is
 made and `unregistered connection` when it ends, and a `SyncClient` or a
-server class logs `connecting to` before it; a `ThreadedClient` warns
+server class logs `connecting to` before it. A stop logs `stopping: N
+connection(s) close once what is queued for them is written, within S s`,
+then, if some peer did not read in time, `N connection(s) still held
+messages at the deadline; closing them`, and at its end `stopped: every
+connection closed in N ms`, followed by `; dropped N message(s) still
+queued for peers and M that arrived while their connection closed` at
+`WARNING` when it dropped anything. A multiplexer out of file descriptors
+logs `cannot accept a connection: Too many open files` and tries again
+every 0.1 s. A `ThreadedClient` warns
 `connection lost under query <id>; sending again`, or `; locating the
 addressee`, for each query it sends again. A message a rule queued nowhere
 gives one of three lines: `routing while none present of type N (NAME)`

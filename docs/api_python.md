@@ -694,7 +694,8 @@ class SearchTest(unittest.TestCase):
 ```
 
 - `Cluster(count, rules, record=False, record_payload_bytes=0,
-  rules_check_interval=None)` starts `count` multiplexers on entering and
+  rules_check_interval=None, drain_seconds=None)` starts `count`
+  multiplexers on entering and
   stops every peer and multiplexer on leaving. `rules` is the path of the
   rules file, the one your constants were generated from, which the test
   names: under Bazel `runfile("your/pkg/deployment.rules")` with the file
@@ -703,7 +704,9 @@ class SearchTest(unittest.TestCase):
   a copy of the file under the running multiplexers gives
   `rules_check_interval`, the seconds between their reads of it (their
   default when `None`, 0 never), and `Mx.reload_rules()` sends one
-  `SIGHUP` instead. The multiplexers run the binary `MXCONTROL` names when
+  `SIGHUP` instead; `drain_seconds` is their `--drain-seconds`, how long a
+  stop goes on sending what is queued (their default when `None`). The
+  multiplexers run the binary `MXCONTROL` names when
   it is set, else the `mxcontrol` that came with the package, the wheel's
   or, under Bazel, `@mx//mxcontrol` in the runfiles; PATH is never
   searched, so a test runs the multiplexer of the library it imports, and
@@ -716,7 +719,8 @@ class SearchTest(unittest.TestCase):
   `wait_for_peer_gone(type_or_name, timeout=15)` until none does; each
   `Mx` in `mx` has `connected_peers()`, `stop()`, `kill()`, `restart()`,
   `pause()`, `resume()`, `log_path` and, with `record=True`, `record_file`:
-  `stop()` sends `SIGTERM` and `kill()` `SIGKILL`; `start()` starts a
+  `stop()` sends `SIGTERM` and waits for the exit, through the drain, and
+  `kill()` `SIGKILL`; `start()` starts a
   stopped or killed one again on the same port and returns once it
   listens, and `restart()` is both; `pause()` freezes it with `SIGSTOP`, a
   hung multiplexer whose sockets stay open, and `resume()` thaws it;

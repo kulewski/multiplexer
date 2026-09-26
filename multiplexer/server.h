@@ -21,6 +21,9 @@
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <chrono>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -105,7 +108,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // at once.
   void set_rules_check_interval(float seconds) { rules_check_interval_ = seconds; }
   // Whether stop() has run: the acceptor is closed and nothing re-arms.
-  bool stopped() const { return !acceptor_.is_open(); }
+  bool stopped() const { return stopping_; }
   // The CRC-32 of the rules in use, as the generated constants carry it.
   const std::string& rules_fingerprint() const { return rules_fingerprint_; }
 
@@ -144,9 +147,40 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // Port the acceptor is bound to; meaningful when constructed with port 0.
   unsigned short local_port() const { return acceptor_.local_endpoint().port(); }
 
-  // Closes the acceptor and shuts every connection down, so that the io loop
-  // drains and run() returns. Used to exit cleanly on SIGTERM and SIGINT.
-  void stop();
+  // Stops the multiplexer, so that the io loop drains and run() returns;
+  // used on SIGTERM and SIGINT. The acceptor closes, and so does every
+  // connection that has not sent its welcome; a welcome is refused from
+  // then on. With `drain_seconds` above 0, every registered connection goes
+  // on as before, read, routed and routed to, until what is queued for it
+  // is written, and then ends the way a leaving client's does
+  // (Connection::close_gracefully): this end of the stream goes out after
+  // everything written, and what the peer still sends is read and dropped
+  // until its end, CLOSE_READ_SECONDS at most. A connection still holding
+  // messages after `drain_seconds`, a peer that does not read, is shut
+  // down and its queue dropped. With 0, or called again while draining,
+  // every connection is shut down at once and its queue dropped. The
+  // log says what each stop dropped. `stopped` runs once every connection
+  // has ended.
+  void stop(float drain_seconds = 0, std::function<void()> stopped = nullptr);
+
+  // ConnectionsManager hooks. A welcome after stop() is refused; a
+  // connection that ended leaves the set stop() closes, and a stop that
+  // was waiting for it may be over. While stopping, what a connection
+  // ending dropped, from its queue or as it read on, is counted for the
+  // stop's last line.
+  void register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
+    if (stopping_) {
+      conn->shutdown();
+      return;
+    }
+    Base::register_connection(conn, welcome);
+  }
+  void connection_closed(Connection* conn);
+  void handle_orphaned_outgoing_messages(Connection::MessagesBuffer& queue) {
+    if (stopping_) {
+      stop_dropped_queued_ += queue.size();
+    }
+  }
 
   // Peers may not announce a reserved type (1 to 99), and must be in the
   // rules file; the exceptions are a rules controller, always accepted,
@@ -187,6 +221,16 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
  private:
   void _start_accept();
   void _handle_accept(Connection::pointer new_connection, const asio::error_code& error);
+  // An accept that failed for want of a descriptor or memory is tried
+  // again after ACCEPT_RETRY_SECONDS: no event says one was freed, and
+  // trying again at once spins. Other failures, such as a peer that reset
+  // before its accept, try again at once.
+  static constexpr float ACCEPT_RETRY_SECONDS = 0.1;
+  void _accept_later();
+  // stop() is over once every connection it waits for has ended: the
+  // timers go, the counts and the recording are closed, and `stopped` runs.
+  void _stop_if_done();
+  static void _on_drain_deadline(weak_pointer server, const asio::error_code& error);
 
   // Everything about the message being routed, passed down the _schedule
   // calls. Collects the delivery failures as they happen; at the end,
@@ -262,6 +306,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     NO_RULE,
     UNKNOWN_PROTOCOL_TYPE,
     BAD_SEARCH,
+    ACCEPT_FAILED,  // not a message: the accept loop out of descriptors
   };
   // A peer's copy its full queue refused; the line names the peer.
   void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection);
@@ -367,6 +412,19 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   Taps taps_;
   std::string peers_file_;
 
+  // Every connection accepted and not yet ended, registered or not, for
+  // stop(); keyed by address, which connection_closed() erases.
+  std::map<const Connection*, Connection::weak_pointer> accepted_;
+  asio::steady_timer accept_timer_;
+  // stop(): whether it ran, its deadline for the drain, its callback, and
+  // what it dropped, said in its last line.
+  bool stopping_ = false;
+  bool stop_done_ = false;
+  std::chrono::steady_clock::time_point stop_started_;
+  asio::steady_timer drain_timer_;
+  std::function<void()> on_stopped_;
+  std::uint64_t stop_dropped_queued_ = 0;
+  std::uint64_t stop_dropped_read_ = 0;
   // The lines about messages that went nowhere: see LogSummary.
   LogSummary drops_;
 };  // class Server

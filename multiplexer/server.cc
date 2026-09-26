@@ -3,6 +3,7 @@
 // translation unit so it inlines the way it did as header code.
 #include "multiplexer/server.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -28,6 +29,8 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
       io_service_(io_service),
       rules_timer_(io_service),
       session_timer_(io_service),
+      accept_timer_(io_service),
+      drain_timer_(io_service),
       drops_(io_service, "multiplexer.server") {}
 
 void Server::start() {
@@ -35,24 +38,116 @@ void Server::start() {
   _arm_rules_check();
 }
 
-void Server::stop() {
+void Server::stop(float drain_seconds, std::function<void()> stopped) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  if (stopped) {
+    on_stopped_ = std::move(stopped);
+  }
+  const bool again = stopping_;
+  if (!again) {
+    stopping_ = true;
+    stop_started_ = std::chrono::steady_clock::now();
+  }
   asio::error_code ignored;
   acceptor_.close(ignored);
-  rules_timer_.cancel();
+  accept_timer_.cancel(ignored);
+  rules_timer_.cancel(ignored);
+  // A copy: every shutdown() below takes its connection out of accepted_.
   std::vector<Connection::pointer> live;
-  for (ConnectionById::iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
-    if (Connection::pointer connection = entry->second.lock()) {
+  for (const auto& entry : accepted_) {
+    if (Connection::pointer connection = entry.second.lock()) {
       live.push_back(connection);
     }
   }
-  for (size_t index = 0; index < live.size(); ++index) {
-    live[index]->shutdown();
+  const bool drain = !again && drain_seconds > 0;
+  if (drain) {
+    unsigned int registered = 0;
+    for (const Connection::pointer& connection : live) {
+      registered += connection->registered();
+    }
+    MX_LOG(INFO, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("stopping: " + repr(registered) +
+                                          " connection(s) close once what is queued for them is written, within " +
+                                          repr(drain_seconds) + " s"));
+    drain_timer_.expires_after(std::chrono::microseconds(static_cast<long>(drain_seconds * 1e6)));
+    drain_timer_.async_wait(
+        [weak = weak_pointer(shared_from_this())](const asio::error_code& error) { _on_drain_deadline(weak, error); });
+  } else {
+    drain_timer_.cancel(ignored);
   }
+  for (const Connection::pointer& connection : live) {
+    if (connection->shuts_down()) {
+      continue;
+    }
+    if (drain && connection->registered()) {
+      connection->close_when_flushed(CLOSE_READ_SECONDS);
+    } else {
+      connection->shutdown();  // and one that never sent its welcome has nothing queued
+    }
+  }
+  _stop_if_done();
+}
+
+// The drain's deadline: whatever still holds messages is shut down, its
+// queue dropped; a connection already reading on to its peer's end keeps
+// its own bound.
+void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& error) {
+  pointer self = server.lock();
+  if (error || !self) {
+    return;
+  }
+  std::vector<Connection::pointer> late;
+  for (const auto& entry : self->accepted_) {
+    Connection::pointer connection = entry.second.lock();
+    if (connection && connection->living()) {
+      late.push_back(connection);
+    }
+  }
+  if (!late.empty()) {
+    MX_LOG(WARNING, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("stopping: " + repr(late.size()) +
+                                          " connection(s) still held messages at the deadline; closing them"));
+  }
+  for (const Connection::pointer& connection : late) {
+    if (!connection->shuts_down()) {
+      connection->shutdown();
+    }
+  }
+  self->_stop_if_done();
+}
+
+void Server::connection_closed(Connection* conn) {
+  accepted_.erase(conn);
+  if (stopping_) {
+    stop_dropped_read_ += conn->dropped_while_closing();
+    _stop_if_done();
+  }
+}
+
+void Server::_stop_if_done() {
+  if (!stopping_ || stop_done_ || !accepted_.empty()) {
+    return;
+  }
+  stop_done_ = true;
+  asio::error_code ignored;
+  drain_timer_.cancel(ignored);
+  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - stop_started_).count();
+  std::string line = "stopped: every connection closed in " + repr(static_cast<long>(seconds * 1000)) + " ms";
+  if (stop_dropped_queued_ || stop_dropped_read_) {
+    line += "; dropped " + repr(stop_dropped_queued_) + " message(s) still queued for peers and " +
+            repr(stop_dropped_read_) + " that arrived while their connection closed";
+  }
+  MX_LOG(stop_dropped_queued_ || stop_dropped_read_ ? WARNING : INFO, LOWVERBOSITY,
+         CTX("multiplexer.server") TEXT(line));
   drops_.flush();
   // After the peers left, so their departures are in the file; the
   // session's deadline timer would otherwise keep the loop alive.
   stop_recording("the multiplexer stopped");
+  if (on_stopped_) {
+    std::function<void()> stopped = std::move(on_stopped_);
+    on_stopped_ = nullptr;
+    stopped();
+  }
 }
 
 void Server::_start_accept() {
@@ -69,15 +164,37 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
     new_connection->shutdown();
     return;
   }
+  if (error == asio::error::no_descriptors || error == asio::error::no_buffer_space ||
+      error == asio::error::no_memory || error.value() == ENFILE) {
+    if (drops_.first({ACCEPT_FAILED, ERROR, 0, 0}, [&] { return "cannot accept a connection: " + error.message(); })) {
+      MX_LOG(ERROR, LogSummary::VERBOSITY,
+             CTX("multiplexer.server") TEXT("cannot accept a connection: " + error.message() + "; trying again every " +
+                                            repr(ACCEPT_RETRY_SECONDS) + " s"));
+    }
+    new_connection->shutdown();
+    _accept_later();
+    return;
+  }
   _start_accept();
   if (!error) {
     // reading only, until the peer has introduced itself with
     // CONNECTION_WELCOME; routed traffic before that closes the connection
+    accepted_[new_connection.get()] = new_connection;
     new_connection->start_only_read();
   } else {
     // the connection is dropped, or -- in fact -- has never been established
     new_connection->shutdown();
   }
+}
+
+void Server::_accept_later() {
+  accept_timer_.expires_after(std::chrono::microseconds(static_cast<long>(ACCEPT_RETRY_SECONDS * 1e6)));
+  accept_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
+    pointer self = weak.lock();
+    if (!error && self && self->acceptor_.is_open()) {
+      self->_start_accept();
+    }
+  });
 }
 
 void Server::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
