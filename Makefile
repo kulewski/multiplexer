@@ -6,7 +6,7 @@
 #
 #   make -j            build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 #   make check         the C++ and Python unit tests, against what was built
-#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip
+#   make wheel         build/dist/mx_multiplexer-<VERSION>-*.whl, for pip, stripped
 #   make install       mxcontrol, generate_constants, the library, the headers and
 #                      a pkg-config file under PREFIX
 #   make RULES=your.rules ...   generate the constants from your rules file
@@ -23,6 +23,7 @@ PYTHON ?= python3
 PROTOC ?= protoc
 CXX ?= g++
 AR ?= ar
+STRIP ?= strip
 VERSION ?= 2.3.1
 # The optimisation and debug flags; the rest is what the code needs.
 CXXFLAGS ?= -O2 -g -DNDEBUG
@@ -213,12 +214,13 @@ check-py: python $(PY_TESTS) $(MXCONTROL)
 
 # The wheel: the package without the tests, with setup.py and
 # pyproject.toml from make/ and the README, which setup.py turns into the
-# PyPI page.
+# PyPI page. Its extension is stripped; build/python keeps the symbols.
 
 wheel: python
 	rm -rf $(BUILD)/wheel && mkdir -p $(BUILD)/wheel $(BUILD)/dist
 	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
+	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so
 	sed 's/@VERSION@/$(VERSION)/' make/setup.py > $(BUILD)/wheel/setup.py
 	cp make/pyproject.toml README.md $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .

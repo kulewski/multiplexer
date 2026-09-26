@@ -177,8 +177,9 @@ py_test(
 # thing static glibc cannot do everywhere is resolve host names, which
 # needs the host's own name-service modules: the multiplexer listens on an
 # address and never resolves, and the client subcommands take addresses
-# too. Built only when named; the release workflow does.
-cc_binary(
+# too. Built only when named; the release workflow builds it with
+# --config=release, which strips it as it strips //mxcontrol.
+maybe_strip_cc_binary(
     name = "mxcontrol_static",
     srcs = ["main.cc"],
     data = ["//:multiplexer_rules"],

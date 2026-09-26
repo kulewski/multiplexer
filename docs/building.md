@@ -96,7 +96,7 @@ sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libasio-dev \
     python3-pip python3-setuptools python3-wheel
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a, build/python/
 make check                   # the C++ and Python unit tests, against what was built
-make wheel                   # build/dist/mx_multiplexer-<version>-<python>-<platform>.whl
+make wheel                   # build/dist/mx_multiplexer-<version>-<python>-<platform>.whl, stripped
 sudo make install            # mxcontrol, the library and the headers under /usr/local
 make RULES=your.rules -j     # the constants from your rules file, as --//:multiplexer_rules does
 ```
@@ -120,7 +120,7 @@ files by `./format.sh` (so the two builds cannot disagree about which
 files exist), `setup.py` and `pyproject.toml` for the wheel, and `wheel_smoke.py`, which
 `docker/check.sh make` runs with the wheel installed in a fresh virtual
 environment. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
-`PREFIX`, `PYTHON` and `PROTOC` are variables like `RULES`.
+`PREFIX`, `PYTHON`, `PROTOC` and `STRIP` are variables like `RULES`.
 
 Not built this way: the test roles and scenarios under `tests/`, the
 examples, the sanitizer and analysis configurations. Those are Bazel's.

@@ -4,6 +4,10 @@ Every version tag produces the same set of artifacts from one commit,
 built and checked by `.github/workflows/release.yml` and attached to the
 GitHub release. The scripts under `packaging/` build each of them locally
 the same way, in Docker, so a release can be reproduced on a workstation.
+Every binary in them is a release build, stripped: optimized, without the
+debug assertions and without symbols. `packaging/check_binaries.sh` checks
+each before it is published, and the binaries with symbols are not
+published; [operations](operations.md#debug-symbols) says how to debug.
 
 | Artifact | For | Needs on the machine |
 |---|---|---|
@@ -19,9 +23,10 @@ in their workspace, as [examples/README.md](../examples/README.md) shows.
 
 ## The static mxcontrol
 
-`bazel build //mxcontrol:mxcontrol_static` links the same binary as
-`//mxcontrol` with `-static`: glibc, libstdc++ and protobuf inside, about
-8 MB, and it runs on any x86_64 Linux and in an empty container. Static
+`bazel build --config=release //mxcontrol:mxcontrol_static` links the same
+binary as `//mxcontrol` with `-static` and strips it: glibc, libstdc++ and
+protobuf inside, about 4 MB, and it runs on any x86_64 Linux and in an empty
+container. Static
 glibc cannot resolve host names without the running system's name-service
 modules, so inside the image, or on a system with a different glibc, give
 mxcontrol's client subcommands addresses rather than names. The
@@ -66,8 +71,9 @@ a consumer of `@mx`.
 `packaging/build_debs.sh` builds one package per supported release, each
 inside that release's container: Debian 12 and 13, Ubuntu 22.04, 24.04 and
 26.04. A package holds `mxcontrol` and `generate_constants` in `/usr/bin`,
-`libmultiplexer.a` and the headers under `/usr/include/mx`, and
-`/usr/lib/pkgconfig/multiplexer.pc`, so a C++ peer builds with
+both stripped, `libmultiplexer.a`, without its debug information, and the
+headers under `/usr/include/mx`, and `/usr/lib/pkgconfig/multiplexer.pc`, so
+a C++ peer builds with
 
 ```
 g++ -std=c++17 backend.cc $(pkg-config --cflags --libs multiplexer) -o backend
@@ -90,8 +96,9 @@ holds, writes the same). Changing the reserved block is not supported.
 
 `packaging/build_wheels.sh` builds them in the `manylinux_2_28` container:
 protobuf 3.21.12 compiled once from source and linked statically into the
-extension, then `make wheel` per CPython and `auditwheel`, which verifies
-that the wheel needs nothing from the system beyond what manylinux allows.
+extension, then `make wheel` per CPython, which strips the extension, and
+`auditwheel`, which verifies that the wheel needs nothing from the system
+beyond what manylinux allows.
 `pip install mx-multiplexer` installs them from PyPI, where every release
 is published under that name, because `multiplexer` on PyPI belongs to an
 unrelated package; the import is `multiplexer` all the same. `pip install
@@ -132,5 +139,6 @@ release candidate that will not be tagged, never the version itself. A
 failed run is re-run from its page once the fix is on the branch; the tag
 never moves.
 
-To rebuild any artifact by hand: `bazel build //mxcontrol:mxcontrol_static`,
-`bazel run //docker:load`, `packaging/build_debs.sh`, `packaging/build_wheels.sh`.
+To rebuild any artifact by hand: `bazel build --config=release
+//mxcontrol:mxcontrol_static`, `bazel run --config=release //docker:load`,
+`packaging/build_debs.sh`, `packaging/build_wheels.sh`.

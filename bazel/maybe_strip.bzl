@@ -85,15 +85,17 @@ STRIP_IN_RELEASE = select({
     "//conditions:default": False,
 })
 
-def maybe_strip_cc_binary(name, visibility = ["//visibility:private"], **kwargs):
+def maybe_strip_cc_binary(name, visibility = ["//visibility:private"], tags = [], **kwargs):
     """A cc_binary `name` that is stripped in release builds.
 
     Declares `name + "_with_debug_symbols"` as the cc_binary with `kwargs`,
-    and `name` as its maybe_strip wrapper. Both get `visibility`.
+    and `name` as its maybe_strip wrapper. Both get `visibility` and `tags`,
+    so that a `manual` binary stays out of a wildcard build under both names.
     """
     native.cc_binary(
         name = name + "_with_debug_symbols",
         visibility = visibility,
+        tags = tags,
         **kwargs
     )
     maybe_strip(
@@ -101,4 +103,5 @@ def maybe_strip_cc_binary(name, visibility = ["//visibility:private"], **kwargs)
         binary = ":" + name + "_with_debug_symbols",
         strip = STRIP_IN_RELEASE,
         visibility = visibility,
+        tags = tags,
     )

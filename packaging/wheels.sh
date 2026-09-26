@@ -3,8 +3,9 @@
 # quay.io/pypa/manylinux_2_28_x86_64, as packaging/build_wheels.sh does.
 # protobuf is built from source once, static, at the version the generated
 # code and the extension must match; then, per CPython, `make python wheel`
-# with that interpreter and auditwheel, which checks that the wheel needs
-# nothing from the system beyond what manylinux_2_28 allows.
+# with that interpreter, a check that the extension is a stripped release
+# build, and auditwheel, which checks that the wheel needs nothing from the
+# system beyond what manylinux_2_28 allows.
 #
 #   packaging/wheels.sh [outdir] [cp310 cp311 ...]   default: every CPython from 3.10
 set -euo pipefail
@@ -45,6 +46,7 @@ for tag in "${pythons[@]}"; do
   "$python" -m pip install -q pybind11 pybind11-stubgen "protobuf>=4.21,<5" setuptools wheel auditwheel
   rm -rf build/python build/obj/multiplexer/_native.o build/wheel
   make -j"$(nproc)" wheel PYTHON="$python" > /dev/null
+  packaging/check_binaries.sh build/wheel/multiplexer/_native.so
   "$python" -m auditwheel repair -w "$out" build/dist/mx_multiplexer-*-linux_x86_64.whl > /dev/null
   rm -f build/dist/mx_multiplexer-*-linux_x86_64.whl
 done
