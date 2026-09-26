@@ -360,6 +360,9 @@ class Client(_mxclient.Client):
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
         query = self.new_message(type=type, message=message)
+        # Every id the request goes out under, the first and each resend
+        # after a lost connection: a reply to any of them answers the query.
+        attempts = []
         # Stage 1: the request through one connection. A reply ends it here.
         try:
             response, connwrap = self.send_and_receive(
@@ -367,6 +370,7 @@ class Client(_mxclient.Client):
                 multiplexer=lane if lane is not None else Client.ONE,
                 timeout=timeout,
                 ignore_types=(types.REQUEST_RECEIVED,),
+                sent_ids=attempts,
             )
             if response.type != types.DELIVERY_ERROR:
                 self.__adopt(lane, connwrap)
@@ -385,7 +389,7 @@ class Client(_mxclient.Client):
         pinned = lane is not None and lane.pinned
         response, connwrap = self.send_and_receive(
             mxmsg,
-            accept_ids=[query.id],
+            accept_ids=attempts,
             multiplexer=lane if pinned else Client.ALL,
             timeout=timeout,
             handle_delivery_errors=not pinned,
@@ -396,7 +400,7 @@ class Client(_mxclient.Client):
             # Every multiplexer reported no backend of this type, so the one
             # that took the request is gone too: nothing can answer any more.
             raise OperationFailed
-        if response.references == query.id:
+        if response.references in attempts:
             self.__adopt(lane, connwrap)
             return response, connwrap
 
@@ -404,14 +408,14 @@ class Client(_mxclient.Client):
 
         # Stage 3: the request again, to the backend that answered first, by
         # instance id and through the connection its PING came on. A late
-        # reply to the original request is still accepted; late PINGs from
+        # reply to an earlier attempt is still accepted; late PINGs from
         # other backends are ignored.
         direct_query = self.new_message(to=response.from_, message=message, type=type)
         assert direct_query.type == type
         assert type
         response, connwrap = self.send_and_receive(
             direct_query,
-            accept_ids=[query.id],
+            accept_ids=attempts,
             ignore_ids=[mxmsg.id],
             multiplexer=connwrap,
             lane=lane,
@@ -437,11 +441,13 @@ class Client(_mxclient.Client):
             lane = Lane(multiplexer)  # preferred, then any
         ticker = TimeoutTicker(timeout)
         request = self.new_message(type=type, message=message, to=to, report_delivery_error=True)
+        attempts = []  # every id the request goes out under; a reply to any of them answers
         response, connwrap = self.send_and_receive(
             request,
             multiplexer=lane if lane is not None else Client.ONE,
             timeout_ticker=ticker,
             ignore_types=(types.REQUEST_RECEIVED,),
+            sent_ids=attempts,
         )
         if response.type != types.DELIVERY_ERROR:
             self.__adopt(lane, connwrap)
@@ -460,7 +466,7 @@ class Client(_mxclient.Client):
         pinned = lane is not None and lane.pinned
         response, connwrap = self.send_and_receive(
             mxmsg,
-            accept_ids=[request.id],
+            accept_ids=attempts,
             multiplexer=lane if pinned else Client.ALL,
             timeout_ticker=ticker,
             handle_delivery_errors=not pinned,
@@ -468,7 +474,7 @@ class Client(_mxclient.Client):
         )
         if response.type == types.DELIVERY_ERROR:
             raise OperationFailed  # no multiplexer has the instance
-        if response.references == request.id:
+        if response.references in attempts:
             self.__adopt(lane, connwrap)
             return response, connwrap  # a late reply to the request after all
         self._check_type(response, types.PING)
@@ -478,7 +484,7 @@ class Client(_mxclient.Client):
         again = self.new_message(type=type, message=message, to=to, report_delivery_error=True)
         response, connwrap = self.send_and_receive(
             again,
-            accept_ids=[request.id],
+            accept_ids=attempts,
             ignore_ids=[mxmsg.id],
             multiplexer=connwrap,
             lane=lane,
@@ -506,6 +512,7 @@ class Client(_mxclient.Client):
         ignore_types=(),
         timeout_ticker=None,
         lane=None,
+        sent_ids=None,
         **kwargs,
     ):
         """Send `message` once and wait for a reply that references it.
@@ -517,6 +524,12 @@ class Client(_mxclient.Client):
         are skipped silently, other unexpected messages go to handle_drop().
         `multiplexer` may be a Lane; `lane` is one to update while
         `multiplexer` names a connection to prefer.
+
+        A message whose connection dies under the wait is sent again
+        through another, as a copy with a fresh id; a MultiplexerMessage
+        passed in is never changed, so its id is only the first attempt's.
+        `sent_ids`, a list, gets every id the message went out under, and
+        the reply's `references` names the one it answers.
         """
         if timeout_ticker is None:
             timeout_ticker = TimeoutTicker(timeout)
@@ -525,7 +538,7 @@ class Client(_mxclient.Client):
             lane = kwargs.pop("multiplexer")
         if multiplexer is not Client.ALL:
             return self.__send_and_receive_one(
-                message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, **kwargs
+                message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, sent_ids, **kwargs
             )
 
         id, tracker = self.__send_message(message, timeout=timeout_ticker(), **kwargs)
@@ -554,7 +567,9 @@ class Client(_mxclient.Client):
 
         raise OperationTimedOut
 
-    def __send_and_receive_one(self, message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, **kwargs):
+    def __send_and_receive_one(
+        self, message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, sent_ids, **kwargs
+    ):
         """The single-connection case of send_and_receive, the same as
         Client::_send_and_receive_one in client.h: if the connection used dies
         before the reply arrives, or none is live, keep running the loop so
@@ -568,6 +583,8 @@ class Client(_mxclient.Client):
         while True:
             _, used = self.__send_one(mxmsg, timeout_ticker, preferred, lane)
             assert used is not None, "__send_one returns a connection or raises"
+            if sent_ids is not None:
+                sent_ids.append(mxmsg.id)
             preferred = None
             accept_ids = [mxmsg.id] + accept_ids
             while timeout_ticker.permit():
@@ -590,6 +607,9 @@ class Client(_mxclient.Client):
                 MEDIUMVERBOSITY,
                 text="connection lost while waiting for a reply to %d; sending again" % mxmsg.id,
             )
+            if mxmsg is message:  # the caller's own: a copy goes again, and theirs keeps its id
+                mxmsg = MultiplexerMessage()
+                mxmsg.CopyFrom(message)
             mxmsg.id = self.random()
 
     def __send_one(self, mxmsg, timeout_ticker, preferred=None, lane=None):

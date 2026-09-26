@@ -225,12 +225,9 @@ void BasicClient::connection_destroyed(Connection* conn) {
     connection_by_target_.erase(target_entry);
   }
 
-  if (connection_observer_) {
-    connection_observer_(
-        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
-  }
   if (!shuts_down_) {
-    // auto reconnect after AUTO_RECONNECT_TIME seconds
+    // auto reconnect after AUTO_RECONNECT_TIME seconds; armed before the
+    // observer runs, so that nothing the observer does can skip it
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
                                    target.first + ":" + repr(target.second)));
@@ -239,6 +236,10 @@ void BasicClient::connection_destroyed(Connection* conn) {
     timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code& error) {
       self->reconnect_after_timeout(timer, target, error);
     });
+  }
+  if (connection_observer_) {
+    connection_observer_(
+        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
   }
 }
 

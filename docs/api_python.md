@@ -771,3 +771,12 @@ you need but exposes `send_and_receive()` for one request without the search,
 `receive()` to wait for replies to given ids, `flush_all(timeout)` to push
 every queued message out, and `new_message(**fields)` to build a
 `MultiplexerMessage` with id and sender filled in.
+
+`send_and_receive()` sends a request again when its connection dies under
+the wait, through another connection and with a fresh id, as every client
+does. A `MultiplexerMessage` you pass is never changed: the resend is a
+copy, and your message's id is only the first attempt's. Pass `sent_ids=[]`
+to learn every id it went out under; the reply's `references` names the
+attempt it answers. Anything else about the request that must find its way
+back, a follow-up or a progress report, is best matched in the payload,
+since ids belong to attempts (the follow-up rule in [Delivery](semantics.md#delivery)).

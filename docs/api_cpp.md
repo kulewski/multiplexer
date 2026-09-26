@@ -23,7 +23,10 @@ are the same as in Python: `type`, `message` (a `std::string` of bytes),
 `set_message()` and so on. `id` is drawn by the library per attempt: a query
 sent again after a timeout, a search or a lost connection carries a new id,
 so a backend that must not do the same work twice keys on the payload, not
-on `id()`.
+on `id()`. A message you pass to a query is never changed, since the library
+sends copies: `Client` sends the first attempt under the message's own id,
+`ThreadedClient` draws one for every attempt, the first included, and in
+both a reply's `references()` names the attempt it answers.
 
 ## Client
 

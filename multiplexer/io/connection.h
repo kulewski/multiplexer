@@ -29,6 +29,7 @@
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <string>
 
@@ -205,19 +206,32 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       return;
     }
 
-    // mark as dead
+    // Mark as dead before the manager hears of it: what its callbacks do
+    // may reach this connection again, as a client's resend of a query
+    // through the lane that still holds it does, and living() must say no
+    // by then, so that schedule() drops the frame and another connection
+    // takes it, rather than the assertion below throwing out of the
+    // callback and leaving the shutdown, and the reconnect, undone.
     shuts_down_ = true;
+    is_living_ = false;
     ManagerPointer manager = manager_.lock();
 
-    // notify our Manager
-    if (is_registered_ && manager) {
-      manager->unregister_connection(this);
+    // Notify the manager. What its callbacks do is theirs: an exception out
+    // of one is logged, and the rest of the shutdown, the socket, the timers
+    // and the queue, happens all the same.
+    try {
+      if (is_registered_ && manager) {
+        manager->unregister_connection(this);
+      }
+      is_registered_ = false;
+      if (manager) {
+        manager->connection_destroyed(this);
+      }
+    } catch (const std::exception& error) {
+      is_registered_ = false;
+      MX_LOG(ERROR, LOWVERBOSITY,
+             TEXT("the manager's callback raised on the shutdown of " + repr((void*)this) + ": " + error.what()));
     }
-    is_registered_ = false;
-    if (manager) {
-      manager->connection_destroyed(this);
-    }
-    is_living_ = false;
 
     // stop doing I/O
     outgoing_queue_max_size_ = 0;
@@ -416,10 +430,12 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     Assert(incoming_channel_state_ == ChannelState::FREE);
 
     incoming_channel_state_ = ChannelState::READING_HEADER;
+    // The handler holds the frame as well as the connection: a composed read
+    // goes on in steps after shutdown() dropped incoming_message_, and must
+    // still have its buffer.
     asio::async_read(socket_, asio::buffer(incoming_message_->get_header_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
-                       self->_handle_read_header(error, bytes);
-                     });
+                     [self = this->shared_from_this(), frame = incoming_message_](
+                         const asio::error_code& error, size_t bytes) { self->_handle_read_header(error, bytes); });
   }
   void _handle_read_header(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -453,9 +469,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     incoming_channel_state_ = ChannelState::READING_BODY;
     _require_heartbit_later();
     asio::async_read(socket_, asio::buffer(incoming_message_->get_body_buffer()),
-                     [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
-                       self->_handle_read_body(error, bytes);
-                     });
+                     [self = this->shared_from_this(), frame = incoming_message_](
+                         const asio::error_code& error, size_t bytes) { self->_handle_read_body(error, bytes); });
   }
   void _handle_read_body(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -592,9 +607,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       // start writing
       outgoing_channel_state_ = ChannelState::BUSY;
       Assert(raw->get_message_buffer().size());
-      // The handler holds a shared_ptr to this, so the connection outlives the write.
+      // The handler holds the connection and the frame: the write goes on in
+      // steps after shutdown() handed the queue over or dropped it.
       asio::async_write(socket_, raw->get_message_buffer(),
-                        [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
+                        [self = this->shared_from_this(), raw](const asio::error_code& error, size_t bytes) {
                           self->_handle_write(error, bytes);
                         });
     }

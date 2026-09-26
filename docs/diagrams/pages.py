@@ -216,7 +216,8 @@ itself with `DELIVERY_ERROR` marked `is_known_type`, and the client raises
                 Step(
                     "Every multiplexer says no",
                     "Each answers the search with `DELIVERY_ERROR`. Once every connection "
-                    "has failed, the query fails: `OperationFailed` in Python, right away "
+                    "the search went through has said no, the query fails: `OperationFailed` "
+                    "in Python, right away "
                     "rather than after a timeout. A multiplexer that has just restarted "
                     "and has no backend of the type back yet says no the same way, which "
                     "is why a restart of the only multiplexer can fail a request in "

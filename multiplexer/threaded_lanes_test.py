@@ -30,6 +30,30 @@ def answer(mxmsg):
     return mxmsg.message.upper()
 
 
+def lose_the_first_slow(*fakes):
+    """Script `fakes` so that the first b"slow" any of them gets is held a
+    second and never answered, as a request lost with its multiplexer is,
+    and every other message is answered as by `answer`. Returns the list
+    that receives the lost request's id."""
+    lock = threading.Lock()
+    lost = []
+
+    def script(mxmsg):
+        """No answer to the first b"slow"; `answer` for the rest."""
+        with lock:
+            losing = mxmsg.message == b"slow" and not lost
+            if losing:
+                lost.append(mxmsg.id)
+        if losing:
+            time.sleep(1.0)
+            return None
+        return answer(mxmsg)
+
+    for fake in fakes:
+        fake.on(REQUEST, script, RESPONSE)
+    return lost
+
+
 class ThreadedClientLanesTest(unittest.TestCase):
     """ThreadedClient: a cluster of two per test, since several tests kill one."""
 
@@ -98,6 +122,31 @@ class ThreadedClientLanesTest(unittest.TestCase):
         self.assertIn(len(arrivals), (1, 2))
         self.assertTrue(all(via is not victim for _, via in arrivals[1:]))
         self.assertIsNot(victim, self.cluster.multiplexer_at(lane.connection.endpoint), "the lane followed")
+
+    def test_a_typed_query_is_sent_again_when_the_lane_s_multiplexer_dies(self):
+        """The same for a typed query, one with no addressee: the fakes never
+        answer the first request, lost with its multiplexer, so only the
+        resend through the other multiplexer can end the query, within a
+        second or two rather than after its first stage runs out; the lane
+        followed, and the client is back on the killed multiplexer once it
+        returns. The resend used to go through the dying connection, which
+        the lane still held, and the failed assertion in it left the client
+        without a reconnect."""
+        lost = lose_the_first_slow(self.peer, self.other)
+        lane = self.client.lane()
+        self.client.query(b"warm-up", REQUEST, multiplexer=lane)
+        victim = self.cluster.multiplexer_at(lane.connection.endpoint)
+        killer = threading.Timer(0.3, victim.kill)
+        killer.start()
+        started = time.monotonic()
+        reply = self.client.query(b"slow", REQUEST, multiplexer=lane, timeout=8)
+        killer.join()
+        self.assertEqual(b"SLOW", reply.message)
+        self.assertNotIn(reply.references, lost, "the resend's answer")
+        self.assertLess(time.monotonic() - started, 3, "sent again at once, not after a reconnect or a search")
+        self.assertIsNot(victim, self.cluster.multiplexer_at(lane.connection.endpoint), "the lane followed")
+        victim.start()
+        self.cluster.wait_for_peer(peers.PYTHON_TEST_CLIENT)  # the client reconnected to it
 
     def test_a_lane_keeps_a_stream_on_one_multiplexer_and_follows_a_failover(self):
         lane = self.client.lane()
@@ -278,6 +327,23 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"ON-THE-LANE", reply.message)
         self.assertIn(self.peer.via(self.peer.messages(REQUEST)[-1]), ways)
 
+    async def test_a_typed_query_is_sent_again_when_the_lane_s_multiplexer_dies(self):
+        """As for ThreadedClient: only the resend can answer, it does, the
+        lane moved, the client is back once the killed multiplexer returns."""
+        lost = lose_the_first_slow(self.peer, self.other)
+        lane = self.client.lane()
+        await self.client.query(b"warm-up", REQUEST, multiplexer=lane)
+        victim = self.cluster.multiplexer_at(lane.connection.endpoint)
+        asyncio.get_running_loop().call_later(0.3, victim.kill)
+        started = time.monotonic()
+        reply = await self.client.query(b"slow", REQUEST, multiplexer=lane, timeout=8)
+        self.assertEqual(b"SLOW", reply.message)
+        self.assertNotIn(reply.references, lost, "the resend's answer")
+        self.assertLess(time.monotonic() - started, 3, "sent again at once, not after a reconnect or a search")
+        self.assertIsNot(victim, self.cluster.multiplexer_at(lane.connection.endpoint), "the lane followed")
+        victim.start()
+        self.cluster.wait_for_peer(peers.PYTHON_TEST_CLIENT)
+
     async def test_a_pinned_lane_fails_once_its_multiplexer_is_gone(self):
         pinned = self.client.lane(pinned=True)
         await self.client.send_message(b"first", type=REQUEST, multiplexer=pinned)
@@ -290,6 +356,58 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
             await self.client.query(b"more", REQUEST, to=self.peer.instance_id, multiplexer=pinned, timeout=5)
         reply = await self.client.query(b"still", REQUEST, to=self.peer.instance_id, timeout=10)
         self.assertEqual(b"STILL", reply.message)
+
+
+class OrphanedMessagesTest(unittest.TestCase):
+    """A connection that dies with frames it had not written yet hands each
+    of them to one other connection, round robin, not a copy to every one:
+    with ANY routing, a copy per multiplexer is a request handled twice."""
+
+    def test_each_unwritten_message_goes_to_one_other_multiplexer(self):
+        with Cluster(3, rules=RULES) as cluster:
+            client = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
+            try:
+                lane = None
+                for _ in range(6):  # a new lane takes the next connection, round robin, until one is mx[0]'s
+                    candidate = client.lane()
+                    client.send_message(b"warm-up", type=REQUEST, multiplexer=candidate, flush=True)
+                    if cluster.multiplexer_at(candidate.connection.endpoint) is cluster.mx[0]:
+                        lane = candidate
+                        break
+                assert lane is not None, "no lane on mx[0] in six tries"
+                behind = [
+                    FakePeer(
+                        cluster, peers.PYTHON_TEST_SERVER, name="behind-%d" % index, endpoints=[mx.endpoint]
+                    ).start()
+                    for index, mx in ((1, cluster.mx[1]), (2, cluster.mx[2]))
+                ]
+                cluster.mx[0].pause()  # frames queue up behind a socket nobody reads
+                chunk = b"x" * (128 * 1024)
+                for index in range(300):
+                    client.send_message(b"%d:" % index + chunk, type=REQUEST, multiplexer=lane)
+                cluster.mx[0].kill()
+                arrived = self._settled(behind)
+                self.assertGreater(len(arrived[0] | arrived[1]), 100, "the unwritten messages were handed over")
+                self.assertEqual(set(), arrived[0] & arrived[1], "no message reached both multiplexers")
+                for fake in behind:
+                    fake.stop()
+            finally:
+                client.shutdown()
+
+    @staticmethod
+    def _settled(fakes, quiet=1.0, timeout=15):
+        """The ids each fake received, once nothing new came for `quiet` seconds."""
+        deadline = time.monotonic() + timeout
+        last: list[set[int]] = []
+        since = time.monotonic()
+        while time.monotonic() < deadline:
+            now = [{mxmsg.id for mxmsg in fake.messages(REQUEST)} for fake in fakes]
+            if now != last:
+                last, since = now, time.monotonic()
+            elif time.monotonic() - since >= quiet:
+                break
+            time.sleep(0.05)
+        return last
 
 
 if __name__ == "__main__":

@@ -130,6 +130,10 @@ class ThreadedClient : public ExceptionDefinitions {
   // reconnecting every AUTO_RECONNECT_TIME seconds on its own.
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
   unsigned int connections_count();
+  // How many message ids the client watches for an answer: those of the
+  // queries in flight, every attempt's and every search's. Zero once every
+  // query has ended; for tests. Not from the io thread.
+  std::size_t watched_ids();
 
   // Sending. The message must carry its id and from; new_message() fills
   // those in. send() queues it on one live connection (round robin),
@@ -229,6 +233,7 @@ class ThreadedClient : public ExceptionDefinitions {
   void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
   void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
+  bool _answered(const InFlightPtr& in_flight, const ConnectionWrapper& connection) MX_RUN_ON(io_thread_);
   void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
   float _stage_timeout(const InFlightPtr& in_flight) const MX_RUN_ON(io_thread_);

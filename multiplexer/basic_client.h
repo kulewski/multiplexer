@@ -123,9 +123,9 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
 
 // The handle callers see for a connection: a weak reference plus what it
 // was asked to connect to and the address that resolved to. It is false
-// once the connection is gone, and scheduling through it may reconnect to
-// the remembered target (see schedule_one). Replies carry the wrapper of
-// the connection they arrived on, so a peer can answer through the same
+// once the connection is gone; schedule_one() then puts a message meant
+// for it on another live connection. Replies carry the wrapper of the
+// connection they arrived on, so a peer can answer through the same
 // multiplexer.
 class ConnectionWrapper {
  public:
@@ -491,8 +491,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   }
 
   // Outgoing messages. schedule_all queues the frame on every live connection
-  // with room and returns how many; the receivers drop the copies by id.
-  unsigned int schedule_all(std::shared_ptr<const RawMessage> raw) {
+  // with room and returns how many, the connections themselves in `used`
+  // when given; the receivers drop the copies by id.
+  unsigned int schedule_all(std::shared_ptr<const RawMessage> raw, std::vector<ConnectionWrapper>* used = NULL) {
     MX_DCHECK_RUN_ON(&owner_thread());
     unsigned int c = 0;
     for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
@@ -502,6 +503,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
         }
         if (conn->schedule(raw)) {
           ++c;
+          if (used) {
+            used->push_back(_wrap(conn));
+          }
         }
       }
     }
@@ -563,9 +567,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     MXTHROW(OperationTimedOut());
   }
 
-  // Queues the frame on a specific connection, the one a request arrived on
-  // or a reply came from. If that connection is gone, reconnects to its
-  // endpoint within `timeout` and tries once more; with no timeout, throws.
+  // Queues the frame on a preferred connection, the one a request arrived on
+  // or a reply came from, while it lives; once it is gone, on another, as
+  // any message is, waiting up to `timeout` for one to come back when none
+  // is live; with none by then, throws NotConnected. Never a connection of
+  // its own to the old one's address: the client already reconnects to
+  // that multiplexer under the target it was given, a host name perhaps,
+  // and a second connection to it would replace the first and be replaced
+  // in turn.
   BasicScheduledMessageTracker schedule_one(std::shared_ptr<const RawMessage> raw, ConnectionWrapper wrapper,
                                             float timeout) {
     MX_DCHECK_RUN_ON(&owner_thread());
@@ -574,15 +583,29 @@ class BasicClient : public ConnectionsManager<BasicClient>,
       // A connection closed by the peer while the loop did not run still
       // reads as living here; Client polls the loop before calling this.
       return (BasicScheduledMessageTracker)conn->schedule(raw);
-    } else {
-      assert(Endpoint().port() == 0);
-      if (wrapper.endpoint_.port() && timeout > 0) {
-        wrapper = this->connect(wrapper.endpoint_, timeout);
-        return schedule_one(raw, wrapper, 0);
-      } else {
-        MXTHROW(NotConnected());
+    }
+    BasicScheduledMessageTracker tracker = schedule_one(raw);
+    if (!tracker && timeout > 0) {
+      std::unique_ptr<mx::SimpleTimer> timer = create_timer(timeout);
+      if (wait_for_any_connection(*timer)) {
+        tracker = schedule_one(raw);
       }
     }
+    if (!tracker) {
+      MXTHROW(NotConnected());
+    }
+    return tracker;
+  }
+
+  // Queues the frame on `wrapper`'s connection and never another, as a
+  // lane does: a null tracker when that connection is gone, dead or full.
+  BasicScheduledMessageTracker schedule_on(std::shared_ptr<const RawMessage> raw, const ConnectionWrapper& wrapper) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    Connection::pointer conn = wrapper.lock();
+    if (!conn || !conn->living()) {
+      return BasicScheduledMessageTracker();
+    }
+    return (BasicScheduledMessageTracker)conn->schedule(raw);
   }
 
   // A connection that shuts down with unsent messages offers them here; they
@@ -609,12 +632,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
       for (size_t n = working_connections.size(); n; --n) {
         if (working_connections.front()->take_over(message)) {
-          // move front element to the end
+          // One connection takes it, and the next message goes to the next
+          // one: move this connection to the end.
           working_connections.splice(working_connections.end(), working_connections, working_connections.begin());
           message.first.reset();
-        } else {
-          working_connections.pop_front();
+          break;
         }
+        working_connections.pop_front();  // dead or full: out of the rotation
       }
       if (working_connections.empty()) {
         break;

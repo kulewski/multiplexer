@@ -124,6 +124,68 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
             finally:
                 client.shutdown()
 
+    def test_a_reply_to_the_first_attempt_answers_after_a_resend(self):
+        """A typed query whose multiplexer dies under the wait is sent again
+        with a new id; the backend, busy two seconds with each attempt,
+        answers the first after the query's first stage ran out. That reply
+        answers the query, as a reply to any attempt does, rather than being
+        dropped while the search waits behind the resent request and times
+        out."""
+
+        def slower(mxmsg):
+            """Two seconds for each "slower"."""
+            if mxmsg.message == b"slower":
+                time.sleep(2.0)
+            return mxmsg.message.upper()
+
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+            peer.on(REQUEST, slower, RESPONSE)
+            client = TestClient(cluster, peers.WEBSITE)
+            try:
+                lane = client.lane()
+                client.query(b"warm-up", REQUEST, multiplexer=lane)
+                victim = cluster.multiplexer_at(lane.connection.endpoint)
+                killer = threading.Timer(0.3, victim.kill)
+                killer.start()
+                reply = client.query(b"slower", REQUEST, multiplexer=lane, timeout=1.5)
+                killer.join()
+                self.assertEqual(b"SLOWER", reply.message)
+                first = peer.arrivals(REQUEST, matching=lambda m: m.message == b"slower")[0][0]
+                self.assertEqual(first.id, reply.references, "the answer to the first attempt")
+            finally:
+                client.shutdown()
+
+    def test_a_resend_leaves_the_callers_message_as_it_was(self):
+        """send_and_receive() sends a message whose connection died again,
+        with a new id; a MultiplexerMessage the caller passed in keeps its
+        own, since the caller may still hold it, to send again or to log."""
+
+        def held(mxmsg):
+            """A second for "held": its multiplexer dies meanwhile."""
+            if mxmsg.message == b"held":
+                time.sleep(1.0)
+            return mxmsg.message.upper()
+
+        with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+            peer.on(REQUEST, held, RESPONSE)
+            client = TestClient(cluster, peers.WEBSITE)
+            try:
+                lane = client.lane()
+                client.query(b"warm-up", REQUEST, multiplexer=lane)
+                victim = cluster.multiplexer_at(lane.connection.endpoint)
+                mxmsg = client.client.new_message(message=b"held", type=REQUEST)
+                own = mxmsg.id
+                killer = threading.Timer(0.3, victim.kill)
+                killer.start()
+                sent_ids = []
+                reply, _ = client.client.send_and_receive(mxmsg, multiplexer=lane, timeout=5, sent_ids=sent_ids)
+                killer.join()
+                self.assertEqual(b"HELD", reply.message)
+                self.assertEqual(2, len(sent_ids), "sent again once its multiplexer died")
+                self.assertEqual(own, mxmsg.id, "the caller's message, untouched")
+            finally:
+                client.shutdown()
+
     def test_the_asymmetric_moment_is_bridged_by_the_locate_phase(self):
         """The addressee is behind one multiplexer only while the client is
         on both: the request through the wrong one comes back as a delivery

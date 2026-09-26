@@ -312,12 +312,15 @@ class Client : public ExceptionDefinitions {
   IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all = false,
-                                    bool handle_delivery_errors = false, std::uint64_t accept_id = 0,
+                                    bool handle_delivery_errors = false,
+                                    const std::vector<uint64_t>& also_accept = std::vector<uint64_t>(),
                                     std::uint32_t ignore_type = 0, std::uint64_t ignore_id = -1,
-                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr());
+                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr(),
+                                    std::vector<uint64_t>* sent_ids = NULL);
   IncomingMessage _send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer& timer,
                                         std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
-                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane);
+                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane,
+                                        std::vector<uint64_t>* sent_ids = NULL);
   ConnectionWrapper _send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
                               LanePtr lane = LanePtr());
   MultiplexerMessage _probe_for(const MultiplexerMessage& query, Probe probe);

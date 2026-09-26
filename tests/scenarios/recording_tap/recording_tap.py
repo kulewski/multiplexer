@@ -94,6 +94,45 @@ class RecordingTap(unittest.TestCase):
                     tap.kill()
                 controller.shutdown()
 
+    def test_a_peer_that_leaves_while_tapping_is_forgotten(self):
+        """A tapping peer that goes without an UNTAP: the multiplexer drops
+        the tap with the connection, routes the next peer's traffic and
+        records it for the tap still there, and exits 0 on SIGTERM. Before,
+        telling the leaving tap about its own departure threw out of the
+        connection's shutdown, and every later record threw again."""
+        cfg = harness.CONFIG
+        with Cluster(1, remote_recording=True) as cluster:
+            staying = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
+            leaving = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
+            try:
+                records = recording.tap(staying, timeout=5)
+                recording.tap(leaving, timeout=5)
+                wait_until(lambda: recording.status(staying)[0].taps == 2, 10, "both taps")
+                leaving.shutdown()
+                wait_until(lambda: recording.status(staying)[0].taps == 1, 10, "the leaver's tap dropped")
+                backend = spawn(
+                    "backend",
+                    cfg.lang("backend"),
+                    mx=cluster.addresses,
+                    type=C.peers.TEST_BACKEND_A,
+                    serves={C.types.TEST_REQUEST_A: C.types.TEST_RESPONSE},
+                )
+                backend.wait_for("connected")
+                client = spawn(
+                    "client",
+                    cfg.lang("client"),
+                    mx=cluster.addresses,
+                    type=C.peers.TEST_CLIENT,
+                    query=[(C.types.TEST_REQUEST_A, "after the leaver")],
+                )
+                self.assertEqual(0, client.wait(30))
+                self.assertEqual(1, len(client.events_of("response")), "routed as before")
+                request = next(r for r in records if r.HasField("routed") and r.routed.type == C.types.TEST_REQUEST_A)
+                self.assertEqual(C.peers.TEST_CLIENT, request.routed.from_peer_type, "recorded for the tap still there")
+                self.assertEqual(0, cluster.mx[0].stop(), "SIGTERM with a tap still there")
+            finally:
+                staying.shutdown()
+
     def test_a_tap_that_stops_reading_loses_records_and_nothing_else(self):
         cfg = harness.CONFIG
         with Cluster(1, remote_recording=True) as cluster:

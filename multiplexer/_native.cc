@@ -207,23 +207,16 @@ struct PythonClient : public Client {
     std::string message(serialized);
     return Client::schedule_one(&message, w, timeout);
   }
-  // schedule_one on `w` only, no reconnect: null when it is gone or full;
-  // `pinned` as for schedule_one_used.
+  // On `w` only, never another connection, as the C++ clients use a lane's:
+  // null when it is gone, dead or full; `pinned` as for schedule_one_used.
   ScheduledMessageTracker schedule_on(pybind11::bytes serialized, ConnectionWrapper w, bool pinned) {
     std::string message(serialized);
     basic_client_->poll();
-    if (!w) {
-      return ScheduledMessageTracker(BasicScheduledMessageTracker());
-    }
     shared_ptr<const RawMessage> raw = _serialize(&message);
     if (pinned) {
       raw->mark_pinned();
     }
-    try {
-      return Client::schedule_one(raw, w, 0);  // no reconnect: a gone connection throws
-    } catch (NotConnected&) {
-      return ScheduledMessageTracker(BasicScheduledMessageTracker());
-    }
+    return ScheduledMessageTracker(basic_client_->schedule_on(raw, w));
   }
 
   unsigned int schedule_all(pybind11::bytes serialized) {

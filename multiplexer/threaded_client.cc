@@ -34,8 +34,16 @@ struct ThreadedClient::InFlight {
   Probe probe = PROBE_SEARCH;
   LanePtr lane;  // held until the query ends, then released
   std::uint64_t request_id = 0, search_id = 0, direct_id = 0;
-  unsigned int pending_delivery_errors = 0;  // during SEARCH: connections yet to answer
-  unsigned int generation = 0;               // bumped per stage so stale deadlines are ignored
+  // The request and direct ids of attempts sent again since, tracked still
+  // for a late reply; empty unless a connection was lost under the query.
+  std::vector<std::uint64_t> earlier_ids;
+  // During SEARCH: the connections the search went through that have not
+  // answered it yet, with a delivery error or by going down. Only these
+  // count: another connection ending, a failed connect for instance, says
+  // nothing about the search.
+  std::vector<ConnectionWrapper> searched;
+  std::vector<std::uint64_t> search_ids;  // every search the query made, the current one last
+  unsigned int generation = 0;            // bumped per stage so stale deadlines are ignored
   Callback callback;
   std::unique_ptr<asio::steady_timer> timer;
   bool addressed() const { return prototype.to() != 0; }
@@ -216,6 +224,13 @@ unsigned int ThreadedClient::connections_count() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
     return basic_client_->connections_count(true);
+  });
+}
+
+std::size_t ThreadedClient::watched_ids() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return by_id_.size();
   });
 }
 
@@ -450,14 +465,10 @@ BasicClient::BasicScheduledMessageTracker ThreadedClient::_schedule(const std::s
   }
   if (lane && lane->holds_connection()) {
     ConnectionWrapper held = lane->connection();
-    if (BasicClient::Connection::pointer conn = held.lock()) {
-      if (conn->living()) {
-        BasicClient::BasicScheduledMessageTracker tracker = conn->schedule(raw);
-        if (tracker) {
-          *used = held;
-          return tracker;
-        }
-      }
+    BasicClient::BasicScheduledMessageTracker tracker = basic_client_->schedule_on(raw, held);
+    if (tracker) {
+      *used = held;
+      return tracker;
     }
     if (lane->pinned()) {
       *refused = true;
@@ -622,15 +633,28 @@ void ThreadedClient::shutdown() {
     MX_LOG(DEBUG, HIGHVERBOSITY,
            CTX("ThreadedClient") TEXT("shutting down: " + repr(in_flight_.size()) + " queries in flight, " +
                                       repr(pending_sends_.size()) + " sends pending"));
+    // A callback that throws is logged and the others still run: the
+    // teardown below must happen, or the io thread runs on and join()
+    // waits for good.
     std::vector<InFlightPtr> pending = in_flight_;
     for (auto& in_flight : pending) {
       if (in_flight->callback) {
-        _finish(in_flight, SHUT_DOWN, NULL);
+        try {
+          _finish(in_flight, SHUT_DOWN, NULL);
+        } catch (const std::exception& e) {
+          MX_LOG(ERROR, LOWVERBOSITY,
+                 CTX("ThreadedClient") TEXT(std::string("a query's callback raised on shutdown: ") + e.what()));
+        }
       }
     }
     for (auto& send : pending_sends_) {
       if (send->done) {
-        send->done(0);
+        try {
+          send->done(0);
+        } catch (const std::exception& e) {
+          MX_LOG(ERROR, LOWVERBOSITY,
+                 CTX("ThreadedClient") TEXT(std::string("a send's callback raised on shutdown: ") + e.what()));
+        }
       }
     }
     pending_sends_.clear();
@@ -746,8 +770,8 @@ void ThreadedClient::_on_connection(const ConnectionWrapper& connection, bool up
         }
         break;
       case InFlight::SEARCH:
-        // One connection fewer to answer the search.
-        if (in_flight->pending_delivery_errors > 0 && --in_flight->pending_delivery_errors == 0) {
+        // One connection fewer to answer the search, if it carried it.
+        if (_answered(in_flight, connection) && in_flight->searched.empty()) {
           _start_query(in_flight, /*keep_deadline=*/true);
         }
         break;
@@ -792,7 +816,11 @@ void ThreadedClient::_start_query(InFlightPtr in_flight, bool keep_deadline) {
     _finish(in_flight, SHUT_DOWN, NULL);
     return;
   }
-  // Ids of an earlier attempt stay tracked, so a late reply is accepted.
+  // Ids of an earlier attempt stay tracked, so a late reply is accepted,
+  // until the query ends.
+  if (in_flight->request_id) {
+    in_flight->earlier_ids.push_back(in_flight->request_id);
+  }
   MultiplexerMessage request = in_flight->prototype;
   request.set_id(random64());
   in_flight->request_id = request.id();
@@ -823,27 +851,34 @@ void ThreadedClient::_start_query(InFlightPtr in_flight, bool keep_deadline) {
 
 void ThreadedClient::_advance(InFlightPtr in_flight, const IncomingMessage& incoming) {
   const MultiplexerMessage& msg = *incoming.third;
+  // What the message answers: one of the query's searches, whose answers
+  // are PINGs and delivery errors, or an attempt of the request itself (the
+  // first, a resend after a lost connection, the direct request), whose
+  // answer is the reply, accepted in any stage. A search's answer is never
+  // the reply: arriving after the query moved on, it is dropped.
+  const std::vector<std::uint64_t>& searches = in_flight->search_ids;
+  const bool to_a_search = std::find(searches.begin(), searches.end(), msg.references()) != searches.end();
+  const bool delivery_error = msg.type() == types::DELIVERY_ERROR;
+  if (!to_a_search && !delivery_error) {
+    _finish(in_flight, REPLIED, &incoming);
+    return;
+  }
   switch (in_flight->stage) {
     case InFlight::REQUEST:
-      if (msg.type() == types::DELIVERY_ERROR) {
-        _search(in_flight);
-      } else {
-        _finish(in_flight, REPLIED, &incoming);
+      if (!to_a_search && msg.references() == in_flight->request_id) {
+        _search(in_flight);  // nobody took the request
       }
-      return;
+      return;  // a delivery error for an earlier attempt, an earlier search's answer
 
     case InFlight::SEARCH:
-      if (msg.references() == in_flight->request_id) {
-        // A late reply to the original request still counts.
-        if (msg.type() != types::DELIVERY_ERROR) {
-          _finish(in_flight, REPLIED, &incoming);
-        }
-        return;
+      if (msg.references() != in_flight->search_id) {
+        return;  // for an earlier search or an earlier attempt
       }
-      if (msg.type() == types::DELIVERY_ERROR) {
-        // Every multiplexer reported no backend of the type, so nothing can
-        // answer any more.
-        if (in_flight->pending_delivery_errors == 0 || --in_flight->pending_delivery_errors == 0) {
+      if (delivery_error) {
+        // Every multiplexer the search went through reported no backend of
+        // the type, so nothing can answer any more.
+        _answered(in_flight, incoming.second);
+        if (in_flight->searched.empty()) {
           _finish(in_flight, FAILED, NULL);
         }
       } else if (msg.type() == types::PING) {
@@ -852,20 +887,12 @@ void ThreadedClient::_advance(InFlightPtr in_flight, const IncomingMessage& inco
       return;
 
     case InFlight::DIRECT:
-      if (msg.references() == in_flight->search_id) {
-        return;  // a later PING from another backend
+      if (!to_a_search && msg.references() == in_flight->direct_id) {
+        _finish(in_flight, FAILED, NULL);  // the backend that answered the search is gone
       }
-      if (msg.type() == types::DELIVERY_ERROR) {
-        _finish(in_flight, FAILED, NULL);
-      } else {
-        _finish(in_flight, REPLIED, &incoming);
-      }
-      return;
+      return;  // a later PING from another backend, a stale delivery error
 
     case InFlight::WAITING:
-      if (msg.type() != types::DELIVERY_ERROR) {
-        _finish(in_flight, REPLIED, &incoming);  // a reply to an earlier attempt after all
-      }
       return;
   }
 }
@@ -895,34 +922,52 @@ void ThreadedClient::_search(InFlightPtr in_flight) {
     msg.set_report_delivery_error(true);
   }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(msg));
-  unsigned int sent = 0;
+  std::vector<ConnectionWrapper> sent;
   if (in_flight->pinned()) {
     ConnectionWrapper used;
     bool refused = false;
     if (_schedule(raw, in_flight->lane, &used, &refused)) {
-      sent = 1;
+      sent.push_back(used);
     } else if (refused) {
       _finish(in_flight, NOT_CONNECTED, NULL);
       return;
     }
   } else {
-    sent = basic_client_->schedule_all(raw);
+    basic_client_->schedule_all(raw, &sent);
   }
-  if (sent == 0) {
+  if (sent.empty()) {
     in_flight->stage = InFlight::WAITING;  // the request goes out again when a connection is back
     return;
   }
   in_flight->search_id = msg.id();
-  in_flight->pending_delivery_errors = sent;
+  in_flight->search_ids.push_back(msg.id());
+  in_flight->searched = sent;
   _track(in_flight, in_flight->search_id);
   in_flight->stage = InFlight::SEARCH;
   _arm(in_flight, left);
+}
+
+// The search went through `connection` and has its answer from it now, a
+// delivery error or the connection going down: it counts no more. False
+// when the search never went through it.
+bool ThreadedClient::_answered(const InFlightPtr& in_flight, const ConnectionWrapper& connection) {
+  std::vector<ConnectionWrapper>& searched = in_flight->searched;
+  for (std::vector<ConnectionWrapper>::iterator it = searched.begin(); it != searched.end(); ++it) {
+    if (it->is_same_connection(connection)) {
+      searched.erase(it);
+      return true;
+    }
+  }
+  return false;
 }
 
 void ThreadedClient::_direct(InFlightPtr in_flight, const IncomingMessage& ping) {
   MultiplexerMessage request = in_flight->prototype;
   request.set_id(random64());
   request.set_to(ping.third->from());
+  if (in_flight->direct_id) {
+    in_flight->earlier_ids.push_back(in_flight->direct_id);  // tracked still, as a request's
+  }
   in_flight->direct_id = request.id();
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(request));
   // Through the connection the PING came on, which is known to reach that
@@ -982,15 +1027,21 @@ void ThreadedClient::_finish(InFlightPtr in_flight, Outcome outcome, const Incom
   asio::error_code ignored;
   in_flight->timer->cancel(ignored);
   ++in_flight->generation;
+  // Every id the query was tracked under: the current request's and
+  // direct request's, every search's, every earlier attempt's.
   by_id_.erase(in_flight->request_id);
   _remember_finished(in_flight->request_id);
-  if (in_flight->search_id) {
-    by_id_.erase(in_flight->search_id);
-    _remember_finished(in_flight->search_id);
-  }
   if (in_flight->direct_id) {
     by_id_.erase(in_flight->direct_id);
     _remember_finished(in_flight->direct_id);
+  }
+  for (std::uint64_t id : in_flight->search_ids) {
+    by_id_.erase(id);
+    _remember_finished(id);
+  }
+  for (std::uint64_t id : in_flight->earlier_ids) {
+    by_id_.erase(id);
+    _remember_finished(id);
   }
   in_flight_.erase(std::remove(in_flight_.begin(), in_flight_.end(), in_flight), in_flight_.end());
   Callback callback;
