@@ -1,0 +1,4 @@
+# What the example runs on: `pip install -r requirements.txt`.
+mx-multiplexer
+django
+protobuf

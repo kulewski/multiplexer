@@ -68,12 +68,23 @@ The multiplexer needs `protoc` and `libprotobuf` from the system, and C++17.
   another workspace.
 - [aio](aio/): an asyncio TCP gateway with `AsyncClient` in front of a chat
   backend, replies to the client that asked and broadcasts to every client.
+- [cache](cache/): a replicated cache as a Django cache backend, the
+  smallest example of both routing modes: a write goes to every replica, a
+  read to any one. Its walkthrough builds it line by line and walks through
+  its test, the harness's showcase. A pip example.
 - [inference](inference/): a Django web app asking a pool of PyTorch model
   workers, with the walkthrough notebook that builds it up and shows a
-  worker die, a rolling restart and a multiplexer die. A pip example.
+  worker die, a rolling restart and a multiplexer die. A pip example too.
 
 ## Adding an example
 
-Copy `echo/`, keep its `WORKSPACE` and `.bazelrc`, replace the rules file and
-the programs, and add a `py_test` that starts `@mx//mxcontrol` and exercises
-the example end to end, so `test_all.sh` covers it.
+A Bazel example: copy `echo/`, keep its `WORKSPACE` and `.bazelrc`, replace
+the rules file and the programs, and add a `py_test` that starts
+`@mx//mxcontrol` and exercises the example end to end, so `test_all.sh`
+covers it. A pip example: copy `cache/`, with a `requirements.txt`, a
+`test.py` on the harness and a `test.sh` that makes a venv and runs it.
+Either way, list the example's paths in `pyrightconfig.json`, which types
+every example against the tree. A walkthrough that builds the example up,
+`walkthrough.md`, shows the files in fenced blocks marked `file=`, and
+`check_walkthroughs.py`, which `format.sh --check` runs, keeps those blocks
+identical to the files.
