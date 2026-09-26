@@ -667,6 +667,18 @@ py_test(
 )
 
 py_test(
+    name = "unrouted_test",
+    size = "medium",
+    srcs = ["unrouted_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "mxlog_test",
     size = "small",
     srcs = ["mxlog_test.py"],

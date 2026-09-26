@@ -256,9 +256,10 @@ compiles with `-g` and installs unstripped.
 
 The multiplexer and both libraries log to stderr, one entry per line, with
 the level, timestamp, pid, context, workflow id, message and source
-location. The multiplexer logs every peer that registers and leaves at `INFO`, every
-undelivered message at `ERROR` or `WARNING` according to the
-rule, and every message dropped for a full queue at `WARNING`.
+location. The multiplexer logs every peer that registers and leaves at `INFO`, a
+message a rule queued nowhere at `ERROR`, or `WARNING` when the rule's
+`delivery_error_is_error` is false, saying why (below), and a copy a full
+connection refuses at `WARNING`.
 
 A few lines are worth knowing by their text. At start the multiplexer
 logs `rules loaded from <path>: <fingerprint>, <n> message types, <m> peer
@@ -269,7 +270,12 @@ types`, and for every file it puts in use later `rules reloaded from
 made and `unregistered connection` when it ends, and a `SyncClient` or a
 server class logs `connecting to` before it; a `ThreadedClient` warns
 `connection lost under query <id>; sending again`, or `; locating the
-addressee`, for each query it sends again.
+addressee`, for each query it sends again. A message a rule queued nowhere
+gives one of three lines: `routing while none present of type N (NAME)`
+when no peer of the type is connected; `routing off on every peer of type
+N (NAME)` when every one has turned rule routing off, as while it drains;
+and `queue full on every peer of type N (NAME) that takes it` when every
+peer that would take it is full.
 
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a

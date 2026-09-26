@@ -181,4 +181,5 @@ PY_TEST_FILES := \
   multiplexer/threaded_lanes_test.py \
   multiplexer/threaded_sends_test.py \
   multiplexer/threaded_server_test.py \
+  multiplexer/unrouted_test.py \
 

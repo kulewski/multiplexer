@@ -294,3 +294,13 @@ type {
     name: "TEST_UNROUTED"
     comment: "no routing rule on purpose"
 }
+
+type {
+    type: 207
+    name: "TEST_TINY_QUEUE_EVENT"
+    comment: "to any one TEST_TINY_QUEUE peer, to test what the multiplexer says when every queue is full"
+    to {
+        peer: "TEST_TINY_QUEUE"
+        whom: ANY
+    }
+}

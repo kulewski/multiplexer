@@ -244,6 +244,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
   unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
+  // The log line for a rule that queued a message nowhere, saying why: no
+  // living peer of the type, routing off on every one, or the queue full on
+  // every one that takes it. `by_any` names the Routing flag the rule tests.
+  // Only on that failure path.
+  std::string _unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const;
+
   // Recording. A record is built once and goes to the file session and to
   // every tap; nothing is built while neither exists.
   void _record(const MessageMetaHandler& meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,

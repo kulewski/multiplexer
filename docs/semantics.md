@@ -35,9 +35,14 @@ that changes.
   where a late copy came after the library forgot the first.
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type. For `ANY` a
-  full peer is skipped in favour of the next one; for `ALL`, and when every
-  peer of the type is full, the message is dropped for that peer with a
-  warning in the multiplexer's log. The library on the receiving side holds
+  full peer is skipped in favour of the next one; for `ALL` a full peer's
+  copy is dropped with a warning in the multiplexer's log. When every peer
+  of the type that takes the message is full, the multiplexer logs `queue
+  full on every peer of type N (NAME) that takes it` at the rule's level,
+  and the rule's `report_delivery_error` answers the sender with a
+  `DELIVERY_ERROR`, as for a type nobody is connected as: a query to a
+  saturated type fails with `OperationFailed` once its search finds the
+  same full queues. The library on the receiving side holds
   at most 1024 unread messages and drops beyond that too. A backend that
   reads slower than clients send loses messages rather than memory. On
   the sending side a client's queue to each multiplexer holds 1024

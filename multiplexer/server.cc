@@ -397,10 +397,43 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
     const unsigned int level = rule.delivery_error_is_error() ? ERROR : WARNING;
     MX_LOG(level, HIGHVERBOSITY,
            CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
-               TEXT("routing while none present of type " + repr(rule.peer_type()) + " (" +
-                    config_.peer_name_by_type(rule.peer_type()) + ")"));
+               TEXT(_unrouted(rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY)));
   }
   return scheduled;
+}
+
+std::string Server::_unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const {
+  bool present = false;
+  bool takes = false;
+  const auto look_at = [&](const ConnectionsList& connections) {
+    for (const auto& weak : connections) {
+      if (Connection::pointer connection = weak.lock()) {
+        if (connection->living()) {
+          present = true;
+          takes =
+              takes || (by_any ? connection->accepts_any() : connection->accepts_all()) || connection->last_resort();
+        }
+      }
+    }
+  };
+  if (rule.peer_type() == peers::ALL_TYPES) {
+    for (const ConnectionsByType::value_type& by_type : connections_by_type_) {
+      look_at(by_type.second);
+    }
+  } else {
+    ConnectionsByType::const_iterator found = connections_by_type_.find(rule.peer_type());
+    if (found != connections_by_type_.end()) {
+      look_at(found->second);
+    }
+  }
+  const std::string type = repr(rule.peer_type()) + " (" + config_.peer_name_by_type(rule.peer_type()) + ")";
+  if (!present) {
+    return "routing while none present of type " + type;
+  }
+  if (!takes) {
+    return "routing off on every peer of type " + type;
+  }
+  return "queue full on every peer of type " + type + " that takes it";
 }
 
 unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
