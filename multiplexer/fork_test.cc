@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <future>
 #include <memory>
 
 #include "multiplexer/client.h"
@@ -63,6 +64,15 @@ TEST(Fork, InheritedClientsAreOrphansAndTheParentKeepsWorking) {
   sync->connect("127.0.0.1", mx.port, 5);
   std::unique_ptr<ThreadedClient> threaded(new ThreadedClient(multiplexer::peers::WEBSITE));
   ASSERT_TRUE(threaded->connect("127.0.0.1", mx.port, 5));
+  // Fork only once the client's io thread and the multiplexer's are idle:
+  // one inside the allocator at the fork leaves its lock taken in the
+  // child, where an AddressSanitizer build waits on it forever (glibc's
+  // malloc takes its locks across a fork; the sanitizer's does not). A
+  // round trip through each thread lets it finish what it was doing.
+  threaded->connections_count();
+  std::promise<void> served;
+  mx.io_service.post([&served] { served.set_value(); });
+  served.get_future().wait();
 
   pid_t pid = fork();
   ASSERT_NE(-1, pid);
