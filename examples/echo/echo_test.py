@@ -60,6 +60,7 @@ class EchoTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        assert self.backend.stdout is not None
         self.assertEqual(b"ready\n", self.backend.stdout.readline())
 
     def query_in_process(self, backend_binary: str) -> None:

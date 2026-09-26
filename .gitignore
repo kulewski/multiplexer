@@ -14,3 +14,12 @@ __pycache__/
 /.cache/
 # Editor state
 /.vscode/
+
+# The examples: the virtual environments their test.sh scripts make
+# (examples/.venv shared by the examples workflow, and made by
+# examples/venv.sh for check.sh), and the logs and process ids their steps
+# write; anything else an example writes, its own .gitignore names.
+examples/.venv
+examples/*/.venv
+examples/*/*.log
+examples/*/*.pid
