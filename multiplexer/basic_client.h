@@ -38,6 +38,7 @@
 #include "multiplexer/connections_manager.h"
 #include "multiplexer/defaults.h"
 #include "multiplexer/io/connection.h"
+#include "multiplexer/log_summary.h"
 
 namespace multiplexer {
 
@@ -484,6 +485,16 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   IncomingMessagesBuffer::value_type next_incoming_message();  // pop the oldest; only when has_incoming_messages()
   inline bool incoming_queue_full() const { return incoming_queue_max_size_ <= incoming_messages_.size(); }
 
+  // The lines about messages this client dropped, at most about two per
+  // kind and second (see LogSummary); for the io thread only, the classes
+  // built on this one included. The kinds the library tells apart:
+  enum DropLine : unsigned int {
+    INCOMING_QUEUE_FULL,  // nobody read the incoming queue in time
+    NO_ON_MESSAGE,        // a ThreadedClient given no callback for messages
+    REQUESTS_QUEUE_FULL,  // a threaded backend's workers fell behind
+  };
+  LogSummary& drop_lines() { return drop_lines_; }
+
   // Runs the loop until a message is queued or `timeout` seconds pass;
   // throws OperationTimedOut, or NotConnected when no connection exists.
   void inline wait_for_incoming_message(float timeout = -1) const {
@@ -694,6 +705,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   unsigned int routing_version_ = 0;  // bumped by set_routing; 0 is the default routing
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
+  LogSummary drop_lines_;
 
   ConnectionByTarget connection_by_target_;
   std::set<TimerPointer> reconnect_timers_;        // armed by lost connections; shutdown() cancels them

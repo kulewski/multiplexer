@@ -194,7 +194,11 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
   request->dropped_ = true;  // said below, not by the destructor
   const std::string what = "request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type());
   if (accepting) {
-    MX_LOG(WARNING, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
+    // Counted with the client's own drop lines: at most about two a second.
+    if (client_.drop_lines().first({BasicClient::REQUESTS_QUEUE_FULL, WARNING, 0, 0},
+                                   [] { return "requests dropped: queue full"; })) {
+      MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
+    }
     return;
   }
   const MultiplexerMessage& msg = *incoming.third;

@@ -31,6 +31,7 @@
 #include "multiplexer/connections_manager.h"
 #include "multiplexer/defaults.h"
 #include "multiplexer/io/connection.h"
+#include "multiplexer/log_summary.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 #include "multiplexer/recorder.h"
 
@@ -244,11 +245,26 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
   unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
-  // The log line for a rule that queued a message nowhere, saying why: no
-  // living peer of the type, routing off on every one, or the queue full on
-  // every one that takes it. `by_any` names the Routing flag the rule tests.
-  // Only on that failure path.
-  std::string _unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const;
+  // Why a rule queued a message nowhere: no living peer of the type,
+  // routing off on every one, or the queue full on every one that takes it.
+  // `by_any` names the Routing flag the rule tests. Only on that failure
+  // path. _unrouted_text() is the log line for it.
+  enum Unrouted : unsigned int { NONE_PRESENT, ROUTING_OFF, ALL_FULL };
+  Unrouted _unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const;
+  std::string _unrouted_text(Unrouted why, std::uint32_t peer_type) const;
+
+  // What drops_ tells apart, besides the three above: the kinds of line
+  // about a message that went nowhere (LogSummary::Kind::reason).
+  enum Dropped : unsigned int {
+    NOT_CONNECTED = ALL_FULL + 1,  // `to` names no connected peer
+    QUEUE_FULL,                    // one peer's copy, to it or under whom ALL
+    UNKNOWN_TYPE,
+    NO_RULE,
+    UNKNOWN_PROTOCOL_TYPE,
+    BAD_SEARCH,
+  };
+  // A peer's copy its full queue refused; the line names the peer.
+  void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection);
 
   // Recording. A record is built once and goes to the file session and to
   // every tap; nothing is built while neither exists.
@@ -350,6 +366,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   asio::steady_timer session_timer_;
   Taps taps_;
   std::string peers_file_;
+
+  // The lines about messages that went nowhere: see LogSummary.
+  LogSummary drops_;
 };  // class Server
 
 };  // namespace multiplexer

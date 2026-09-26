@@ -21,6 +21,7 @@ LIB_SRCS := \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
   multiplexer/io/raw_message.cc \
+  multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
@@ -102,6 +103,7 @@ HEADERS := \
   multiplexer/defaults.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
+  multiplexer/log_summary.h \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
@@ -155,6 +157,7 @@ CC_TEST_SRCS := \
   multiplexer/client_names_test.cc \
   multiplexer/connect_by_name_test.cc \
   multiplexer/fork_test.cc \
+  multiplexer/log_summary_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
@@ -164,6 +167,7 @@ PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_by_name_test.py \
+  multiplexer/drop_lines_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \

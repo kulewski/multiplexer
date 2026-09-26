@@ -36,7 +36,8 @@ that changes.
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type. For `ANY` a
   full peer is skipped in favour of the next one; for `ALL` a full peer's
-  copy is dropped with a warning in the multiplexer's log. When every peer
+  copy is dropped with a warning in the multiplexer's log, about one line
+  a second for each peer however many it drops. When every peer
   of the type that takes the message is full, the multiplexer logs `queue
   full on every peer of type N (NAME) that takes it` at the rule's level,
   and the rule's `report_delivery_error` answers the sender with a

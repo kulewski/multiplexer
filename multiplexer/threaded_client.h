@@ -78,6 +78,10 @@
 
 namespace multiplexer {
 
+namespace backend {
+class BaseThreadedMultiplexerServer;
+}  // namespace backend
+
 class ThreadedClient : public ExceptionDefinitions {
  public:
   // How a query ended. REPLIED: `reply` holds the answer. TIMED_OUT: a stage
@@ -229,6 +233,11 @@ class ThreadedClient : public ExceptionDefinitions {
   bool orphaned() const;
 
  private:
+  // The io thread's lines about dropped messages (BasicClient::drop_lines),
+  // for a message callback, which runs there: the threaded backend's.
+  friend class backend::BaseThreadedMultiplexerServer;
+  LogSummary& drop_lines();
+
   class Core;  // the state, which the io thread co-owns: threaded_client_core.h
   std::shared_ptr<Core> core_;
   const std::uint32_t peer_type_;

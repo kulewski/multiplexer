@@ -356,7 +356,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     Assert(!shuts_down_);
 
     if (!force && outgoing_queue_full()) {
-      MX_LOG(WARNING, HIGHVERBOSITY, TEXT("outgoing queue full, dropping message"));
+      // Per message, so off unless asked for: the manager, which knows the
+      // peer and the message, says it (the multiplexer through LogSummary).
+      MX_LOG(DEBUG, CHATTERBOX, TEXT("outgoing queue full, dropping message"));
       return scheduling_result_type_default_functor_();  // drop
     }
 

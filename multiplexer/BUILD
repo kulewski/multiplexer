@@ -273,6 +273,29 @@ cc_library(
     ],
 )
 
+# Lines about dropped messages, at most about two per kind and second.
+cc_library(
+    name = "log_summary",
+    srcs = ["log_summary.cc"],
+    hdrs = ["log_summary.h"],
+    deps = [
+        "//lib/logging",
+        "@asio",
+    ],
+)
+
+cc_test(
+    name = "log_summary_test",
+    size = "small",
+    srcs = ["log_summary_test.cc"],
+    deps = [
+        ":log_summary",
+        "//lib/logging",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "connections_manager",
     srcs = ["connections_manager.cc"],
@@ -405,6 +428,7 @@ cc_library(
     hdrs = ["basic_client.h"],
     deps = [
         ":connections_manager",
+        ":log_summary",
         ":multiplexer_cc_constants",
         "//lib:fork",
         "//lib:mutex",
@@ -437,6 +461,7 @@ cc_library(
     visibility = ["//mxcontrol:__pkg__"],
     deps = [
         ":connections_manager",
+        ":log_summary",
         ":multiplexer_cc_proto",
         ":recorder",
         "//lib:exception",
@@ -662,6 +687,19 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "drop_lines_test",
+    size = "medium",
+    srcs = ["drop_lines_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
         "//multiplexer/testing",
     ],
 )

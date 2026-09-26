@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <regex>
 #include <thread>
 
 #include "multiplexer/backend/base_threaded_multiplexer_server.h"
@@ -266,6 +267,37 @@ TEST(ThreadedServer, AFullQueueDropsAndTheRestIsHandledInOrder) {
   served.server.release();
   EXPECT_EQ("MARKER", requester.query("marker", lane));
   EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "marker"}), served.server.snapshot());
+}
+
+// The drops of a full queue said as one line and a count, not a line each:
+// fifty dropped while the worker is held, said by the time the server is
+// gone, since its client's shutdown says what is still counted.
+TEST(ThreadedServer, AFullQueueSaysItsDropsInOneLineAndACount) {
+  InProcessMultiplexer mx;
+  ::testing::internal::CaptureStderr();
+  {
+    ThreadedServerOptions options;
+    options.queue_size = 1;
+    Served served(mx.port, options);
+    Requester requester(mx.port);
+    multiplexer::LanePtr lane(new multiplexer::Lane());
+    requester.send("block", lane);
+    ASSERT_TRUE(eventually([&] { return served.server.pending() == 1; }));
+    for (int index = 0; index < 51; ++index) {
+      requester.send("event-" + std::to_string(index), lane);
+    }
+    ASSERT_TRUE(eventually([&] { return served.server.dropped() == 50; }));
+    served.server.release();
+  }
+  const std::string log = ::testing::internal::GetCapturedStderr();
+  const std::regex first(R"(request #\d+ of type \d+ dropped: queue full)");
+  const std::regex counted(R"(requests dropped: queue full \[(\d+) more in the last \d+\.\d s\])");
+  EXPECT_EQ(1, std::distance(std::sregex_iterator(log.begin(), log.end(), first), std::sregex_iterator())) << log;
+  std::uint64_t more = 0;
+  for (std::sregex_iterator match(log.begin(), log.end(), counted), end; match != end; ++match) {
+    more += std::stoull((*match)[1].str());
+  }
+  EXPECT_EQ(49u, more) << log;
 }
 
 TEST(ThreadedServer, AThrowingHandlerReportsBackendErrorAndServesOn) {

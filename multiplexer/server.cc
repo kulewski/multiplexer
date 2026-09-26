@@ -27,7 +27,8 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
       acceptor_(io_service, asio::ip::tcp::endpoint(asio::ip::address::from_string(host), port)),
       io_service_(io_service),
       rules_timer_(io_service),
-      session_timer_(io_service) {}
+      session_timer_(io_service),
+      drops_(io_service, "multiplexer.server") {}
 
 void Server::start() {
   _start_accept();
@@ -48,6 +49,7 @@ void Server::stop() {
   for (size_t index = 0; index < live.size(); ++index) {
     live[index]->shutdown();
   }
+  drops_.flush();
   // After the peers left, so their departures are in the file; the
   // session's deadline timer would otherwise keep the loop alive.
   stop_recording("the multiplexer stopped");
@@ -166,8 +168,11 @@ void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage&
     const Config::MessageDescriptionById& definitions = config_.message_description_by_id();
     Config::MessageDescriptionById::const_iterator definition = definitions.find(msg.type());
     if (definition == definitions.end()) {
-      MX_LOG(WARNING, HIGHVERBOSITY,
-             CTX("multiplexer.server") TEXT("message of unknown type " + repr(msg.type()) + "; dropping"));
+      if (const std::string* line = drops_.first({UNKNOWN_TYPE, WARNING, msg.type(), 0}, [&] {
+            return "message of unknown type " + repr(msg.type()) + "; dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(msg.workflow()) TEXT(*line));
+      }
       meta_handler.unknown();
       _record(meta_handler, 0, 0, RoutedMessage::UNKNOWN_TYPE, true);
       break;  // won't be handled at all
@@ -178,9 +183,12 @@ void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage&
     if (description.to().empty()) {
       // A reply type, or any other without a rule, sent without `to`: nobody
       // could ever receive it. Say so now rather than let the sender wait.
-      MX_LOG(WARNING, HIGHVERBOSITY,
-             CTX("multiplexer.server") TEXT("message of type " + repr(msg.type()) + " (" + description.name() +
-                                            ") has no routing rule and no `to`; dropping"));
+      if (const std::string* line = drops_.first({NO_RULE, WARNING, msg.type(), 0}, [&] {
+            return "message of type " + repr(msg.type()) + " (" + description.name() +
+                   ") has no routing rule and no `to`; dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(msg.workflow()) TEXT(*line));
+      }
       meta_handler.unroutable();
       _record(meta_handler, 0, 0, RoutedMessage::NO_RULE, true);
       break;
@@ -205,7 +213,9 @@ void Server::_handle_delivery_errors(MessageMetaHandler& meta_handler) {
     return;  // no errors
   }
 
-  MX_LOG(ERROR, HIGHVERBOSITY,
+  // Per message, so off unless asked for: the line saying why, logged
+  // where the failure was found, is the one that counts.
+  MX_LOG(DEBUG, CHATTERBOX,
          CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
              TEXT("errors when delivering " + repr(meta_handler.msg.id()))
                  SKIPFILEIF(!(meta_handler.msg.logging_method() & multiplexer::LoggingMethod::FILE)));
@@ -256,9 +266,11 @@ bool Server::_handle_message_inlined_rules(MessageMetaHandler& meta_handler) {
       }
       _record(meta_handler, meta_handler.msg.to(), 0, RoutedMessage::NO_RECIPIENT,
               meta_handler.msg.report_delivery_error());
-      MX_LOG(WARNING, HIGHVERBOSITY,
-             CTX("multiplexer.server")
-                 TEXT("message to " + repr(meta_handler.msg.to()) + " which is not connected; dropping"));
+      if (const std::string* line = drops_.first({NOT_CONNECTED, WARNING, 0, meta_handler.msg.to()}, [&] {
+            return "message to " + repr(meta_handler.msg.to()) + " which is not connected; dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+      }
       return true;
     }
     // A full queue drops the message like an absent peer does, and the
@@ -271,6 +283,7 @@ bool Server::_handle_message_inlined_rules(MessageMetaHandler& meta_handler) {
       }
       _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL,
               meta_handler.msg.report_delivery_error());
+      _dropped_queue_full(meta_handler, *connection);
     }
     return true;
   }
@@ -323,18 +336,21 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     case types::BACKEND_FOR_PACKET_SEARCH: {
       BackendForPacketSearch search;
       if (!search.ParseFromString(meta_handler.msg.message())) {
-        MX_LOG(ERROR, HIGHVERBOSITY,
-               CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
-                   TEXT("garbled BACKEND_FOR_PACKET_SEARCH packet"));
+        if (const std::string* line =
+                drops_.first({BAD_SEARCH, ERROR, 0, 0}, [] { return "garbled BACKEND_FOR_PACKET_SEARCH packet"; })) {
+          MX_LOG(ERROR, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+        }
         meta_handler.unknown();
         return true;
       }
       const MultiplexerMessageDescription* description = config_.message_description(search.packet_type());
       if (!description || !description->to().size()) {
-        MX_LOG(ERROR, HIGHVERBOSITY,
-               CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
-                   TEXT("BACKEND_FOR_PACKET_SEARCH: unknown packet type " + repr(search.packet_type()) +
-                        " or type with no routing rules"));
+        if (const std::string* line = drops_.first({BAD_SEARCH, ERROR, search.packet_type(), 0}, [&] {
+              return "BACKEND_FOR_PACKET_SEARCH: unknown packet type " + repr(search.packet_type()) +
+                     " or type with no routing rules";
+            })) {
+          MX_LOG(ERROR, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+        }
         meta_handler.unknown();
         return true;
       }
@@ -358,9 +374,11 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       return true;
 
     default:
-      MX_LOG(WARNING, HIGHVERBOSITY,
-             CTX("multiplexer.server")
-                 TEXT("unknown protocol message type " + repr(meta_handler.msg.type()) + "; dropping"));
+      if (const std::string* line = drops_.first({UNKNOWN_PROTOCOL_TYPE, WARNING, meta_handler.msg.type(), 0}, [&] {
+            return "unknown protocol message type " + repr(meta_handler.msg.type()) + "; dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") TEXT(*line));
+      }
       return true;
   }
 }
@@ -395,14 +413,16 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
 
   if (!scheduled) {
     const unsigned int level = rule.delivery_error_is_error() ? ERROR : WARNING;
-    MX_LOG(level, HIGHVERBOSITY,
-           CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
-               TEXT(_unrouted(rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY)));
+    const Unrouted why = _unrouted(rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY);
+    if (const std::string* line =
+            drops_.first({why, level, rule.peer_type(), 0}, [&] { return _unrouted_text(why, rule.peer_type()); })) {
+      MX_LOG(level, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+    }
   }
   return scheduled;
 }
 
-std::string Server::_unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const {
+Server::Unrouted Server::_unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const {
   bool present = false;
   bool takes = false;
   const auto look_at = [&](const ConnectionsList& connections) {
@@ -426,14 +446,32 @@ std::string Server::_unrouted(const MultiplexerMessageDescription::RoutingRule& 
       look_at(found->second);
     }
   }
-  const std::string type = repr(rule.peer_type()) + " (" + config_.peer_name_by_type(rule.peer_type()) + ")";
   if (!present) {
-    return "routing while none present of type " + type;
+    return NONE_PRESENT;
   }
-  if (!takes) {
-    return "routing off on every peer of type " + type;
+  return takes ? ALL_FULL : ROUTING_OFF;
+}
+
+std::string Server::_unrouted_text(Unrouted why, std::uint32_t peer_type) const {
+  const std::string type = repr(peer_type) + " (" + config_.peer_name_by_type(peer_type) + ")";
+  switch (why) {
+    case NONE_PRESENT:
+      return "routing while none present of type " + type;
+    case ROUTING_OFF:
+      return "routing off on every peer of type " + type;
+    case ALL_FULL:
+      break;
   }
   return "queue full on every peer of type " + type + " that takes it";
+}
+
+void Server::_dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection) {
+  if (const std::string* line = drops_.first({QUEUE_FULL, WARNING, connection.peer_type(), connection.peer_id()}, [&] {
+        return "outgoing queue full, dropping message to peer " + repr(connection.peer_id()) + " of type " +
+               repr(connection.peer_type()) + " (" + _peer_name(connection.peer_type()) + ")";
+      })) {
+    MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+  }
 }
 
 unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
@@ -465,7 +503,7 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
 
 // whom: ALL. Every live connection of the type that takes the path gets
 // the frame (Routing.all, or Routing.any for a search); one whose queue is
-// full drops it (Connection::schedule logs that) and is not counted. The
+// full drops it, said by _dropped_queue_full, and is not counted. The
 // peers that take nothing by the path are skipped, and recorded as such,
 // unless no peer takes it: then the last resorts among them get it.
 unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
@@ -496,6 +534,7 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
         _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
       } else {
         _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
+        _dropped_queue_full(meta_handler, *connection);
       }
     } else {
       connections.erase(current);  // dead connection

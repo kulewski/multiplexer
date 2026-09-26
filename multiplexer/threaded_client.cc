@@ -190,6 +190,8 @@ ThreadedClient::Result ThreadedClient::query(const MultiplexerMessage& msg, cons
   return core_->query(msg, connection, timeout, probe);
 }
 void ThreadedClient::shutdown() { core_->shutdown(); }
+LogSummary& ThreadedClient::drop_lines() { return core_->drop_lines(); }
+
 bool ThreadedClient::orphaned() const { return core_->orphaned(); }
 
 ThreadedClient::Core::Core(std::uint32_t peer_type, MessageSink on_message)
@@ -1181,9 +1183,13 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
     _guarded([&] { on_message_(incoming); }, [&] { return "on_message, for " + describe(msg); });
     return;
   }
-  MX_LOG(WARNING, MEDIUMVERBOSITY,
-         CTX("ThreadedClient") TEXT("message #" + repr(msg.id()) + " of type " + repr(msg.type()) +
-                                    " dropped: this client has no on_message callback"));
+  if (basic_client_->drop_lines().first({BasicClient::NO_ON_MESSAGE, WARNING, msg.type(), 0}, [&] {
+        return "messages of type " + repr(msg.type()) + " dropped: this client has no on_message callback";
+      })) {
+    MX_LOG(WARNING, LogSummary::VERBOSITY,
+           CTX("ThreadedClient") TEXT("message #" + repr(msg.id()) + " of type " + repr(msg.type()) +
+                                      " dropped: this client has no on_message callback"));
+  }
 }
 
 void ThreadedClient::Core::_remember_finished(std::uint64_t id) {

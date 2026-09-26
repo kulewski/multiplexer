@@ -8,14 +8,16 @@ leaving.
 import threading
 import time
 import unittest
+from unittest import mock
 
-from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, Routing
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, MultiplexerMessage, Routing
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationFailed, OperationTimedOut
 from multiplexer.testing import BackendThread, Cluster, TestClient, wait_until
 from multiplexer.threaded_client import ThreadedClient
-from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
+import multiplexer.threaded_server as threaded_server
+from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request, _DropLines
 from multiplexer.testing import runfile
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
@@ -385,6 +387,39 @@ class ThreadedServerTest(unittest.TestCase):
             self.assertEqual(b"LATE", client.query(b"late", REQUEST).message)
         server.stop()
         thread.join(10)
+
+
+class DropLinesTest(unittest.TestCase):
+    """The lines about requests a full queue dropped, on a clock of the
+    test's own: what each line stands for adds up to every drop."""
+
+    def test_the_first_at_once_one_count_a_second_and_the_rest_when_taken(self) -> None:
+        """Twenty-one drops within a second: one line, then one count of
+        twenty; two more, then the queue takes a request: their count;
+        and the next drop starts a burst of its own."""
+        now = [100.0]
+        said: list[str] = []
+        lines = _DropLines(clock=lambda: now[0])
+        request = MultiplexerMessage(id=7, type=types.PYTHON_TEST_REQUEST)
+        with mock.patch.object(threaded_server, "log", lambda level, verbosity, text: said.append(text)):
+            for _ in range(10):
+                lines.dropped(request)
+            now[0] += 0.5
+            for _ in range(10):
+                lines.dropped(request)
+            self.assertEqual(["request #7 of type %d dropped: queue full" % types.PYTHON_TEST_REQUEST], said)
+            now[0] += 0.5
+            lines.dropped(request)  # a second after the first line: the count so far
+            self.assertEqual("requests dropped: queue full [20 more in the last 1.0 s]", said[-1])
+            now[0] += 0.3
+            lines.dropped(request)
+            lines.dropped(request)
+            lines.accepted()  # the burst is over: its rest
+            self.assertEqual("requests dropped: queue full [2 more in the last 0.3 s]", said[-1])
+            lines.accepted()
+            lines.dropped(request)  # a new burst starts with a line of its own
+            self.assertEqual(4, len(said))
+            self.assertTrue(said[-1].startswith("request #7"))
 
 
 if __name__ == "__main__":

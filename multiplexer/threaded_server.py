@@ -30,9 +30,58 @@ from typing import Any, Callable
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxclient import ConnectionWrapper, parse_message
-from multiplexer.mxlog import DEBUG, ERROR, LOWVERBOSITY, WARNING, log
+from multiplexer.mxlog import DEBUG, ERROR, HIGHVERBOSITY, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
+
+
+class _DropLines:
+    """The lines about requests a full queue dropped, at most about two a
+    second however many there are, as the C++ library's LogSummary says
+    its own: the first of a burst at once, then, while the drops go on,
+    one line a second with how many more there were, and the rest once
+    the queue takes a request again. The io thread's only."""
+
+    INTERVAL = 1.0  # seconds between two counts
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self.burst = False  # a drop was said and the queue has taken nothing since
+        self.more = 0  # dropped since the last line
+        self.since = 0.0  # when the last line was said
+
+    def dropped(self, mxmsg: MultiplexerMessage) -> None:
+        """A request was dropped: said now when it is the first of a
+        burst or a second has passed, else counted."""
+        now = self.clock()
+        if not self.burst:
+            self.burst = True
+            self.since = now
+            log(
+                WARNING,
+                HIGHVERBOSITY,
+                text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type),
+            )
+            return
+        self.more += 1
+        if now - self.since >= self.INTERVAL:
+            self._say(now)
+
+    def accepted(self) -> None:
+        """The queue took a request: the burst is over, and its rest is said."""
+        if self.more:
+            self._say(self.clock())
+        self.burst = False
+
+    def _say(self, now: float) -> None:
+        """The count since the last line, in LogSummary's words."""
+        log(
+            WARNING,
+            HIGHVERBOSITY,
+            text="requests dropped: queue full [%d more in the last %.1f s]" % (self.more, now - self.since),
+        )
+        self.more = 0
+        self.since = now
 
 
 class Request:
@@ -183,6 +232,7 @@ class BaseThreadedMultiplexerServer:
         self._cond = threading.Condition()
         self._busy = 0  # workers running a handler
         self.dropped = 0  # requests dropped for a full queue, or while leaving
+        self._drop_lines = _DropLines()  # what is said about the requests a full queue dropped
         self._accepting = True
         self._wake = threading.Event()
         self._failure: BaseException | None = None
@@ -384,15 +434,20 @@ class BaseThreadedMultiplexerServer:
         drop it then if it answers another message."""
         request = Request(self, mxmsg, connection)
         with self._cond:
-            if self._accepting and len(self._queue) < self.queue_size:
+            accepting = self._accepting
+            accepted = accepting and len(self._queue) < self.queue_size
+            if accepted:
                 self._queue.append(request)
                 self._cond.notify()
-                return
-            accepting = self._accepting
-            self.dropped += 1
+            else:
+                self.dropped += 1
+        if accepted:
+            if self._drop_lines.burst:
+                self._drop_lines.accepted()
+            return
         request.dropped = True  # said below, not by __del__
         if accepting:
-            log(WARNING, LOWVERBOSITY, text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type))
+            self._drop_lines.dropped(mxmsg)
             return
         if mxmsg.references:
             # A message that answers another is dropped: nobody retries a

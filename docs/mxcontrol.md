@@ -64,8 +64,9 @@ serving.
 
 Each peer that connects is logged at `INFO` with its instance id and peer
 type, and again when it leaves. A message nobody could receive is
-logged at `ERROR`, or `WARNING` if the rule says so, and a full queue is
-logged at `WARNING` for every message dropped.
+logged at `ERROR`, or `WARNING` if the rule says so, and a message a full
+queue drops at `WARNING`: the first of a kind at once, the rest as one
+line a second with a count ([logs](operations.md#logs)).
 
 ## generate_constants
 

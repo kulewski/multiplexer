@@ -259,7 +259,30 @@ the level, timestamp, pid, context, workflow id, message and source
 location. The multiplexer logs every peer that registers and leaves at `INFO`, a
 message a rule queued nowhere at `ERROR`, or `WARNING` when the rule's
 `delivery_error_is_error` is false, saying why (below), and a copy a full
-connection refuses at `WARNING`.
+connection refuses at `WARNING`, as `outgoing queue full, dropping message
+to peer ID of type N (NAME)`.
+
+A line about a message that went nowhere is logged at once the first time,
+and about once a second after that, while it goes on happening, as the
+same line with a count: `routing while none present of type 106 (BACKEND)
+[1999 more in the last 1.0 s]`. A kind of line that has nothing to say for
+a whole second is logged at once again the next time. So a receiver that
+falls behind, or a type nobody serves, costs the log about two lines a
+second for each kind, where it used to cost up to three for every message,
+each one a write to stderr on the multiplexer's only thread. The kinds are
+told apart by what the line names: the peer type and the reason for a
+message a rule queued nowhere, the addressee for one sent to an instance
+that is not connected, the peer for a full queue, the type for an unknown
+type; beyond 256 kinds at once, the rest share one count, `[N more lines of
+other kinds in the last 1.0 s]`. The libraries count their own lines about
+dropped messages the same way: `incoming_queue_full, dropping` when a
+synchronous client's 1024 unread messages are not read in time, a
+`ThreadedClient` given no `on_message` callback, and the requests a server
+class's full queue drops (the Python `BaseThreadedMultiplexerServer` says
+its count when the queue takes a request again). The line the multiplexer
+used to log for every `DELIVERY_ERROR` it sent back, `errors when
+delivering <id>`, is a `CHATTERBOX` entry now, since the line saying why
+is logged where the failure is found.
 
 A few lines are worth knowing by their text. At start the multiplexer
 logs `rules loaded from <path>: <fingerprint>, <n> message types, <m> peer
@@ -290,8 +313,9 @@ stderr has the same shape.
 entries have a verbosity, and the default shows a process's connections
 coming and going, at `HIGHVERBOSITY`, and not its traffic: the
 per-message entries, a request and the connection it took, a message
-routed, a connection skipped because it is full, are at `CHATTERBOX` and
-off unless asked for. The environment variable `MX_LOG_VERBOSITY`, read
+routed, a connection skipped because it is full, a message a full queue
+refused, a `DELIVERY_ERROR` sent back, are at `CHATTERBOX` and off unless
+asked for. The environment variable `MX_LOG_VERBOSITY`, read
 once when the library loads, sets this without a rebuild or a call:
 `MX_LOG_VERBOSITY=DEBUG:CHATTERBOX` turns the traffic log on for one
 process, `MX_LOG_VERBOSITY=DEBUG:LOW` quiets a chatty one, and a bare
