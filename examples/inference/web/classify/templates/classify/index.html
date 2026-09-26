@@ -1,0 +1,14 @@
+<!doctype html>
+<title>Which digit?</title>
+<h1>Which digit?</h1>
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+  <input type="file" name="image" accept="image/*" required>
+  <button>Ask a worker</button>
+</form>
+{% if result %}
+<p>It is a <strong>{{ result.label }}</strong>, says worker <code>{{ result.worker }}</code>
+  with probability {{ result.probability|floatformat:3 }}, after {{ result.model_seconds|floatformat:3 }} s in the model.</p>
+{% elif error %}
+<p><strong>Sorry:</strong> {{ error }}.</p>
+{% endif %}

@@ -10,12 +10,14 @@
 {
   "include": [
     "aio",
-    "echo"
+    "echo",
+    "inference"
   ],
   "exclude": [
     "**/bazel-*",
     "**/.venv",
     "**/__pycache__",
+    "inference/data",
     "**/*_pb2.py",
     "**/*_pb2.pyi",
     "**/multiplexer_constants.py",
@@ -36,6 +38,14 @@
       "root": "echo",
       "extraPaths": [
         ".venv/mxtree-echo"
+      ]
+    },
+    {
+      "root": "inference",
+      "extraPaths": [
+        "inference",
+        "inference/web",
+        ".venv/mxtree"
       ]
     }
   ]

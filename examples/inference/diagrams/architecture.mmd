@@ -1,0 +1,22 @@
+graph LR
+  subgraph col0 [Web processes]
+    W1[Django worker 1]
+    W2[Django worker 2]
+  end
+  subgraph col1 [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph col2 [Model workers]
+    B1[worker alpha]
+    B2[worker beta]
+  end
+  W1 --- M1
+  W1 --- M2
+  W2 --- M1
+  W2 --- M2
+  M1 --- B1
+  M1 --- B2
+  M2 --- B1
+  M2 --- B2
+  linkStyle default stroke:#a0a0a0,stroke-width:1px

@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant C as client.py
+    participant M as multiplexer
+    participant A as worker alpha
+    participant B as worker beta
+    C->>M: INFER_REQUEST
+    M->>B: INFER_REQUEST, beta's turn
+    Note over B: killed with kill -9, and the request with it
+    Note over M: routes to alpha alone from now on
+    Note over C: no answer within the two-second timeout
+    C->>M: BACKEND_FOR_PACKET_SEARCH, who has INFERENCE
+    M->>A: the search
+    A->>M: PING
+    M->>C: PING, from alpha
+    C->>M: INFER_REQUEST again, addressed to alpha
+    M->>A: INFER_REQUEST
+    A->>M: INFER_RESPONSE
+    M->>C: INFER_RESPONSE
