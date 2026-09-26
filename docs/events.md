@@ -148,7 +148,7 @@ backends; it costs one copy per multiplexer on every link.
 
 ### 1. One copy per connection
 
-The client queues the message on every live connection. The call returns how many connections took it; `flush=True` is not supported in this mode.
+The client queues the message on every live connection. C++ `schedule_all()` returns how many took it; a Python send returns the message id, and with `flush=True` waits until it is written, the synchronous client on every connection, the threaded and asyncio ones on the first.
 
 ```mermaid
 graph LR

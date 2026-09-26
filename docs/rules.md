@@ -33,9 +33,9 @@ peer {
 - `is_passive`: true for peer types built on the synchronous `Client`,
   which runs the library's loop only inside calls. The multiplexer then
   does not expect heartbeats from them and does not drop them for
-  silence. Default false, which is right for backends, `ThreadedClient`
-  and `AsyncClient`, all of which run the loop all the time; a deployment
-  built on those never needs the mark.
+  silence. Default false, which is right for both backend classes,
+  `ThreadedClient` and `AsyncClient`, all of which run the loop all the
+  time; a deployment built on those never needs the mark.
 
 ## A message type
 
@@ -67,7 +67,9 @@ A routing rule has these fields:
   means every peer type that has a connection.
 - `whom`: `ANY` delivers to one connected peer of the type, round robin,
   skipping peers whose queue is full. `ALL` delivers to every connected peer
-  of the type. Default `ANY`.
+  of the type. Default `ANY`. The sender is not left out: a peer that sends
+  a message routed to its own type gets a copy of it with `ALL`, and may
+  get it with `ANY` when its turn comes.
 - `report_delivery_error`: when no peer received the message, send the sender
   a `DELIVERY_ERROR`. Default true. Requests need it; the client's `query()`
   starts its search on that report instead of waiting out its timeout.
@@ -84,8 +86,8 @@ names the backends first.
 
 Peer types 1 to 99 and message types 1 to 99 belong to the protocol. A peer
 that announces a type in that range is refused, the two controllers below
-apart; a backend treats a message type in that range as internal and never
-passes it to `handle_message`.
+apart; the backend classes treat a message type in that range as internal
+and never pass it to `handle_message`.
 
 | Peer type | Value | Meaning |
 |---|---|---|
@@ -117,12 +119,22 @@ multiplexer whatever the rules file says; the shipped rules files name
 them so that dumps and logs show names.
 
 The libraries also use two ordinary types by name, so keep them in every rules
-file: `REQUEST_RECEIVED`, which a backend may send with `notify_start()` to say
-it is working on a request, and `BACKEND_ERROR`, which the Python backend
-sends when `handle_message` raised. `PICKLE_RESPONSE` is needed only by the
-Python `MultiplexerServer` that exchanges pickles. `LOG_STREAMER`,
-`LOG_RECEIVER_EXAMPLE` and `LOGS_STREAM` are needed only by the two log
-commands of `mxcontrol`. Everything else in the example file, the
+file: `REQUEST_RECEIVED`, which a backend built on `BaseMultiplexerServer`
+may send with `notify_start()` to say it is working on a request, and
+`BACKEND_ERROR`, which the Python backend classes send when `handle_message`
+raised. A Bazel build takes their numbers from your file. A program installed from a release does not: the wheel and the
+Debian package carry the example file's constants, so there
+`REQUEST_RECEIVED` must stay 113 and `BACKEND_ERROR` 114, and no type of
+yours may take either number; a reply of yours numbered 114 would be raised
+as `BackendError`.
+
+Three more are needed by a Bazel build pointed at your file, not only by the
+programs that use them: `mxcontrol` is compiled with every subcommand, so
+`@mx//mxcontrol` needs `LOG_STREAMER`, `LOG_RECEIVER_EXAMPLE` and
+`LOGS_STREAM`, which its two log commands name, and the Python backend
+modules read `PICKLE_RESPONSE` when they are imported, so every Python
+program that imports them needs it, not only the `MultiplexerServer` that
+exchanges pickles. Everything else in the example file, the
 `PYTHON_TEST_*` and `*_COLLECTOR` entries, is there as illustration and can
 go.
 

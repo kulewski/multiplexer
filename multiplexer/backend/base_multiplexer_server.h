@@ -4,9 +4,9 @@
 // BaseMultiplexerServer in clients.py; both behave the same way, including
 // what happens when a handler throws. docs/api_cpp.md is the user's view.
 //
-// A backend is driven by serve_forever(): it blocks in the client's
-// read, so heartbeats and reconnects happen on their own and the peer type
-// need not be passive. One message is handled at a time. After every
+// A BaseMultiplexerServer is driven by serve_forever(): it blocks in the
+// client's read, so heartbeats and reconnects happen on their own and the
+// peer type need not be passive. One message is handled at a time. After every
 // iteration, message or poll timeout, periodic_task() runs: the place for
 // work on the backend's own schedule and for noticing a request to leave.
 // The library installs no signal handlers; a handler of your own should

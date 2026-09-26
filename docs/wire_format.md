@@ -65,11 +65,13 @@ heartbeat per frame received and expects none.
 
 ## Protocol messages
 
-Types 1 to 99 are the protocol's. A backend library answers them itself.
+Types 1 to 99 are the protocol's. The libraries handle them themselves,
+whichever class a peer is built on, with one gap: a peer on the synchronous
+`Client` does not answer a `PING`.
 
 | Type | Payload | Who sends it, and what the receiver does |
 |---|---|---|
-| `PING` (1) | any | a peer that gets a `PING` without `references` answers with a `PING` carrying the same payload, `references` set to the request's id, or, when that echo would be over `MAX_MESSAGE_SIZE`, with a `BACKEND_ERROR` saying so; a `PING` that references something is an answer and is not answered again |
+| `PING` (1) | any | a peer that gets a `PING` without `references` answers (every class but the synchronous `Client`) with a `PING` carrying the same payload, `references` set to the request's id, or, when that echo would be over `MAX_MESSAGE_SIZE`, with a `BACKEND_ERROR` saying so; a `PING` that references something is an answer and is not answered again |
 | `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake; the optional `routing` (a `Routing`: `any`, `all`, `last_resort`) says which rule-routed paths reach the peer, applied before anything is routed to it |
 | `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type whose routing takes requests (`any`), or to the last resorts when none does; each backend answers with a `PING` referencing the search's id, addressed to the client |
 | `HEARTBIT` (4) | empty | keep-alive, ignored |

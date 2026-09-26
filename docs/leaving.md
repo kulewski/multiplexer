@@ -94,12 +94,13 @@ routing by then; the confirmation is what tells A that nothing more is
 coming, so its drain lasted as long as its work, a few milliseconds here,
 not a guessed number of seconds. No caller waited for anything. The one
 request that can still be refused is one routed in the moment between the
-multiplexer applying the routing and A's `close()`, none here; a threaded
-backend answers it with the delivery error a multiplexer sends when nobody
-could take a message, and the client, which treats a delivery error on its
-first attempt as the signal to search, has B's answer a few milliseconds
-later. The inference walkthrough measures exactly this, three hundred
-requests through a rolling restart of two workers.
+multiplexer applying the routing and A's `close()`, none here; a backend
+built on `BaseThreadedMultiplexerServer` answers it with the delivery
+error a multiplexer sends when nobody could take a message, and the
+client, which treats a delivery error on its first attempt as the signal
+to search, has B's answer a few milliseconds later. The inference
+walkthrough measures exactly this, three hundred requests through a
+rolling restart of two workers.
 
 ## `stop()` without a drain
 
@@ -177,14 +178,14 @@ slowest acceptable answer pays no more than it would have accepted anyway.
   backend had died. That window is the time between the backend's last read
   and the multiplexer noticing the close: microseconds on one host, a
   network round trip between hosts.
-- `BaseMultiplexerServer`, the plain backend that runs its handler on the
-  loop's thread, has the drain but not the refusal: what it had read
-  when the drain ended is served before it closes, what arrives after its
-  last read is lost the same way. `BaseThreadedMultiplexerServer` refuses
-  because its io thread keeps reading while the workers finish. With a
-  drain, next to nothing arrives then. Both classes write what they still
-  hold, the last replies, before they close their sockets, for up to a
-  second.
+- `BaseMultiplexerServer`, the plain backend class that runs its handler
+  on the loop's thread, has the drain but not the refusal: what it had
+  read when the drain ended is served before it closes, what arrives
+  after its last read is lost the same way.
+  `BaseThreadedMultiplexerServer` refuses because its io thread keeps
+  reading while the workers finish. With a drain, next to nothing arrives
+  then. Both classes write what they still hold, the last replies, before
+  they close their sockets, for up to a second.
 - The refusal is for what someone would retry. A message that answers
   another, one with `references` set, a reply or a `BACKEND_ERROR`, is
   dropped instead: nobody retries a reply, and refusing one could start a

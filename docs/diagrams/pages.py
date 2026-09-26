@@ -282,8 +282,10 @@ Two instances of the type exist; the request is for instance 2.
                     "The client probes for the instance on every connection",
                     "The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, "
                     "which reaches it whatever its routing, as every addressed message does, "
-                    "or with `probe=PING` a `PING`, which every client library answers, "
-                    "not only a backend. Delivery errors are requested, so a multiplexer without the "
+                    "or with `probe=PING` a `PING`, which the backend classes, `ThreadedClient` "
+                    "and `AsyncClient` all answer, echoing its payload, so it also finds a peer "
+                    "that serves no requests (the synchronous `Client` does not answer it). "
+                    "Delivery errors are requested, so a multiplexer without the "
                     "instance says so. The connection dying under the first stage leads here "
                     "too. A request that simply gets no answer within the timeout does not: "
                     "a silent addressee is one the multiplexer still has, and a probe would "
@@ -464,9 +466,11 @@ backends; it costs one copy per multiplexer on every link.
             steps=[
                 Step(
                     "One copy per connection",
-                    "The client queues the message on every live connection. The call "
-                    "returns how many connections took it; `flush=True` is not supported in "
-                    "this mode.",
+                    "The client queues the message on every live connection. C++ "
+                    "`schedule_all()` returns how many took it; a Python send returns the "
+                    "message id, and with `flush=True` waits until it is written, the "
+                    "synchronous client on every connection, the threaded and asyncio ones "
+                    "on the first.",
                     [0, 1],
                     ["S"],
                 ),
@@ -501,12 +505,12 @@ A peer opens a TCP connection and both sides exchange one `CONNECTION_WELCOME`
 message before anything else. The peer speaks first; the multiplexer registers
 it and only then answers. After that, heartbeats keep the connection alive.
 
-There are two kinds of peer. A backend hands control to the library, which
-runs its loop all the time, so its heartbeats flow on their own; so does a
-`ThreadedClient`, whose io thread does the same. A synchronous `Client` only
-runs the loop inside calls, so its peer type is declared `is_passive` in the
-rules file and the multiplexer neither expects heartbeats from it nor drops it
-for silence.
+There are two kinds of peer, by how their library runs the loop.
+`BaseMultiplexerServer`, `BaseThreadedMultiplexerServer`, `ThreadedClient`
+and `AsyncClient` run it all the time, so their heartbeats flow on their
+own. A synchronous `Client` only runs the loop inside calls, so its peer
+type is declared `is_passive` in the rules file and the multiplexer neither
+expects heartbeats from it nor drops it for silence.
 """,
     sections=[
         Section(
@@ -552,25 +556,27 @@ for silence.
                     ["M"],
                 ),
                 Step(
-                    "Heartbeats, backends",
+                    "Heartbeats, peers that run the loop",
                     "Each side sends `HEARTBIT` every 3 s and expects some message within "
-                    "30 s, then grants 60 s more. Any message resets that clock. A backend "
-                    "sits in the loop, so this just works.",
+                    "30 s, then grants 60 s more. Any message resets that clock. A peer whose "
+                    "library runs its loop all the time heartbeats on its own, so this just "
+                    "works.",
                     [3, 4],
                     [],
                 ),
                 Step(
-                    "Heartbeats, clients",
-                    "A client sends no heartbeats between calls. The multiplexer does "
-                    "not require any from it and sends it at most one heartbeat per message "
-                    "received, so an idle client is neither dropped nor flooded.",
+                    "Heartbeats, passive peers",
+                    "A peer on the synchronous `Client` sends no heartbeats between calls. "
+                    "The multiplexer does not require any from its passive peer type and "
+                    "sends it at most one heartbeat per message received, so an idle one is "
+                    "neither dropped nor flooded.",
                     [4],
                     ["M"],
                 ),
                 Step(
-                    "Silence from a backend",
-                    "If a backend stops talking, the multiplexer closes the connection "
-                    "after the two intervals. The backend's library reconnects 3 s after "
+                    "Silence from a peer that runs the loop",
+                    "If such a peer stops talking, the multiplexer closes the connection "
+                    "after the two intervals. Its library reconnects 3 s after "
                     "noticing.",
                     [5],
                     ["M"],
@@ -584,12 +590,13 @@ for silence.
 Every peer's library remembers what it was told to connect to, a host name
 or an address, and reconnects on its own when the connection goes away,
 resolving the name again each time, so a multiplexer that comes back under
-another address is found too. A backend, which runs
-the loop all the time, does this within a few seconds. A client does it the
-next time it calls the library. The picture has one backend, one client and
-one multiplexer that is restarted; with the several multiplexers a
-deployment runs, a request in flight simply goes through another one and
-none of this is visible to the caller.
+another address is found too. A peer whose library runs the loop all the
+time, whatever its role, does this within a few seconds. A peer on the
+synchronous `Client` does it the next time it calls the library. The picture
+has one backend, one client on the synchronous `Client`, and one multiplexer
+that is restarted; with the several multiplexers a deployment runs, a
+request in flight simply goes through another one and none of this is
+visible to the caller.
 """,
             columns=[
                 Column("Clients", [("C", "client")]),
@@ -744,8 +751,10 @@ type under a `whom: ANY` rule.
                 Step(
                     "Nobody can receive it",
                     "No rule for the type, or a rule whose peer type has no connected "
-                    "backend: the message is dropped, and the client gets `DELIVERY_ERROR` "
-                    "if it set `report_delivery_error`. A query's search relies on this.",
+                    "backend: the message is dropped, and the sender gets `DELIVERY_ERROR` "
+                    "when the rule sets `report_delivery_error`, as it does by default; a "
+                    "message addressed with `to` reports by its own flag instead. A query's "
+                    "search relies on this.",
                     [8, 9],
                     ["M"],
                 ),

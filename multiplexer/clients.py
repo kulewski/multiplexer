@@ -1,11 +1,12 @@
 """The Python client API: Client, and MxClient to hold one.
 
-This is the module clients import (docs/api_python.md). It builds on
+A program built on the synchronous Client, or on an MxClient holding one,
+imports this module, whatever its role (docs/api_python.md). It builds on
 multiplexer.mxclient, which wraps the C++ Client: everything about
 connections, queues, timeouts and the query algorithm lives there; this
-module adds the BACKEND_ERROR check and the exception classes. The backend
-side, BaseMultiplexerServer, is in multiplexer.servers and is re-exported
-here for the older import path.
+module adds the BACKEND_ERROR check and the exception classes.
+BaseMultiplexerServer, a base class for backends, is in multiplexer.servers
+and is re-exported here for the older import path.
 
 Threading: a Client belongs to one thread. @log_call on most methods logs
 entry and exit at DEBUG/CHATTERBOX; it checks should_log() first, so it costs

@@ -27,6 +27,12 @@ that changes.
   while that connection lives, so the stream is in order; at a failover
   the lane moves and there is a gap or a reorder, once, unless the lane
   is pinned, in which case the stream ends with `NotConnected` instead.
+  A stream sent through every connection keeps its order too, since the
+  receiving library passes on the first copy of each message: every
+  copy of a message follows the copy of the one before on its own
+  connection. It breaks only where a message went out through fewer
+  connections than the one after it, one being down at that moment, or
+  where a late copy came after the library forgot the first.
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type. For `ANY` a
   full peer is skipped in favour of the next one; for `ALL`, and when every
@@ -66,7 +72,12 @@ that changes.
 - **Events give no feedback** unless the rule reports delivery errors, and
   even then only that nobody was there, not that anybody processed it. A
   flushing send (`flush=True`, `Client::send`) does guarantee the event was
-  written to a live connection, re-sending across a dead one.
+  written to a live connection, re-sending across a dead one. The report
+  comes from each multiplexer that got a copy and found nobody: an event
+  sent through every connection can bring one `DELIVERY_ERROR` per
+  multiplexer, each with an id of its own and `references` set to the
+  event's id, and one of them says only that its multiplexer had nobody.
+  A multiplexer that is down says nothing.
 
 ## Failure modes
 
@@ -105,10 +116,11 @@ that changes.
   backend of the type at once, without a search, and the drain ends when
   the multiplexers confirmed and the work is done, `drain_seconds` at
   the latest; a backend alone of its type drains as the last resort or
-  its callers fail at once, its choice. A threaded backend that is
-  closing answers a request routed to it before the multiplexer heard
-  with a delivery error, as a multiplexer answers for a peer that is
-  gone, so the client searches and repeats the request elsewhere at once.
+  its callers fail at once, its choice. A backend built on
+  `BaseThreadedMultiplexerServer` that is closing answers a request routed
+  to it before the multiplexer heard with a delivery error, as a
+  multiplexer answers for a peer that is gone, so the client searches and
+  repeats the request elsewhere at once.
   A plain `BaseMultiplexerServer` loses what arrived after its last read,
   which costs the client a timeout. [How a backend leaves](leaving.md)
   draws it.
@@ -119,6 +131,16 @@ that changes.
   90 s is dropped by the multiplexer and reconnects afterwards; a
   `BaseThreadedMultiplexerServer` keeps heartbeating from its io thread
   while a handler runs, for any length of time, and is not.
+- **A multiplexer hangs without dying.** A multiplexer stopped with its
+  sockets open, a hung host or `SIGSTOP`, is not noticed at once: the
+  libraries apply to it the heartbeat intervals it applies to its peers,
+  and close the connection after 30 s and 60 s more without a frame, as
+  for a dead one. Until then the round robin still gives it its share. A
+  typed query sent through it waits out its `timeout`, then its search
+  finds a backend through another multiplexer; an addressed query through
+  it ends with `OperationTimedOut`; an event sent through it, flushed or
+  not, waits inside it, lost if it dies, delivered late if it wakes. A
+  flushing send through every connection ends once one copy is written.
 - **A client is idle for a long time.** Nothing happens: passive peers are
   never dropped for silence, and a `ThreadedClient` keeps heartbeating.
 - **A multiplexer restarts while a synchronous client is idle.** The
@@ -126,6 +148,14 @@ that changes.
   connection that multiplexer closed is retired first and the message goes
   through another, or waits for the reconnect; it is never written into
   the closed socket, which would succeed and lose it.
+- **A peer closes one side of its connection.** When the other end of a
+  connection stops sending, a half-close such as `shutdown(SHUT_WR)`, the
+  multiplexer and the libraries end the connection at once and write
+  nothing more to it: a multiplexer drops what it had queued for that
+  peer, and a client sends what it had queued through another connection,
+  unless it was pinned to that one. No peer of theirs half-closes; a server
+  of yours that takes plain TCP clients decides for itself what it still
+  owes one that does.
 - **A peer closes while a message to it is on its way.** Writing to a
   closed connection fails, but what the peer sent before it closed is
   still in the socket: the multiplexer and the libraries stop writing and
@@ -189,8 +219,8 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `HEARTBIT_INTERVAL` | 3 s | between heartbeats on an idle connection |
 | `CLOSE_READ_SECONDS` | 1 s | a client's `shutdown()`: how long a connection reads on, waiting for its multiplexer to close its side |
 | `MX_LOG_VERBOSITY` | `DEBUG:HIGH` | connections logged, traffic not; the environment variable changes it per process ([operations](operations.md#logs)) |
-| `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence from a non-passive peer before the multiplexer starts to worry |
-| `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before it closes the connection |
+| `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence on a connection, from a non-passive peer or from a multiplexer, before the other side starts to worry |
+| `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a library holds per peer |
 | `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |

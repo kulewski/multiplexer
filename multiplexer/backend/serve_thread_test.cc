@@ -159,9 +159,9 @@ TEST(ServeThread, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   EXPECT_FALSE(ended_by_exception.load());
 }
 
-// A draining plain backend serves what it had already read: the requests
-// the synchronous client pulled off the socket while a reply was being
-// sent are handled before the connections close. Every request sent is
+// A draining BaseMultiplexerServer serves what it had already read: the
+// requests the synchronous client pulled off the socket while a reply was
+// being sent are handled before the connections close. Every request sent is
 // therefore either answered or, routed after the multiplexer applied the
 // drain routing, refused by the multiplexer with a delivery error: none
 // vanishes into a timeout.

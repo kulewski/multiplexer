@@ -1,9 +1,9 @@
 # Using the C++ library
 
 `multiplexer::Client` in [multiplexer/client.h](../multiplexer/client.h)
-is the client; `multiplexer::backend::BaseMultiplexerServer` in
+is the synchronous client class; `multiplexer::backend::BaseMultiplexerServer` in
 [multiplexer/backend/base_multiplexer_server.h](../multiplexer/backend/base_multiplexer_server.h)
-is the base class for backends. The constants generated from the
+is one class a backend can be built on. The constants generated from the
 [rules file](rules.md) are in `multiplexer/multiplexer.constants.h`, as
 `multiplexer::peers::*` and `multiplexer::types::*`, both `std::uint32_t`.
 
@@ -120,8 +120,8 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   covers the stages. The probe is `PROBE_SEARCH` by default, a
   `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it
   whatever its routing, as every addressed message does, or `PROBE_PING`,
-  which every client library answers, not only a backend.
-  The library sets `report_delivery_error` on the request. The old
+  which the backend classes and `ThreadedClient` all answer, so it also
+  finds a peer that serves no requests. The library sets `report_delivery_error` on the request. The old
   behaviour of `Client::query` with `to`, a search by type and the
   request to whichever backend answered, is gone.
 - **A lane**, `multiplexer::Lane` in `multiplexer/basic_client.h`, held as
@@ -144,8 +144,8 @@ The same on `Client` and `ThreadedClient`; the reasoning is in
   thread.
 - **A connection**, `send(msg, connection)`, `send(msg, connection,
   timeout)` and `query(msg, connection, ...)`, is preferred for that
-  message and replaced when gone, as `send_message` in a backend replies
-  the way the request came. `Result::reply.second` and
+  message and replaced when gone, as `BaseMultiplexerServer::send_message`
+  replies the way the request came. `Result::reply.second` and
   `IncomingMessage::second` are where a connection comes from.
 
 ## BaseMultiplexerServer
@@ -254,8 +254,8 @@ then closes the connections as `Client::shutdown()` does.
 
 `multiplexer::backend::BaseThreadedMultiplexerServer` in
 [multiplexer/backend/base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h)
-is the backend whose handlers run on worker threads behind a heartbeating
-io thread; target `@mx//multiplexer/backend:base_threaded_multiplexer_server`.
+is the backend class whose handlers run on worker threads behind a
+heartbeating io thread; target `@mx//multiplexer/backend:base_threaded_multiplexer_server`.
 When to use it rather than `BaseMultiplexerServer` is in
 [the Python API](api_python.md#basethreadedmultiplexerserver): a request
 that may take longer than the multiplexer's drop interval, several handled
@@ -312,9 +312,13 @@ Echo(addresses, options).serve_forever();
   `notify_start()` and `parse_message<T>()`; a request destroyed without a
   reply or `no_response()` logs a warning. The reply goes the way the
   request came, or another way when that connection is gone. One reply
-  per request: `reply()` sets `references`, which a threaded requester
-  uses to drop late replies, so a follow-up that is not the reply goes
-  through `client().send()` with `to` set and no `references`.
+  per request: `reply()` sets `references`, which a requester built on
+  `ThreadedClient` uses to drop late replies, so a follow-up that is not
+  the reply goes through `client().send()` with `to` set and no
+  `references`. A request kept for later no longer counts in `pending()`
+  once its handler returned, so neither `drained()` nor `close()` waits
+  for it: a program that answers later overrides `drained()` to wait for
+  its own work too.
 - `serve_forever(poll, drain_seconds)`, `stop()`, `start_draining()`,
   `draining()`, `drained()`, `periodic_task()`,
   `on_handler_exception()` and `should_respond_to_backend_for_packet_search()`
@@ -388,14 +392,17 @@ client.shutdown();
   message lost on the way, with its connection or at its own timeout, does
   not count. What the backend classes do in `close()`. Not from callbacks.
 - The `MessageSink` given to the constructor runs on the io thread with
-  every message that is not a reply to a query or one of the protocol's
-  own: events and requests addressed to this peer. Without one such
-  messages are logged and dropped; nothing is queued. A late reply to a
+  every message that is not a reply to a query: events and requests
+  addressed to this peer, and a `DELIVERY_ERROR` for a message that was
+  not a query, an event whose rule reports errors, one from each
+  multiplexer that could not deliver it. Without one such messages are
+  logged and dropped; nothing is queued. A late reply to a
   query that already ended, `REQUEST_RECEIVED` for an untracked query, a
   `PING`, which the client answers itself, and a
   `BACKEND_FOR_PACKET_SEARCH`, answered with a `PING` when addressed to
-  this instance and dropped when routed by type, never reach it. The
-  late-reply rule binds the peers that send to this client: `references`
+  this instance, answered by type too when a policy set with
+  `set_search_policy()` says yes, and dropped otherwise, never reach it.
+  The late-reply rule binds the peers that send to this client: `references`
   means "this is the reply", and what references a query this client has
   seen answered (the last 1024) is dropped whatever its type, so a
   follow-up that is not the reply must not reference the request; it is
@@ -421,12 +428,13 @@ checks that (`--config=clang`).
 
 ## Threads
 
-Neither `Client` nor `BaseMultiplexerServer` is thread-safe. One `Client` belongs to one thread, and a
-backend runs on the thread that calls `serve_forever()`. For parallel clients
-create one per thread, as the integration test roles do in
-[tests/roles/cc/client.cc](../tests/roles/cc/client.cc). In builds
-without `NDEBUG` the library asserts this: a call from another thread fails
-with an `AssertionError` naming the wrong-thread call.
+Neither `Client` nor `BaseMultiplexerServer` is thread-safe. One `Client`
+belongs to one thread, and a `BaseMultiplexerServer` runs on the thread that
+calls `serve_forever()`. For parallel clients create one per thread, as the
+integration test roles do in
+[tests/roles/cc/client.cc](../tests/roles/cc/client.cc). In builds without
+`NDEBUG` the library asserts this: a call from another thread fails with an
+`AssertionError` naming the wrong-thread call.
 
 **Fork.** A client inherited by a forked child is an orphan there: its io
 thread does not exist in the child, its locks may be held by nobody, and

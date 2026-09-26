@@ -56,12 +56,12 @@ class ConnectByName(unittest.TestCase):
         self.assertEqual(0, asyncio.run(construct()))
 
     def test_a_reply_through_a_dead_connection_leaves_one_connection_per_multiplexer(self):
-        """A plain backend given a host name replies through the connection
-        its request came on. With that connection dead, the reply waits for
-        the connection the client makes again to the same name, rather than
-        opening one of its own to the old address, which the multiplexer
-        would take for the same peer: the two would replace each other
-        every 3 s for good."""
+        """A BaseMultiplexerServer given a host name replies through the
+        connection its request came on. With that connection dead, the
+        reply waits for the connection the client makes again to the same
+        name, rather than opening one of its own to the old address, which
+        the multiplexer would take for the same peer: the two would replace
+        each other every 3 s for good."""
         with Cluster(1, rules=RULES) as cluster:
             mx = cluster.mx[0]
             port = cluster.endpoints[0][1]

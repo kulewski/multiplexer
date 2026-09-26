@@ -77,9 +77,10 @@ There is one package per release because protobuf C++ promises no
 compatibility between versions, not even ABI stability between micro
 releases: the library is compiled against the release's `libprotobuf-dev`,
 and a program using it must be too. `Recommends` names the exact version.
-The library itself depends only on the reserved peer and message types,
-ids 1 to 99 ([rules.md](rules.md)), which every rules file carries as
-shipped; your own types come from `mxcontrol generate_constants your.rules
+The library itself depends on the reserved peer and message types, ids 1
+to 99, which every rules file carries as shipped, and on `REQUEST_RECEIVED`
+113 and `BACKEND_ERROR` 114, which it sends and recognizes by those numbers
+whatever your file says ([rules.md](rules.md)); your own types come from `mxcontrol generate_constants your.rules
 --cxx multiplexer/multiplexer.constants.h`, placed on the include path
 before the package's copy (`generate_constants your.rules
 multiplexer/multiplexer.constants.h`, the build-time tool the package also

@@ -4,12 +4,12 @@ A peer opens a TCP connection and both sides exchange one `CONNECTION_WELCOME`
 message before anything else. The peer speaks first; the multiplexer registers
 it and only then answers. After that, heartbeats keep the connection alive.
 
-There are two kinds of peer. A backend hands control to the library, which
-runs its loop all the time, so its heartbeats flow on their own; so does a
-`ThreadedClient`, whose io thread does the same. A synchronous `Client` only
-runs the loop inside calls, so its peer type is declared `is_passive` in the
-rules file and the multiplexer neither expects heartbeats from it nor drops it
-for silence.
+There are two kinds of peer, by how their library runs the loop.
+`BaseMultiplexerServer`, `BaseThreadedMultiplexerServer`, `ThreadedClient`
+and `AsyncClient` run it all the time, so their heartbeats flow on their
+own. A synchronous `Client` only runs the loop inside calls, so its peer
+type is declared `is_passive` in the rules file and the multiplexer neither
+expects heartbeats from it nor drops it for silence.
 
 ## Handshake and heartbeats
 
@@ -84,9 +84,9 @@ graph LR
   style M fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
-### 4. Heartbeats, backends
+### 4. Heartbeats, peers that run the loop
 
-Each side sends `HEARTBIT` every 3 s and expects some message within 30 s, then grants 60 s more. Any message resets that clock. A backend sits in the loop, so this just works.
+Each side sends `HEARTBIT` every 3 s and expects some message within 30 s, then grants 60 s more. Any message resets that clock. A peer whose library runs its loop all the time heartbeats on its own, so this just works.
 
 ```mermaid
 graph LR
@@ -106,9 +106,9 @@ graph LR
   linkStyle 3,4 stroke:#d62828,stroke-width:3px
 ```
 
-### 5. Heartbeats, clients
+### 5. Heartbeats, passive peers
 
-A client sends no heartbeats between calls. The multiplexer does not require any from it and sends it at most one heartbeat per message received, so an idle client is neither dropped nor flooded.
+A peer on the synchronous `Client` sends no heartbeats between calls. The multiplexer does not require any from its passive peer type and sends it at most one heartbeat per message received, so an idle one is neither dropped nor flooded.
 
 ```mermaid
 graph LR
@@ -129,9 +129,9 @@ graph LR
   style M fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
-### 6. Silence from a backend
+### 6. Silence from a peer that runs the loop
 
-If a backend stops talking, the multiplexer closes the connection after the two intervals. The backend's library reconnects 3 s after noticing.
+If such a peer stops talking, the multiplexer closes the connection after the two intervals. Its library reconnects 3 s after noticing.
 
 ```mermaid
 graph LR
@@ -157,12 +157,13 @@ graph LR
 Every peer's library remembers what it was told to connect to, a host name
 or an address, and reconnects on its own when the connection goes away,
 resolving the name again each time, so a multiplexer that comes back under
-another address is found too. A backend, which runs
-the loop all the time, does this within a few seconds. A client does it the
-next time it calls the library. The picture has one backend, one client and
-one multiplexer that is restarted; with the several multiplexers a
-deployment runs, a request in flight simply goes through another one and
-none of this is visible to the caller.
+another address is found too. A peer whose library runs the loop all the
+time, whatever its role, does this within a few seconds. A peer on the
+synchronous `Client` does it the next time it calls the library. The picture
+has one backend, one client on the synchronous `Client`, and one multiplexer
+that is restarted; with the several multiplexers a deployment runs, a
+request in flight simply goes through another one and none of this is
+visible to the caller.
 
 ### 1. The multiplexer goes down
 

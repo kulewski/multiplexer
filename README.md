@@ -137,7 +137,7 @@ type {
   thread, for quick handlers, and one whose handlers run on worker threads
   behind a heartbeating io thread, for requests that take minutes,
   several at once, or a handler that blocks on a query of its own
-  ([which to use](docs/README.md#backend-or-client-which-class-to-build-on)).
+  ([which to use](docs/README.md#which-class-to-build-on)).
 - **Tested for every failure mode.** One documented integration scenario per
   failure, AddressSanitizer, ThreadSanitizer, LeakSanitizer, clang thread-safety
   analysis and a soak test ([scenarios](tests/scenarios/README.md)).
@@ -323,9 +323,9 @@ load("@mx//bazel:setup.bzl", "mx_setup")
 mx_setup()
 ```
 
-Then depend on `@mx//multiplexer:clients` (a client) or
-`@mx//multiplexer:servers` (a backend) from Python, `@mx//multiplexer:client`
-from C++; import and include paths are unchanged. [examples/](examples/) holds
+Then depend on `@mx//multiplexer:clients` (`Client`) or
+`@mx//multiplexer:servers` (`BaseMultiplexerServer`) from Python,
+`@mx//multiplexer:client` from C++; import and include paths are unchanged. [examples/](examples/) holds
 complete workspaces built that way, starting with [examples/echo](examples/echo).
 Your tests get `@mx//multiplexer/testing`: real multiplexers on ephemeral
 ports, scripted peers, and the macro this repository's own scenarios use
@@ -337,9 +337,10 @@ ports, scripted peers, and the macro this repository's own scenarios use
 Linux; the import is `multiplexer`, and `mxcontrol generate_constants
 your.rules --python multiplexer_constants.py` writes the `peers` and
 `types` of your rules file, which a Bazel build generates on its own. A
-backend waits for requests and answers them. `serve_forever()` runs the loop
-and calls `handle_message` for each request; `send_message` replies to the peer
-that asked.
+backend waits for requests and answers them. This one is built on
+`BaseMultiplexerServer`: `serve_forever()` runs the loop and calls
+`handle_message` for each request; `send_message` replies to the peer that
+asked.
 
 ```python
 from multiplexer.servers import BaseMultiplexerServer

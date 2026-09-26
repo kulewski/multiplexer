@@ -25,14 +25,14 @@ a pool of interchangeable workers, and publish/subscribe for events.
   each other. "mx" is the short form you will see in code and command names.
 - **Peer**: any program connected to a multiplexer. Every backend and every
   client is a peer.
-- **Backend**: a peer that hands control to the library. The library runs the
-  backend's loop, and calls it whenever a message arrives; the backend does
-  its work and, for a request, sends the answer. Whether it answers or only
-  acts is up to it.
-- **Client**: a peer that keeps control and calls the library only when it
-  has something to send: a request, which expects exactly one answer, or an
-  event, which expects nothing. A client built on the synchronous `Client`
-  does not run the loop between calls, so its peer type is marked
+- **Backend**: a peer that receives requests or events and acts on them,
+  answering each request. A backend that only receives events answers
+  nothing. It is a role, not a class: a backend can be built on
+  `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer`,
+  `ThreadedClient` or `AsyncClient`.
+- **Client**: a peer that sends requests or events: a request expects
+  exactly one answer, an event expects nothing. A client built on the
+  synchronous `Client` does not run the loop between calls, so its peer type is marked
   `is_passive` in the rules file and the multiplexer does not expect a
   heartbeat from it. That is the only class that needs the mark: a
   `ThreadedClient`, an `AsyncClient` and both backend classes run the loop
@@ -50,30 +50,33 @@ a pool of interchangeable workers, and publish/subscribe for events.
 - **Request** and **event**: the two things a client sends. A request is
   answered by the backend that received it; an event is not answered.
 
-## Backend or client: which class to build on
+## Which class to build on
 
-A program that serves requests by type subclasses one of the two backend
-classes, because only a backend answers the search that typed requests
-are routed by; everything else is a client, and which client is a matter
-of how the program is shaped. A `ThreadedClient` that receives requests
-addressed to its instance id and replies to them is a legitimate shape
-too, a service reachable by `to` after an introduction.
+A program that serves requests by type must answer the search that
+typed requests are routed by. Both backend classes do; so does a
+`ThreadedClient` given a search policy (`search_policy` in Python,
+`set_search_policy` in C++), which is how the Python
+`BaseThreadedMultiplexerServer` is built. A backend that answers only
+requests addressed to its instance id needs no search policy and can be
+built on `ThreadedClient` or `AsyncClient`: a service reachable by `to`
+after an introduction. Otherwise which class is a matter of how the
+program is shaped.
 
-Among backends: `BaseMultiplexerServer` when every handler is quick and
-requests are handled one at a time, the simplest class and the usual
-one; `BaseThreadedMultiplexerServer` when a request may run longer than
-the multiplexer's drop interval (90 s as shipped), when several must be
-handled at once, or when a handler blocks on a query of its own. Among
-clients: `Client` for a program with one thread and no event loop, the
-only class whose peer type needs `is_passive`; `ThreadedClient` for a
-threaded server or anything with more than one thread; `AsyncClient`
-for asyncio.
+Among the backend classes: `BaseMultiplexerServer` when every handler is
+quick and requests are handled one at a time, the simplest class and the
+usual one; `BaseThreadedMultiplexerServer` when a request may run longer
+than the multiplexer's drop interval (90 s as shipped), when several
+must be handled at once, or when a handler blocks on a query of its own.
+Among the client classes: `Client` for a program with one thread and no
+event loop, the only class whose peer type needs `is_passive`;
+`ThreadedClient` for a threaded server or anything with more than one
+thread, a backend included; `AsyncClient` for asyncio.
 
 | | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `Client` |
 |---|---|---|---|---|---|
 | who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
-| found by typed requests | yes: answers the backend search | yes | no: never answers it | no | no |
-| receives | requests routed by type, events, addressed messages | the same | events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
+| found by typed requests | yes: answers the backend search | yes | with a search policy (`search_policy`, `set_search_policy`); otherwise only a search addressed to it | no | no |
+| receives | requests routed by type, events, addressed messages | the same | requests and events routed to its type, addressed messages | the same, as handlers or streams | replies only, and `receive_message()` |
 | handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing arrives on its own |
 | a handler may block | no: nothing heartbeats meanwhile | yes, for as long as it needs | no: it runs on the io thread | no: it runs on the loop | |
 | sends | replies, and anything from `periodic_task()` | replies from any thread, events from any thread | queries and events from any thread | awaited | queries and events from its thread |
@@ -144,9 +147,9 @@ graph LR
 2. **Run one or more multiplexers**, each with that rules file:
    `mxcontrol run_multiplexer --address 0.0.0.0:1980 --rules your.rules`
    (see [mxcontrol](mxcontrol.md)).
-3. **Write a backend.** Subclass `BaseMultiplexerServer`, implement
-   `handle_message`, reply with `send_message` when the message is a request,
-   and call `serve_forever()`. Python and C++ versions of a complete one are in
+3. **Write a backend**, here on `BaseMultiplexerServer`: subclass it,
+   implement `handle_message`, reply with `send_message` when the message is
+   a request, and call `serve_forever()`. Python and C++ versions of a complete one are in
    [examples/echo](../examples/echo).
 4. **Write a client.** Create a `Client` with the addresses of all your
    multiplexers and call `query()` for requests or `send_message()` for events.

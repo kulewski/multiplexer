@@ -1,20 +1,22 @@
 # Using the Python library
 
-Three modules matter: `multiplexer.clients` holds `Client` for clients,
-`multiplexer.servers` holds `BaseMultiplexerServer` for backends, and
-`multiplexer.multiplexer_constants` holds `peers` and `types`, generated
-from the [rules file](rules.md) the build was pointed at. Depend on
-`@mx//multiplexer:clients` or `@mx//multiplexer:servers`, and on
-`@mx//multiplexer:multiplexer_constants`. Outside Bazel, after `pip
-install mx-multiplexer`, the constants of your rules file come from
-`mxcontrol generate_constants your.rules --python multiplexer_constants.py
---pyi multiplexer_constants.pyi`, a module to import from wherever it is
-written ([mxcontrol.md](mxcontrol.md#generate_constants)); the package's
-own `multiplexer.multiplexer_constants` holds the example file's. `multiplexer.threaded_client`,
-`multiplexer.aio` and `multiplexer.threaded_server` hold the threaded and
-asyncio clients and the threaded backend, each described below;
-[which class to build on](README.md#backend-or-client-which-class-to-build-on)
-is the one-table answer.
+Three modules matter: `multiplexer.clients` holds the synchronous
+`Client`, `multiplexer.servers` holds `BaseMultiplexerServer`, one class a
+backend can be built on, and `multiplexer.multiplexer_constants` holds
+`peers` and `types`, generated from the [rules file](rules.md) the build
+was pointed at. Depend on `@mx//multiplexer:clients` or
+`@mx//multiplexer:servers`, and on `@mx//multiplexer:multiplexer_constants`.
+Outside Bazel, after `pip install mx-multiplexer`, the constants of your
+rules file come from `mxcontrol generate_constants your.rules --python
+multiplexer_constants.py --pyi multiplexer_constants.pyi`, a module to
+import from wherever it is written
+([mxcontrol.md](mxcontrol.md#generate_constants)); the package's own
+`multiplexer.multiplexer_constants` holds the example file's.
+`multiplexer.threaded_client`, `multiplexer.aio` and
+`multiplexer.threaded_server` hold `ThreadedClient`, `AsyncClient` and
+`BaseThreadedMultiplexerServer`, each described below;
+[which class to build on](README.md#which-class-to-build-on) is the
+one-table answer.
 
 ```python
 from multiplexer.clients import Client
@@ -70,8 +72,8 @@ the time and their peer types are ordinary ones.
   Raises `OperationFailed` when no backend can be found, `OperationTimedOut`
   when a stage runs out of time, `NotConnected` when there is no live
   connection, and `BackendError` when the backend answered with
-  `BACKEND_ERROR`, which the Python backend does when its handler raised.
-  [How a query is answered](query.md) draws it. With `to`, the instance
+  `BACKEND_ERROR`, which the Python backend classes send when a handler
+  raised. [How a query is answered](query.md) draws it. With `to`, the instance
   id of one peer, the query is addressed: only that peer ever gets it,
   located again with `probe` when a multiplexer no longer has it, and one
   `timeout` covers the stages; `multiplexer` and `with_connection` are for
@@ -163,8 +165,9 @@ without a probe, since a silent peer is one the multiplexer still has.
 The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance,
 which reaches it whatever its routing, as every addressed message does,
 so a request addressed to a draining backend lands on it and is served;
-`probe=types.PING` differs in who answers it: every client library, not
-only a backend, for a peer that serves no requests at all.
+`probe=types.PING` differs in who answers it: the backend classes,
+`ThreadedClient` and `AsyncClient` all do, so it also finds a peer that
+serves no requests at all; the synchronous `Client` does not answer it.
 The instance id comes from a reply, `reply.from_`, or from the peer
 itself, `instance_id`. [How a query is answered](query.md#an-addressed-query)
 draws the stages.
@@ -186,7 +189,13 @@ so, until the caller makes a new lane; a pinned lane is the guarantee
 that everything through it went through one multiplexer, down to the
 messages a dying connection had not written yet, which are reported
 lost rather than handed to another connection as any other message is. `lane(connection=c)` seeds a
-lane with a connection a reply came through, pinned or not. A lane holds
+lane with a connection a reply came through, pinned or not. A lane's
+`connection` is the `ConnectionWrapper` it holds, empty until its first
+message went through, and `pinned`, `holds_connection`, `connected` and
+`closed` read its state. A `ConnectionWrapper` is false once its
+connection is gone; its `endpoint`, the multiplexer's `(host, port)`,
+stays, which is how a program or a test tells which multiplexer a
+stream took. A lane holds
 its connection weakly and the library keeps no registry of lanes, so a
 lane lives as long as your reference and keeps nothing alive; a query in
 flight holds it until it ends. `multiplexer=connection`, a
@@ -246,9 +255,9 @@ request to leave: a file a preStop hook wrote, a flag another thread set.
 The default does nothing; gate the frequency inside it if the poll is
 shorter than the work's period.
 
-A backend may be built on one thread and served from another: the thread
-that calls `serve_forever()` becomes its thread, and only that thread may
-touch it from then on. In debug builds the library checks this and fails
+A `BaseMultiplexerServer` may be made on one thread and served from
+another: the thread that calls `serve_forever()` becomes its thread, and
+only that thread may touch it from then on. In debug builds the library checks this and fails
 an assertion on a call from another thread. A program that drives
 `loop_iter()` itself from a thread other than the one that built the
 backend calls `backend.conn.bind_to_current_thread()` and then
@@ -311,11 +320,17 @@ invisible;
 show both forms, and [examples/echo/backend.py](../examples/echo/backend.py)
 watches a file for the request to leave.
 
-The library installs no signal handlers, and a backend should not rely on
-one either: a Python handler runs only when the main thread returns from
-C++, and a C++ library in the same process can replace it. The
-[FAQ](faq.md) has the details. A process with non-daemon threads still
-needs its own exit after `serve_forever()` returns.
+The library installs no signal handlers. A backend that must leave on
+`SIGTERM`, as an orchestrator asks, may install one that only sets a flag,
+which `periodic_task()` reads and answers with `start_draining()`: a
+Python handler runs only when the main thread returns from C++, which
+`serve_forever()` does at least every `poll`, so the flag is seen within
+one. The handler must not call the library itself, not even
+`start_draining()`, since it can interrupt the main thread inside the
+library's own locks, and a C++ library in the same process can replace
+it; the drain file needs neither. The [FAQ](faq.md) has the details. A
+process with non-daemon threads still needs its own exit after
+`serve_forever()` returns.
 
 `stall_seconds` arms `faulthandler.dump_traceback_later` around every
 iteration: an iteration that takes longer dumps every thread's stack to
@@ -330,7 +345,7 @@ ends are Python, and pickles from the network must be trusted.
 ## BaseThreadedMultiplexerServer
 
 `multiplexer.threaded_server.BaseThreadedMultiplexerServer` is the backend
-whose handlers run on worker threads behind a heartbeating io thread.
+class whose handlers run on worker threads behind a heartbeating io thread.
 Depend on `@mx//multiplexer:threaded_server`.
 
 ```python
@@ -351,7 +366,7 @@ handler that runs longer than the multiplexer's drop interval, 90 s as
 shipped ([semantics](semantics.md#failure-modes)), gets the backend
 dropped mid-work. Use it when every handler is quick, requests are to be
 handled one at a time, and a handler never blocks on a query of its own;
-it is the simplest class and the one most backends are. Use
+it is the simplest class and the one most backends are built on. Use
 `BaseThreadedMultiplexerServer` when a request may take long, when
 several requests should be handled at once (`workers=4`), or when a
 handler must block, on a `query()` to another backend for instance,
@@ -394,12 +409,16 @@ through it, rather than through `self`.
   type=..., **fields)` answers it, with `to`, `references`, `workflow` and
   the connection filled in from the request, through the threaded client
   from whichever thread calls it: a handler may hand the request to
-  another thread and return, and the reply comes later.
-  One reply per request: `reply()` sets `references`, and a threaded
-  requester drops what references a query it has seen answered, so a
-  follow-up that is not the reply goes through `self.send_message(...,
-  to=request.mxmsg.from_)` with no `references`, correlated in the
-  payload. `request.no_response()` says the message needs none, as an
+  another thread and return, and the reply comes later. Such a request
+  no longer counts in `pending` once its handler returned, so neither
+  `drained()` nor `close()` waits for it: a program that answers later
+  overrides `drained()` to wait for its own work too, and a reply sent
+  after `close()` raises `RuntimeError`.
+  One reply per request: `reply()` sets `references`, and a requester
+  built on `ThreadedClient` or `AsyncClient` drops what references a query
+  it has seen answered, so a follow-up that is not the reply goes through
+  `self.send_message(..., to=request.mxmsg.from_)` with no `references`,
+  correlated in the payload. `request.no_response()` says the message needs none, as an
   event; `request.report_error(message)` answers with `BACKEND_ERROR`;
   `request.notify_start()` sends `REQUEST_RECEIVED`;
   `request.parse_message(SomeProto)`, `request.parse_pickle()` and
@@ -436,10 +455,10 @@ through it, rather than through `self`.
 
 ## ThreadedClient
 
-`multiplexer.threaded_client.ThreadedClient` is a client with an io thread
-of its own. The thread runs all the time, so heartbeats and reconnects
-happen while the program does other things, the peer type need not be
-passive, and any thread may use it. Depend on
+`multiplexer.threaded_client.ThreadedClient` is a class with an io thread
+of its own, for a client or a backend. The thread runs all the time, so
+heartbeats and reconnects happen while the program does other things, the
+peer type need not be passive, and any thread may use it. Depend on
 `@mx//multiplexer:threaded_client_py`.
 
 ```python
@@ -495,13 +514,15 @@ client.shutdown()
   `send_pickle(data, ...)`: the pickle convention, as on `Client`; with a
   callback, it gets the unpickled reply or the exception.
 - `on_message(mxmsg)`, given at construction, runs on the io thread with
-  every message that is not a reply to a query or one of the protocol's
-  own: events and requests addressed to this peer. Pass `queue.put` to
+  every message that is not a reply to a query: events and requests
+  addressed to this peer, and a `DELIVERY_ERROR` for a message that was
+  not a query, an event whose rule reports errors, one from each
+  multiplexer that could not deliver it. Pass `queue.put` to
   collect them for another thread. Without it such messages are logged
   and dropped, never queued for a reader that may never come. A late
   reply to a query that already ended, `REQUEST_RECEIVED` for a query no
-  longer tracked and a `PING` (which the client answers itself) never
-  reach it. The late-reply rule has a consequence for peers that send
+  longer tracked, and a `PING` or a search, which the client answers or
+  declines itself, never reach it. The late-reply rule has a consequence for peers that send
   to this client: `references` means "this is the reply", and what
   references a query this client has seen answered (the last 1024) is
   dropped whatever its type, so a follow-up that is not the reply must
@@ -529,11 +550,11 @@ its own queue.
 
 ## AsyncClient
 
-`multiplexer.aio.AsyncClient` is the client for asyncio programs: an
-async face on `ThreadedClient`. The io thread keeps the sockets, the
-heartbeats, the reconnects and the query algorithm; the coroutine awaits a
-future the io thread settles through the loop, so nothing ever blocks the
-event loop. Depend on `@mx//multiplexer:aio`.
+`multiplexer.aio.AsyncClient` is the class for asyncio programs, for a
+client or a backend: an async face on `ThreadedClient`. The io thread
+keeps the sockets, the heartbeats, the reconnects and the query algorithm;
+the coroutine awaits a future the io thread settles through the loop, so
+nothing ever blocks the event loop. Depend on `@mx//multiplexer:aio`.
 
 ```python
 from multiplexer.aio import AsyncClient
@@ -553,7 +574,10 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   awaited from any loop, as a `ThreadedClient` may be called from any
   thread, which is what code run through asgiref's `async_to_sync` away
   from the server's loop needs. `messages()` from another loop raises
-  `RuntimeError`.
+  `RuntimeError`. `loop` is that loop; once it is closed, what arrives on
+  its own is dropped without a warning, while `query()` and
+  `send_message()` still work from other loops, so a program that must
+  receive again makes a new client on a running loop.
 - `await query(message, type, timeout=10, to=0, probe=..., multiplexer=ONE, with_connection=False)`
   returns the reply and raises the same exceptions as the synchronous
   client: `NotConnected`, `OperationTimedOut`, `OperationFailed`,
@@ -575,7 +599,15 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   ...)` likewise.
 - `subscribe(type, handler, matching=None)` runs `handler(mxmsg)` on the
   loop for every message of `type` (`None` for all) that `matching`
-  accepts; a coroutine function runs as a task. A handler that raises, at
+  accepts; a coroutine function runs as a task. `matching` runs on the io
+  thread, with the GIL, for every message that arrives on its own, before
+  anything is handed to the loop: it must be quick and must not touch the
+  loop's state, and a message it refuses costs the loop nothing. A plain
+  handler is called in the order the messages arrived, each call over
+  before the next message is handed over; coroutine handlers start in
+  that order, as tasks that may interleave at their awaits. A query
+  awaited on the client's own loop resumes after everything that arrived
+  before its reply was handed over. A handler that raises, at
   once or later as a coroutine, is logged with the message's type and
   sender through the client's logging, and the other handlers still run.
   Returns the function that ends the subscription. `messages(type=None)` is the pull form, an async
@@ -602,9 +634,9 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
 
 A synchronous `Client` belongs to one thread; a `ThreadedClient` may be
 used from any number of them; an `AsyncClient` delivers on the event
-loop it was made on and may be awaited from any. A backend built on one
-thread and served from another is fine: `serve_forever()` adopts its
-thread. In debug builds of the extension the rules are checked and a
+loop it was made on and may be awaited from any. A
+`BaseMultiplexerServer` made on one thread and served from another is
+fine: `serve_forever()` adopts its thread. In debug builds of the extension the rules are checked and a
 violation fails an assertion.
 
 **Interpreter exit.** A thread blocked in one of the library's waits when
@@ -673,7 +705,15 @@ class SearchTest(unittest.TestCase):
   multiplexer lists that many peers of the type in its peers file, and
   `wait_for_peer_gone(type_or_name, timeout=15)` until none does; each
   `Mx` in `mx` has `connected_peers()`, `stop()`, `kill()`, `restart()`,
-  `pause()`, `resume()`, `log_path` and, with `record=True`, `record_file`.
+  `pause()`, `resume()`, `log_path` and, with `record=True`, `record_file`:
+  `stop()` sends `SIGTERM` and `kill()` `SIGKILL`; `start()` starts a
+  stopped or killed one again on the same port and returns once it
+  listens, and `restart()` is both; `pause()` freezes it with `SIGSTOP`, a
+  hung multiplexer whose sockets stay open, and `resume()` thaws it;
+  `log_contains(text)`, with `wait_until`, waits for a line of its log
+  such as `rules reloaded from`; `endpoint` is its `(host, port)`, and
+  `cluster.multiplexer_at(endpoint)` is the `Mx` at the `(host, port)` a
+  lane's or a reply's connection names.
   The logs and files go to Bazel's outputs directory under `bazel test`;
   outside Bazel to `$MX_TEST_OUTPUT` when set, or to one temporary
   directory per process, removed when the process exits.

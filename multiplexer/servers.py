@@ -1,12 +1,14 @@
-"""The Python backend API: BaseMultiplexerServer, which a backend subclasses.
+"""The Python backend base class: BaseMultiplexerServer, which a backend may subclass.
 
-A backend hands control to serve_forever(): the loop reads one message at a
-time, answers the protocol's own messages itself, and calls handle_message()
-with the rest; while a message is being handled, send_message() defaults to
-replying to it. The C++ BaseMultiplexerServer mirrors this class, including
-what happens when a handler raises. docs/api_python.md is the user's view.
+A BaseMultiplexerServer hands control to serve_forever(): the loop reads one
+message at a time, answers the protocol's own messages itself, and calls
+handle_message() with the rest; while a message is being handled,
+send_message() defaults to replying to it. The C++ BaseMultiplexerServer
+mirrors this class, including what happens when a handler raises.
+docs/api_python.md is the user's view.
 
-Threading: a backend runs on the thread that calls serve_forever().
+Threading: a BaseMultiplexerServer runs on the thread that calls
+serve_forever().
 """
 
 import faulthandler
@@ -315,8 +317,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     )
 
         except Exception as e:
-            # Same as the C++ backend: tell the requester instead of leaving it
-            # to time out, then ask on_handler_exception() whether to go on.
+            # Same as the C++ BaseMultiplexerServer: tell the requester instead
+            # of leaving it to time out, then ask on_handler_exception() whether
+            # to go on.
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % e)
             if not self._has_sent_response:

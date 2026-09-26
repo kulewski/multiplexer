@@ -7,8 +7,8 @@
 // It runs no thread of its own: every wait_* or flush call runs the shared
 // io_service until its condition holds or its timer expires, and between
 // calls nothing happens. That is why a peer built on it must be marked
-// is_passive in the rules file unless it keeps calling in (a backend's
-// serve_forever loop does).
+// is_passive in the rules file unless it keeps calling in
+// (BaseMultiplexerServer's serve_forever loop does).
 //
 // Tricky parts, each commented at the spot: the tribool message tracker that
 // reports sent/lost per message; the round-robin choice of a connection in
@@ -250,7 +250,8 @@ typedef std::shared_ptr<Lane> LanePtr;
 // How an addressed query locates its addressee when the request did not
 // reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
 // reaches it whatever its Routing, as every addressed message does, or a
-// PING, which every client library answers, not only a backend.
+// PING, which `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer` and
+// `ThreadedClient` answer; the synchronous Client does not.
 // docs/query.md, "An addressed query".
 enum Probe { PROBE_SEARCH, PROBE_PING };
 

@@ -1,9 +1,9 @@
-"""The reason the threaded backend exists: a request that takes longer than
-the multiplexer's drop interval. With the intervals as shipped (a
-heartbeat every 3 s, the drop started after 30 s of silence and completed
-at 90 s), a BaseMultiplexerServer blocked in its handler is dropped; a
-BaseThreadedMultiplexerServer keeps heartbeating from its io thread, stays
-registered, and its reply arrives. About two minutes; tagged slow.
+"""The reason BaseThreadedMultiplexerServer exists: a request that takes
+longer than the multiplexer's drop interval. With the intervals as shipped
+(a heartbeat every 3 s, the drop started after 30 s of silence and
+completed at 90 s), a BaseMultiplexerServer blocked in its handler is
+dropped; a BaseThreadedMultiplexerServer keeps heartbeating from its io
+thread, stays registered, and its reply arrives. About two minutes; tagged slow.
 """
 
 import time

@@ -383,9 +383,9 @@ class ThreadedTestClient:
     order, messages(type, matching=None), wait_for(type, count=1,
     timeout=10, matching=None), via(mxmsg) and arrivals(type), as on
     FakePeer. TestClient, on the synchronous client, never drops a late
-    reply and never answers a search, so a test of a threaded peer that
-    passes on it may not pass in production; this one shows what
-    production shows. `client` is the ThreadedClient underneath.
+    reply and never answers a search, so a test of a peer built on
+    ThreadedClient that passes on it may not pass in production; this one
+    shows what production shows. `client` is the ThreadedClient underneath.
     """
 
     def __init__(self, cluster: Cluster, peer_type: int, name: str | None = None):

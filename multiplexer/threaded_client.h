@@ -39,10 +39,11 @@
 // for an unknown id is dropped, a PING without references, or a
 // BACKEND_FOR_PACKET_SEARCH addressed to this instance, is answered with a
 // PING carrying its payload back (BACKEND_ERROR when that echo would be
-// over MAX_MESSAGE_SIZE), a search routed by type is dropped (this peer
-// is no backend), and the rest, events and requests
-// addressed to this peer, go to on_message, or are logged and dropped when
-// there is none. Nothing is ever queued for a reader that may never come.
+// over MAX_MESSAGE_SIZE), a search routed by type is dropped unless a
+// search policy is set (set_search_policy), and the rest, events and
+// requests addressed to this peer, go to on_message, or are logged and
+// dropped when there is none. Nothing is ever queued for a reader that may
+// never come.
 //
 // Threading, as declared: everything under io_thread_ runs on the io thread
 // only, reached from other threads through io_service::post. Callbacks and
@@ -103,10 +104,10 @@ class ThreadedClient : public ExceptionDefinitions {
   // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
   // by type or addressed to this instance, is answered with a PING when
   // `answer()` returns true (on the io thread, so it must be quick) and
-  // dropped otherwise, the way a saturated backend declines with
-  // decline_searches_when_full. Without a policy the client is no
-  // backend: it answers only a search addressed to it and drops the rest.
-  // Call before connecting.
+  // dropped otherwise, the way BaseThreadedMultiplexerServer declines when
+  // saturated, with decline_searches_when_full. Without a policy, a
+  // ThreadedClient answers only a search addressed to it and drops the
+  // rest. Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
   // How host names become addresses; for tests. See BasicClient::Resolver.

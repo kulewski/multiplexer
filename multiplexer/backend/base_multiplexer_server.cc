@@ -199,8 +199,8 @@ void BaseMultiplexerServer::__handle_message() {
   } catch (std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception in handle_message: ") + error.what()));
     if (!_has_sent_response) {
-      // Same as the Python backend: tell the requester instead of leaving it
-      // to time out.
+      // Same as the Python BaseMultiplexerServer: tell the requester instead
+      // of leaving it to time out.
       report_error(error.what());
     }
     if (!on_handler_exception(error)) {
@@ -213,9 +213,9 @@ void BaseMultiplexerServer::report_error(const std::string& message) {
   send_message(Kwargs().set("message", message).set("type", types::BACKEND_ERROR));
 }
 
-// The protocol messages a backend must answer: a client's search for a
-// backend gets a PING referencing it, which is how the client learns this
-// backend is alive and where to send the request; a PING without
+// The protocol messages this class answers itself: a client's search for
+// a backend gets a PING referencing it, which is how the client learns
+// this backend is alive and where to send the request; a PING without
 // references is an echo request and is answered with the same payload.
 void BaseMultiplexerServer::__handle_internal_message() {
   const MultiplexerMessage& mxmsg = *last_mxmsg;

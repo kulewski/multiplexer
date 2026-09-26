@@ -6,10 +6,11 @@ without the program calling in, and the peer type need not be passive. Any
 thread may call query() and send_message(), any number of them at once:
 replies are matched to queries by the ids they reference. query() blocks,
 or, given a callback, returns at once and calls it with the result.
-Everything else that arrives, events and requests addressed to this peer,
-goes to the on_message callback given at construction, or is logged and
-dropped when there is none; late replies and the protocol's own messages
-never reach it. docs/api_python.md has the user's view; the synchronous
+Everything else that arrives, events and requests addressed to this peer
+and the delivery errors for messages that were not queries, goes to the
+on_message callback given at construction, or is logged and dropped when
+there is none; late replies, pings and searches never reach it.
+docs/api_python.md has the user's view; the synchronous
 multiplexer.clients.Client remains for programs that prefer no thread.
 
 Callbacks, on_message and query()'s, run on the io thread, with the GIL,
@@ -64,13 +65,14 @@ class ThreadedClient:
         """Start the io thread and connect to every (host, port) in `addresses`.
 
         `on_message(mxmsg)` runs on the io thread with every message that is
-        not a reply to a query or one of the protocol's own; a program that
-        wants a queue passes `queue.put`. Without it such messages are
-        logged and dropped. With `with_connection`, it is called as
+        not a reply to a query, the delivery errors for messages that were
+        not queries included, and no ping or search; a program that wants a
+        queue passes `queue.put`. Without it such messages are logged and
+        dropped. With `with_connection`, it is called as
         `on_message(mxmsg, connection)`, the connection the message came on,
         for a reply that must go back the same way. `search_policy`, a
         function returning whether to answer a client's search for a
-        backend, makes the client a backend: what
+        backend, lets requests routed by type find this client: what
         multiplexer.threaded_server builds on; without it only a search
         addressed to this instance is answered.
         """
