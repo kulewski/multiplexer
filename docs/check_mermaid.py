@@ -10,9 +10,13 @@ mmdc`), when either is installed; a block that fails to render is reported
 with its file and line, and the renderer's message.
 
 A picture is a `name.mmd` beside a `name.svg`, for a page that cannot hold
-Mermaid itself, a notebook, which GitHub shows without rendering it. The
-full check renders every source and fails when the committed SVG differs;
-`--write` renders them all in place.
+Mermaid itself: a notebook, which GitHub shows without rendering it, or the
+PyPI page, which is the README unrendered. The full check renders every
+source and fails when the committed SVG differs; `--write` renders them all
+in place. Every block in README.md follows a `<!-- pypi: ![...](name.svg)
+-->` line naming the picture make/setup.py puts in its place on the PyPI
+page, and that picture's `name.mmd` must be the block, which the fast check
+checks.
 
 Usage: check_mermaid.py [--fast | --write]     exits 1 on any failure
 """
@@ -40,6 +44,8 @@ PICTURE_CONFIG = {
     "fontFamily": "arial, sans-serif",
     "flowchart": {"htmlLabels": False},
 }
+# The line above a README block: the picture the PyPI page shows instead.
+PYPI_PICTURE = re.compile(r"^<!-- pypi: !\[[^\]]+\]\(([^)\s]+)\.svg\) -->$")
 
 
 def markdown_files() -> list[str]:
@@ -85,6 +91,25 @@ def fast_problems(source: str) -> list[str]:
         for line in source.split("\n"):
             if ";" in line and not line.strip().startswith("%%"):
                 problems.append("';' ends a Mermaid statement; use a comma: %s" % line.strip())
+    return problems
+
+
+def readme_problems() -> list[str]:
+    """README.md's Mermaid blocks without their picture for PyPI above them."""
+    path = os.path.join(ROOT, "README.md")
+    lines = open(path).read().split("\n")
+    problems = []
+    for line, source in mermaid_blocks(path):
+        marker = PYPI_PICTURE.match(lines[line - 2]) if line > 1 else None
+        if marker is None:
+            problems.append("README.md:%d: no `<!-- pypi: ![what it shows](picture.svg) -->` line above it" % line)
+            continue
+        picture = os.path.join(ROOT, marker.group(1) + ".mmd")
+        if not os.path.exists(picture) or open(picture).read().rstrip("\n") != source.rstrip("\n"):
+            problems.append(
+                "README.md:%d: %s.mmd is not this block: copy it there, then docs/check_mermaid.py --write"
+                % (line, marker.group(1))
+            )
     return problems
 
 
@@ -160,7 +185,7 @@ def main(argv: list[str]) -> int:
     fast_only = "--fast" in argv
     blocks = [(path, line, source) for path in markdown_files() for line, source in mermaid_blocks(path)]
     blocks += [(path, 1, open(path).read()) for path in picture_sources()]
-    failures = []
+    failures = readme_problems()
     for path, line, source in blocks:
         for problem in fast_problems(source):
             failures.append("%s:%d: %s" % (os.path.relpath(path, ROOT), line, problem))

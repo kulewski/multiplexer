@@ -183,8 +183,10 @@ graph LR
 
 ## Start here
 
-- [Running the echo example, step by step](../examples/echo/walkthrough.md): run a multiplexer, a
-  backend and a client, and read what they print.
+- [The quick start](../README.md#quick-start): a pip install, a rules
+  file, two multiplexers, a backend and a client, nothing built.
+- [Running the echo example, step by step](../examples/echo/walkthrough.md): with Bazel, run a
+  multiplexer, a backend and a client, and read what they print.
 - [Building the chat gateway, step by step](../examples/aio/walkthrough.md):
   an asyncio TCP server on one `AsyncClient`, a line awaited as a query
   and a broadcast delivered to every client, the piece the channel layer
