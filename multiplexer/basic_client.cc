@@ -442,3 +442,31 @@ std::unique_ptr<mx::SimpleTimer> BasicClient::create_timer(float timeout) const 
   Assert(ptr->expired() == false);
   return ptr;
 }
+
+// Takes `connection`, and its live flag, on the client's thread, where a
+// reference to the connection may be taken and dropped.
+void Lane::adopt(const ConnectionWrapper& connection) {
+  _check_made_here();
+  if (connection.inherited()) {
+    MXTHROW(ExceptionDefinitions::UsedAfterFork());
+  }
+  BasicClient::Connection::pointer conn = connection.lock();
+  mx::MutexLock lock(mutex_);
+  if (pinned_ && holds_) {
+    return;
+  }
+  connection_ = connection;
+  holds_ = true;
+  living_ = conn ? conn->living_flag() : std::shared_ptr<const std::atomic<bool>>();
+  watched_.store(static_cast<bool>(living_), std::memory_order_release);
+}
+
+// A seeded lane's first use: `conn` is the connection a message is placed
+// on, its flag the lane's when it is the one the lane holds.
+void Lane::_watch(const BasicClient::Connection::pointer& conn) {
+  mx::MutexLock lock(mutex_);
+  if (!living_ && holds_ && connection_.lock() == conn) {
+    living_ = conn->living_flag();
+  }
+  watched_.store(static_cast<bool>(living_), std::memory_order_release);
+}

@@ -20,8 +20,10 @@ import google.protobuf.message
 
 import multiplexer._native as _mxclient
 from multiplexer._native import (
+    CLOSE_FLUSH_SECONDS,
     DEFAULT_TIMEOUT,
     ConnectionWrapper,
+    DropReason,
     Lane,
     MultiplexerClientError,
     NotConnected,
@@ -36,10 +38,12 @@ from multiplexer.mxlog import HIGHVERBOSITY, MEDIUMVERBOSITY, WARNING, log
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
 
 # What this module is imported for: the client, its exceptions and handles,
-# the message helpers, and the default timeout.
+# the message helpers, the default timeout, and how long an end call writes
+# what was sent before it.
 __all__ = [
     "Client",
     "ConnectionWrapper",
+    "DropReason",
     "Lane",
     "MultiplexerClientError",
     "NotConnected",
@@ -48,6 +52,7 @@ __all__ = [
     "UsedAfterFork",
     "ScheduledMessageTracker",
     "DEFAULT_TIMEOUT",
+    "CLOSE_FLUSH_SECONDS",
     "TimeoutTicker",
     "initialize_message",
     "make_message",
@@ -180,6 +185,12 @@ class Client(_mxclient.Client):
         return self.__instance_id
 
     instance_id = property(__get_instance_id)
+
+    @property
+    def dropped(self) -> int:
+        """How many messages this client gave up on so far, each copy of one
+        sent to ALL; the drop observer (`on_drop`) hears of each as it goes."""
+        return self._dropped()
 
     def async_connect(self, endpoint):
         """
@@ -541,14 +552,12 @@ class Client(_mxclient.Client):
                 message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, sent_ids, **kwargs
             )
 
-        id, tracker = self.__send_message(message, timeout=timeout_ticker(), **kwargs)
-        assert isinstance(tracker, int)
+        id, tracker = self.__schedule_all(message, timeout_ticker(), **kwargs)
         if tracker == 0:
             # No connection at all: let the reconnect timers fire, then once more.
             if not self.wait_for_any_connection(timeout_ticker()):
                 raise NotConnected()
-            id, tracker = self.__send_message(message, timeout=timeout_ticker(), **kwargs)
-            assert isinstance(tracker, int)
+            id, tracker = self.__schedule_all(message, timeout_ticker(), **kwargs)
 
         accept_ids = [id] + accept_ids
         while timeout_ticker.permit():
@@ -581,8 +590,7 @@ class Client(_mxclient.Client):
         kwargs.pop("flush", None)
         mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
         while True:
-            _, used = self.__send_one(mxmsg, timeout_ticker, preferred, lane)
-            assert used is not None, "__send_one returns a connection or raises"
+            used = self.send_one(mxmsg.SerializeToString(), preferred, lane, timeout_ticker())
             if sent_ids is not None:
                 sent_ids.append(mxmsg.id)
             preferred = None
@@ -611,47 +619,6 @@ class Client(_mxclient.Client):
                 mxmsg = MultiplexerMessage()
                 mxmsg.CopyFrom(message)
             mxmsg.id = self.random()
-
-    def __send_one(self, mxmsg, timeout_ticker, preferred=None, lane=None):
-        """Write `mxmsg` to one connection and return (tracker, connection),
-        waiting for a connection or for the write to complete up to the
-        deadline. A connection that dies under the write is replaced by
-        another, or by the same one once reconnected, so a multiplexer
-        restart between two calls costs the reconnect delay, not the message.
-        With a lane, the lane's connection is the one preferred and the lane
-        adopts the connection used; a pinned lane allows no other, so its
-        connection being gone is NotConnected. Raises NotConnected when no
-        connection exists by the deadline."""
-        raw = mxmsg.SerializeToString()
-        if lane is not None:
-            if lane.closed:
-                raise NotConnected()
-            if lane.holds_connection and not preferred:
-                preferred = lane.connection  # a connection given outright wins: where a probe was answered
-        only_preferred = lane is not None and lane.pinned and lane.holds_connection
-        pinned = lane is not None and lane.pinned  # never handed to another connection if this one dies
-        while True:
-            tracker = used = None
-            if preferred:
-                tracker = self.schedule_on(raw, preferred, pinned, timeout_ticker())
-                used = preferred
-                preferred = None
-            if not tracker and only_preferred:
-                raise NotConnected()
-            if not tracker:
-                tracker, used = self.schedule_one_used(raw, pinned, timeout_ticker())
-            if tracker:
-                self.flush(tracker, timeout=timeout_ticker())
-                if tracker.is_sent():
-                    if lane is not None:
-                        lane.adopt(used)
-                    return tracker, used
-                if only_preferred:
-                    raise NotConnected()  # died under the write; nothing else may carry it
-            if not timeout_ticker.permit():
-                raise OperationTimedOut()
-            if not self.wait_for_any_connection(timeout_ticker()):
-                raise NotConnected()
 
     def __parse_incoming(self, got):
         """A (bytes, connection) pair from the C++ side as (MultiplexerMessage, connection)."""
@@ -695,7 +662,7 @@ class Client(_mxclient.Client):
         raise OperationTimedOut()
 
     def send_message(self, message, **kwargs) -> int:
-        """Queue a message on one or more connections and return its id.
+        """Send a message on one or more connections and return its id.
 
         `message` is a MultiplexerMessage, or a payload (bytes, str, or a
         protocol buffer message) wrapped into a new one built from the
@@ -704,34 +671,43 @@ class Client(_mxclient.Client):
         Client.ALL, a ConnectionWrapper (that connection while it is live;
         a reply goes back the way the request came) or a Lane from lane()
         (the lane's connection, which the lane replaces on a failover, or
-        keeps for good and raises NotConnected for when pinned); `flush`
-        waits until
-        the message reached the socket (every socket, for ALL), within
-        `timeout` seconds, resending through another connection if the
-        first dies under it; `embed` wraps `message` without looking at its
-        type. A message a full connection cannot take waits for its room,
-        in order, within `timeout`, and goes in as a later call runs the
-        loop; a lane keeps its connection while that lives. Raises
-        NotConnected when no connection is live (or the pinned lane's is
-        gone), OperationTimedOut when a flush ran out of time. For the
-        tracker of a queued message use schedule_one() or schedule_all()
-        directly.
+        keeps for good and raises NotConnected for when pinned); `embed`
+        wraps `message` without looking at its type.
+
+        Without `flush` it returns at once: the message is queued, waits
+        for room on a full connection, or, with no connection live, is held
+        until one comes up, `timeout` seconds at most, and goes out as a
+        later call runs the loop; one the client gives up on is reported
+        (on_drop). With `flush` it waits until the message reached the
+        socket, the first copy for ALL, within `timeout`, a connection that
+        dies under it handing it to another or having it held, and raises
+        NotConnected when nothing wrote it with no connection live, or
+        OperationTimedOut. With a `callback`, flush or not, it returns at
+        once and `callback(written)` runs inside a later call that runs the
+        loop, 1 once the message is written, the first copy for ALL, 0 once
+        it was given up on or shutdown() came first. NotConnected at once
+        for a pinned lane whose connection is gone, and after shutdown(). For the tracker of a
+        queued message use schedule_one() directly; schedule_all() returns
+        how many connections took a copy.
         """
-        mxmsg_id, tracker = self.__send_message(message, **kwargs)
-        if (tracker == 0) if isinstance(tracker, int) else not tracker:
+        mxmsg_id, taken = self.__send_message(message, **kwargs)
+        if not taken:
             raise NotConnected()
         return mxmsg_id
 
-    def __send_message(self, message, embed=False, multiplexer=ONE, flush=False, timeout=DEFAULT_TIMEOUT, **kwargs):
-        """The body of send_message(): wrap, serialize, queue on the chosen
-        connection(s), optionally flush. Choosing a connection first runs
-        every ready handler of the loop, so a connection the multiplexer
-        closed while this client was idle is retired, never written into.
-        With `flush` and one connection the message is also sent again if
-        that connection dies under it, and the call waits for a reconnect
-        within `timeout`; without `flush` the message is only queued."""
-        timeout_ticker = TimeoutTicker(timeout)
-
+    def __send_message(
+        self, message, embed=False, multiplexer=ONE, flush=False, timeout=DEFAULT_TIMEOUT, callback=None, **kwargs
+    ):
+        """The body of send_message(): wrap, serialize and send as every
+        client does (BasicClient::send in C++): placed on a connection, or
+        held until one comes up, within `timeout`. With `flush`, wait until
+        written, the first copy for ALL, raising as ThreadedClient does
+        (Client::_send_one in C++); a `callback` replaces the wait, hearing
+        how the message ended instead. Choosing a connection first runs every
+        ready handler of the loop, so a connection the multiplexer closed
+        while this client was idle is retired, never written into. Returns
+        (id, taken), taken False when nothing may take the message: a
+        pinned lane whose connection is gone, or the client shut down."""
         if embed or not isinstance(message, MultiplexerMessage):
             mxmsg = self.new_message(message=message, **kwargs)
         else:
@@ -742,42 +718,45 @@ class Client(_mxclient.Client):
         raw = mxmsg.SerializeToString()
 
         if multiplexer is Client.ALL:
-            count = self.schedule_all(raw, timeout_ticker())
-            if flush and count and not self.flush_all(timeout_ticker()):
-                raise OperationTimedOut()
-            return (mxmsg.id, count)
+            if flush and callback is None:
+                self.send_all_and_wait(raw, timeout)
+                return (mxmsg.id, True)
+            return (mxmsg.id, self.send(raw, True, None, timeout, callback))
         if multiplexer is not Client.ONE and not isinstance(multiplexer, (ConnectionWrapper, Lane)):
             raise NotImplementedError("selecting multiplexer with %r is not supported" % multiplexer)
-        preferred = multiplexer if isinstance(multiplexer, ConnectionWrapper) else None
         lane = multiplexer if isinstance(multiplexer, Lane) else None
-
-        if flush:
-            tracker, _ = self.__send_one(mxmsg, timeout_ticker, preferred, lane)
-            return (mxmsg.id, tracker)
-        if preferred is not None:
-            return (mxmsg.id, self.schedule_one(raw, preferred, timeout_ticker()))
-        if lane is None:
-            return (mxmsg.id, self.schedule_one(raw, timeout=timeout_ticker()))
-        # Queued only, through the lane: its connection while live, waiting
-        # there for room when it is full, else any (which the lane adopts),
-        # or nothing for a pinned lane whose connection is gone.
-        if lane.closed:
+        if lane is not None and lane.closed:
             raise NotConnected()
-        if lane.holds_connection:
-            tracker = self.schedule_on(raw, lane.connection, lane.pinned, timeout_ticker())
-            if tracker or lane.pinned:
-                return (mxmsg.id, tracker)
-        tracker, used = self.schedule_one_used(raw, lane.pinned, timeout_ticker())
-        if tracker:
-            lane.adopt(used)
-        return (mxmsg.id, tracker)
+        if flush and callback is None:
+            preferred = multiplexer if isinstance(multiplexer, ConnectionWrapper) else None
+            self.send_one(raw, preferred, lane, timeout)
+            return (mxmsg.id, True)
+        if isinstance(multiplexer, ConnectionWrapper):
+            lane = Lane(multiplexer)  # that connection while it lives, another once it is gone
+        return (mxmsg.id, self.send(raw, False, lane, timeout, callback))
+
+    def __schedule_all(self, message, timeout, embed=False, multiplexer=None, flush=False, **kwargs):
+        """send_and_receive's request to ALL: a copy on every live connection
+        now, and (id, how many), 0 with none live, for its delivery error
+        count."""
+        if embed or not isinstance(message, MultiplexerMessage):
+            mxmsg = self.new_message(message=message, **kwargs)
+        else:
+            mxmsg = message
+        return (mxmsg.id, self.schedule_all(mxmsg.SerializeToString(), timeout))
 
     def flush(self, tracker, timeout=DEFAULT_TIMEOUT):
-        """ensure that message tracked by tracker is either sent or dropped"""
+        """Run the loop until the message `tracker` follows is written or
+        dropped, or `timeout` seconds pass, when it may still be queued;
+        the tracker says which. The program's other threads go on meanwhile."""
         super(Client, self).flush(tracker, timeout)
 
     def flush_all(self, timeout=DEFAULT_TIMEOUT):
-        """try to empty all outgoing messages buffers within timeout seconds"""
+        """Run the loop until every message sent before the call has left its
+        queue, written or dropped, what waits for room included; True when
+        every one was written, False when one was dropped, which on_drop
+        names, or `timeout` seconds passed first. The program's other
+        threads go on meanwhile."""
         return super(Client, self).flush_all(timeout)
 
     def read_message(self, *args, **kwargs):

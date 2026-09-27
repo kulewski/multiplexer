@@ -1,6 +1,10 @@
 """AsyncClient against a real multiplexer and a scripted backend: every
 verb, the exceptions, concurrency, cancellation, subscriptions, the queue,
-a multiplexer restart, the loop rule, a fork, and the interpreter's exit.
+a multiplexer restart, the loop rule, a fork, and the interpreter's exit;
+and sends as on every client, against a frozen multiplexer: the await
+returns once the io thread has the message, where it waited for the
+write, flush=True waits for the write, a callback hears how the message
+ended, and flush_all() is awaited.
 """
 
 import asyncio
@@ -87,7 +91,7 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(b"AFTER", (await self.client.query(b"after", types.PYTHON_TEST_REQUEST)).message)
 
-    async def test_send_message_awaits_the_write_and_the_event_arrives(self):
+    async def test_send_message_returns_the_id_and_the_event_arrives(self):
         started = time.monotonic()
         mxmsg_id = await self.client.send_message(b"event", type=types.PYTHON_TEST_REQUEST)
         self.assertLess(time.monotonic() - started, 5)
@@ -98,7 +102,9 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(100, len(set(ids)))
         self.peer.wait_for(types.PYTHON_TEST_REQUEST, count=100, matching=lambda m: m.message.startswith(b"e"))
-        await self.client.send_message(b"everyone", type=types.PYTHON_TEST_REQUEST, multiplexer=AsyncClient.ALL)
+        await self.client.send_message(
+            b"everyone", type=types.PYTHON_TEST_REQUEST, multiplexer=AsyncClient.ALL, flush=True
+        )
         self.peer.wait_for(types.PYTHON_TEST_REQUEST, matching=lambda m: m.message == b"everyone")
 
     def push(self, payload: bytes, to: int) -> None:
@@ -214,6 +220,85 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
     async def _messages_elsewhere(self):
         """messages() called from a loop that is not the client's."""
         self.client.messages()
+
+
+def frames_to_fill(size: int) -> int:
+    """How many messages of `size` bytes a frozen multiplexer's connection
+    cannot take: twice what the two sockets may buffer, the largest the
+    kernel allows each, and twice the queue."""
+    buffers = 0
+    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
+        try:
+            with open(path) as limits:
+                buffers += int(limits.read().split()[2])
+        except (OSError, IndexError, ValueError):
+            buffers += 8 << 20  # a guess where /proc does not say
+    return 2 * buffers // size + 2 * 1024
+
+
+class SendTest(unittest.IsolatedAsyncioTestCase):
+    """Sends as on every client; a multiplexer per test, frozen when a test
+    needs the client's connection full."""
+
+    CHUNK = b"x" * (16 * 1024)
+
+    async def asyncSetUp(self):
+        self.cluster = Cluster(1, rules=RULES).__enter__()
+        self.client = AsyncClient(self.cluster.endpoints, peers.PYTHON_TEST_CLIENT)
+
+    async def asyncTearDown(self):
+        await self.client.aclose(timeout=0)
+        self.cluster.mx[0].resume()
+        self.cluster.__exit__(None, None, None)
+
+    async def test_a_send_returns_with_the_connection_full(self):
+        """The multiplexer frozen: sends past what its connection takes
+        return at once, the messages waiting for room in the client, where
+        each awaited its write and the first that had no room waited out its
+        timeout; once the multiplexer reads again, flush_all() sees every
+        one written and none is dropped."""
+        self.cluster.mx[0].pause()
+
+        async def fill():
+            for _ in range(frames_to_fill(len(self.CHUNK))):
+                await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+
+        await asyncio.wait_for(fill(), 30)
+        self.cluster.mx[0].resume()
+        self.assertTrue(await self.client.flush_all(60))
+        self.assertEqual(0, self.client.dropped)
+
+    async def test_a_flushing_send_awaits_the_write(self):
+        """The connection full: a flushing send that could not be written
+        within its timeout raises OperationTimedOut, and flush_all() says
+        False, for that send's message and those before it."""
+        self.cluster.mx[0].pause()
+        for _ in range(frames_to_fill(len(self.CHUNK))):
+            await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+        with self.assertRaises(OperationTimedOut):
+            await self.client.send_message(b"waits", type=types.PYTHON_TEST_REQUEST, flush=True, timeout=0.3)
+        self.assertFalse(await self.client.flush_all(0.3))
+
+    async def test_a_callback_hears_how_the_message_ended_on_the_loop(self):
+        """A send with a callback: 1 once written, called once, on the
+        client's loop; 0 for one given up on, the multiplexer frozen with
+        the connection full."""
+        loop_thread = threading.get_ident()
+        heard: list[tuple[int, int]] = []
+
+        def callback(written: int) -> None:
+            heard.append((written, threading.get_ident()))
+
+        await self.client.send_message(b"written", type=types.PYTHON_TEST_REQUEST, callback=callback)
+        self.assertTrue(await self.client.flush_all(10))
+        self.assertEqual([(1, loop_thread)], heard)
+        self.cluster.mx[0].pause()
+        for _ in range(frames_to_fill(len(self.CHUNK))):
+            await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+        await self.client.send_message(b"dropped", type=types.PYTHON_TEST_REQUEST, timeout=0.3, callback=callback)
+        await self.client.flush_all(0.6)  # past the message's timeout, whose callback the loop got first
+        self.assertEqual([(1, loop_thread), (0, loop_thread)], heard)
+        self.assertEqual(1, self.client.dropped)
 
 
 class HolderTest(unittest.TestCase):

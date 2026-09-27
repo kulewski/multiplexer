@@ -75,7 +75,9 @@ class Request {
   // is the reply", and a requester built on ThreadedClient drops what
   // references a query it has seen answered; a follow-up that is not the
   // reply goes through the server's client() with `to` set and no
-  // `references`, correlated in the payload.
+  // `references`, correlated in the payload. A reply that threw did not go
+  // out: the request is not answered, and a handler's exception then gets
+  // the requester BACKEND_ERROR.
   void reply(const std::string& payload, std::uint32_t type);
   void reply(MultiplexerMessage msg);
   // The message needs no reply, as an event does.
@@ -132,7 +134,8 @@ class BaseThreadedMultiplexerServer {
   // serve_forever() calls it first, and a second call does nothing. Call
   // it yourself when something waits for a line you print before it
   // sends, so that the line means reachable, or in a test that wants the
-  // backend connected without a thread serving it.
+  // backend connected without a thread serving it. A close() on another
+  // thread meanwhile ends it: what is not connected yet is not.
   void connect();
   // Take no more messages, tell every multiplexer the drain_routing as
   // start_draining() does, answer no search, let the workers finish what
@@ -140,14 +143,18 @@ class BaseThreadedMultiplexerServer {
   // routed before the multiplexers applied the drain routing or saw the
   // connection go, is refused with DELIVERY_ERROR, a reply dropped.
   // Idempotent: a second call, from another thread too, returns once the
-  // first is done. The destructor calls it.
+  // first is done, and a serve_forever() running on another thread returns.
+  // The destructor calls it.
   // Joins the workers, so from a handler, on a worker, it throws
-  // std::logic_error: a handler that wants the server gone calls stop().
+  // std::logic_error, during another thread's close() too: a handler that
+  // wants the server gone calls stop().
   // In a forked child, on a server the parent made, it throws
   // UsedAfterFork before any lock, as connect(), serve_forever() and
   // pending() do, stop() only clears `working`, and the destructor only
   // lets go of what the parent's threads held (_forget_the_parents_threads).
-  void close();
+  // The connections close as the client's shutdown(timeout) does, what was
+  // sent before written first, `timeout` seconds at most.
+  void close(float timeout = CLOSE_FLUSH_SECONDS);
 
   // Draining, as on BaseMultiplexerServer: tell every multiplexer the
   // drain_routing, nothing new by the rules by default, keep serving what
@@ -179,9 +186,10 @@ class BaseThreadedMultiplexerServer {
   // handled, since nothing more is on its way; a drain that keeps a path
   // open lasts the whole period. Override for a condition of your own.
   virtual bool drained() const;
-  // Called on the worker thread when handle_message() threw, after
-  // BACKEND_ERROR went to the requester. True (the default) keeps serving;
-  // false makes serve_forever() return and rethrow.
+  // Called on the worker thread when handle_message() threw, after the
+  // requester was sent BACKEND_ERROR, unless a reply had gone out or the
+  // report failed. True (the default) keeps serving; false makes
+  // serve_forever() return and rethrow.
   virtual bool on_handler_exception(const std::exception&) { return true; }
   // Whether to answer a client's search for a backend; on the io thread,
   // so quick. False with decline_searches_when_full while every worker is
@@ -209,6 +217,10 @@ class BaseThreadedMultiplexerServer {
   unsigned int busy_ MX_GUARDED_BY(mutex_) = 0;
   bool accepting_ MX_GUARDED_BY(mutex_) = true;
   std::vector<std::thread> threads_ MX_GUARDED_BY(mutex_);
+  // Every worker's id, kept once close() has taken threads_ to join them:
+  // a worker calling close() then still throws, rather than wait for the
+  // close() that waits for it.
+  std::vector<std::thread::id> worker_ids_ MX_GUARDED_BY(mutex_);
   std::atomic<bool> draining_{false};
   // When the drain started, as steady_clock ticks, written before
   // draining_ is published: drained() may run on another thread than

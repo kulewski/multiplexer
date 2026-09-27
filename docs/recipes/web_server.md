@@ -86,7 +86,11 @@ not call the blocking `query()` from it (pass a `callback` there).
 ## Exit and reload
 
 The client's io thread is a C++ thread, not a Python one: it never keeps
-the interpreter alive, and the client's destructor joins it. A request
+the interpreter alive. A client given no `on_message` is freed at exit,
+and its destructor shuts it down, writing what was sent first, a second
+at most. One given `on_message` is never freed, so its io thread ends
+with the process and an event it had not written yet is lost: a hook
+registered with `atexit` beside the fork hook shuts it down. A request
 thread blocked in `query()` when the interpreter exits gets a shut-down
 error, or parks, never a crash. A backend built on `BaseMultiplexerServer`
 that must run inside the same process runs its `serve_forever()` on a

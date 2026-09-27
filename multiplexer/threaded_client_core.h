@@ -35,10 +35,13 @@ class ThreadedClient::Core {
   // Core outlives a handle destroyed on that thread; see shutdown().
   void start(const std::shared_ptr<Core>& self);
   void set_search_policy(SearchPolicy answer);
+  void set_drop_observer(DropObserver observer);
+  std::uint64_t dropped();
   void set_resolver(BasicClient::Resolver resolver);
   void set_routing(const Routing& routing);
   bool routing_acknowledged();
   bool flush_all(float timeout);
+  void flush_all_with_callback(float timeout, FlushCallback done);
   std::uint64_t instance_id() const { return instance_id_; }
   std::uint32_t peer_type() const { return peer_type_; }
   std::uint64_t random64();  // thread-safe
@@ -46,19 +49,22 @@ class ThreadedClient::Core {
   unsigned int connections_count();
   std::size_t watched_ids();
   std::uint64_t retries();
+  std::size_t waiting_queries();
+  std::size_t waiting_messages();
   void send(const MultiplexerMessage& msg);
-  void send(const MultiplexerMessage& msg, LanePtr lane);
-  void send_all(const MultiplexerMessage& msg);
-  void send(const MultiplexerMessage& msg, const ConnectionWrapper& connection);
+  void send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done);
+  void send_all(const MultiplexerMessage& msg, SendCallback done);
+  void send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, SendCallback done);
   unsigned int send(const MultiplexerMessage& msg, float timeout);
   unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
-  void send_serialized(std::string serialized, LanePtr lane = LanePtr(), float timeout = DEFAULT_TIMEOUT);
-  void send_all_serialized(std::string serialized, float timeout = DEFAULT_TIMEOUT);
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr());
+  void send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done);
+  void send_all_serialized(std::string serialized, float timeout, SendCallback done);
+  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane, bool* given_up);
   void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                      LanePtr lane = LanePtr());
+  void send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done, LanePtr lane);
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
   void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr());
@@ -72,7 +78,7 @@ class ThreadedClient::Core {
              float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH);
   Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
                Probe probe = PROBE_SEARCH);
-  void shutdown();
+  void shutdown(float timeout);
   bool orphaned() const { return basic_client_->orphaned(); }
   LogSummary& drop_lines() { return basic_client_->drop_lines(); }  // the io thread only
 
@@ -86,24 +92,19 @@ class ThreadedClient::Core {
   typedef std::shared_ptr<InFlight> InFlightPtr;
   typedef BasicClient::BasicScheduledMessageTracker Tracker;
   void _orphan_teardown();
+  void _teardown() MX_RUN_ON(io_thread_);
+  void _write_out() MX_RUN_ON(io_thread_);
+  bool _writing_out_here();
   void _release_callbacks();
 
   // Sends; see "Sends" in the .cc.
   void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
-                    LanePtr lane);
+                    LanePtr lane, FlushedCallback flushed = FlushedCallback());
   void _place(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  bool _try_place(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _queued(const PendingSendPtr& pending, const Tracker& tracker) MX_RUN_ON(io_thread_);
-  void _wait_any(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _unwait(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
   void _refuse(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _retry(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _settle(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _untrack(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
+  void _settle(const PendingSendPtr& pending, unsigned int written, bool given_up) MX_RUN_ON(io_thread_);
   void _post_fill() MX_RUN_ON(io_thread_);
   void _fill() MX_RUN_ON(io_thread_);
-  void _on_tracked(const std::shared_ptr<SendState>& state, bool written) MX_RUN_ON(io_thread_);
-  void _process_tracked() MX_RUN_ON(io_thread_);
   void _expire_at(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
   void _arm_expiry() MX_RUN_ON(io_thread_);
   void _expire() MX_RUN_ON(io_thread_);
@@ -112,6 +113,7 @@ class ThreadedClient::Core {
                                                       ConnectionWrapper* used, bool* refused, float timeout,
                                                       std::uint64_t number = 0) MX_RUN_ON(io_thread_);
   // flush_all() and connect(); see the .cc.
+  void _begin_flush_all(float timeout, FlushCallback done);
   void _end_flush(const std::shared_ptr<FlushWait>& wait, bool flushed) MX_RUN_ON(io_thread_);
   void _end_connect(const std::shared_ptr<ConnectWaiter>& waiter, bool up) MX_RUN_ON(io_thread_);
 
@@ -129,6 +131,7 @@ class ThreadedClient::Core {
   void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
   void _wait_for_connection(const InFlightPtr& in_flight) MX_RUN_ON(io_thread_);
   void _restart_waiting_queries() MX_RUN_ON(io_thread_);
+  void _clear_out_waiting() MX_RUN_ON(io_thread_);
   void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
   void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
@@ -167,23 +170,15 @@ class ThreadedClient::Core {
   // (_release_callbacks).
   MessageSink on_message_ MX_GUARDED_BY(io_thread_);
   SearchPolicy search_policy_ MX_GUARDED_BY(io_thread_);
-  // Sends made while no connection was live, waiting for one to come up, in
-  // the order made; what waits for room waits in BasicClient.
-  std::deque<PendingSendPtr> waiting_any_ MX_GUARDED_BY(io_thread_);
-  std::uint64_t retries_ MX_GUARDED_BY(io_thread_) = 0;  // see retries(): this client's part
+  std::uint64_t retries_ MX_GUARDED_BY(io_thread_) = 0;  // see retries(): the queries' part
   bool fill_posted_ MX_GUARDED_BY(io_thread_) = false;   // a _fill() is on its way
-  // Queries that found no connection live, waiting for one.
+  // Queries that found no connection live, waiting for one, and of them
+  // how many ended meanwhile and are not cleared out yet.
   std::deque<InFlightPtr> waiting_queries_ MX_GUARDED_BY(io_thread_);
-  // Flushing sends by the state of each copy queued: written or lost, the
-  // connection says so through the tracked observer, and the events wait in
-  // tracked_events_ for the one pass per loop turn that handles them.
-  std::unordered_map<const SendState*, PendingSendPtr> tracked_sends_ MX_GUARDED_BY(io_thread_);
-  std::vector<std::pair<std::shared_ptr<SendState>, bool>> tracked_events_ MX_GUARDED_BY(io_thread_);
-  bool tracked_posted_ MX_GUARDED_BY(io_thread_) = false;
-  // The deadlines of the sends that have one running (flushing sends, and
-  // those waiting for a connection), as a heap with the earliest on top,
-  // and the one timer set to it. Entries of sends that ended are skipped
-  // when met, and cleared out once they are half of it.
+  std::size_t waiting_ended_ MX_GUARDED_BY(io_thread_) = 0;
+  // The deadlines of the flushing sends, as a heap with the
+  // earliest on top, and the one timer set to it. Entries of sends that
+  // ended are skipped when met, and cleared out once they are half of it.
   std::vector<Expiring> expiring_ MX_GUARDED_BY(io_thread_);
   std::size_t expiring_compact_at_ MX_GUARDED_BY(io_thread_) = 64;
   std::unique_ptr<asio::steady_timer> expiry_timer_ MX_GUARDED_BY(io_thread_);
@@ -191,7 +186,15 @@ class ThreadedClient::Core {
       std::chrono::steady_clock::time_point::max();
   std::vector<std::shared_ptr<FlushWait>> flushes_ MX_GUARDED_BY(io_thread_);       // flush_all() calls waiting
   std::vector<std::shared_ptr<ConnectWaiter>> connects_ MX_GUARDED_BY(io_thread_);  // connect() calls waiting
+  // shutdown() was called: no new query, send, connect or routing, but a
+  // send made on the io thread meanwhile (_writing_out_here). What was sent
+  // before is written meanwhile, and what the io thread sent since
+  // (drain_, until drain_timer_), then the connections close (_teardown),
+  // once: torn_down_.
   bool shut_down_ MX_GUARDED_BY(io_thread_) = false;
+  BasicClient::FlushPtr drain_ MX_GUARDED_BY(io_thread_);
+  std::unique_ptr<asio::steady_timer> drain_timer_ MX_GUARDED_BY(io_thread_);
+  bool torn_down_ MX_GUARDED_BY(io_thread_) = false;
 
   mx::Mutex random_mutex_;
   mx::Random64 random_ MX_GUARDED_BY(random_mutex_);

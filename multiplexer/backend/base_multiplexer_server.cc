@@ -25,7 +25,20 @@ void BaseMultiplexerServer::loop_iter(float timeout) {
   std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received = conn->receive_message(timeout);
   last_mxmsg = received.first;
   last_connwrap = received.second;
-  __handle_message();
+  try {
+    __handle_message();
+  } catch (...) {
+    _forget_request();
+    throw;
+  }
+  _forget_request();
+}
+
+// The reply defaults hold while a message is handled, and only then: what
+// periodic_task() sends is no reply to the last request.
+void BaseMultiplexerServer::_forget_request() {
+  last_mxmsg.reset();
+  last_connwrap = ConnectionWrapper();
 }
 
 void BaseMultiplexerServer::connect() {
@@ -53,15 +66,21 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
       }
       periodic_task();
     }
-    // A drain serves what was already on its way: the requests the client
-    // had read off the sockets when the drain ended are handled before the
-    // connections close, whether the drain ended on the confirmation or
-    // on its cap.
-    while (draining_ && working && conn->has_incoming_messages()) {
-      try {
-        loop_iter(0);
-      } catch (Client::OperationTimedOut&) {
-        break;
+    // The drain is over. What arrives from now on is refused at once, so
+    // that its sender retries elsewhere, and what was already on its way,
+    // read off the sockets when the drain ended, is handled before the
+    // connections close, whether the drain ended on the confirmation or on
+    // its cap: a number fixed here, however fast more comes, where every
+    // reply's turn of the loop read more, handled in turn, so that under
+    // steady load the drain never ended.
+    if (draining_ && working) {
+      conn->refuse_arrivals();
+      while (working && conn->has_incoming_messages()) {
+        try {
+          loop_iter(0);
+        } catch (Client::OperationTimedOut&) {
+          break;
+        }
       }
     }
   } catch (...) {
@@ -90,12 +109,12 @@ bool BaseMultiplexerServer::drained() const {
 
 // Builds and queues a message. While a request is being handled the
 // defaults make it the reply: addressed to the requester, referencing the
-// request, on the connection the request arrived on. Kwargs is typed by
-// std::any, so a key must hold exactly the type documented in the header.
+// request, on the connection the request arrived on; outside a handler
+// there are none, and the message is routed by its type. Kwargs is typed
+// by std::any, so a key must hold exactly the type documented in the
+// header.
 std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
-  _has_sent_response = true;
-
-  DbgAssert(kwargs.check_keys(KwargsKeys()("message")("to")("type")("references")("workflow")));
+  DbgAssert(kwargs.check_keys(KwargsKeys()("message")("to")("type")("references")("workflow")("multiplexer")));
   Assert(kwargs.has_key("message"));
   DbgAssert(kwargs.unsafe_is<const MultiplexerMessage*>("message") || kwargs.unsafe_is<const std::string*>("message") ||
             kwargs.unsafe_is<std::string>("message"));
@@ -105,10 +124,17 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   DbgAssert(kwargs.empty_or<std::string>("workflow") || kwargs.unsafe_is<const std::string*>("workflow"));
 
   // defaults
-  kwargs.set_default("workflow", last_mxmsg->workflow());
-  kwargs.set_default("references", last_mxmsg->id());
-  kwargs.set_default("to", last_mxmsg->from());
-  kwargs.set_default("multiplexer", last_connwrap);
+  if (last_mxmsg) {
+    kwargs.set_default("workflow", last_mxmsg->workflow());
+    kwargs.set_default("references", last_mxmsg->id());
+    kwargs.set_default("to", last_mxmsg->from());
+    kwargs.set_default("multiplexer", last_connwrap);
+  } else {
+    kwargs.set_default("workflow", std::string());  // read unchecked below, as every default is
+    kwargs.set_default("references", std::uint64_t(0));
+    kwargs.set_default("to", std::uint64_t(0));
+    kwargs.set_default("multiplexer", ONE);
+  }
 
   std::unique_ptr<MultiplexerMessage> _mxmsg;
   const MultiplexerMessage* mxmsg;
@@ -147,20 +173,31 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
     mxmsg = kwargs.get<const MultiplexerMessage*>("message");
   }
 
+  // Sent as every client sends (SyncClient::queue): placed, or held until
+  // a connection comes up, and reported if given up on. A reply counts as
+  // sent once something took it: one that threw leaves the request to
+  // report_error().
+  Client::ScheduledMessageTracker tracker = Client::ScheduledMessageTracker(Client::BasicScheduledMessageTracker());
   if (kwargs.unsafe_is<int>("multiplexer")) {
     switch (kwargs.get<int>("multiplexer")) {
       case ALL:
-        return conn->schedule_all(*mxmsg);
+        tracker = conn->queue_all(*mxmsg);
+        break;
       case ONE:
-        return conn->schedule_one(*mxmsg);
+        tracker = conn->queue(*mxmsg);
+        break;
       default:
         AssertMsg(false, "impossible");
     }
   } else if (kwargs.unsafe_is<ConnectionWrapper>("multiplexer")) {
-    return conn->schedule_one(*mxmsg, kwargs.get<const ConnectionWrapper&>("multiplexer"));
+    // that connection while it lives, another once it is gone
+    tracker = conn->queue(*mxmsg, DEFAULT_TIMEOUT,
+                          std::make_shared<Lane>(kwargs.get<const ConnectionWrapper&>("multiplexer")));
+  } else {
+    AssertMsg(false, "impossible");
   }
-  AssertMsg(false, "impossible");
-  return false;  // unreachable
+  _has_sent_response = _has_sent_response || static_cast<bool>(tracker);
+  return tracker;
 }
 
 void BaseMultiplexerServer::notify_start() {
@@ -200,8 +237,14 @@ void BaseMultiplexerServer::__handle_message() {
     MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception in handle_message: ") + error.what()));
     if (!_has_sent_response) {
       // Same as the Python BaseMultiplexerServer: tell the requester instead
-      // of leaving it to time out.
-      report_error(error.what());
+      // of leaving it to time out; a report that fails leaves it to its
+      // timeout, and the handler's exception decides all the same.
+      try {
+        report_error(error.what());
+      } catch (const std::exception& reporting) {
+        MX_LOG(ERROR, LOWVERBOSITY,
+               TEXT(std::string("could not report the exception to the requester: ") + reporting.what()));
+      }
     }
     if (!on_handler_exception(error)) {
       throw;
@@ -265,12 +308,18 @@ void BaseMultiplexerServer::__handle_internal_message() {
   }  // switch
 }
 
-void BaseMultiplexerServer::close() {
+void BaseMultiplexerServer::close(float timeout) {
   if (conn == NULL) {
     return;
   }
-  conn->flush_all(CLOSE_FLUSH_SECONDS);  // the last replies go out before the sockets close
-  conn->shutdown();
+  if (!conn->orphaned()) {
+    // What arrives meanwhile, and what was read and will not be handled
+    // now, is refused, so that its sender retries elsewhere at once rather
+    // than wait out its timeout.
+    conn->refuse_arrivals();
+    conn->refuse_unread();
+  }
+  conn->shutdown(timeout);  // the last replies go out first
   __conn.reset();
   conn = NULL;
 }

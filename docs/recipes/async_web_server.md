@@ -81,9 +81,11 @@ drops the oldest with a warning. Size the queue for the burst you expect,
 and prefer `subscribe` with a predicate to a consumer that reads
 everything.
 
-Nothing is needed at shutdown: a worker that exits with the client alive
-exits cleanly, and `MX.close()` from an ASGI lifespan shutdown handler is
-the tidy option.
+At shutdown, `await MX.aclose()` from an ASGI lifespan shutdown handler
+writes what was sent first, a second at most, then closes. A worker that
+exits with the client alive exits without a crash, but an `AsyncClient`
+is never freed, so what it had not written yet is lost, unreported
+([interpreter exit](../api_python.md#threads-exit-and-fork)).
 
 ## Testing the consumer
 

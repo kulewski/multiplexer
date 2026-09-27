@@ -29,7 +29,7 @@ from typing import Any, Callable, TypeVar
 
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxclient import ConnectionWrapper, parse_message
+from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, NotConnected, parse_message
 from multiplexer.mxlog import DEBUG, ERROR, HIGHVERBOSITY, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
@@ -113,8 +113,13 @@ class Request:
         """Answer the request with `message` (bytes, str or a protocol
         buffer message) and the remaining fields, `type=` above all;
         `to`, `references`, `workflow` and `multiplexer` default to the
-        request's. The kwargs are ThreadedClient.send_message()'s, so
-        `flush=True` waits for the write. Returns the message id.
+        request's. A whole MultiplexerMessage goes with those of its
+        fields that are empty filled in so, its id and from too, as the
+        C++ Request::reply does. The kwargs are
+        ThreadedClient.send_message()'s, so `flush=True` waits for the
+        write. Returns the message id. A reply that raised did not go out:
+        the request is not answered, and a handler's exception then gets
+        the requester BACKEND_ERROR.
 
         One reply per request: `references` means "this is the reply", and
         a requester built on ThreadedClient or AsyncClient drops what
@@ -122,12 +127,33 @@ class Request:
         the reply, a stream of results after the answer for instance, goes
         through self.server.send_message(..., to=request.mxmsg.from_) with
         no `references`, correlated in the payload."""
-        self.answered = True
-        kwargs.setdefault("to", self.mxmsg.from_)
-        kwargs.setdefault("references", self.mxmsg.id)
-        kwargs.setdefault("workflow", self.mxmsg.workflow)
         kwargs.setdefault("multiplexer", self.connection)
-        return self.client.send_message(message, **kwargs)
+        if isinstance(message, MultiplexerMessage):
+            message = self._completed(message)
+        else:
+            kwargs.setdefault("to", self.mxmsg.from_)
+            kwargs.setdefault("references", self.mxmsg.id)
+            kwargs.setdefault("workflow", self.mxmsg.workflow)
+        sent = self.client.send_message(message, **kwargs)
+        self.answered = True  # once it went: a reply that raised is no answer
+        return sent
+
+    def _completed(self, message: MultiplexerMessage) -> MultiplexerMessage:
+        """A copy of `message` with its empty fields filled in as a reply
+        to this request's: id, from, to, references and workflow."""
+        reply = MultiplexerMessage()
+        reply.CopyFrom(message)
+        if not reply.id:
+            reply.id = self.client.random()
+        if not reply.from_:
+            setattr(reply, "from", self.client.instance_id)  # a keyword; from_ only reads
+        if not reply.to:
+            reply.to = self.mxmsg.from_
+        if not reply.references:
+            reply.references = self.mxmsg.id
+        if not reply.workflow:
+            reply.workflow = self.mxmsg.workflow
+        return reply
 
     def no_response(self) -> None:
         """Declare that the message needs no reply, as for an event."""
@@ -167,11 +193,6 @@ class Request:
                 text="request #%d of type %d dropped without a reply or no_response()"
                 % (self.mxmsg.id, self.mxmsg.type),
             )
-
-
-# How long close() waits for the last replies to be written before it
-# closes the sockets; a peer that stopped reading cannot hold it longer.
-CLOSE_FLUSH_SECONDS = 1.0
 
 
 _ThreadedServerT = TypeVar("_ThreadedServerT", bound="BaseThreadedMultiplexerServer")
@@ -237,6 +258,8 @@ class BaseThreadedMultiplexerServer:
         self.dropped = 0  # requests dropped for a full queue, or while leaving
         self._drop_lines = _DropLines()  # what is said about the requests a full queue dropped
         self._accepting = True
+        self._closed = False  # set once, by the first close()
+        self._close_lock = threading.Lock()  # a second close() returns once the first is done, not before
         self._wake = threading.Event()
         self._failure: BaseException | None = None
         self._threads: list[threading.Thread] = []  # started by serve_forever()
@@ -285,9 +308,9 @@ class BaseThreadedMultiplexerServer:
 
     def on_handler_exception(self, exc: Exception) -> bool:
         """Called on the worker thread when handle_message() raised, after
-        BACKEND_ERROR went to the requester. Return True to keep serving
-        (the default); return False and the exception propagates out of
-        serve_forever()."""
+        the requester was sent BACKEND_ERROR, unless a reply had gone out or
+        the report failed. Return True to keep serving (the default);
+        return False and the exception propagates out of serve_forever()."""
         return True
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
@@ -314,14 +337,23 @@ class BaseThreadedMultiplexerServer:
         serve_forever() calls it first, and a second call does nothing.
         Call it yourself when something waits for a line you print before
         it sends, so that the line means reachable, or in a test that
-        wants the backend connected without a thread serving it."""
+        wants the backend connected without a thread serving it. A close()
+        on another thread meanwhile ends it: what is not connected yet is
+        not."""
         self._check_not_inherited()
-        if self._connected or self._client is None:
-            return
-        self._connected = True
+        client = self._client
+        with self._cond:  # once, as the C++ class's atomic flag makes it, whichever thread calls
+            if self._connected or self._closed or client is None:
+                return
+            self._connected = True
         self._start_workers()  # before the first connection, so that nothing waits for a worker
         for endpoint in self._addresses:
-            self._client.connect(endpoint, self._timeout)
+            try:
+                client.connect(endpoint, self._timeout)
+            except NotConnected:
+                if not self._closed:
+                    raise
+                return  # close() shut the client down under us
 
     # Leaving.
 
@@ -335,8 +367,9 @@ class BaseThreadedMultiplexerServer:
         rules by default; keep serving what arrives until drained()."""
         if self._draining_since is None:
             self._draining_since = time.time()
-            if self._client is not None:
-                self._client.set_routing(self.drain_routing)
+            client = self._client
+            if client is not None:
+                client.set_routing(self.drain_routing)  # close()'s too; nothing on a client already shut down
             self._wake.set()
 
     def drained(self) -> bool:
@@ -351,12 +384,19 @@ class BaseThreadedMultiplexerServer:
         since = self._draining_since
         if since is None:
             return False
+        if self._closed:
+            return True  # nothing more is coming through a closed client
         if time.time() - since >= self._drain_seconds:
             return True
         client = self._client
         if client is None:
             return True  # closed: nothing more is coming
-        return nothing_more_arrives(self.drain_routing) and self.pending == 0 and client.routing_acknowledged()
+        if not (nothing_more_arrives(self.drain_routing) and self.pending == 0):
+            return False
+        try:
+            return client.routing_acknowledged()
+        except NotConnected:
+            return True  # shut down under us: nothing more is coming
 
     def stop(self) -> None:
         """Ask serve_forever() to return, from any thread: it finishes what
@@ -390,38 +430,51 @@ class BaseThreadedMultiplexerServer:
         self._drain_seconds = drain_seconds
         try:
             self.connect()
-            while self.working and not (self.draining and self.drained()) and self._failure is None:
+            while True:
                 self._wake.wait(poll)
                 self._wake.clear()
+                if not self.working or (self.draining and self.drained()) or self._failure is not None:
+                    break  # checked after the wait: a close() meanwhile ends it before periodic_task()
                 self.periodic_task()
         finally:
             self.close()
         if self._failure is not None:
             raise self._failure
 
-    def close(self) -> None:
+    def close(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
         """Take no more messages, let the workers finish what is queued,
-        stop them and close the connections. A request that still arrives,
+        stop them and close the connections as ThreadedClient.shutdown(timeout)
+        does, what was sent before written first, `timeout` seconds at
+        most. A request that still arrives,
         routed before the multiplexers applied the drain routing or saw the
         connection go, is refused with DELIVERY_ERROR, so that its
-        requester retries elsewhere at once, and a reply is dropped. Safe to
-        call twice. Joins the
-        workers, so from a handler, on a worker, it raises RuntimeError: a
-        handler that wants the server gone calls stop()."""
+        requester retries elsewhere at once, and a reply is dropped. A
+        serve_forever() running on another thread returns. Safe to call
+        twice, from two threads too: the second returns once the first is
+        done. Joins the workers, so from a handler, on a worker, it raises
+        RuntimeError: a handler that wants the server gone calls stop()."""
         self._check_not_inherited()
-        if threading.current_thread() in self._threads:
-            raise RuntimeError("close() called from a worker thread, which it would join; call stop() instead")
-        with self._cond:  # before the drain shows: a request seeing `draining` must find the door shut
-            self._accepting = False
-            self._cond.notify_all()
-        self.start_draining()
-        for thread in self._threads:
-            thread.join()
-        self._threads = []
-        if self._client is not None:
-            self._client.flush_all(CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
-            self._client.shutdown()
-            self._client = None
+        with self._cond:
+            if threading.current_thread() in self._threads:
+                raise RuntimeError("close() called from a worker thread, which it would join; call stop() instead")
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            with self._cond:  # before the drain shows: a request seeing `draining` must find the door shut
+                self._accepting = False
+                self._cond.notify_all()
+                threads = list(self._threads)  # listed until joined: a worker calling close() meanwhile raises
+            self.start_draining()
+            self.stop()  # a serve_forever() still running on another thread returns now rather than polling
+            for thread in threads:
+                thread.join()
+            with self._cond:
+                self._threads = []
+            client = self._client
+            if client is not None:
+                client.shutdown(timeout)  # the last replies go out first
+                self._client = None
 
     def __enter__(self: _ThreadedServerT) -> _ThreadedServerT:
         """The server, for a `with` block, at whose end it is closed however
@@ -526,7 +579,14 @@ class BaseThreadedMultiplexerServer:
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % exc)
             if not request.answered:
-                request.report_error(message=format_exception(exc, sys.exc_info()[2]))
+                try:
+                    request.report_error(message=format_exception(exc, sys.exc_info()[2]))
+                except Exception as reporting:  # the requester waits out its timeout; the handler's exception decides
+                    log(
+                        ERROR,
+                        LOWVERBOSITY,
+                        text=lambda: "could not report the exception to the requester: %r" % reporting,
+                    )
             if not self.on_handler_exception(exc):
                 self._failure = exc
                 self.stop()

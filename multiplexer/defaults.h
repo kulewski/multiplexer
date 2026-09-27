@@ -16,6 +16,10 @@ static const unsigned int DEFAULT_INCOMING_QUEUE_MAX_SIZE = 1024;
 static const unsigned int AUTO_RECONNECT_TIME = 3;
 // Seconds for connect, flush, and each stage of a query.
 static const float DEFAULT_TIMEOUT = 10.0;
+// Seconds a message a synchronous flushing send placed waits for room, or
+// for a connection, past the call's own deadline, so that the call times
+// out first rather than see its message dropped (Client::_send_and_wait).
+static const float ROOM_GRACE_SECONDS = 0.01f;
 // A negative timeout means wait forever; used by the receive calls.
 static const float DEFAULT_READ_TIMEOUT = -1;
 // Largest frame body accepted; a bigger one closes the connection.
@@ -28,6 +32,11 @@ static const float HEARTBIT_INTERVAL = 3.0;
 // something unread makes the kernel reset the connection and throw away
 // what it had not sent yet. See Connection::close_gracefully.
 static const float CLOSE_READ_SECONDS = 1.0;
+// Seconds a shutdown() or close() goes on writing what was sent before it,
+// in every client and server class, before the connections close: what a
+// multiplexer that stopped reading, or a connection that did not come up,
+// leaves unwritten by then is dropped and reported. 0 drops it at once.
+static const float CLOSE_FLUSH_SECONDS = 1.0;
 // Seconds without any frame from a non-passive peer before the multiplexer
 // starts the drop, and how much longer it then waits before closing.
 static const float NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL = 30;

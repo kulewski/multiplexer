@@ -220,7 +220,9 @@ class ForkTest(unittest.TestCase):
         """The child's calls on an inherited SyncClient, from the thread
         that made it, raise UsedAfterFork and leave nothing on the
         connection the parent still uses: a backend of the type counts what
-        arrives, up to a message the parent sends after the child exited."""
+        arrives, up to a message the parent sends after the child exited.
+        The getters of the connections' state raise too, rather than answer
+        with the parent's."""
         received: list[bytes] = []
         parent_after_child = threading.Event()
 
@@ -242,12 +244,22 @@ class ForkTest(unittest.TestCase):
                         "lane",
                         lambda: sync.send_message(b"from the child", type=types.PYTHON_TEST_REQUEST, multiplexer=lane),
                     ),
+                    ("connections_count", sync.connections_count),
+                    ("has_incoming_messages", sync.has_incoming_messages),
+                    ("routing_acknowledged", sync.routing_acknowledged),
                 ]
             )
             sync.send_message(b"after the child", type=types.PYTHON_TEST_REQUEST, flush=True)
             parent_after_child.wait(10)
             self.assertEqual(
-                (0, "query: UsedAfterFork\nsend: UsedAfterFork\nlane: UsedAfterFork\n", 0, 1, 1),
+                (
+                    0,
+                    "query: UsedAfterFork\nsend: UsedAfterFork\nlane: UsedAfterFork\nconnections_count: UsedAfterFork\n"
+                    "has_incoming_messages: UsedAfterFork\nrouting_acknowledged: UsedAfterFork\n",
+                    0,
+                    1,
+                    1,
+                ),
                 (
                     code,
                     report,

@@ -41,7 +41,8 @@ class FullConnectionTest(unittest.TestCase):
         """Every send is taken while the connection lives, the ones beyond
         the queue waiting; a flushing send then times out having used next
         to no CPU for its half second; and once the multiplexer reads again,
-        flush_all() sees everything written."""
+        flush_all() sees everything written but that send's message, given
+        up on right after it timed out, and so returns False."""
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
@@ -55,7 +56,8 @@ class FullConnectionTest(unittest.TestCase):
                     self.assertLess(time.process_time() - cpu, 0.1, "of the 0.5 s it waited")
                 finally:
                     cluster.mx[0].resume()
-                self.assertTrue(client.flush_all(60))
+                self.assertFalse(client.flush_all(60))
+                self.assertEqual(1, client.dropped)
             finally:
                 client.shutdown()
 

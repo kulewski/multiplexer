@@ -55,6 +55,26 @@ time.sleep(0.3)
 print("main thread leaving with both daemon threads mid-wait")
 """
 
+# The library's first import on a worker thread, as Django's runserver
+# makes it on its django-main-thread, and a client the main thread holds,
+# destroyed at exit on the main thread, which must not take itself for a
+# thread to park.
+FIRST_IMPORT_OFF_THE_MAIN_THREAD = """
+import sys, threading
+host, port = sys.argv[1].rsplit(":", 1)
+imported = {}
+
+def first_import():
+    import multiplexer.clients
+    imported["clients"] = multiplexer.clients
+
+worker = threading.Thread(target=first_import)
+worker.start()
+worker.join()
+client = imported["clients"].Client([(host, int(port))], type=%(passive)d)
+print("main thread leaving with a client to destroy")
+"""
+
 
 class InterpreterExitTest(unittest.TestCase):
     """See the module docstring."""
@@ -109,6 +129,23 @@ class InterpreterExitTest(unittest.TestCase):
                 0, result.returncode, "run %d: exit %d\n%s" % (run, result.returncode, "\n".join(said[-30:]))
             )
             self.assertIn("main thread leaving", result.stdout)
+
+    def test_a_first_import_off_the_main_thread_still_exits(self) -> None:
+        """The client destroyed at exit on the main thread, the library
+        having been imported first on another: the exit completes, where the
+        main thread parked for good."""
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+        program = FIRST_IMPORT_OFF_THE_MAIN_THREAD % {"passive": peers.WEBSITE}
+        result = subprocess.run(
+            [sys.executable, "-c", program, "%s:%d" % self.endpoint],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        said = [line for line in result.stderr.splitlines() if not line.startswith(("[DEBUG]", "[INFO]"))]
+        self.assertEqual(0, result.returncode, "exit %d\n%s" % (result.returncode, "\n".join(said[-30:])))
+        self.assertIn("main thread leaving", result.stdout)
 
 
 if __name__ == "__main__":

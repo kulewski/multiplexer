@@ -4,6 +4,10 @@
 // decline, a full queue dropping, a handler that throws, draining, a
 // request refused while leaving, nothing connected before serve_forever.
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -28,10 +32,14 @@ namespace {
 
 // A backend the tests steer by payload: "block" waits for release(),
 // "wait" joins a barrier of four, "later" is kept for the test to answer,
-// "throw" throws, "event..." gets no reply, anything else is upper-cased.
+// "throw" throws, "too big" replies over MAX_MESSAGE_SIZE, which throws
+// where the reply is built, "shut down and throw" shuts the client down
+// and throws, "event..." gets no reply, anything else is upper-cased.
 struct Scripted : BaseThreadedMultiplexerServer {
   Scripted(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
-      : BaseThreadedMultiplexerServer({{"127.0.0.1", port}}, multiplexer::peers::PYTHON_TEST_SERVER, options) {}
+      : Scripted(multiplexer::backend::MultiplexerAddresses{{"127.0.0.1", port}}, options) {}
+  Scripted(const multiplexer::backend::MultiplexerAddresses& addresses, const ThreadedServerOptions& options)
+      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER, options) {}
 
   void handle_message(const RequestPtr& request) override {
     const std::string payload = request->mxmsg().message();
@@ -56,8 +64,19 @@ struct Scripted : BaseThreadedMultiplexerServer {
       kept = request;
     } else if (payload == "throw") {
       throw std::runtime_error("as asked");
+    } else if (payload == "too big") {
+      request->reply(std::string(multiplexer::MAX_MESSAGE_SIZE, 'x'), multiplexer::types::PYTHON_TEST_RESPONSE);
+    } else if (payload == "shut down and throw") {
+      client().shutdown(0);
+      throw std::runtime_error("after the client");
     } else if (payload == "close") {
       close();  // from a worker: an error, not a deadlock
+    } else if (payload == "block, then close") {
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return released; });
+      }
+      close();  // from a worker while another thread closes: an error too
     } else if (payload.rfind("event", 0) == 0) {
       request->no_response();
     } else {
@@ -68,7 +87,10 @@ struct Scripted : BaseThreadedMultiplexerServer {
       request->reply(upper, multiplexer::types::PYTHON_TEST_RESPONSE);
     }
   }
-  bool on_handler_exception(const std::exception&) override { return keep_serving; }
+  bool on_handler_exception(const std::exception&) override {
+    ++exceptions;
+    return keep_serving;
+  }
 
   void release() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -91,6 +113,7 @@ struct Scripted : BaseThreadedMultiplexerServer {
   std::vector<std::string> handled;
   RequestPtr kept;
   std::atomic<bool> keep_serving{true};
+  std::atomic<int> exceptions{0};
 };
 
 // A Scripted served on its own thread, as a program would; built once it
@@ -320,6 +343,31 @@ TEST(ThreadedServer, AThrowingHandlerReportsBackendErrorAndServesOn) {
   EXPECT_TRUE(served.failure) << "serve_forever() should have rethrown";
 }
 
+// A reply that threw where it was built, one over MAX_MESSAGE_SIZE, did
+// not go out: the requester gets BACKEND_ERROR, where the request counted
+// as answered and the requester waited out its timeout.
+TEST(ThreadedServer, AReplyThatThrowsIsAnsweredWithBackendError) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  Requester requester(mx.port);
+  multiplexer::IncomingMessage reply =
+      requester.client.query(requester.message("too big", multiplexer::types::PYTHON_TEST_REQUEST), 5);
+  EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
+  EXPECT_EQ(1, served.server.exceptions.load());
+}
+
+// A report of a handler's exception that fails, the client shut down
+// under the worker, is logged and on_handler_exception() is still told,
+// where the report's exception left the worker's thread and ended the
+// process.
+TEST(ThreadedServer, AReportThatFailsStillTellsOnHandlerException) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  Requester requester(mx.port);
+  requester.send("shut down and throw");
+  EXPECT_TRUE(eventually([&] { return served.server.exceptions.load() == 1; }));
+}
+
 TEST(ThreadedServer, CloseFromAHandlerIsAnErrorNotADeadlock) {
   InProcessMultiplexer mx;
   Served served(mx.port);
@@ -402,6 +450,68 @@ TEST(ThreadedServer, AClosingServerAnswersNoSearch) {
   EXPECT_THROW(requester.search(1), multiplexer::Client::OperationTimedOut) << "closing: not answered";
   server.release();
   closing.join();
+}
+
+// A worker that calls close() while another thread's close() joins it
+// throws, as from a handler at any time, rather than wait for the close()
+// that waits for it. The server is leaked when the two wait for each other.
+TEST(ThreadedServer, CloseFromAHandlerDuringAnotherCloseIsAnErrorNotADeadlock) {
+  InProcessMultiplexer mx;
+  std::unique_ptr<Served> served(new Served(mx.port));
+  Scripted& server = served->server;
+  Requester requester(mx.port);
+  requester.send("block, then close");
+  ASSERT_TRUE(eventually([&] { return server.pending() == 1; }));
+  std::promise<void> closed;
+  std::future<void> close_returned = closed.get_future();
+  std::thread closing([&server, &closed] {
+    server.close();
+    closed.set_value();
+  });
+  ASSERT_TRUE(eventually([&] { return server.draining(); }));
+  server.release();
+  if (close_returned.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+    closing.detach();  // waiting for good, with the server
+    served.release();
+    FAIL() << "close() waited for the worker, which waited for it";
+  }
+  closing.join();
+  EXPECT_EQ(1, server.exceptions.load()) << "the handler's close() threw";
+}
+
+// close() on another thread while serve_forever() still connects, to a
+// multiplexer that never answers: the connect under way ends, the next
+// address is not tried, and serve_forever() returns, where the next connect
+// threw NotConnected out of it.
+TEST(ThreadedServer, ACloseWhileServeForeverConnectsEndsItQuietly) {
+  InProcessMultiplexer mx;
+  const int silent = ::socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in address = {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  socklen_t length = sizeof address;
+  ASSERT_EQ(0, ::bind(silent, reinterpret_cast<sockaddr*>(&address), length));
+  ASSERT_EQ(0, ::listen(silent, 1));
+  ASSERT_EQ(0, ::getsockname(silent, reinterpret_cast<sockaddr*>(&address), &length));
+  ThreadedServerOptions options;
+  options.connect_timeout = 30;
+  Scripted server({{"127.0.0.1", ntohs(address.sin_port)}, {"127.0.0.1", mx.port}}, options);
+  std::exception_ptr failure;
+  std::thread serving([&server, &failure] {
+    try {
+      server.serve_forever(0.05f);
+    } catch (...) {
+      failure = std::current_exception();
+    }
+  });
+  pollfd waiting = {silent, POLLIN, 0};
+  ASSERT_EQ(1, ::poll(&waiting, 1, 10000)) << "the first connect never came";
+  const int accepted = ::accept(silent, nullptr, nullptr);  // the first connect is under way, waiting for a welcome
+  server.close();
+  serving.join();
+  ::close(accepted);
+  ::close(silent);
+  EXPECT_FALSE(failure) << "serve_forever() threw";
 }
 
 // close() from another thread while a worker is busy: serve_forever()'s

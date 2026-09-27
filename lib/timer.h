@@ -56,6 +56,19 @@ struct SimpleTimer {
 
   inline bool expired() const { return expiry_holder_ && *expiry_holder_; }
 
+  // Seconds left until it expires, 0 once it has; negative for a timer
+  // that never expires.
+  inline float remaining() const {
+    if (!expiry_holder_) {
+      return -1;
+    }
+    if (*expiry_holder_) {
+      return 0;
+    }
+    const std::chrono::duration<float> left = timer_.expiry() - std::chrono::steady_clock::now();
+    return left.count() > 0 ? left.count() : 0;
+  }
+
  private:
   asio::steady_timer timer_;
   ExpiryHolder expiry_holder_;

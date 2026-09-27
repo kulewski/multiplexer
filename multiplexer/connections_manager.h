@@ -42,6 +42,10 @@ struct DefaultConnectionsManagerTraits {
   // manager that holds messages back for a full connection. The
   // multiplexer drops them instead, so it is not told.
   static constexpr bool REPORTS_ROOM = false;
+  // Whether the manager counts and logs the messages a connection that
+  // ends leaves to it and it cannot place (the client, which reports every
+  // drop in one place), so that the connection does not log them as well.
+  static constexpr bool REPORTS_DROPS = false;
 
   struct MessagesBufferTraits {
     struct SendingResultNotifier {

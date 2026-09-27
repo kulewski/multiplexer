@@ -30,6 +30,7 @@
 #include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
+#include <atomic>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -84,6 +85,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         peer_id_(0),
         is_passive_(false),
         is_living_(false),
+        living_flag_(std::make_shared<std::atomic<bool>>(false)),
         shuts_down_(false),
         is_registered_(false),
         told_gone_(false),
@@ -136,6 +138,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     if (!shuts_down_) {
       shutdown();
     }
+    // A write whose handler was destroyed unrun, its io_service gone: what
+    // became of the frame is unknown, and it reads lost rather than queued.
+    if (!set_aside_.empty()) {
+      _give_up(set_aside_, set_aside_manager_);
+    }
   }
 
   asio::ip::tcp::socket& socket() { return socket_; }
@@ -155,7 +162,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("starting Connection " + repr((void*)this)));
     Assert(!is_living_);
     Assert(!shuts_down_);
-    is_living_ = true;
+    _set_living(true);
     // Every write is one whole frame, so Nagle's algorithm has nothing to
     // coalesce and only delays a small frame sent right after another one
     // until the peer's ACK arrives. Off on both sides.
@@ -235,7 +242,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     // takes it, rather than the assertion below throwing out of the
     // callback and leaving the shutdown, and the reconnect, undone.
     shuts_down_ = true;
-    is_living_ = false;
+    _set_living(false);
     _tell_manager_gone();
     is_registered_ = false;
 
@@ -264,6 +271,12 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   }
 
  private:
+  // Live or not, for this thread (is_living_) and for the others (living_flag_).
+  void _set_living(bool living) {
+    is_living_ = living;
+    living_flag_->store(living, std::memory_order_release);
+  }
+
   // Tells the manager, once, that the connection is gone: unregistered if it
   // was registered, then destroyed. What its callbacks do is theirs: an
   // exception out of one is logged, and the rest of the shutdown, the
@@ -316,7 +329,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   void _read_to_the_end(float bound, bool deliver) {
     MX_DCHECK_RUN_ON(&io_thread_);
     // Dead to the manager before it hears of it, as in shutdown().
-    is_living_ = false;
+    _set_living(false);
     outgoing_channel_state_ = ChannelState::BROKEN;
     delivering_ = deliver;
     _tell_manager_gone();
@@ -468,6 +481,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     return outgoing_queue_.empty() ? nullptr : &outgoing_queue_.back();
   }
   inline bool living() const { return is_living_; }
+  // living(), readable from any thread without a reference to the
+  // connection: what a lane holding it reads (Lane::closed), since a dead
+  // connection's object lives on while it reads to the end.
+  std::shared_ptr<const std::atomic<bool>> living_flag() const { return living_flag_; }
   inline bool shuts_down() const { return shuts_down_; }
 
  private:
@@ -770,6 +787,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
       // start writing
       outgoing_channel_state_ = ChannelState::BUSY;
+      write_in_flight_ = true;
       Assert(raw->get_message_buffer().size());
       // The handler holds the connection and the frame: the write goes on in
       // steps after shutdown() handed the queue over or dropped it.
@@ -781,6 +799,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   }
   void _handle_write(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
+    write_in_flight_ = false;
     if (error) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
              TEXT("write error on " + repr((void*)this) + " error=" + repr(error) +
@@ -788,6 +807,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
 
     if (outgoing_channel_state_ == ChannelState::BROKEN) {
+      _settle_set_aside(error, bytes_transferred);
       return;
     }
     if (bytes_transferred == 0) {
@@ -836,26 +856,65 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
-  // On shutdown, offers the unsent queue to the manager (the client moves the
-  // entries to another connection, and what waited for this one after
-  // them, so it is told even of an empty queue) and reports the rest as lost.
+  // On shutdown, offers the unsent queue to the manager (the client moves
+  // entries to another connection and takes them out of the queue, and
+  // after them what waited for this one, so it is told even of an empty
+  // queue) and reports the rest as lost. The frame being written is not
+  // the queue's to give: its bytes may be in the kernel already, written
+  // inside the call that queued it, and the write's handler, still to run,
+  // says whether they are; it is set aside for that handler to settle
+  // (_settle_set_aside), so that it is neither reported lost although it
+  // arrives nor handed to another connection and sent twice.
   void inline _orphan_outgoing_messages() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (ManagerPointer manager = manager_.lock()) {
-      manager->handle_orphaned_outgoing_messages(outgoing_queue_);
+    if (write_in_flight_ && !outgoing_queue_.empty()) {
+      set_aside_.push_back(outgoing_queue_.front());
+      set_aside_manager_ = manager_;
+      outgoing_queue_.pop_front();
     }
-    if (outgoing_queue_.empty()) {
+    _give_up(outgoing_queue_, manager_);
+  }
+
+  // The write of the frame set aside has ended, the connection closed
+  // meanwhile: a frame written whole is reported written, one that was not
+  // goes the way the rest of the queue went.
+  void _settle_set_aside(const asio::error_code& error, size_t bytes_transferred) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (set_aside_.empty()) {
       return;
     }
-    // we haven't managed to transfer messages ownership to the manager for
-    // eventual resending
-    MX_LOG(WARNING, HIGHVERBOSITY,
-           TEXT("Connection shutdown on " + repr((void*)this) + ", dropping about " + repr(outgoing_queue_.size()) +
-                " outgoing messages"));
-    for (typename MessagesBuffer::value_type& entry : outgoing_queue_) {
-      message_sending_notifier_.notify_error(manager_, entry);
+    typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw_converter;
+    const bool whole = !error && bytes_transferred == to_raw_converter(set_aside_.front())->get_header_length() +
+                                                          to_raw_converter(set_aside_.front())->get_body_length();
+    std::weak_ptr<ConnectionsManagerImplementation> manager;
+    manager.swap(set_aside_manager_);
+    if (whole) {
+      message_sending_notifier_.notify_success(manager, set_aside_.front());
+      set_aside_.clear();
+      return;
     }
-    outgoing_queue_.clear();
+    _give_up(set_aside_, manager);
+  }
+
+  // Offers `entries` to `manager`, which takes out of the buffer what it
+  // hands to another connection, and reports what it left as lost.
+  void _give_up(MessagesBuffer& entries, const std::weak_ptr<ConnectionsManagerImplementation>& manager) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (ManagerPointer owner = manager.lock()) {
+      owner->handle_orphaned_outgoing_messages(entries);
+    }
+    if (entries.empty()) {
+      return;
+    }
+    if constexpr (!ConnectionsManagerTraits::REPORTS_DROPS) {
+      MX_LOG(WARNING, HIGHVERBOSITY,
+             TEXT("Connection shutdown on " + repr((void*)this) + ", dropping " + repr(entries.size()) +
+                  " outgoing message(s)"));
+    }
+    for (typename MessagesBuffer::value_type& entry : entries) {
+      message_sending_notifier_.notify_error(manager, entry);
+    }
+    entries.clear();
   }
 
  public:
@@ -875,6 +934,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   Routing routing_;
 
   bool is_living_;
+  std::shared_ptr<std::atomic<bool>> living_flag_;  // is_living_, for other threads; see living_flag()
   bool shuts_down_;
   bool is_registered_;
   bool told_gone_;           // the manager heard the connection is gone: once, see _tell_manager_gone()
@@ -900,6 +960,12 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   MessagesBuffer outgoing_queue_ MX_GUARDED_BY(io_thread_);
   ChannelStateT outgoing_channel_state_ MX_GUARDED_BY(io_thread_);
   std::uint32_t outgoing_queue_max_size_;
+  // An async_write was started and its handler has not run yet. On a
+  // shutdown meanwhile, the frame it writes is set aside, with the manager
+  // to tell, for that handler to settle (see _orphan_outgoing_messages).
+  bool write_in_flight_ MX_GUARDED_BY(io_thread_) = false;
+  MessagesBuffer set_aside_ MX_GUARDED_BY(io_thread_);
+  std::weak_ptr<ConnectionsManagerImplementation> set_aside_manager_ MX_GUARDED_BY(io_thread_);
 
   /* incoming channel */
   std::shared_ptr<RawMessage> incoming_message_ MX_GUARDED_BY(io_thread_);

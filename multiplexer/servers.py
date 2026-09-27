@@ -22,7 +22,7 @@ from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedExc
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
-from multiplexer.mxclient import ConnectionWrapper, OperationTimedOut, parse_message
+from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, OperationTimedOut, parse_message
 
 
 def format_exception(exc, trace=None):
@@ -81,11 +81,6 @@ class MultiplexerPeer(object):
         self._connected = True
         for host, port in self._addresses:
             self.conn.connect((host, port))
-
-
-# How long close() waits for the last replies to be written before it
-# closes the sockets; a peer that stopped reading cannot hold it longer.
-CLOSE_FLUSH_SECONDS = 1.0
 
 
 def nothing_more_arrives(routing: Routing) -> bool:
@@ -195,9 +190,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
         or clear `working`. Does nothing by default."""
 
     def on_handler_exception(self, exc: Exception) -> bool:
-        """Called when handle_message() raised, after BACKEND_ERROR went to
-        the requester. Return True to keep serving (the default); return
-        False and the exception propagates out of serve_forever()."""
+        """Called when handle_message() raised, after the requester was
+        sent BACKEND_ERROR, unless a reply had gone out or the report
+        failed. Return True to keep serving (the default); return False and
+        the exception propagates out of serve_forever()."""
         return True
 
     def serve_forever(
@@ -238,22 +234,36 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     self.periodic_task()
                     if stall_seconds is not None:
                         faulthandler.cancel_dump_traceback_later()
-            # A drain serves what was already on its way: the requests the
-            # client had read off the sockets when the drain ended are
-            # handled before the connections close, whether the drain ended
-            # on the confirmation or on its cap.
-            while self.draining and self.working and self.conn.has_incoming_messages():
-                try:
-                    self.loop_iter(timeout=0)
-                except OperationTimedOut:
-                    break
+            # The drain is over. What arrives from now on is refused at once,
+            # so that its sender retries elsewhere, and what was already on
+            # its way, read off the sockets when the drain ended, is handled
+            # before the connections close, whether the drain ended on the
+            # confirmation or on its cap: a number fixed here, however fast
+            # more comes, where every reply's turn of the loop read more,
+            # handled in turn, so that under steady load the drain never
+            # ended.
+            if self.draining and self.working:
+                self.conn.refuse_arrivals()
+                while self.working and self.conn.has_incoming_messages():
+                    try:
+                        self.loop_iter(timeout=0)
+                    except OperationTimedOut:
+                        break
         finally:
             self.close()
 
     def loop_iter(self, *args, **kwargs):
-        """Wait for one message (up to `timeout` seconds, forever by default) and handle it. Raises OperationTimedOut when the time passes."""
+        """Wait for one message (up to `timeout` seconds, forever by default)
+        and handle it; send_message()'s reply defaults hold while it is
+        handled, and only then. Raises OperationTimedOut when the time
+        passes."""
         self.last_mxmsg, self.last_connwrap = self.conn.receive_message(*args, **kwargs)
-        self.__handle_message()
+        try:
+            self.__handle_message()
+        finally:
+            # what periodic_task() sends is no reply to the last request
+            self.last_mxmsg = None
+            self.last_connwrap = None
 
     @log_call
     def __echo(self, mxmsg, what: str) -> None:
@@ -261,13 +271,12 @@ class BaseMultiplexerServer(MultiplexerPeer):
         BACKEND_ERROR saying so, `what` naming it, when that echo would be
         over MAX_MESSAGE_SIZE, rather than not at all."""
         try:
-            self.send_message(message=mxmsg.message, embed=True, flush=True, type=types.PING)
+            self.send_message(message=mxmsg.message, embed=True, type=types.PING)
         except ValueError:
             self.send_message(
                 message=b"the echo of a %s of %d bytes would be over MAX_MESSAGE_SIZE"
                 % (what.encode(), len(mxmsg.message)),
                 embed=True,
-                flush=True,
                 type=types.BACKEND_ERROR,
                 workflow=b"",
             )
@@ -334,7 +343,14 @@ class BaseMultiplexerServer(MultiplexerPeer):
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % e)
             if not self._has_sent_response:
-                self.report_error(message=str(e))
+                try:
+                    self.report_error(message=str(e))
+                except Exception as reporting:  # the requester waits out its timeout; the handler's exception decides
+                    log(
+                        ERROR,
+                        LOWVERBOSITY,
+                        text=lambda: "could not report the exception to the requester: %r" % reporting,
+                    )
             if not self.on_handler_exception(e):
                 raise
 
@@ -368,8 +384,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def send_pickle(self, data, type=types.PICKLE_RESPONSE, **kwargs):
         """send_message() with `data` pickled as the payload: by default a
-        PICKLE_RESPONSE reply to the current request, flushed."""
-        kwargs.setdefault("flush", True)
+        PICKLE_RESPONSE reply to the current request."""
         return self.send_message(message=pickle.dumps(data), type=type, **kwargs)
 
     @log_call
@@ -392,15 +407,20 @@ class BaseMultiplexerServer(MultiplexerPeer):
         Defaults, each overridable through kwargs: `to` the requester's
         instance id, `references` the request's id, `workflow` the request's
         workflow, `multiplexer` the connection the request arrived on. Other
-        kwargs are as for mxclient.Client.send_message.
+        kwargs are as for mxclient.Client.send_message. Outside
+        handle_message(), from periodic_task() say, there are no defaults:
+        the message is routed by its type, as any client's.
         """
+        handling = self.last_mxmsg is not None
         if self.last_mxmsg is not None:
-            self._has_sent_response = True
             kwargs.setdefault("multiplexer", self.last_connwrap)
             kwargs.setdefault("references", self.last_mxmsg.id)
             kwargs.setdefault("workflow", self.last_mxmsg.workflow)
             kwargs.setdefault("to", self.last_mxmsg.from_)
-        return self.conn.send_message(**kwargs)
+        sent = self.conn.send_message(**kwargs)
+        if handling:
+            self._has_sent_response = True  # once it went: a send that raised is no answer
+        return sent
 
     @log_call
     def send_backend_error(self, exc, trace=None):
@@ -414,18 +434,24 @@ class BaseMultiplexerServer(MultiplexerPeer):
         self._has_sent_response = True
 
     @log_call
-    def report_error(self, message="", type=types.BACKEND_ERROR, flush=True, **kwargs):
-        """Answer the current request with BACKEND_ERROR (or `type`) carrying `message`."""
+    def report_error(self, message="", type=types.BACKEND_ERROR, flush=False, **kwargs):
+        """Answer the current request with BACKEND_ERROR (or `type`) carrying
+        `message`, queued as every reply is; `flush=True` waits for the write."""
         assert self.last_mxmsg is not None
         self.send_message(message=message, type=type, flush=flush, **kwargs)
 
     @log_call
-    def close(self):
-        """Write what is still queued, up to a second, then close every
-        connection as SyncClient.shutdown() does; the server cannot be used
-        afterwards. Safe to call twice."""
-        self.conn.flush_all(timeout=CLOSE_FLUSH_SECONDS)  # the last replies go out before the sockets close
-        self.conn.shutdown()  # idempotent, so a second close() is harmless
+    def close(self, timeout=CLOSE_FLUSH_SECONDS):
+        """Close every connection as SyncClient.shutdown(timeout) does,
+        what was sent before written first, `timeout` seconds at most; the
+        server cannot be used afterwards. A request that arrives meanwhile,
+        or was read and not handled, is refused with DELIVERY_ERROR, so that
+        its sender retries elsewhere at once, as the threaded server's
+        close() does. Safe to call twice."""
+        if not self.conn.orphaned():
+            self.conn.refuse_arrivals()
+            self.conn.refuse_unread()
+        self.conn.shutdown(timeout)  # idempotent, so a second close() is harmless
 
     def __enter__(self: _ServerT) -> _ServerT:
         """The server, for a `with` block, at whose end it is closed however

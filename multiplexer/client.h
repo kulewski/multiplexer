@@ -52,8 +52,10 @@ class Client : public ExceptionDefinitions {
   typedef BasicClient::BasicScheduledMessageTracker BasicScheduledMessageTracker;
 
   // What schedule_one returns: whether the message is still queued, was
-  // written to the socket, or was lost with its connection. Null (false as
-  // bool) when no connection took the message at all.
+  // written to the socket (which the kernel then holds; the multiplexer
+  // may not have it yet), or was dropped: its connection ended before
+  // writing it, or it waited past its timeout. Null (false as bool) when no
+  // connection took the message at all.
   struct ScheduledMessageTracker {
     ScheduledMessageTracker(BasicScheduledMessageTracker basic_tracker) : basic_tracker_(basic_tracker) {}
 
@@ -81,12 +83,15 @@ class Client : public ExceptionDefinitions {
   Client(asio::io_service& io_service, std::uint32_t client_type);
   ~Client();  // shutdown(), on whichever thread destroys the client
 
-  // Connectivity; see BasicClient for the semantics.
-  void shutdown();
+  // Connectivity; see BasicClient for the semantics. shutdown() first
+  // writes what was sent before it, running the loop as flush_all() does,
+  // `timeout` seconds at most, then closes every connection; what is still
+  // unwritten is dropped and reported, at once with 0. Idempotent.
+  void shutdown(float timeout = CLOSE_FLUSH_SECONDS);
   // Whether this client was inherited across a fork, in which case its
-  // calls throw UsedAfterFork, the getters aside, and shutdown() and the
-  // destructor only close the child's descriptor copies, once; see
-  // BasicClient::orphaned.
+  // calls throw UsedAfterFork, connections_count() and the other getters of
+  // its state included, and shutdown() and the destructor only close the
+  // child's descriptor copies, once; see BasicClient::orphaned.
   bool orphaned() const { return basic_client_->orphaned(); }
   // Makes the calling thread the one this client is used from, for a client
   // built on one thread and driven from another; BaseMultiplexerServer's
@@ -132,13 +137,35 @@ class Client : public ExceptionDefinitions {
     basic_client_->set_routing(routing);
   }
   const Routing& routing() const { return basic_client_->routing(); }
-  bool routing_acknowledged() const { return basic_client_->routing_acknowledged(); }
+  bool routing_acknowledged() const {
+    basic_client_->check_not_orphaned();  // the parent's state in a forked child: raise, as ThreadedClient's
+    return basic_client_->routing_acknowledged();
+  }
   // Messages read off the sockets and not yet handed out by a receive.
-  bool has_incoming_messages() const { return basic_client_->has_incoming_messages(); }
+  bool has_incoming_messages() const {
+    basic_client_->check_not_orphaned();
+    return basic_client_->has_incoming_messages();
+  }
 
-  unsigned int inline connections_count() { return basic_client_->connections_count(true); }  // live ones
-  std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }           // our `from`
-  std::uint32_t inline client_type() const { return basic_client_->client_type(); }           // our peer type
+  // Leaving, for the server classes. From now on a request that arrives is
+  // refused at once with the DELIVERY_ERROR a multiplexer sends for a peer
+  // that is gone, naming this client's type, so that its sender retries
+  // elsewhere; a message that answers another, and the protocol's own,
+  // are dropped: nobody retries a reply, and refusing one could start a
+  // loop. What was read before stays to be received, a number fixed now,
+  // however fast more comes. The refusal is queued as a reply is, on the
+  // request's connection while that lives.
+  void refuse_arrivals();
+  // The messages read and not received yet, refused or dropped by the same
+  // rule: for a server that will not handle them, at its close.
+  void refuse_unread();
+
+  unsigned int inline connections_count() {  // live ones
+    basic_client_->check_not_orphaned();
+    return basic_client_->connections_count(true);
+  }
+  std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }  // our `from`
+  std::uint32_t inline client_type() const { return basic_client_->client_type(); }  // our peer type
 
   // Incoming messages: the next one in arrival order, waiting up to
   // `timeout` (negative: forever). Throws OperationTimedOut, NotConnected.
@@ -159,13 +186,17 @@ class Client : public ExceptionDefinitions {
     return std::make_pair(raw.third, raw.second);
   }
 
-  // Sending. schedule_* only queue; the write happens while any call runs
-  // the loop, so a caller that wants the message out before it goes idle
-  // uses flush() or flush_all(). A message a full connection cannot take
+  // Sending. schedule_* queue the message; on an idle connection it is
+  // written inside the call, otherwise while a later call runs the loop, so
+  // a caller that wants every message out before it goes idle uses flush()
+  // or flush_all(). A message a full connection cannot take
   // waits for its room, in order, `timeout` seconds at most, and goes in
-  // as a later call runs the loop (see BasicClient); a null tracker means
-  // no connection is live. `msg` may be a MultiplexerMessage, an already
-  // serialized std::string, or a RawMessage.
+  // as a later call runs the loop (see BasicClient). They hold nothing: a
+  // null tracker from schedule_one(msg) means no connection is live, and
+  // schedule_one(msg, wrapper) waits up to `timeout` for one instead and
+  // throws NotConnected; queue() is the send that holds the message. `msg`
+  // may be a MultiplexerMessage, an already serialized std::string, or a
+  // RawMessage.
   // Each of these polls the loop first (BasicClient::poll), so that a
   // connection the multiplexer closed while this client sat idle is retired
   // rather than written into.
@@ -201,8 +232,10 @@ class Client : public ExceptionDefinitions {
     }
   }
 
-  // Runs the loop until everything sent before the call is written, what
-  // still waits for room included, or `timeout` passes; false then. See
+  // Runs the loop until everything sent before the call is written or
+  // given up on, what still waits for room included, or `timeout` passes;
+  // true when every one of them was written, false when one was given up
+  // on (the drop observer says which) or the time ran out. See
   // BasicClient::begin_flush().
   bool flush_all(float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
@@ -212,17 +245,43 @@ class Client : public ExceptionDefinitions {
       basic_client_->run_one();
     }
     basic_client_->end_flush(flush);
-    return basic_client_->flushed(flush);
+    return basic_client_->all_written(flush);
   }
 
-  // Writes `msg` to one connection and returns it, waiting up to `timeout`:
-  // a connection that dies under the write is replaced by another, or by
-  // the same one once reconnected, so a multiplexer restart between two
-  // calls costs the reconnect delay, not the message. Throws NotConnected
-  // when no connection exists by the deadline, OperationTimedOut otherwise.
-  // With a lane, through the lane's connection, which takes the connection
-  // used when it has none or lost its own; a pinned lane whose connection
-  // is gone throws NotConnected.
+  // The SyncClient's form of ThreadedClient::send(msg): returns at once,
+  // the message queued on one live connection, round robin or `lane`'s, or
+  // held until one comes up, `timeout` seconds at most, and written as the
+  // loop runs; a message the client gives up on is reported
+  // (set_drop_observer). queue_all() gives every live connection a copy.
+  // `done`, when given, hears how the message ended, once, inside a later
+  // call that runs the loop: 1 once it was written, the first copy for
+  // ALL, 0 once it was given up on or shutdown() came first, as the Python
+  // send_message(callback=) does. Returns the tracker of the message, the
+  // first copy's for ALL; null, `done` never called, when nothing may take
+  // it: a pinned lane whose connection is gone, or the client shut down.
+  // See BasicClient::send.
+  typedef BasicClient::SendCallback SendCallback;
+  template <typename T>
+  ScheduledMessageTracker queue(const T& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
+                                SendCallback done = SendCallback()) {
+    return _queue(_serialize(msg), false, lane, timeout, done);
+  }
+  template <typename T>
+  ScheduledMessageTracker queue_all(const T& msg, float timeout = DEFAULT_TIMEOUT, SendCallback done = SendCallback()) {
+    return _queue(_serialize(msg), true, LanePtr(), timeout, done);
+  }
+
+  // Writes `msg` to one connection and returns the one that wrote it,
+  // waiting up to `timeout`: with no connection live the message is held
+  // until one comes up, and a connection that dies with it unwritten hands
+  // it to another, or has it held, so a multiplexer restart between two
+  // calls costs the reconnect delay, not the message; through a pinned
+  // lane the message is lost with its connection instead. Throws
+  // NotConnected when nothing wrote it with no connection live, or when a
+  // pinned lane's connection is gone, OperationTimedOut otherwise, as the
+  // Python ThreadedClient raises. With a lane, through the lane's
+  // connection, which takes the connection used when it has none or lost
+  // its own.
   ConnectionWrapper send(const MultiplexerMessage& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr()) {
     basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
@@ -287,6 +346,13 @@ class Client : public ExceptionDefinitions {
 
   mx::Random64::result_type random64() const { return basic_client_->random64(); }  // a message id
 
+  // Every message the program sent that the client gives up on, each copy
+  // of one sent to ALL, is told to `observer` with its id and why
+  // (DropReason), inside whichever call runs the loop when it happens;
+  // dropped() counts them. See BasicClient::report_drop.
+  void set_drop_observer(BasicClient::DropObserver observer) { basic_client_->set_drop_observer(observer); }
+  std::uint64_t dropped() const { return basic_client_->dropped(); }
+
  protected:
   // The query algorithm and the send-and-receive it is built on live in
   // client.cc; see the comments there.
@@ -304,10 +370,35 @@ class Client : public ExceptionDefinitions {
                                         std::vector<uint64_t>* sent_ids = NULL);
   ConnectionWrapper _send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
                               LanePtr lane = LanePtr());
+  ConnectionWrapper _send_one(std::shared_ptr<const RawMessage> raw, mx::SimpleTimer& timer,
+                              ConnectionWrapper preferred, LanePtr lane);
+  // The flushing send's core, both languages': BasicClient::send, then the
+  // loop runs until a copy is written, the first for ALL, none is left that
+  // could be, or `timer` expires. Returns the copies written, 0 or 1;
+  // `used` gets the connection that wrote it; `taken` is false when
+  // nothing took the message (BasicClient::send), `lost` when every copy
+  // was given up on before the time ran out.
+  unsigned int _send_and_wait(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane,
+                              mx::SimpleTimer& timer, ConnectionWrapper* used, bool* taken, bool* lost);
+  // queue() and queue_all(), and the binding's non-flushing send.
+  ScheduledMessageTracker _queue(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
+                                 const SendCallback& done) {
+    basic_client_->check_not_orphaned();
+    basic_client_->poll();
+    std::vector<BasicScheduledMessageTracker> trackers;
+    if (!basic_client_->send(raw, all, lane, timeout, 0, &trackers, NULL, done) || trackers.empty()) {
+      return ScheduledMessageTracker(BasicScheduledMessageTracker());
+    }
+    return ScheduledMessageTracker(trackers.front());
+  }
+  // What a flushing send that wrote nothing throws, as the Python
+  // ThreadedClient raises: NotConnected when the message was given up on, when no
+  // connection is live or `lane` is a pinned one whose connection is gone,
+  // OperationTimedOut otherwise.
+  [[noreturn]] void _raise_for_nothing_written(const LanePtr& lane, bool lost);
   MultiplexerMessage _probe_for(const MultiplexerMessage& query, Probe probe);
   IncomingMessage _receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper* watch = NULL, bool* lost = NULL);
-
   /**
    * _serialize
    */

@@ -100,8 +100,14 @@ that changes.
   them twice and the caller sees nothing. A reply that was to go back
   through the dead connection goes through another live one, or the first
   to come up, so it can reach the caller through another multiplexer than
-  its request took. Backends and clients reconnect to the restarted
-  multiplexer within about 3 s. [Connecting to a
+  its request took. What a client's connection to it had not written goes
+  through another live connection, or, with none live, waits for the next:
+  what still waited for room within its own timeout, what was queued
+  `DEFAULT_TIMEOUT` from then, so that it rides through a restart however
+  long ago it was sent; a pinned lane's messages are dropped, and so are the
+  copies of messages sent to every connection, the other multiplexers
+  having theirs, each drop reported. Backends and clients reconnect to the
+  restarted multiplexer within about 3 s. [Connecting to a
   multiplexer](handshake.md) shows it.
 - **A multiplexer is stopped.** On `SIGTERM` it accepts nothing new and
   closes each connection once what is queued for it is written, so what it
@@ -122,7 +128,9 @@ that changes.
 - **The only multiplexer dies.** There is no other connection. A threaded
   client sends its in-flight requests again as soon as it is reconnected; a
   synchronous client waits for the reconnect inside its current call and
-  sends again. The request is answered if the backend of its type is back
+  sends again. An event sent meanwhile, by either client, is held and goes
+  out once the client is reconnected, or is dropped and reported at its
+  timeout. The request is answered if the backend of its type is back
   on the fresh multiplexer by then, and fails at once with `OperationFailed`
   if the client reconnected first: a multiplexer with nobody of the type
   reports a delivery error, and the search that follows asks the same one
@@ -134,14 +142,13 @@ that changes.
   backend of the type at once, without a search, and the drain ends when
   the multiplexers confirmed and the work is done, `drain_seconds` at
   the latest; a backend alone of its type drains as the last resort or
-  its callers fail at once, its choice. A backend built on
-  `BaseThreadedMultiplexerServer` that is closing answers a request routed
-  to it before the multiplexer heard with a delivery error, as a
-  multiplexer answers for a peer that is gone, so the client searches and
-  repeats the request elsewhere at once.
-  A plain `BaseMultiplexerServer` loses what arrived after its last read,
-  which costs the client a timeout. [How a backend leaves](leaving.md)
-  draws it.
+  its callers fail at once, its choice. A backend of either server class
+  that is closing, or whose drain is over, answers a request routed to it
+  before the multiplexer heard with a delivery error, as a multiplexer
+  answers for a peer that is gone, so the client searches and repeats the
+  request elsewhere at once; what it had read before is served. Only what
+  the multiplexer wrote after the backend's last read is lost, which
+  costs the client a timeout. [How a backend leaves](leaving.md) draws it.
 - **A backend hangs without dying.** Its connection stays registered as long
   as its library still runs the loop and answers heartbeats, so it keeps
   receiving its share of round-robin requests, which time out. A
@@ -153,12 +160,18 @@ that changes.
   sockets open, a hung host or `SIGSTOP`, is not noticed at once: the
   libraries apply to it the heartbeat intervals it applies to its peers,
   and close the connection after 30 s and 60 s more without a frame, as
-  for a dead one. Until then the round robin still gives it its share. A
+  for a dead one. Until then the round robin still gives it its share,
+  until its queue of 1024 messages is full; from then on new messages and
+  requests go to the other connections. A
   typed query sent through it waits out its `timeout`, then its search
   finds a backend through another multiplexer; an addressed query through
-  it ends with `OperationTimedOut`; an event sent through it, flushed or
-  not, waits inside it, lost if it dies, delivered late if it wakes. A
-  flushing send through every connection ends once one copy is written.
+  it ends with `OperationTimedOut`. An event sent through it waits in the
+  client, queued or for room, and goes out late if the multiplexer wakes;
+  if it dies, what waited goes through another connection or waits for
+  the next, and what the client had written into its socket is lost
+  unreported. One that waits past its timeout is dropped and reported. A
+  flushing send through every connection, in every client, ends once one
+  copy is written.
 - **A client is idle for a long time.** Nothing happens: passive peers are
   never dropped for silence, and a `ThreadedClient` keeps heartbeating.
 - **A multiplexer restarts while a synchronous client is idle.** The
@@ -171,7 +184,8 @@ that changes.
   multiplexer and the libraries end the connection at once and write
   nothing more to it: a multiplexer drops what it had queued for that
   peer, and a client sends what it had queued through another connection,
-  unless it was pinned to that one. No peer of theirs half-closes; a server
+  or holds it for the next when none is live, unless it was pinned to that
+  one or was a copy for every connection. No peer of theirs half-closes; a server
   of yours that takes plain TCP clients decides for itself what it still
   owes one that does.
 - **A peer closes while a message to it is on its way.** Writing to a
@@ -180,16 +194,40 @@ that changes.
   read that to the end, a few seconds at most, and route or deliver it
   before the connection closes. A client's last events, sent just before
   it exited, are not lost to a delivery error written back to it.
-- **A client leaves right after sending.** A socket closed with something
+- **A client leaves right after sending.** Every client and server class
+  ends the same way, `shutdown(timeout)` or `close(timeout)`: what was
+  sent before it is written first, `CLOSE_FLUSH_SECONDS` at most by
+  default, and what a multiplexer that stopped reading, or a connection
+  that did not come up, leaves unwritten by then is dropped and reported
+  (0 drops it at once). A socket closed with something
   unread makes the kernel reset the connection and throw away what it had
   not sent yet, which, with the multiplexer behind, is the client's last
-  messages. So a client's `shutdown()` closes each connection the polite
+  messages. So a client's `shutdown()` then closes each connection the polite
   way: nothing more is written, the client's end of the stream follows
   what the kernel still holds, and what the multiplexer still sends is
   read and dropped until the multiplexer closes its side, a round trip,
-  `CLOSE_READ_SECONDS` at most. What `flush_all()` reported written
-  reaches a multiplexer that reads it within that second; one that does
-  not answer holds `shutdown()` that long.
+  `CLOSE_READ_SECONDS` at most. What was written reaches a multiplexer
+  that reads it within that second; one that does not answer holds
+  `shutdown()` that long, and its drain before that. Past that second
+  the socket closes with what the kernel still holds, which the
+  multiplexer gets when it reads on, unless it writes to the client
+  first, a heartbeat after a stall say: the client's kernel then resets
+  the connection, and that tail is lost without a report.
+- **The library gives up on a message.** A message the program sent waits
+  in its client for room on a full connection, or for a connection to come
+  up, within its `timeout`. One that waited longer, one whose connection
+  ended with nothing else allowed to take it (a pinned lane's, a copy sent
+  to `ALL`), and what a client's shutdown leaves are dropped, and every one
+  is counted and told to the program with its id and why: `on_drop` and
+  `dropped` in Python, `set_drop_observer()` and `dropped()` in C++
+  ([Python](api_python.md#messages-the-library-gives-up-on),
+  [C++](api_cpp.md#messages-the-library-gives-up-on)). Each is logged too.
+- **A written message is lost.** Written means handed to the kernel on a
+  live connection, which is what a flushing send waits for and all a
+  library can know: a multiplexer that dies before reading what its socket
+  holds takes those messages along, flushed or not, and nobody is told.
+  Only an answer says a message arrived: a query's reply, or an
+  acknowledgement the receiver sends of its own.
 - **Nobody handles a type.** Every multiplexer the client is connected to
   answers the search with a delivery error, and the client learns at once
   rather than by timeout.
@@ -233,9 +271,11 @@ multiplexer and both libraries, and exported to Python as attributes of
 | Constant | Value | Where it applies |
 |---|---|---|
 | `DEFAULT_TIMEOUT` | 10 s | connect, each stage of a query, flush |
+| `ROOM_GRACE_SECONDS` | 0.01 s | how much longer than its synchronous flushing send a message waits for room or for a connection, so that the send times out before its message is dropped |
 | `DEFAULT_READ_TIMEOUT` | none | `receive_message` waits forever by default |
 | `AUTO_RECONNECT_TIME` | 3 s | between a connection dropping and the library reconnecting |
 | `HEARTBIT_INTERVAL` | 3 s | between heartbeats on an idle connection |
+| `CLOSE_FLUSH_SECONDS` | 1 s | every `shutdown()` and `close()`: how long what was sent before it is written before the connections close; the `timeout=` default |
 | `CLOSE_READ_SECONDS` | 1 s | a client's `shutdown()`: how long a connection reads on, waiting for its multiplexer to close its side |
 | `MX_LOG_VERBOSITY` | `DEBUG:HIGH` | connections logged, traffic not; the environment variable changes it per process ([operations](operations.md#logs)) |
 | `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence on a connection, from a non-passive peer or from a multiplexer, before the other side starts to worry |

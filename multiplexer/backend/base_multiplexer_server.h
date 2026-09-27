@@ -1,7 +1,7 @@
 // Base class for backends written in C++: connects to the multiplexers,
 // runs the receive loop, answers the protocol's own messages, and calls
 // handle_message() with everything else. The Python counterpart is
-// BaseMultiplexerServer in clients.py; both behave the same way, including
+// BaseMultiplexerServer in servers.py; both behave the same way, including
 // what happens when a handler throws. docs/api_cpp.md is the user's view.
 //
 // A BaseMultiplexerServer is driven by serve_forever(): it blocks in the
@@ -37,12 +37,6 @@ typedef std::uint32_t PeerType;
 using mx::util::kwargs::Kwargs;
 using mx::util::kwargs::KwargsKeys;
 
-// How long close() waits for the last replies to be written before it
-// closes the connections, which takes CLOSE_READ_SECONDS more at most
-// (Client::shutdown); a multiplexer that stopped reading cannot hold it
-// longer than the two.
-static const float CLOSE_FLUSH_SECONDS = 1.0f;
-
 // The routing a draining backend asks for unless told otherwise: nothing
 // new by the rules, only what is addressed to it (Multiplexer.proto's
 // Routing; docs/leaving.md).
@@ -64,10 +58,11 @@ inline bool nothing_more_arrives(const Routing& routing) {
 // serve_forever(). Not thread-safe.
 class BaseMultiplexerServer {
  public:
-  // for use with send_message(..., multiplexer=(ONE|ALL|a ConnectionWrapper),
-  // ...)
-  static const int ONE = 1;
-  static const int ALL = 2;
+  // For send_message()'s `multiplexer`, besides a ConnectionWrapper.
+  // constexpr, so inline: Kwargs::set() binds a reference to the one given,
+  // which then needs the definition only an inline variable has unoptimized.
+  static constexpr int ONE = 1;
+  static constexpr int ALL = 2;
 
  protected:
   // A peer of `type` for the multiplexers at `addresses`: this makes the
@@ -142,9 +137,10 @@ class BaseMultiplexerServer {
   // `BaseMultiplexerServer::drained() && in_flight_ == 0`.
   virtual bool drained() const;
 
-  // Called when handle_message() threw, after BACKEND_ERROR went to the
-  // requester. Return true to keep serving (the default); return false and
-  // the exception propagates out of serve_forever().
+  // Called when handle_message() threw, after the requester was sent
+  // BACKEND_ERROR, unless a reply had gone out or the report failed. Return
+  // true to keep serving (the default); return false and the exception
+  // propagates out of serve_forever().
   virtual bool on_handler_exception(const std::exception&) { return true; }
 
   // Whether to answer a client's search for a backend; true unless
@@ -170,32 +166,29 @@ class BaseMultiplexerServer {
   // (REQUEST_RECEIVED); call it first thing in handle_message.
   void notify_start();
 
-  /*
-   * required kwargs:
-   *	    message:	const MultiplexerMessage* OR
-   *			const std::string* OR
-   *			std::string
-   * possible kwargs:
-   *	    to:		std::uint64_t
-   *	    references: std::uint64_t
-   *	    type:	std::uint32_t
-   *	    workflow:	std::string OR
-   *			const std::string*
-   *	    multiplexer:    int OR
-   *			    ConnectionWrapper
-   * TODO flush, timeout
-   * TODO other MultiplexerMessage keys ??
-   *
-   * returns
-   *	    TODO add doc on return type
-   */
+  // Queues a message. Required: `message`, a const MultiplexerMessage*
+  // sent as it is, or a const std::string* or std::string payload, which
+  // also needs `type` (std::uint32_t). Optional: `to` and `references`
+  // (std::uint64_t), `workflow` (std::string or const std::string*), and
+  // `multiplexer`, ONE, ALL (int) or a ConnectionWrapper. While a message
+  // is handled the defaults make it the reply: `to` the requester,
+  // `references` and `workflow` the request's, `multiplexer` the
+  // connection it came on, replaced when gone; outside a handler, from
+  // periodic_task() say, there are none and the message is routed by its
+  // type through one connection. Sent as every client sends
+  // (SyncClient::queue): placed, or held while no connection is live, and
+  // reported to the drop observer if given up on. Returns, in the
+  // std::any, the message's ScheduledMessageTracker, the first copy's for
+  // ALL, null when nothing took it. Not flushed: the loop writes it, and
+  // close() flushes what is left.
   std::any send_message(Kwargs kwargs);
 
   void no_response() { _has_sent_response = true; }
 
-  // Closes every connection; the server cannot be used afterwards. Safe to
-  // call twice.
-  void close();
+  // Closes every connection as the client's shutdown(timeout) does, what
+  // was sent before written first, `timeout` seconds at most; the server
+  // cannot be used afterwards. Safe to call twice.
+  void close(float timeout = CLOSE_FLUSH_SECONDS);
 
   // Answers the current request with BACKEND_ERROR carrying `message`, so the
   // requester's query() fails at once instead of waiting out its timeout.
@@ -208,6 +201,8 @@ class BaseMultiplexerServer {
   // carrying its payload back; `what` names it in the BACKEND_ERROR sent
   // instead when that echo would be over MAX_MESSAGE_SIZE.
   void _echo(const char* what);
+  // Ends the reply defaults once a message has been handled.
+  void _forget_request();
 
  public:
   std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly

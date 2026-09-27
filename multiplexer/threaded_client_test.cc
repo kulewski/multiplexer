@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
@@ -27,10 +28,12 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "multiplexer/client.h"
 #include "multiplexer/in_process_multiplexer.h"
@@ -58,6 +61,76 @@ TEST(ThreadedClient, QueryWithNoMultiplexerIsNotConnected) {
   EXPECT_FALSE(client.connect("127.0.0.1", 1, 0.2f));  // nothing listens on port 1
   ThreadedClient::Result result = client.query("hello", multiplexer::types::PYTHON_TEST_REQUEST, 0.3f);
   EXPECT_EQ(ThreadedClient::NOT_CONNECTED, result.outcome);
+}
+
+// With no multiplexer up, the queries that ended at their deadlines are
+// not kept: the client holds those still waiting, and 64 more at most,
+// where every one stayed, its whole request with it, until a connection
+// came up, and a long outage grew without bound. One query waits a second,
+// so that the list is cleared out beside it, and then none waits. Counted
+// once each has ended, as its callback says.
+TEST(ThreadedClient, AnOutageKeepsNoQueryThatEnded) {
+  const int count = 200;
+  std::promise<void> all_ended;  // before the client, whose callbacks set them
+  std::promise<void> last_ended;
+  std::atomic<int> ended(0);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  EXPECT_FALSE(client.connect("127.0.0.1", 1, 0.2f));  // nothing listens on port 1
+  client.query(
+      "waits", multiplexer::types::PYTHON_TEST_REQUEST,
+      [&last_ended](const ThreadedClient::Result&) { last_ended.set_value(); }, 1.0f);
+  for (int index = 0; index < count; ++index) {
+    client.query(
+        "hello", multiplexer::types::PYTHON_TEST_REQUEST,
+        [&](const ThreadedClient::Result&) {
+          if (++ended == count) {
+            all_ended.set_value();
+          }
+        },
+        0.05f);
+  }
+  ASSERT_EQ(std::future_status::ready, all_ended.get_future().wait_for(std::chrono::seconds(30)));
+  EXPECT_LE(client.waiting_queries(), 1u + 64u) << "queries that ended beside one that waits";
+  ASSERT_EQ(std::future_status::ready, last_ended.get_future().wait_for(std::chrono::seconds(30)));
+  EXPECT_EQ(0u, client.waiting_queries()) << "queries that ended";
+}
+
+// With no multiplexer up, the messages that ended at their deadlines are
+// not kept: the outbox holds those still waiting, and 64 more at most,
+// where every one stayed, its whole frame with it, until a connection came
+// up. One message waits a second, a flushing send on a thread of its own,
+// so that the queue is cleared out beside it, and then none waits. Counted
+// once the drops are reported.
+TEST(ThreadedClient, AnOutageKeepsNoMessageThatEnded) {
+  const int count = 200;
+  std::promise<void> all_dropped;  // before the client, whose observer sets them
+  std::promise<void> last_dropped;
+  std::atomic<int> dropped(0);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  client.set_drop_observer([&](std::uint64_t, multiplexer::DropReason) {
+    const int now = ++dropped;
+    if (now == count) {
+      all_dropped.set_value();
+    } else if (now == count + 1) {
+      last_dropped.set_value();
+    }
+  });
+  EXPECT_FALSE(client.connect("127.0.0.1", 1, 0.2f));  // nothing listens on port 1
+  std::thread waiting(
+      [&client] { client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "waits"), 1.0f); });
+  for (int tries = 0; tries < 1000 && client.waiting_messages() == 0; ++tries) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(1u, client.waiting_messages()) << "the message that waits";
+  const std::string payload(1024, 'x');
+  for (int index = 0; index < count; ++index) {
+    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, payload), 0.001f);
+  }
+  ASSERT_EQ(std::future_status::ready, all_dropped.get_future().wait_for(std::chrono::seconds(30)));
+  EXPECT_LE(client.waiting_messages(), 1u + 64u) << "messages that ended beside one that waits";
+  waiting.join();
+  ASSERT_EQ(std::future_status::ready, last_dropped.get_future().wait_for(std::chrono::seconds(30)));
+  EXPECT_EQ(0u, client.waiting_messages()) << "messages that ended";
 }
 
 // A synchronous Client next to the threaded one, to send it messages by
@@ -435,6 +508,10 @@ TEST(ThreadedClient, ALaneKeepsAStreamOnOneConnectionAndAPinnedOneFails) {
   }
   ASSERT_TRUE(pinned->closed());
   EXPECT_EQ(0, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "refused"), pinned, 5));
+  // The send that does not wait refuses at the call, as in Python, where it
+  // returned and dropped the message with a warning.
+  EXPECT_THROW(client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "refused"), pinned),
+               ThreadedClient::NotConnected);
   multiplexer::MultiplexerMessage request = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "refused");
   EXPECT_EQ(ThreadedClient::NOT_CONNECTED, client.query(request, 5, pinned).outcome);
   // The bare connection is only preferred: the message goes the other way.
@@ -636,6 +713,45 @@ struct Sink {
   ThreadedClient client;
 };
 
+// A backend that counts what it is handed and keeps the short payloads,
+// for a test that asks whether one message in particular arrived, after a
+// later one that must come behind it.
+struct PayloadSink {
+  explicit PayloadSink(unsigned short port)
+      : client(multiplexer::peers::PYTHON_TEST_SERVER, [this](const multiplexer::IncomingMessage& incoming) {
+          std::lock_guard<std::mutex> lock(mutex);
+          ++count;
+          if (incoming.third->message().size() < 256) {
+            payloads.push_back(incoming.third->message());
+          }
+          arrived.notify_all();
+        }) {
+    client.connect("127.0.0.1", port, 5);
+  }
+  // Whether a message with `payload` arrived within `seconds`.
+  bool wait_for(const std::string& payload, int seconds) {
+    std::unique_lock<std::mutex> lock(mutex);
+    return arrived.wait_for(lock, std::chrono::seconds(seconds), [&] { return _has(payload); });
+  }
+  bool has(const std::string& payload) {
+    std::lock_guard<std::mutex> lock(mutex);
+    return _has(payload);
+  }
+  std::size_t received() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return count;
+  }
+  bool _has(const std::string& payload) const {
+    return std::find(payloads.begin(), payloads.end(), payload) != payloads.end();
+  }
+  // Before the client, which writes into them until it is gone.
+  std::mutex mutex;
+  std::condition_variable arrived;
+  std::size_t count = 0;
+  std::vector<std::string> payloads;
+  ThreadedClient client;
+};
+
 // A backend that answers every request with its payload.
 struct Answerer {
   explicit Answerer(unsigned short port)
@@ -726,6 +842,63 @@ bool voluntary_switches(std::uint64_t* total) {
   }
   closedir(tasks);
   return true;
+}
+
+// A send made on the io thread while shutdown(timeout) writes out what was
+// sent before, as a server's refusal of what still arrives is, goes out:
+// it threw NotConnected, so the refusal was lost and its sender waited out
+// its timeout. The first multiplexer, frozen with copies of a send to ALL
+// queued for it, holds the write-out open; a request arrives through the
+// second meanwhile and is answered.
+TEST(ThreadedClient, ASendFromTheIoThreadDuringTheShutdownsWriteOutGoesOut) {
+  InProcessMultiplexer first;
+  InProcessMultiplexer second;
+  ThreadedClient* answering_client = nullptr;
+  ThreadedClient answering(multiplexer::peers::PYTHON_TEST_SERVER,
+                           [&answering_client](const multiplexer::IncomingMessage& incoming) {
+                             if (incoming.third->type() != multiplexer::types::PYTHON_TEST_REQUEST) {
+                               return;  // the multiplexers' word on the filler
+                             }
+                             multiplexer::MultiplexerMessage reply =
+                                 answering_client->new_message(multiplexer::types::PYTHON_TEST_RESPONSE, "late");
+                             reply.set_to(incoming.third->from());
+                             reply.set_references(incoming.third->id());
+                             answering_client->send(reply, incoming.second);
+                           });
+  answering_client = &answering;
+  ASSERT_TRUE(answering.connect("127.0.0.1", first.port, 5));
+  ASSERT_TRUE(answering.connect("127.0.0.1", second.port, 5));
+  Peer requester(second.port, multiplexer::peers::WEBSITE);
+  std::thread closing;
+  {
+    Freeze frozen(first);
+    const std::string filler(1024, 'f');
+    for (int index = 0; index < frames_to_fill(filler.size()); ++index) {
+      multiplexer::MultiplexerMessage msg = answering.new_message(9999, filler);  // a type nobody takes
+      msg.set_report_delivery_error(false);
+      answering.send_all(msg);
+    }
+    closing = std::thread([&answering] { answering.shutdown(10); });
+    for (bool stopped = false; !stopped;) {  // until the shutdown has begun
+      try {
+        answering.connections_count();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      } catch (const ThreadedClient::NotConnected&) {
+        stopped = true;
+      }
+    }
+    multiplexer::MultiplexerMessage request =
+        requester.message(multiplexer::types::PYTHON_TEST_REQUEST, "still there?", answering.instance_id());
+    requester.send(request);
+    try {
+      const multiplexer::IncomingMessage got = requester.client.read_raw_message(5);
+      EXPECT_EQ(request.id(), got.third->references());
+      EXPECT_EQ("late", got.third->message());
+    } catch (const multiplexer::Client::OperationTimedOut&) {
+      ADD_FAILURE() << "no answer: the send threw NotConnected on the io thread";
+    }
+  }  // the first multiplexer thawed: the write-out ends
+  closing.join();
 }
 
 // A burst the connection cannot take while its multiplexer is frozen: the
@@ -961,6 +1134,42 @@ std::chrono::nanoseconds thread_cpu() {
   return std::chrono::seconds(now.tv_sec) + std::chrono::nanoseconds(now.tv_nsec);
 }
 
+// A read with no deadline on a client with nothing it could receive from,
+// no connection and none on its way, throws NotConnected at once, where it
+// spun at full CPU forever: one never connected, and one shut down. Each
+// reads on a thread of its own, let go of if it never ends, so that a spin
+// fails the test instead of hanging it.
+TEST(Client, AReadWithNothingToReceiveFromThrowsNotConnected) {
+  InProcessMultiplexer mx;
+  for (const bool shut_down : {false, true}) {
+    std::promise<std::string> ended;
+    std::future<std::string> outcome = ended.get_future();
+    std::thread reader([&ended, shut_down, port = mx.port] {
+      multiplexer::Client client(multiplexer::peers::WEBSITE);
+      if (shut_down) {
+        client.connect("127.0.0.1", port, 5);
+        client.shutdown();
+      }
+      try {
+        client.read_raw_message(-1);
+        ended.set_value("a message");
+      } catch (const multiplexer::Client::NotConnected&) {
+        ended.set_value("NotConnected");
+      } catch (const std::exception& error) {
+        ended.set_value(error.what());
+      }
+    });
+    const char* what = shut_down ? "shut down" : "never connected";
+    if (outcome.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+      reader.detach();  // spinning for good
+      ADD_FAILURE() << what << ": the read never ended";
+      continue;
+    }
+    reader.join();
+    EXPECT_EQ("NotConnected", outcome.get()) << what;
+  }
+}
+
 // Nothing is refused while the connection lives, where a message the full
 // queue could not take got a null tracker, and all of it arrives.
 TEST(Client, WhatAFullConnectionCannotTakeWaitsForItsRoom) {
@@ -1024,17 +1233,21 @@ TEST(Client, EveryMultiplexerGetsItsCopyOfASendToAll) {
 // A lane that is not pinned keeps its connection while that lives, as in
 // ThreadedClient: a flushing send its full connection cannot take waits
 // there, where it went through the other multiplexer and the lane moved.
+// The message waits for room as long as the call and a moment more, so
+// that a call that timed out has its message dropped soon after, where it
+// waited 10 s whatever the call's timeout and went out after the call had
+// thrown.
 TEST(Client, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
   InProcessMultiplexer first, second;
-  Sink behind_first(first.port), behind_second(second.port);
+  PayloadSink behind_first(first.port), behind_second(second.port);
   Peer sender(first.port, multiplexer::peers::WEBSITE);
   sender.client.connect("127.0.0.1", second.port, 5);
   multiplexer::LanePtr lane(new multiplexer::Lane());
   sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "first", 0), 5, lane);
   const unsigned short held = lane->connection().endpoint().port();
   InProcessMultiplexer& frozen = held == first.port ? first : second;
-  Sink& its = held == first.port ? behind_first : behind_second;
-  Sink& other = held == first.port ? behind_second : behind_first;
+  PayloadSink& its = held == first.port ? behind_first : behind_second;
+  PayloadSink& other = held == first.port ? behind_second : behind_first;
   const std::string chunk(16 * 1024, 'x');
   const int count = frames_to_fill(chunk.size());
   {
@@ -1045,10 +1258,59 @@ TEST(Client, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
     EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "last", 0), 0.2f, lane),
                  multiplexer::Client::OperationTimedOut);
     EXPECT_EQ(held, lane->connection().endpoint().port()) << "the lane moved";
+    // Past the message's own deadline, the loop sees it while the
+    // multiplexer is still frozen, before any room could take it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    sender.client.flush_all(0.01f);
   }
   EXPECT_TRUE(sender.client.flush_all(60));
-  EXPECT_TRUE(its.wait_for(count + 2, 60)) << its.received.load() << " of " << count + 2;
-  EXPECT_EQ(0u, other.received.load()) << "went the other way";
+  sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "after", 0), 30, lane);
+  ASSERT_TRUE(its.wait_for("after", 60)) << its.received() << " arrived";
+  EXPECT_FALSE(its.has("last")) << "it went out after its call had timed out";
+  EXPECT_EQ(static_cast<std::size_t>(count) + 2, its.received()) << "the first, the chunks and the one after";
+  EXPECT_EQ(0u, other.received()) << "went the other way";
+}
+
+// The same without a lane: a synchronous send that timed out has its
+// message dropped soon after, where it waited 10 s and went out once the
+// multiplexer read again.
+TEST(Client, ASendThatTimedOutHasItsMessageDropped) {
+  InProcessMultiplexer mx;
+  PayloadSink backend(mx.port);
+  Peer sender(mx.port, multiplexer::peers::WEBSITE);
+  const std::string chunk(16 * 1024, 'x');
+  {
+    Freeze freeze(mx);
+    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+      sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, chunk, 0));
+    }
+    EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f),
+                 multiplexer::Client::OperationTimedOut);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    sender.client.flush_all(0.01f);  // the loop sees its deadline while the multiplexer is frozen
+  }
+  sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "after", 0), 30);
+  ASSERT_TRUE(backend.wait_for("after", 60));
+  EXPECT_FALSE(backend.has("late")) << "it went out after its call had timed out";
+}
+
+// A pinned lane whose send runs out of time while its connection lives
+// times out, as through any lane and as on ThreadedClient, where it threw
+// NotConnected, the lane not closed.
+TEST(Client, APinnedLaneThatRunsOutOfTimeTimesOut) {
+  InProcessMultiplexer mx;
+  Sink backend(mx.port);
+  Peer sender(mx.port, multiplexer::peers::WEBSITE);
+  multiplexer::LanePtr lane(new multiplexer::Lane(true));
+  sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "first", 0), 5, lane);
+  const std::string chunk(16 * 1024, 'x');
+  Freeze freeze(mx);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, chunk, 0), lane->connection());
+  }
+  EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f, lane),
+               multiplexer::Client::OperationTimedOut);
+  EXPECT_FALSE(lane->closed());
 }
 
 // --- A peer gone with messages unread ----------------------------------------
@@ -1542,6 +1804,51 @@ TEST(ThreadedClient, AQueryCallbackThatThrowsLeavesTheConnectionReading) {
 // The net under both: whatever the manager's handling of a frame throws,
 // here a BasicClient's own sink, the connection logs it, drops that frame
 // and reads on.
+// A connection that stays full, its multiplexer frozen: what ended waiting
+// for its room is cleared out beside a message that still waits, 64 more
+// than what waits kept at most, where every one stayed, its whole frame
+// with it, until room came. Counted once the drops are reported.
+TEST(BasicClient, AFullConnectionKeepsABoundedRestOfWhatEndedWaitingForRoom) {
+  InProcessMultiplexer mx;
+  asio::io_service io_service;
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
+  const std::string payload(1024, 'x');
+  auto frame = [&] {
+    multiplexer::MultiplexerMessage msg;
+    msg.set_id(client->random64());
+    msg.set_from(client->instance_id());
+    msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+    msg.set_message(payload);
+    return std::shared_ptr<const multiplexer::RawMessage>(multiplexer::RawMessage::FromMessage(msg));
+  };
+  // Runs the loop until `done`, 30 s at most.
+  auto run_until = [&](const std::function<bool()>& done) {
+    std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(30);
+    while (!done() && !timer->expired()) {
+      client->run_one();
+    }
+    return done();
+  };
+  Freeze frozen(mx);
+  // The sockets and the queue filled; what does not fit waits half a second.
+  const int filler = frames_to_fill(payload.size());
+  for (int index = 0; index < filler; ++index) {
+    client->send(frame(), false, multiplexer::LanePtr(), 0.5f);
+  }
+  ASSERT_TRUE(run_until([&] { return client->outbox_entries() == 0; })) << "the filler that waited ended";
+  const std::uint64_t before = client->dropped();
+  client->send(frame(), false, multiplexer::LanePtr(), 60);  // waits for room all along
+  for (int index = 0; index < 200; ++index) {
+    client->send(frame(), false, multiplexer::LanePtr(), 0.001f);
+  }
+  ASSERT_TRUE(run_until([&] { return client->dropped() == before + 200; }));
+  EXPECT_LE(client->outbox_entries(), 1u + 64u) << "messages that ended beside one that waits";
+  frozen.release();
+  client->shutdown();
+}
+
 TEST(Connection, AFrameWhoseHandlingThrowsIsDroppedAndTheConnectionReadsOn) {
   InProcessMultiplexer mx;
   asio::io_service io_service;
@@ -1828,4 +2135,423 @@ TEST(Client, AReplyToTheResendAnswersDuringTheSearch) {
   killer.join();
   EXPECT_EQ("RESENT", answer);
   EXPECT_EQ(2, backend.requests.load()) << "the first and the resend; no direct copy after the search";
+}
+
+namespace {
+
+// A threaded backend connected to two multiplexers that answers every
+// request at once, through the connection it came on, with its payload,
+// and counts the requests.
+struct CountingAnswerer {
+  CountingAnswerer(unsigned short first, unsigned short second)
+      : client(multiplexer::peers::PYTHON_TEST_SERVER, [this](const multiplexer::IncomingMessage& incoming) {
+          if (incoming.third->type() != multiplexer::types::PYTHON_TEST_REQUEST) {
+            return;
+          }
+          ++requests;
+          multiplexer::MultiplexerMessage reply =
+              client.new_message(multiplexer::types::PYTHON_TEST_RESPONSE, incoming.third->message());
+          reply.set_to(incoming.third->from());
+          reply.set_references(incoming.third->id());
+          client.send(reply, incoming.second);
+        }) {
+    EXPECT_TRUE(client.connect("127.0.0.1", first, 5));
+    EXPECT_TRUE(client.connect("127.0.0.1", second, 5));
+  }
+  std::atomic<int> requests{0};  // before the client, which counts into it until it is gone
+  ThreadedClient client;
+};
+
+}  // namespace
+
+// A query through a lane whose multiplexer is frozen with the connection
+// full: the request waits there, the multiplexer goes, and the request is
+// handed to the other connection and written there. The flushing send
+// under the query reports that connection, and the reply is awaited
+// there; it reported the dead one, so the request went out again under a
+// new id and the backend counted two.
+TEST(Client, AHandedOverRequestIsAnsweredWithoutAResend) {
+  InProcessMultiplexer kept;
+  std::unique_ptr<InProcessMultiplexer> going(new InProcessMultiplexer());
+  CountingAnswerer backend(kept.port, going->port);
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  client.connect("127.0.0.1", kept.port, 5);
+  multiplexer::ConnectionWrapper to_going = client.connect("127.0.0.1", going->port, 5);
+  multiplexer::LanePtr lane(new multiplexer::Lane(to_going));  // the request goes through the one that goes
+  Freeze freeze(*going);
+  const std::string chunk(16 * 1024, 'x');
+  multiplexer::MultiplexerMessage fill;  // routed nowhere: fills the connection, answered by nobody
+  fill.set_type(multiplexer::types::TEST_UNROUTED);
+  fill.set_from(client.instance_id());
+  fill.set_message(chunk);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    fill.set_id(client.random64());
+    client.schedule_one(fill, to_going, 30);
+  }
+  std::thread killer([&freeze, &going] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    freeze.release();
+    going.reset();
+  });
+  std::string answer;
+  try {
+    answer = client.query("question", multiplexer::types::PYTHON_TEST_REQUEST, 30.0f, lane).third->message();
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "the query raised " << error.what();
+  }
+  killer.join();
+  EXPECT_EQ("question", answer);
+  EXPECT_EQ(1, backend.requests.load()) << "sent once, not again under a new id";
+}
+
+namespace {
+
+// A backend on the threaded client that keeps the id of every message it
+// is handed.
+struct IdSink {
+  explicit IdSink(unsigned short port)
+      : client(multiplexer::peers::PYTHON_TEST_SERVER, [this](const multiplexer::IncomingMessage& incoming) {
+          std::lock_guard<std::mutex> lock(mutex);
+          ids.insert(incoming.third->id());
+        }) {
+    client.connect("127.0.0.1", port, 5);
+  }
+  // The ids that arrived, once `count` did or `seconds` passed.
+  std::set<std::uint64_t> wait_for(std::size_t count, int seconds) {
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    for (;;) {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (ids.size() >= count || std::chrono::steady_clock::now() >= deadline) {
+          return ids;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  std::mutex mutex;
+  std::set<std::uint64_t> ids;  // before the client, which writes into it until it is gone
+  ThreadedClient client;
+};
+
+}  // namespace
+
+// A client that sends to a frozen multiplexer and shuts down with 0, which
+// drops what is not written at once: what was written arrives and
+// everything else was told to the drop observer, so that every message is
+// delivered or reported, and none of those reported arrives. Most went
+// without a word. The multiplexer reads again at the first drop reported,
+// while the client's close still reads on for the multiplexer's end, so
+// that it takes what was written within the close's bound, however long
+// the freeze took: one still stalled past CLOSE_READ_SECONDS may lose what
+// the client's kernel held (semantics.md).
+TEST(ThreadedClient, EveryMessageIsDeliveredOrReportedAtShutdown) {
+  InProcessMultiplexer mx;
+  IdSink sink(mx.port);
+  std::mutex mutex;
+  std::set<std::uint64_t> reported;
+  std::set<multiplexer::DropReason> reasons;
+  std::set<std::uint64_t> sent;
+  Freeze* frozen = nullptr;  // set while the multiplexer is frozen; released by the shutdown's first drop
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  client.set_drop_observer([&](std::uint64_t id, multiplexer::DropReason reason) {
+    std::lock_guard<std::mutex> lock(mutex);
+    reported.insert(id);
+    reasons.insert(reason);
+    if (frozen && reason == multiplexer::DropReason::SHUT_DOWN) {
+      frozen->release();
+    }
+  });
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  const std::string chunk(16 * 1024, 'x');
+  {
+    Freeze freeze(mx);
+    frozen = &freeze;
+    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+      multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk);
+      sent.insert(msg.id());
+      client.send(msg);
+    }
+    client.shutdown(0);  // returns once the io thread is done, the drop observer with it
+    frozen = nullptr;
+  }
+  std::lock_guard<std::mutex> lock(mutex);
+  ASSERT_FALSE(reported.empty()) << "a frozen multiplexer left something to report";
+  EXPECT_EQ(std::set<multiplexer::DropReason>({multiplexer::DropReason::SHUT_DOWN}), reasons);
+  EXPECT_EQ(reported.size(), client.dropped());
+  const std::set<std::uint64_t> arrived = sink.wait_for(sent.size() - reported.size(), 60);
+  std::size_t both = 0, either = 0;
+  for (std::uint64_t id : sent) {
+    both += arrived.count(id) && reported.count(id);
+    either += arrived.count(id) || reported.count(id);
+  }
+  EXPECT_EQ(0u, both) << "reported dropped, yet it arrived";
+  EXPECT_EQ(sent.size(), either) << "neither delivered nor reported";
+}
+
+// flush_all() is false when a message it waited for was given up on, on
+// both clients, where it counted the drop as done and said true: written
+// messages flush true; with the only multiplexer gone, a message held past
+// its timeout is dropped while the next flush waits for it.
+TEST(Client, FlushAllIsFalseWhenAMessageItWaitedForWasDropped) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  Peer sender(mx->port, multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "written", 0), 5));
+  EXPECT_TRUE(sender.client.flush_all(5));
+  mx.reset();  // gone: the client notices in its next call, and holds what follows
+  ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "held", 0), 0.2f));
+  EXPECT_FALSE(sender.client.flush_all(30));
+  EXPECT_EQ(1u, sender.client.dropped());
+}
+
+TEST(ThreadedClient, FlushAllIsFalseWhenAMessageItWaitedForWasDropped) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx->port, 5));
+  client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "written"));
+  EXPECT_TRUE(client.flush_all(5));
+  mx.reset();
+  for (int tries = 0; tries < 1000 && client.connections_count() > 0; ++tries) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));  // the io thread notices the end
+  }
+  ASSERT_EQ(0u, client.connections_count());
+  client.send_serialized(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "held").SerializeAsString(),
+                         multiplexer::LanePtr(), 0.2f);
+  EXPECT_FALSE(client.flush_all(30));
+  EXPECT_EQ(1u, client.dropped());
+}
+
+// A send's callback, in C++ as in Python, on both clients: queue() and
+// queue_all() on the synchronous client call it inside a later call that
+// runs the loop, ThreadedClient's send() and send_all() on the io thread;
+// once, with 1 when the message was written, the first copy for ALL, 0 when
+// it was given up on or shutdown() came first. Only the serialized sends
+// took one.
+TEST(Client, AQueuedMessagesCallbackHearsHowItEnded) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  std::vector<unsigned int> heard;  // before the client, which calls into it until its shutdown
+  Peer sender(mx->port, multiplexer::peers::WEBSITE);
+  auto record = [&heard](unsigned int written) { heard.push_back(written); };
+  ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "one", 0), 5,
+                                  multiplexer::LanePtr(), record));
+  ASSERT_TRUE(sender.client.queue_all(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "all", 0), 5, record));
+  EXPECT_TRUE(sender.client.flush_all(5));
+  EXPECT_EQ(std::vector<unsigned int>({1, 1}), heard) << "each once, by the time flush_all() returned";
+  mx.reset();  // gone: the client notices in its next call, and holds what follows
+  ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "held", 0), 0.2f,
+                                  multiplexer::LanePtr(), record));
+  ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "left", 0), 30,
+                                  multiplexer::LanePtr(), record));
+  sender.client.flush_all(0.5f);  // past the first's timeout
+  EXPECT_EQ(std::vector<unsigned int>({1, 1, 0}), heard) << "given up on at its timeout";
+  sender.client.shutdown(0);
+  EXPECT_EQ(std::vector<unsigned int>({1, 1, 0, 0}), heard) << "given up on at the shutdown";
+}
+
+TEST(ThreadedClient, AMessagesCallbackHearsHowItEnded) {
+  InProcessMultiplexer mx;
+  std::mutex mutex;
+  std::vector<unsigned int> heard;  // before the client, whose io thread calls into it
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  auto record = [&mutex, &heard](unsigned int written) {
+    std::lock_guard<std::mutex> lock(mutex);
+    heard.push_back(written);
+  };
+  client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "one"), multiplexer::LanePtr(), record);
+  client.send_all(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "all"), record);
+  EXPECT_TRUE(client.flush_all(5));
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    EXPECT_EQ(std::vector<unsigned int>({1, 1}), heard) << "each once, by the time flush_all() returned";
+  }
+  const std::string chunk(16 * 1024, 'x');
+  Freeze freeze(mx);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk));
+  }
+  client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "left"), multiplexer::LanePtr(), record);
+  client.shutdown(0);
+  std::lock_guard<std::mutex> lock(mutex);
+  EXPECT_EQ(std::vector<unsigned int>({1, 1, 0}), heard) << "given up on at the shutdown";
+}
+
+// A flushing send that wrote nothing says why: out of time, its message
+// waiting for room on a frozen multiplexer's full connection, or given up
+// on, the client shutting down under it. The Python clients raise
+// OperationTimedOut for the one and NotConnected for the other on it, as
+// the synchronous client does, where they guessed from the lane and the
+// connections afterwards.
+TEST(ThreadedClient, AFlushingSendThatWroteNothingSaysWhy) {
+  InProcessMultiplexer mx;
+  std::promise<std::pair<unsigned int, bool>> ended;  // before the client, which settles it as it shuts down
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  const std::string chunk(16 * 1024, 'x');
+  Freeze freeze(mx);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk));
+  }
+  bool given_up = true;
+  EXPECT_EQ(0u, client.send_serialized_and_wait(
+                    client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "late").SerializeAsString(), false,
+                    0.3f, multiplexer::LanePtr(), &given_up));
+  EXPECT_FALSE(given_up) << "out of time";
+  client.send_serialized_and_notify(
+      client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "left").SerializeAsString(), false, 30,
+      [&ended](unsigned int written, bool lost) { ended.set_value(std::make_pair(written, lost)); });
+  client.shutdown(0);
+  const std::pair<unsigned int, bool> end = ended.get_future().get();
+  EXPECT_EQ(0u, end.first);
+  EXPECT_TRUE(end.second) << "given up on, at the shutdown";
+}
+
+namespace {
+
+// A synchronous client that holds on to its connections' objects, as a
+// connection does itself for a while after a failed write, reading to the
+// end.
+struct HoldingClient : multiplexer::Client {
+  explicit HoldingClient(std::uint32_t type) : multiplexer::Client(type) {}
+  std::vector<std::shared_ptr<void>> hold_connections() {
+    std::vector<std::shared_ptr<void>> held;
+    for (auto entry = basic_client_->begin(); entry != basic_client_->end(); ++entry) {
+      if (std::shared_ptr<void> conn = entry->second.lock()) {
+        held.push_back(conn);
+      }
+    }
+    return held;
+  }
+  multiplexer::MultiplexerMessage message(const std::string& payload) {
+    multiplexer::MultiplexerMessage msg;
+    msg.set_id(random64());
+    msg.set_from(instance_id());
+    msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+    msg.set_message(payload);
+    return msg;
+  }
+};
+
+}  // namespace
+
+// A pinned lane reads closed from the moment its connection stops being
+// live, though the connection's object lives on, where it read closed only
+// once that object was gone, and a ThreadedClient send through it
+// meanwhile was dropped rather than refused. So does a lane seeded with
+// the connection, once a message went through it.
+TEST(Lane, APinnedLaneIsClosedOnceItsConnectionDiesThoughTheConnectionLingers) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  HoldingClient client(multiplexer::peers::WEBSITE);
+  multiplexer::ConnectionWrapper connection = client.connect("127.0.0.1", mx->port, 5);
+  ASSERT_TRUE(connection);
+  multiplexer::LanePtr pinned = std::make_shared<multiplexer::Lane>(true);
+  multiplexer::LanePtr seeded = std::make_shared<multiplexer::Lane>(connection, true);
+  ASSERT_TRUE(client.queue(client.message("through the pinned lane"), 5, pinned));
+  ASSERT_TRUE(client.queue(client.message("through the seeded lane"), 5, seeded));
+  ASSERT_TRUE(client.flush_all(5));
+  ASSERT_TRUE(pinned->connected());
+  ASSERT_TRUE(seeded->connected());
+  std::vector<std::shared_ptr<void>> held = client.hold_connections();
+  ASSERT_EQ(1u, held.size());
+  mx.reset();  // the multiplexer is gone; the client notices in a call that runs the loop
+  for (int tries = 0; tries < 200 && client.connections_count() > 0; ++tries) {
+    try {
+      client.receive_message(0.05f);
+    } catch (const std::exception&) {
+    }
+  }
+  ASSERT_EQ(0u, client.connections_count());
+  EXPECT_FALSE(pinned->connected());
+  EXPECT_TRUE(pinned->closed()) << "its connection's object still exists";
+  EXPECT_TRUE(seeded->closed());
+}
+
+// shutdown() writes what was sent before it, in both clients: sent to a
+// frozen multiplexer, whose connection fills and leaves messages waiting,
+// and which reads again while the shutdown waits, every message arrives
+// and none is reported, where shutdown() dropped what it had not written.
+// The multiplexer is let go from another thread once the shutdown began.
+static void expect_shutdown_writes_what_was_sent(bool threaded) {
+  InProcessMultiplexer mx;
+  IdSink sink(mx.port);
+  std::atomic<int> reported(0);  // before the clients, which report into it until they are gone
+  std::set<std::uint64_t> sent;
+  ThreadedClient threaded_client(multiplexer::peers::WEBSITE);
+  Peer sync_client(mx.port, multiplexer::peers::WEBSITE);
+  threaded_client.set_drop_observer([&reported](std::uint64_t, multiplexer::DropReason) { ++reported; });
+  sync_client.client.set_drop_observer([&reported](std::uint64_t, multiplexer::DropReason) { ++reported; });
+  ASSERT_TRUE(threaded_client.connect("127.0.0.1", mx.port, 5));
+  const std::string chunk(16 * 1024, 'x');
+  Freeze freeze(mx);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    const multiplexer::MultiplexerMessage msg = sync_client.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0);
+    sent.insert(msg.id());
+    if (threaded) {
+      threaded_client.send(msg);
+    } else {
+      sync_client.client.queue(msg, 60);
+    }
+  }
+  std::thread release([&freeze] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));  // the shutdown below began by then
+    freeze.release();
+  });
+  if (threaded) {
+    threaded_client.shutdown(60);
+  } else {
+    sync_client.client.shutdown(60);
+  }
+  release.join();
+  EXPECT_EQ(0, reported.load());
+  EXPECT_EQ(0u, threaded ? threaded_client.dropped() : sync_client.client.dropped());
+  EXPECT_EQ(sent, sink.wait_for(sent.size() - reported.load(), 60));  // what was not reported, at once
+}
+
+TEST(ThreadedClient, ShutdownWritesWhatWasSentBeforeIt) { expect_shutdown_writes_what_was_sent(true); }
+TEST(Client, ShutdownWritesWhatWasSentBeforeIt) { expect_shutdown_writes_what_was_sent(false); }
+
+// A message that waited for room past its timeout is told to the
+// synchronous client's drop observer, in the call that ran the loop then.
+TEST(Client, AMessageThatWaitedForRoomPastItsTimeoutIsReported) {
+  InProcessMultiplexer mx;
+  Sink backend(mx.port);
+  // Before the client, which reports what its shutdown drops as it is destroyed.
+  std::vector<std::pair<std::uint64_t, multiplexer::DropReason>> heard;
+  Peer sender(mx.port, multiplexer::peers::WEBSITE);
+  sender.client.set_drop_observer(
+      [&heard](std::uint64_t id, multiplexer::DropReason reason) { heard.emplace_back(id, reason); });
+  const std::string chunk(16 * 1024, 'x');
+  Freeze freeze(mx);
+  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0));
+  }
+  const multiplexer::MultiplexerMessage late = sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0);
+  sender.client.schedule_one(late, 0.3f);
+  EXPECT_FALSE(sender.client.flush_all(0.6f));  // the loop runs past its deadline
+  ASSERT_EQ(1u, heard.size());
+  EXPECT_EQ(late.id(), heard[0].first);
+  EXPECT_EQ(multiplexer::DropReason::NO_ROOM, heard[0].second);
+  EXPECT_EQ(1u, sender.client.dropped());
+}
+
+// The synchronous client's queue() holds a message while no multiplexer is
+// reachable and writes it once one is back, as ThreadedClient's send()
+// does, where schedule_one() has nothing to put it on: its tracker reads
+// written then, and the message arrives.
+TEST(Client, QueueHoldsAMessageUntilAConnectionComesUp) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  Peer sender(port, multiplexer::peers::WEBSITE);
+  mx.reset();  // gone; the client notices in its next call
+  const multiplexer::MultiplexerMessage held = sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "held", 0);
+  multiplexer::Client::ScheduledMessageTracker tracker = sender.client.queue(held, 30);
+  ASSERT_TRUE(tracker) << "held, not refused";
+  EXPECT_TRUE(tracker.in_queue());
+  mx.reset(new InProcessMultiplexer(port));
+  PayloadSink backend(port);  // registered before the client, which reconnects only inside its calls
+  EXPECT_TRUE(sender.client.flush_all(15));
+  EXPECT_TRUE(tracker.is_sent());
+  EXPECT_TRUE(backend.wait_for("held", 10));
+  EXPECT_EQ(0u, sender.client.dropped());
 }

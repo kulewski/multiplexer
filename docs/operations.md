@@ -208,9 +208,12 @@ another at once, and every peer is back on the restarted multiplexer within
 about 3 s. What the multiplexer held for delivery when it was told to stop
 still reaches the peers that read, before their connections close; what
 it held for a peer that did not read within `--drain-seconds` is lost, as
-is everything it held when it was killed instead. What a peer sends in the
-moment before it sees its connection close is lost too: a request then
-goes out again through another connection, an event does not.
+is everything it held when it was killed instead. What a peer had written
+to it in the moment before the peer saw its connection close is lost too:
+a request then goes out again through another connection, an event does
+not, and nothing reports it, since it was written. What the peer had not
+written yet goes through another connection, or, with none live, waits
+for the next one within its timeout.
 
 With a single multiplexer there is nothing to fall back to. A threaded
 client sends its in-flight requests again as soon as it is reconnected, a
@@ -219,7 +222,9 @@ and the request is then answered if its backend is back on the fresh
 multiplexer first, or fails with `OperationFailed` if the client got there
 first, since a multiplexer with nobody of the type reports a delivery
 error. Both reconnects are scheduled 3 s after the drop, so the order is
-chance. This is the reason to run at least two.
+chance. An event sent meanwhile, by either client, is held and goes out
+once the client is reconnected, or is dropped and reported at its
+timeout. This is the reason to run at least two.
 
 The `mx_restarts`, `threaded_mx_restarts` and `rolling_restart` scenarios
 in `tests/scenarios/` record exactly what a backend and a client see
@@ -239,7 +244,9 @@ Both libraries provide this: `start_draining()` from `periodic_task()`, and
 How the backend is asked to leave is the deployment's choice, checked from
 `periodic_task()` within one poll. The reliable form is a file: a preStop
 hook writes it, the backend sees it, and the termination grace period is
-longer than the drain. The library handles no signals, because a Python
+longer than the drain and the `close()` after it, which writes the last
+replies for a second and waits a second more for the multiplexers to
+close their side. The library handles no signals, because a Python
 handler runs only between iterations and a C++ library in the same process
 can replace it; a pure C++ backend may set a flag from a handler of its
 own. With that, a rolling restart of backends costs nobody a timeout or a
@@ -249,10 +256,9 @@ draining backend nothing by the rules, requests, events and searches alike,
 and a peer alone of its type either drains as the last resort,
 `Routing(any=False, all=False, last_resort=True)`, or fails its callers at
 once. What was routed in the moment before a multiplexer applied the change
-is served, and a backend built on `BaseThreadedMultiplexerServer` refuses
-what reaches it once it is closing, with `DELIVERY_ERROR`, so that costs a
-retry rather than a timeout, while a `BaseMultiplexerServer` loses what
-arrived after its last read. A backend that dies without draining costs its
+is served, and a backend of either server class refuses what reaches it
+once its drain is over or it is closing, with `DELIVERY_ERROR`, so that
+costs a retry rather than a timeout. A backend that dies without draining costs its
 clients a timeout per request it held. [How a backend leaves](leaving.md)
 draws the three phases and the routing flags; a recording notes each skip
 as `NOT_ACCEPTED`.

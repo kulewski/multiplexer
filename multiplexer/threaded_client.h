@@ -114,6 +114,13 @@ class ThreadedClient : public ExceptionDefinitions {
   // rest. Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
+  // Every message the program sent that the client gives up on, each copy
+  // of one sent to ALL, is told to `observer` with its id and why
+  // (DropReason), on the io thread, so it must be quick; dropped() counts
+  // them, from any thread. The observer goes with the io thread.
+  typedef BasicClient::DropObserver DropObserver;
+  void set_drop_observer(DropObserver observer);
+  std::uint64_t dropped();
   // How host names become addresses; for tests. See BasicClient::Resolver.
   void set_resolver(BasicClient::Resolver resolver);
 
@@ -125,15 +132,21 @@ class ThreadedClient : public ExceptionDefinitions {
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();
-  // Waits until everything sent before the call has been written, or
-  // `timeout` seconds; true when it has. A send still waiting for a
-  // connection or for room counts, as does what is queued on a connection;
-  // what is sent after the call does not, so a flush ends however busy the
-  // client is. A message lost on the way, with its connection or at its own
-  // timeout, is not waited for. What a backend calls before shutdown(), so
-  // that its last replies are not cut with the sockets. Not from the io
-  // thread.
+  // Waits until everything sent before the call has been written or given
+  // up on, or `timeout` seconds; true when every one was written, false
+  // when one was given up on, which the drop observer names, or the time
+  // ran out. A send still waiting for a connection or for room counts, as
+  // does what is queued on a connection; what is sent after the call does
+  // not, so a flush ends however busy the client is, a message a dying
+  // connection hands to another included. After shutdown() it returns
+  // true at once, nothing being left to wait for. What shutdown() does
+  // first. Not from the io thread.
   bool flush_all(float timeout);
+  // flush_all() with `done(flushed)` on the io thread instead of the wait,
+  // safe from any thread including the io thread: what an asyncio layer
+  // awaits.
+  typedef std::function<void(bool)> FlushCallback;
+  void flush_all_with_callback(float timeout, FlushCallback done);
 
   std::uint64_t instance_id() const { return instance_id_; }
   std::uint32_t peer_type() const { return peer_type_; }
@@ -154,6 +167,12 @@ class ThreadedClient : public ExceptionDefinitions {
   // It grows with the messages that waited, never with their square; for
   // tests. Not from the io thread.
   std::uint64_t retries();
+  // How many queries, and how many messages, the client keeps for a
+  // connection to come up or for room, those that ended there and are not
+  // cleared out yet included: a bounded few more than what still waits,
+  // however long no multiplexer is up; for tests. Not from the io thread.
+  std::size_t waiting_queries();
+  std::size_t waiting_messages();
 
   // Sending. The message must carry its id and from; new_message() fills
   // those in. send() queues it on one live connection (round robin),
@@ -161,44 +180,67 @@ class ThreadedClient : public ExceptionDefinitions {
   // the io thread right after, so they are safe from callbacks. A message
   // that cannot be queued yet waits on the io thread, behind those sent
   // before it, for a connection to come up, or, when the connections'
-  // queues are full, for room, within DEFAULT_TIMEOUT, and is dropped with
-  // a warning after that; send_all() gives every live connection its
-  // copy, a full one as soon as it has room. With a lane, on the lane's
-  // connection, which takes the connection chosen when it has none, lost
-  // its own or has it full; a pinned lane waits for room on its own, and
-  // once that is gone drops the message with a warning, the lane being
-  // closed() for the caller to see.
+  // queues are full, for room, within DEFAULT_TIMEOUT, and is dropped and
+  // reported after that (set_drop_observer); send_all() gives every live
+  // connection its copy, a full one as soon as it has room. With a lane,
+  // on the lane's connection, which takes the connection chosen when it
+  // has none or lost its own, and waits for room on its own while that
+  // lives. Through a pinned lane already closed() it throws NotConnected,
+  // as the Python client raises it; one whose connection goes after the
+  // call has the message dropped and reported. `done`, when given, hears
+  // how the message ended, once, on the io thread: 1 once it was written,
+  // the first copy for send_all(), 0 once it was given up on or shutdown()
+  // came first, as the Python send_message(callback=) does; send(msg,
+  // LanePtr(), done) for a message with no lane.
+  typedef std::function<void(unsigned int)> SendCallback;
   void send(const MultiplexerMessage& msg);
-  void send(const MultiplexerMessage& msg, LanePtr lane);
-  void send_all(const MultiplexerMessage& msg);
+  void send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done = SendCallback());
+  void send_all(const MultiplexerMessage& msg, SendCallback done = SendCallback());
   // Through `connection`, the one a reply came through, while it is live,
   // another when it is gone.
-  void send(const MultiplexerMessage& msg, const ConnectionWrapper& connection);
+  void send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, SendCallback done = SendCallback());
   // The flushing forms, from any thread but the io thread: wait until the
-  // message reached the socket, on one connection (sent again through
-  // another if the first dies under it, the way the synchronous Client's
-  // flush does), on the lane's, on `connection` or another; send_all()
-  // until one copy is written, the others going out from their
-  // connections' queues, so that a multiplexer frozen with its socket open
-  // holds nobody to the timeout; or until `timeout` passes. Return the
-  // number of connections written by then; 0 means none in time, or a
-  // pinned lane whose connection is gone. flush_all() waits for every copy.
+  // message reached the socket, on one connection (handed to another if
+  // the first dies before writing it, as every message is), on the lane's,
+  // on `connection` or another; send_all() until one copy is written, the
+  // others going out from their connections' queues, so that a
+  // multiplexer frozen with its socket open holds nobody to the timeout;
+  // or until `timeout` passes. Return 1 once a copy is written, 0 when none
+  // was in time or the message was given up on, a pinned lane's
+  // connection being gone for instance; throw NotConnected after
+  // shutdown(), as every send does. flush_all() waits for every copy.
   unsigned int send(const MultiplexerMessage& msg, float timeout);
   unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
   // The same for an already serialized MultiplexerMessage (the Python
-  // side), waiting for a connection or for room within `timeout`.
-  void send_serialized(std::string serialized, LanePtr lane = LanePtr(), float timeout = DEFAULT_TIMEOUT);
-  void send_all_serialized(std::string serialized, float timeout = DEFAULT_TIMEOUT);
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr());
+  // side), waiting for a connection or for room within `timeout`. `done`,
+  // when given, hears how the message ended: 1 once it reached a socket,
+  // the first copy for ALL, 0 once it was given up on, and reported, or
+  // shutdown() came first.
+  void send_serialized(std::string serialized, LanePtr lane = LanePtr(), float timeout = DEFAULT_TIMEOUT,
+                       SendCallback done = SendCallback());
+  void send_all_serialized(std::string serialized, float timeout = DEFAULT_TIMEOUT, SendCallback done = SendCallback());
+  // The flushing send for the serialized form; `given_up`, when given, says
+  // why one that returned 0 wrote nothing: the message was given up on, a
+  // pinned lane's connection being gone or the client shutting down,
+  // rather than out of time, when it waits ROOM_GRACE_SECONDS more and is
+  // then dropped. NotConnected and OperationTimedOut, for the Python
+  // clients.
+  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr(),
+                                        bool* given_up = NULL);
   // The flushing send with a callback instead of a wait, safe from any
   // thread including the io thread: `done(written)` runs on the io thread
-  // once the message reached the socket(s), or with 0 when `timeout`
-  // passed or the client shut down first. What an asyncio layer awaits.
-  typedef std::function<void(unsigned int)> SendCallback;
+  // with 1 once a copy reached a socket, the first for ALL, or with 0 when
+  // the message was given up on, `timeout` passed or the client shut down
+  // first. What an asyncio layer awaits.
   void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                      LanePtr lane = LanePtr());
+  // The same, `done` also hearing whether the message was given up on, as
+  // send_serialized_and_wait()'s `given_up` says.
+  typedef std::function<void(unsigned int written, bool given_up)> FlushedCallback;
+  void send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done,
+                                  LanePtr lane = LanePtr());
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
 
   // A request with a reply, see the file comment. The callback runs on the
@@ -223,13 +265,17 @@ class ThreadedClient : public ExceptionDefinitions {
   Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
                Probe probe = PROBE_SEARCH);
 
-  // Ends every in-flight query with SHUT_DOWN, closes the connections and
-  // stops the io thread. Idempotent; the destructor calls it. On the io
-  // thread itself it does not wait for the thread, which ends once its
-  // handlers are done. The callbacks the client was given, on_message and
-  // the search policy, are destroyed when the io thread ends, on that
-  // thread, and in a forked child by shutdown() itself.
-  void shutdown();
+  // Ends every in-flight query with SHUT_DOWN, writes what was sent before
+  // the call, and what the io thread sends meanwhile, a server's refusal of
+  // what still arrives say, `timeout` seconds in all, any other send
+  // meanwhile throwing NotConnected, then closes the connections and
+  // stops the io thread; what is still unwritten is dropped and reported,
+  // at once with 0. Idempotent; the destructor calls it. On the io thread
+  // itself it does not wait for the thread, which ends once its handlers
+  // are done. The callbacks the client was given, on_message and the
+  // search policy, are destroyed when the io thread ends, on that thread,
+  // and in a forked child by shutdown() itself.
+  void shutdown(float timeout = CLOSE_FLUSH_SECONDS);
   // Whether this client was inherited across a fork: its calls then throw
   // UsedAfterFork, and shutdown() and the destructor only close the
   // child's descriptor copies, once; see BasicClient::orphaned.

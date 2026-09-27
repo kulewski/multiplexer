@@ -98,6 +98,81 @@ class ServersDrainTest(unittest.TestCase):
     def test_a_drain_on_its_cap_serves_what_was_read(self):
         self.drain(0.2, drain_routing=Routing(any=False))
 
+    def test_a_stop_without_a_drain_refuses_what_was_read(self):
+        """stop() with requests read and not handled yet: the close refuses
+        them, so that their senders retry elsewhere at once, where they
+        vanished into the senders' timeouts. Every request has one outcome."""
+        served = BackendThread(lambda: Slow(self.cluster.endpoints)).start()
+        self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+        assert isinstance(served.backend, Slow)
+        server = served.backend
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            sent = {client.send(b"r%d" % index, REQUEST) for index in range(REQUESTS)}
+            wait_until(lambda: len(server.handled) >= 2, 10, "the first replies, with the rest read into the queue")
+            server.stop()
+            wait_until(lambda: not served.running, 10, "serve_forever() returned")
+            self.assertIsNone(served.error)
+            responses = refused = 0
+            deadline = time.time() + 5
+            while sent and time.time() < deadline:
+                try:
+                    reply = client.receive(timeout=0.5)
+                except OperationTimedOut:
+                    continue
+                if reply.references not in sent:
+                    continue
+                sent.discard(reply.references)
+                if reply.type == types.DELIVERY_ERROR:
+                    refused += 1
+                else:
+                    responses += 1
+            self.assertEqual(REQUESTS, responses + refused, "none vanished into a timeout")
+            self.assertGreater(refused, 0, "refused at the close")
+        self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
+
+    def test_a_drain_under_a_flood_ends(self):
+        """A lone backend that drains keeping its last-resort path open,
+        under a flood twice as fast as it serves: it leaves at the end of its
+        drain, having handled what it had read by then and refused what
+        arrived later, where every reply's turn of the loop read more,
+        handled in turn, so that it never left. Every request the flood sent
+        has one outcome: a response, or a delivery error, the backend's or,
+        once it is gone, the multiplexer's."""
+        routing = Routing(any=False, all=False, last_resort=True)
+        served = BackendThread(lambda: Slow(self.cluster.endpoints, drain_routing=routing), drain_seconds=0.3).start()
+        self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+        assert isinstance(served.backend, Slow)
+        server = served.backend
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            sent: set[int] = set()
+            deadline = time.time() + 20
+            while served.running and time.time() < deadline:  # the flood, until the backend has left
+                sent.add(client.send(b"f%d" % len(sent), REQUEST))
+                if len(server.handled) >= 2:
+                    server.leave = True
+                time.sleep(0.015)
+            self.assertFalse(served.running, "serve_forever() went on under the flood")
+            self.assertIsNone(served.error)
+            responses = refused = 0
+            waiting = set(sent)
+            answers_by = time.time() + 10
+            while waiting and time.time() < answers_by:
+                try:
+                    reply = client.receive(timeout=0.5)
+                except OperationTimedOut:
+                    continue
+                if reply.references not in waiting:
+                    continue
+                waiting.discard(reply.references)
+                if reply.type == types.DELIVERY_ERROR:
+                    refused += 1
+                else:
+                    responses += 1
+            self.assertEqual(len(sent), responses + refused, "none vanished into a timeout")
+            self.assertEqual(len(server.handled), responses, "what the backend served was answered")
+            self.assertGreater(refused, 0, "the flood outran it")
+        self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
+
 
 if __name__ == "__main__":
     unittest.main()

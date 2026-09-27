@@ -169,6 +169,8 @@ PY_TEST_FILES := \
   multiplexer/client_names_test.py \
   multiplexer/connect_by_name_test.py \
   multiplexer/drop_lines_test.py \
+  multiplexer/drop_reports_test.py \
+  multiplexer/end_calls_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
@@ -179,9 +181,14 @@ PY_TEST_FILES := \
   multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \
   multiplexer/no_connection_test.py \
+  multiplexer/outage_test.py \
   multiplexer/pickle_test.py \
+  multiplexer/send_callbacks_test.py \
+  multiplexer/send_reports_test.py \
   multiplexer/serve_thread_test.py \
+  multiplexer/server_replies_test.py \
   multiplexer/servers_drain_test.py \
+  multiplexer/sync_waits_test.py \
   multiplexer/testing/fakes_test.py \
   multiplexer/testing/lanes_test.py \
   multiplexer/threaded_client_py_test.py \

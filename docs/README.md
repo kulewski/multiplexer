@@ -82,12 +82,12 @@ thread, a backend included; `AsyncClient` for asyncio.
 
 | | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `SyncClient` |
 |---|---|---|---|---|---|
-| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on the asyncio loop | nobody between calls |
+| who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on its io thread; handlers and streams on the asyncio loop | nobody between calls |
 | found by typed requests | yes: answers the backend search | yes | with a search policy (`search_policy`, `set_search_policy`); otherwise only a search addressed to it | no | no |
 | receives | requests routed by type, events, addressed messages | the same | requests and events routed to its type, addressed messages | the same, as handlers or streams | what `receive_message()` returns; while a query waits, everything but its reply is dropped |
 | handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing by itself: a loop of your own calls `receive_message()` |
 | a handler may block | no: nothing heartbeats meanwhile | yes, for as long as it needs | no: it runs on the io thread | no: it runs on the loop | |
-| sends | replies, and anything from `periodic_task()` | replies from any thread, events from any thread | queries and events from any thread | awaited | queries and events from its thread |
+| sends | replies, and anything from `periodic_task()` | replies from any thread, events from any thread | queries and events from any thread | queries and events, awaited from any loop | queries and events from its thread |
 | peer type | not passive | not passive | not passive | not passive | `is_passive` |
 | leaves | drain, then `serve_forever()` returns | the same, the queue finished first | `shutdown()` | `aclose()` | `shutdown()` |
 

@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,16 +18,18 @@
 
 namespace multiplexer {
 
-// A message waiting for room on one connection.
+// A message waiting for room on one connection, or, held, for a
+// connection to come up.
 struct BasicClient::Waiting {
   std::shared_ptr<const RawMessage> raw;
   BasicScheduledMessageTracker state;  // what its tracker reads: QUEUED while it waits
   std::uint64_t number = 0;            // its place in the order sent; 0 counts for every flush
   std::chrono::steady_clock::time_point deadline;
-  const Connection* on = nullptr;  // the connection whose backlog holds it
+  const Connection* on = nullptr;  // the connection whose backlog holds it; null while held
   bool copy = false;               // an ALL send's copy, for this connection alone
+  bool all = false;                // held: an ALL send, every live connection's when one comes up
   LanePtr lane;                    // adopts the connection it goes to if its own dies
-  bool over = false;               // gone from its backlog: queued, dropped or lost
+  bool over = false;               // gone from where it waited: queued, dropped or lost
 };
 
 // What waits for one connection, in the order it came. `live` counts the
@@ -47,8 +50,19 @@ struct BasicClient::Flush {
   // Per connection, the last of those queued there: once it is written or
   // lost, so is everything queued there before it.
   std::vector<std::pair<const Connection*, BasicScheduledMessageTracker>> marks;
-  std::function<void()> done;
+  std::function<void(bool all_written)> done;
   bool flushed = false;
+  bool lost = false;  // one of those was given up on (report_drop): not all written
+};
+
+// A send followed to its end for its `done` (BasicClient::send): the
+// trackers of its copies, which keep their states alive, and how many are
+// neither written nor given up on yet.
+struct BasicClient::Follow {
+  SendCallback done;
+  std::vector<BasicScheduledMessageTracker> copies;
+  std::size_t live = 0;
+  bool over = false;
 };
 
 // The outbox itself: the backlogs, the deadlines and the flushes.
@@ -65,9 +79,13 @@ struct BasicClient::Outbox {
   explicit Outbox(asio::io_service& io_service) : timer(io_service) {}
 
   std::vector<Backlog> backlogs;
-  std::size_t waiting = 0;           // live entries over every backlog, and the displaced
-  std::size_t held = 0;              // the caller's own, counted by hold()
+  std::size_t waiting = 0;           // live entries over every backlog, the displaced and the held
   std::deque<WaitingPtr> displaced;  // a dead connection's, until its queue was handed over
+  // What waits for a connection to come up, in the order sent; placed as
+  // soon as one is registered (place_held). `held_live` counts the entries
+  // not over: while it is not 0 a new message waits behind them.
+  std::deque<WaitingPtr> held;
+  std::size_t held_live = 0;
   std::uint64_t last_number = 0;
   std::uint64_t retries = 0;
   std::vector<Expiring> expiring;  // entries of messages that left are skipped when met
@@ -75,6 +93,19 @@ struct BasicClient::Outbox {
   asio::steady_timer timer;
   std::chrono::steady_clock::time_point armed = std::chrono::steady_clock::time_point::max();
   std::vector<FlushPtr> flushes;
+  // Messages a dead connection handed to another while somebody held
+  // their tracker, with the connection each went to, for followed(). The
+  // entries of trackers nobody holds any more are cleared out when the list
+  // has doubled since the last time.
+  std::vector<std::pair<std::weak_ptr<SendState>, ConnectionWrapper>> moved;
+  std::size_t moved_compact_at = 64;
+  // The sends followed, by the state of each copy; the events about their
+  // copies, written or given up on, wait for the one pass per loop turn
+  // that handles them (_process_follows), outside the connection's
+  // handlers they came from.
+  std::unordered_map<const SendState*, FollowPtr> follows;
+  std::vector<std::pair<std::shared_ptr<SendState>, bool>> follow_events;
+  bool follow_posted = false;
 };
 
 }  // namespace multiplexer

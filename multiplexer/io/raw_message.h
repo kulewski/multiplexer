@@ -13,6 +13,7 @@
 #include <google/protobuf/message.h>
 
 #include <asio/buffer.hpp>
+#include <cstdint>
 #include <list>
 #include <stdexcept>
 #include <string>
@@ -93,6 +94,23 @@ class RawMessage {
   // is shared as const.
   inline void mark_pinned() const { pinned_ = true; }
   inline bool pinned() const { return pinned_; }
+  // A message sent to ALL, its copies sharing this frame: a copy whose
+  // connection dies goes to no other connection, which has a copy of its
+  // own, and with no connection live the message waits for one once,
+  // whole (BasicClient::handle_orphaned_outgoing_messages).
+  inline void mark_for_all() const { for_all_ = true; }
+  inline bool for_all() const { return for_all_; }
+  // The message's place in the order its client sent it, which flush_all()
+  // goes by (BasicClient::next_number): kept here so that a message a dead
+  // connection hands over keeps its place, its queue entry carrying none.
+  // The first send's: a frame sent again keeps the earlier place, which a
+  // flush waits for rather than miss. 0 until it is placed.
+  inline void mark_number(std::uint64_t number) const {
+    if (!number_) {
+      number_ = number;
+    }
+  }
+  inline std::uint64_t number() const { return number_; }
 
   /* ASIO reading buffers (for reading RawMessage from channel) */
   // returns buffer for reading-in RawMessage header
@@ -142,6 +160,8 @@ class RawMessage {
   std::string header_;
   std::string contents_;
   mutable bool pinned_ = false;
+  mutable bool for_all_ = false;
+  mutable std::uint64_t number_ = 0;
   std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
 };
 

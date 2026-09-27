@@ -37,7 +37,7 @@ import time
 from typing import Any, Iterator
 
 from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
-from multiplexer.mxclient import OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationTimedOut
 
 
 from multiplexer.Recording_pb2 import (  # the reserved numbers, re-exported
@@ -227,8 +227,13 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
     `timeout`, one per multiplexer; fewer when one did not answer. Raises
     NotConnected when the client has no connection."""
     request = RecordingControl(action=action, **fields)
-    request_id = client.send_message(request.SerializeToString(), type=RECORDING_CONTROL, multiplexer=client.ALL)
-    expected = client.connections_count()
+    mxmsg = client.new_message(message=request.SerializeToString(), type=RECORDING_CONTROL)
+    # A copy on every live connection now, and one status expected from each;
+    # with none live, nothing to wait for.
+    expected = client.schedule_all(mxmsg.SerializeToString(), timeout)
+    if not expected:
+        raise NotConnected()
+    request_id = mxmsg.id
     statuses = []
     deadline = time.monotonic() + timeout
     while len(statuses) < expected:

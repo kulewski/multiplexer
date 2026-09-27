@@ -99,12 +99,66 @@ coming, so its drain lasted as long as its work, a few milliseconds here,
 not a guessed number of seconds. No caller waited for anything. The one
 request that can still be refused is one routed in the moment between the
 multiplexer applying the routing and A's `close()`, none here; a backend
-built on `BaseThreadedMultiplexerServer` answers it with the delivery
+of either server class answers it with the delivery
 error a multiplexer sends when nobody could take a message, and the
 client, which treats a delivery error on its first attempt as the signal
 to search, has B's answer a few milliseconds later. The inference
 walkthrough measures exactly this, three hundred requests through a
 rolling restart of two workers.
+
+## A drain that ends while work keeps coming
+
+A drain that keeps a path open, the last resort of a backend alone of its
+type or `all` for one that must hear every event, lasts its `drain_seconds`,
+since work keeps arriving. When the time is up the backend serves what it
+had already read, and refuses what it reads from then on, so that it
+leaves however fast the work comes: a refused request is searched for and
+repeated elsewhere at once, or, with no other backend of the type, fails
+at once with `OperationFailed` instead of waiting out its timeout.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant M as multiplexer
+    participant A as backend A, alone of its type
+    Note over A: start_draining(), Routing(any=False, all=False, last_resort=True)
+    A->>M: PEER_CONTROL: nothing new, but what nobody else could take
+    rect rgb(236, 245, 236)
+        Note over C,A: draining, drain_seconds: A is still the last resort
+        C->>M: request 1
+        M->>A: request 1
+        C->>M: request 2
+        M->>A: request 2, read while A serves request 1
+        A->>M: reply 1
+        M->>C: reply 1
+    end
+    Note over A: drain_seconds over: what A has read is served, what it reads now is refused
+    C->>M: request 3
+    M->>A: request 3
+    A->>M: DELIVERY_ERROR for request 3
+    M->>C: DELIVERY_ERROR: the client searches, or fails at once
+    A->>M: reply 2
+    M->>C: reply 2
+    Note over A: close(), connection closed
+```
+
+Request 2 was on its way when the drain ended and is served; request 3
+came after and is refused. Both server classes draw the line there: the
+threaded one stops taking requests into its queue and lets the workers
+finish it, the plain one serves the messages its client had read and
+refuses what the client reads after, a number fixed when the drain ends.
+
+The finishing has no time bound of its own: what was taken before the
+line is served, however long its handlers run. What was taken is bounded
+by count instead: the threaded class's `queue_size` requests waiting
+(1024 by default) and one more per worker, the plain class's incoming
+queue, at most 1024 messages read ahead. The time is that many handler
+runs divided among the `workers`. A backend that must be gone within a
+grace period sets the three knobs it has: a `drain_seconds` that leaves
+the rest of the period for the finishing, a `queue_size` that takes
+less ahead, and `workers` that finish it sooner. The library never
+interrupts a handler, so one that may run long ends on a deadline of
+its own.
 
 ## `stop()` without a drain
 
@@ -185,14 +239,15 @@ slowest acceptable answer pays no more than it would have accepted anyway.
   backend had died. That window is the time between the backend's last read
   and the multiplexer noticing the close: microseconds on one host, a
   network round trip between hosts.
-- `BaseMultiplexerServer`, the plain server class that runs its handler
-  on the loop's thread, has the drain but not the refusal: what it had
-  read when the drain ended is served before it closes, what arrives
-  after its last read is lost the same way.
-  `BaseThreadedMultiplexerServer` refuses because its io thread keeps
-  reading while the workers finish. With a drain, next to nothing arrives
-  then. Both classes write what they still hold, the last replies, before
-  they close their sockets, for up to a second.
+- Both server classes refuse what they read while they leave.
+  `BaseThreadedMultiplexerServer`'s io thread keeps reading while the
+  workers finish; `BaseMultiplexerServer`, the plain class that runs its
+  handler on the loop's thread, has its client refuse what it reads once
+  the drain ended or the close began, and serves what it had read before;
+  what it had read and will not serve, after a `stop()`, is refused at the
+  close. With a drain, next to nothing arrives then. Both classes write
+  what they still hold, the last replies and the refusals, before they
+  close their sockets, for up to a second.
 - The refusal is for what someone would retry. A message that answers
   another, one with `references` set, a reply or a `BACKEND_ERROR`, is
   dropped instead: nobody retries a reply, and refusing one could start a
@@ -208,9 +263,15 @@ slowest acceptable answer pays no more than it would have accepted anyway.
 ## When to use which
 
 - A deploy, a scale-down, a node drain: ask the backend to drain, with
-  `drain_seconds` shorter than the grace period, so that `close()` runs
-  before the kill; the drain ends as soon as the multiplexers confirmed
-  and the work is done, usually well before. Callers pay nothing.
+  `drain_seconds` a few seconds shorter than the grace period, so that
+  `close()`, which writes the last replies for a second and waits a second
+  more for the multiplexers to close their side, runs before the kill; the
+  drain ends as soon as the multiplexers confirmed and the work is done,
+  usually well before. Callers pay nothing, except in the narrow window that
+  [`stop()` without a drain](#stop-without-a-drain) describes. What the
+  backend had taken when a drain ran out is served with no time bound, so
+  leave room for it, see [A drain that ends while work keeps
+  coming](#a-drain-that-ends-while-work-keeps-coming).
 - A process that must end now: `stop()`. Requests that reach it while it
   closes are retried at once; a client that had just found it pays an
   `OperationFailed`. Even a drain of a fraction of a second before the
@@ -227,8 +288,9 @@ the same on the plain classes; `set_routing()` and
 underneath, which puts the routing in the welcome and sends
 `PEER_CONTROL`; `Server::send_to_one`, `send_to_all` and
 `_handle_peer_control` in [server.cc](../multiplexer/server.cc) on the
-multiplexer's side; the refusal in the threaded classes' `_on_message()`;
-and the client's stages in [How a query is answered](query.md). `dropped`
-counts the refusals and the dropped replies, and the backend logs each at
-DEBUG verbosity LOW as "refused: leaving", or "dropped: leaving" for a
-reply.
+multiplexer's side; the refusal in the threaded classes' `_on_message()`,
+and in `SyncClient.refuse_arrivals()` and `refuse_unread()` for the plain
+classes; and the client's stages in [How a query is answered](query.md).
+The threaded classes' `dropped` counts the refusals and the dropped
+replies, and every class logs each at DEBUG verbosity LOW as "refused:
+leaving", or "dropped: leaving" for a reply.

@@ -345,13 +345,15 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
         self.cluster.wait_for_peer(peers.PYTHON_TEST_CLIENT)
 
     async def test_a_pinned_lane_fails_once_its_multiplexer_is_gone(self):
+        """Flushing sends, which return once the lane has its connection
+        and wrote to it, then raise once that connection is gone."""
         pinned = self.client.lane(pinned=True)
-        await self.client.send_message(b"first", type=REQUEST, multiplexer=pinned)
+        await self.client.send_message(b"first", type=REQUEST, multiplexer=pinned, flush=True)
         way = self.cluster.multiplexer_at(pinned.connection.endpoint)
         way.kill()
         with self.assertRaises(NotConnected):
             for _ in range(20):
-                await self.client.send_message(b"more", type=REQUEST, multiplexer=pinned, timeout=5)
+                await self.client.send_message(b"more", type=REQUEST, multiplexer=pinned, flush=True, timeout=5)
         with self.assertRaises(NotConnected):
             await self.client.query(b"more", REQUEST, to=self.peer.instance_id, multiplexer=pinned, timeout=5)
         reply = await self.client.query(b"still", REQUEST, to=self.peer.instance_id, timeout=10)

@@ -345,8 +345,9 @@ EVENTS = Page(
     file="events.md",
     title="Sending an event",
     intro="""
-An event is a message nobody answers: `send_message()` in Python, `schedule_one()`
-or `schedule_all()` in C++. The client chooses how many of its multiplexer
+An event is a message nobody answers: `send_message()` in Python, and in C++
+`queue()` or `queue_all()` on `SyncClient`, `send()` or `send_all()` on
+`ThreadedClient`. The client chooses how many of its multiplexer
 connections carry the message; each multiplexer then delivers it to the
 backends its rules name. Nothing comes back unless the client sets
 `report_delivery_error` and delivery fails.
@@ -359,8 +360,8 @@ them connected to both multiplexers. The rule for the event type says
         Section(
             "Through one connection",
             """
-The default, `multiplexer=ONE` in Python and `schedule_one()` in C++, and the
-normal way to send an event. One connection is chosen round robin among the
+The default, `multiplexer=ONE` in Python and `queue()` or `send()` in C++, and
+the normal way to send an event. One connection is chosen round robin among the
 live ones.
 """,
             columns=[
@@ -447,7 +448,7 @@ the reply came through, so the events after a request follow the request.
             "Through every connection",
             """
 `multiplexer=ALL` in Python, also available as `SyncClient.event()`, and
-`schedule_all()` in C++. The same message goes out on each connection. Use it
+`queue_all()` or `send_all()` in C++. The same message goes out on each connection. Use it
 when the event must get through even if a multiplexer is unreachable from some
 backends; it costs one copy per multiplexer on every link.
 """,
@@ -467,11 +468,11 @@ backends; it costs one copy per multiplexer on every link.
             steps=[
                 Step(
                     "One copy per connection",
-                    "The client queues the message on every live connection. C++ "
-                    "`schedule_all()` returns how many took it; a Python send returns the "
-                    "message id, and with `flush=True` waits until it is written, the "
-                    "`SyncClient` on every connection, `ThreadedClient` and `AsyncClient` "
-                    "on the first.",
+                    "The client queues the message on every live connection, or, with "
+                    "none live, holds it whole for the first to come up. C++ `queue_all()` "
+                    "returns the first copy's tracker; a Python send returns the message "
+                    "id, and with `flush=True` waits until one copy is written, in every "
+                    "client; `flush_all()` waits for every copy.",
                     [0, 1],
                     ["S"],
                 ),
@@ -490,8 +491,9 @@ backends; it costs one copy per multiplexer on every link.
     outro="""
 With a `whom: ANY` rule each multiplexer would pick one backend instead of all
 of them; see [routing](routing.md). Where this lives: `Client.send_message` and
-`Client.event` in `multiplexer/mxclient.py`, `schedule_one` and `schedule_all`
-in `multiplexer/client.h`, duplicate suppression in
+`Client.event` in `multiplexer/mxclient.py`, `BasicClient::send`, how every
+client sends, in `multiplexer/outbox.cc`, `queue` and `queue_all` in
+`multiplexer/client.h`, duplicate suppression in
 `BasicClient::handle_message` in `multiplexer/basic_client.cc`. Scenarios
 `event_all_backends.py` and `any_vs_all.py` under `tests/scenarios/` cover
 the fan-out.

@@ -2,9 +2,14 @@
 with one worker, parallel handling with four, a reply from another thread
 later, the search answered while every worker is busy unless told to
 decline, a full queue dropping, a handler that raises, draining, and
-leaving.
+leaving. What a request's reply is, as in C++: a reply that raised is no
+answer, so the requester gets BACKEND_ERROR, where the request counted as
+answered; a whole MultiplexerMessage is filled in from the request, where
+it went out without `to` and `references`; and a report that fails is
+logged, on_handler_exception() still told, where it ended the worker.
 """
 
+import socket
 import threading
 import time
 import unittest
@@ -13,7 +18,7 @@ from unittest import mock
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, MultiplexerMessage, Routing
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.mxclient import OperationFailed, OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing import BackendThread, Cluster, TestClient, wait_until
 from multiplexer.threaded_client import ThreadedClient
 import multiplexer.threaded_server as threaded_server
@@ -28,8 +33,12 @@ RESPONSE = types.PYTHON_TEST_RESPONSE
 
 class Scripted(BaseThreadedMultiplexerServer):
     """A backend the tests steer by payload: "block" waits for `release`,
-    "wait" joins a barrier, "later" is answered by another thread, "raise"
-    raises, "event" gets no reply, anything else is upper-cased."""
+    "block, then close" calls close() after that, "wait" joins a barrier,
+    "later" is answered by another thread, "raise"
+    raises, "fail to reply" replies with a field that does not exist,
+    "whole" replies with a MultiplexerMessage built without `to` and
+    `references`, "shut down and raise" shuts the client down and raises,
+    "event" gets no reply, anything else is upper-cased."""
 
     multiplexer_client_type = peers.PYTHON_TEST_SERVER
 
@@ -40,6 +49,7 @@ class Scripted(BaseThreadedMultiplexerServer):
         self.barrier = threading.Barrier(4, timeout=10)
         self.kept: list[Request] = []
         self.keep_serving_after_error = True
+        self.exceptions: list[Exception] = []
 
     def handle_message(self, request: Request) -> None:
         payload = request.mxmsg.message
@@ -54,14 +64,25 @@ class Scripted(BaseThreadedMultiplexerServer):
             self.kept.append(request)  # answered by the test, from its thread
         elif payload == b"raise":
             raise ValueError("as asked")
+        elif payload == b"fail to reply":
+            request.reply(b"answer", type=RESPONSE, no_such_field=1)  # raises where it is built
+        elif payload == b"whole":
+            request.reply(MultiplexerMessage(type=RESPONSE, message=b"WHOLE"))
+        elif payload == b"shut down and raise":
+            self.client.shutdown(timeout=0)
+            raise RuntimeError("after the client")
         elif payload == b"close":
             self.close()  # from a worker: an error, not a deadlock
+        elif payload == b"block, then close":
+            self.release.wait(10)
+            self.close()  # from a worker while another thread closes: an error too
         elif payload.startswith(b"event"):
             request.no_response()
         else:
             request.reply(payload.upper(), type=RESPONSE)
 
     def on_handler_exception(self, exc: Exception) -> bool:
+        self.exceptions.append(exc)
         return self.keep_serving_after_error
 
 
@@ -201,6 +222,24 @@ class ThreadedServerTest(unittest.TestCase):
                 client.query(b"raise", REQUEST)
         with self.assertRaises(ValueError):
             served.stop()  # serve_forever() raised what the handler raised
+
+    def test_a_reply_that_raised_is_answered_with_backend_error(self):
+        self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            with self.assertRaises(BackendError):
+                client.query(b"fail to reply", REQUEST, timeout=3)
+
+    def test_a_whole_message_reply_is_filled_in_from_the_request(self):
+        self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            self.assertEqual(b"WHOLE", client.query(b"whole", REQUEST, timeout=3).message)
+
+    def test_a_report_that_fails_still_tells_on_handler_exception(self):
+        _, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"shut down and raise", REQUEST)
+        wait_until(lambda: server.exceptions, 10, "on_handler_exception() told")
+        self.assertIsInstance(server.exceptions[0], RuntimeError)
 
     def test_draining_takes_the_backend_out_of_routing_and_finishes_the_queue(self):
         """start_draining() tells the multiplexer to route nothing new by
@@ -379,6 +418,116 @@ class ThreadedServerTest(unittest.TestCase):
             self.assertIn(b"worker thread", raised.exception.args[0])
             self.assertEqual(b"STILL", client.query(b"still", REQUEST).message, "still serving")
         self.assertTrue(served.running)
+
+    def test_close_from_a_handler_during_another_close_is_an_error_not_a_deadlock(self):
+        """A worker that calls close() while another thread's close() joins
+        it raises, as from a handler at any time, rather than wait for the
+        close() that waits for it."""
+        served, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"block, then close", REQUEST)
+            wait_until(lambda: server.pending == 1, 10, "the request with a worker")
+            closing = threading.Thread(target=server.close, daemon=True)
+            closing.start()
+            wait_until(lambda: server.draining, 10, "close() under way")
+            server.release.set()
+            closing.join(10)
+            self.assertFalse(closing.is_alive(), "close() waited for the worker, which waited for it")
+        self.assertEqual(["RuntimeError"], [type(exc).__name__ for exc in server.exceptions])
+        wait_until(lambda: not served.running, 10, "serve_forever() returned")
+        self.assertIsNone(served.error)
+
+    def test_close_from_another_thread_ends_serve_forever_quietly(self):
+        """close() on another thread while serve_forever() polls, with the
+        multiplexer frozen so that the client's shutdown lasts its round
+        trip: serve_forever() returns, where its poll asked the client being
+        shut down whether the drain was confirmed, and NotConnected escaped."""
+        served, server = self.serve(drain_seconds=30)  # a drain that only the confirmation, frozen, could end
+        multiplexer = self.cluster.mx[0]
+        multiplexer.pause()
+        try:
+            server.close()
+        finally:
+            multiplexer.resume()
+        wait_until(lambda: not served.running, 10, "serve_forever() returned")
+        self.assertIsNone(served.error)
+
+    def test_a_close_while_serve_forever_connects_ends_it_quietly(self):
+        """close() on another thread while serve_forever() still connects,
+        to a multiplexer that never answers: the connect under way ends, the
+        next is not made, and serve_forever() returns, where the next
+        connect raised NotConnected out of it."""
+        outcome: list[BaseException | None] = []
+        with socket.create_server(("127.0.0.1", 0)) as silent:
+            server = Scripted([silent.getsockname()[:2]] + list(self.cluster.endpoints), timeout=30)
+
+            def serve() -> None:
+                try:
+                    server.serve_forever(0.05)
+                    outcome.append(None)
+                except BaseException as error:  # what the test reports
+                    outcome.append(error)
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            silent.settimeout(10)
+            accepted, _ = silent.accept()  # the first connect is under way, waiting for a welcome
+            with accepted:
+                server.close()
+                thread.join(10)
+        self.assertEqual([None], outcome)
+
+    def test_a_request_arriving_during_the_closes_write_out_is_refused(self):
+        """A request addressed to the server while close() writes out what
+        was sent before: refused with a delivery error, so that its sender
+        retries elsewhere at once, where the refusal threw NotConnected on
+        the io thread and the sender waited out its timeout. The first
+        multiplexer, paused with copies of a send to every multiplexer
+        queued for it, holds the write-out open; the request comes through
+        the second."""
+        with Cluster(2, rules=RULES) as cluster:
+            served = BackendThread(lambda: Scripted(cluster.endpoints)).start()
+            assert isinstance(served.backend, Scripted)
+            server = served.backend
+            requester = Client([cluster.endpoints[1]], type=peers.WEBSITE)
+            first = cluster.mx[0]
+            first.pause()
+            try:
+                for _ in range(1200):  # past the socket buffers, the rest queued
+                    server.client.send_message(
+                        b"x" * 8192, type=9999, multiplexer=server.client.ALL, report_delivery_error=False
+                    )
+                closing = threading.Thread(target=lambda: server.close(10), daemon=True)
+                closing.start()
+
+                def shutting_down() -> bool:
+                    try:
+                        server.client.connections_count()
+                        return False
+                    except NotConnected:
+                        return True
+
+                wait_until(shutting_down, 10, "the client's shutdown began")
+                request = requester.new_message(message=b"late", type=REQUEST, to=server.instance_id)
+                requester.send_message(request, flush=True)
+                answer = None
+                deadline = time.time() + 5
+                while answer is None and time.time() < deadline:
+                    try:
+                        received, _ = requester.receive_message(timeout=0.5)
+                    except OperationTimedOut:
+                        continue
+                    if received.references == request.id:
+                        answer = received
+                self.assertIsNotNone(answer, "no refusal: it threw NotConnected on the io thread")
+                assert answer is not None
+                self.assertEqual(types.DELIVERY_ERROR, answer.type)
+            finally:
+                first.resume()
+                requester.shutdown()
+            closing.join(10)
+            wait_until(lambda: not served.running, 10, "serve_forever() returned")
+            self.assertIsNone(served.error)
 
     def test_stop_from_a_handler_and_the_instance_id(self):
         served, server = self.serve()

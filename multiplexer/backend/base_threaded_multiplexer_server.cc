@@ -27,7 +27,6 @@ Request::~Request() {
 void Request::reply(const std::string& payload, std::uint32_t type) { reply(client_->new_message(type, payload)); }
 
 void Request::reply(MultiplexerMessage msg) {
-  answered_ = true;
   if (!msg.id()) {
     msg.set_id(client_->random64());
   }
@@ -44,6 +43,7 @@ void Request::reply(MultiplexerMessage msg) {
     msg.set_workflow(mxmsg().workflow());
   }
   client_->send(msg, connection());  // the way the request came, another when it is gone
+  answered_ = true;                  // once it went: a reply that threw is no answer
 }
 
 void Request::report_error(const std::string& message) { reply(message, types::BACKEND_ERROR); }
@@ -131,13 +131,13 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
   }
 }
 
-void BaseThreadedMultiplexerServer::close() {
+void BaseThreadedMultiplexerServer::close(float timeout) {
   _check_not_inherited();
   std::vector<std::thread> threads;
   {
     mx::MutexLock lock(mutex_);
-    for (const std::thread& thread : threads_) {
-      if (thread.get_id() == std::this_thread::get_id()) {
+    for (const std::thread::id& worker : worker_ids_) {
+      if (worker == std::this_thread::get_id()) {
         throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
       }
     }
@@ -157,8 +157,7 @@ void BaseThreadedMultiplexerServer::close() {
   for (std::thread& thread : threads) {
     thread.join();
   }
-  client_.flush_all(CLOSE_FLUSH_SECONDS);  // the last replies go out before the sockets close
-  client_.shutdown();
+  client_.shutdown(timeout);  // the last replies go out first
 }
 
 void BaseThreadedMultiplexerServer::start_draining() {
@@ -277,7 +276,14 @@ void BaseThreadedMultiplexerServer::connect() {
   }
   _start_workers();  // before the first connection, so that nothing waits for a worker
   for (const MultiplexerAddress& address : addresses_) {
-    client_.connect(address.first, address.second, options_.connect_timeout);
+    try {
+      client_.connect(address.first, address.second, options_.connect_timeout);
+    } catch (const ThreadedClient::NotConnected&) {
+      if (!closed_.load()) {
+        throw;
+      }
+      return;  // close() shut the client down under us
+    }
   }
 }
 
@@ -291,6 +297,7 @@ void BaseThreadedMultiplexerServer::_start_workers() {
   }
   for (unsigned int index = 0; index < options_.workers; ++index) {
     threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
+    worker_ids_.push_back(threads_.back().get_id());
   }
 }
 
@@ -327,7 +334,15 @@ void BaseThreadedMultiplexerServer::_handle(const RequestPtr& request) {
     MX_LOG(ERROR, LOWVERBOSITY,
            CTX("BaseThreadedMultiplexerServer") TEXT(std::string("exception in handle_message: ") + error.what()));
     if (!request->answered()) {
-      request->report_error(error.what());
+      // As BaseMultiplexerServer: a report that fails leaves the requester
+      // to its timeout, and the handler's exception decides all the same.
+      try {
+        request->report_error(error.what());
+      } catch (const std::exception& reporting) {
+        MX_LOG(ERROR, LOWVERBOSITY,
+               CTX("BaseThreadedMultiplexerServer")
+                   TEXT(std::string("could not report the exception to the requester: ") + reporting.what()));
+      }
     }
     if (!on_handler_exception(error)) {
       failure_ = std::current_exception();

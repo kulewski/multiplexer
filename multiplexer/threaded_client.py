@@ -31,7 +31,16 @@ from typing import Any, Callable, Literal, TypeVar, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
-from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut, UsedAfterFork, make_message
+from multiplexer.mxclient import (
+    CLOSE_FLUSH_SECONDS,
+    ConnectionWrapper,
+    DropReason,
+    Lane,
+    NotConnected,
+    OperationTimedOut,
+    UsedAfterFork,
+    make_message,
+)
 from multiplexer.multiplexer_constants import types
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
 
@@ -62,6 +71,7 @@ class ThreadedClient:
         *,
         with_connection: bool = False,
         search_policy: Callable[[], bool] | None = None,
+        on_drop: Callable[[int, DropReason], None] | None = None,
     ):
         """Start the io thread and connect to every (host, port) in `addresses`.
 
@@ -75,7 +85,10 @@ class ThreadedClient:
         function returning whether to answer a client's search for a
         backend, lets requests routed by type find this client: what
         multiplexer.threaded_server builds on; without it only a search
-        addressed to this instance is answered.
+        addressed to this instance is answered. `on_drop(message_id,
+        reason)` runs on the io thread for every message the client gives
+        up on, each copy of one sent to ALL, with a DropReason; `dropped`
+        counts them. Like `on_message`, it is held until shutdown().
         """
 
         def native_callback(raw: bytes, connection: Any) -> None:
@@ -90,6 +103,8 @@ class ThreadedClient:
         self.type = type
         if search_policy is not None:
             self._native.set_search_policy(search_policy)
+        if on_drop is not None:
+            self._native._set_drop_observer(on_drop)
         for host, port in addresses:
             self.connect((host, port), timeout)
 
@@ -97,6 +112,12 @@ class ThreadedClient:
     def instance_id(self) -> int:
         """This peer's instance id, the `from` of everything it sends."""
         return self._native.instance_id()
+
+    @property
+    def dropped(self) -> int:
+        """How many messages this client gave up on so far, each copy of one
+        sent to ALL; `on_drop` hears of each as it goes. From any thread."""
+        return self._native._dropped()
 
     def orphaned(self) -> bool:
         """Whether the client was made before a fork this process is the
@@ -143,14 +164,15 @@ class ThreadedClient:
         return self._native.routing_acknowledged()
 
     def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
-        """Wait until everything sent before the call has been written, or
-        `timeout` seconds; True when it has. A message still waiting for a
-        connection or for room counts, as does what is queued on a
-        connection; what is sent after the call does not, so a flush ends
-        however busy the client is. A message lost on the way, with its
-        connection or at its own timeout, is not waited for. What a
-        backend does before shutdown(), so that its last replies are not
-        cut with the sockets. Not from the io thread."""
+        """Wait until everything sent before the call has been written or
+        given up on, or `timeout` seconds; True when every one was written,
+        False when one was given up on, which on_drop names, or the time
+        ran out. A message still waiting for a connection or for room
+        counts, as does what is queued on a connection; what is sent after
+        the call does not, so a flush ends however busy the client is, a
+        message a dying connection hands to another included. After
+        shutdown() it returns True at once, nothing being left to wait for.
+        What shutdown() does first. Not from the io thread."""
         return self._native.flush_all(timeout)
 
     def random(self) -> int:
@@ -192,53 +214,82 @@ class ThreadedClient:
         MultiplexerMessage or a payload wrapped with the remaining kwargs,
         such as type= and to=. It goes on one connection, or on every one
         with multiplexer=ALL, on a Lane's connection (the lane taking the
-        connection chosen when it has none, lost its own or has it full,
-        unless pinned),
-        or on a ConnectionWrapper's while it is live and another after;
-        the io thread writes it right after. A message that cannot be
-        queued yet, no connection being live or the connections' queues
-        full, waits on the io thread behind those sent before it, within
-        `timeout`: for ALL, a full connection gets its copy once it has
-        room, and a pinned lane waits for room on its own connection.
+        connection chosen when it has none or lost its own, unless pinned),
+        or on a ConnectionWrapper's while it is live and another after; the
+        io thread writes it right after. A message that cannot be queued
+        yet, no connection being live or the connections' queues full,
+        waits behind those sent before it, within `timeout`, and is dropped
+        and reported (on_drop) after that: for ALL, a full connection gets
+        its copy once it has room, and a lane waits for room on its own
+        connection while that lives. Through a pinned lane whose connection
+        is gone it raises NotConnected at once.
+
         Without `flush` the call returns at once and is safe from
-        callbacks; through a pinned lane whose connection is gone it raises
-        NotConnected at once instead. With `flush=True` it waits until the
-        message reached the socket, for ALL until one copy did, resending
-        through another connection if the first dies under it, and raises
-        OperationTimedOut when `timeout` passes first, or NotConnected when
-        no connection was live at all, or the pinned lane given is gone.
-        With `flush=True` and a `callback`, it returns at once instead and
-        `callback(written)` runs on the io thread once the message reached
-        the socket, for ALL once one copy did, the others going out from
-        their connections' queues, with the number of connections written
-        by then, 0 when `timeout` passed first; safe from callbacks, and
-        what multiplexer.aio awaits. flush_all() waits for every copy."""
+        callbacks. With `flush=True` it waits until the message reached the
+        socket, for ALL until one copy did, a connection that dies under it
+        handing it to another or having it held, and raises NotConnected
+        when nothing wrote it with no connection live, else
+        OperationTimedOut; not from a callback. With a `callback`, flush or
+        not, it returns at once and `callback(written)` runs on the io
+        thread once the message's end is known: 1 once it was written, the
+        first copy for ALL, 0 once it was given up on, and reported, or
+        shutdown() came first; safe from callbacks. flush_all() waits for
+        every copy."""
+        mxmsg_id, raw, every, lane = self._prepare(message, multiplexer, kwargs)
+        if callback is not None or not flush:
+            if every:
+                self._native.send_all(raw, timeout=timeout, callback=callback)
+            else:
+                self._native.send(raw, lane, timeout=timeout, callback=callback)
+            return mxmsg_id
+        written, given_up = self._native.send_and_wait(raw, every, timeout, lane)
+        if written == 0:
+            self._raise_for_nothing_written(lane, given_up)
+        return mxmsg_id
+
+    def _send_and_notify(
+        self,
+        message: Any,
+        multiplexer: int | Lane | ConnectionWrapper,
+        timeout: float,
+        notify: Callable[[int, bool], None],
+        **kwargs: Any,
+    ) -> int:
+        """send_message(flush=True) with `notify(written, given_up)` on the
+        io thread instead of the wait: 1 once the message was written, the
+        first copy for ALL, 0 when it was given up on, `given_up` then, or
+        `timeout` passed first; what multiplexer.aio awaits. Returns the
+        message id."""
+        mxmsg_id, raw, every, lane = self._prepare(message, multiplexer, kwargs)
+        self._native.send_and_notify(raw, every, timeout, notify, lane)
+        return mxmsg_id
+
+    def _flush_all_and_notify(self, timeout: float, notify: Callable[[bool], None]) -> None:
+        """flush_all() with `notify(flushed)` on the io thread instead of
+        the wait; what multiplexer.aio awaits."""
+        self._native.flush_all_and_notify(timeout, notify)
+
+    def _prepare(
+        self, message: Any, multiplexer: int | Lane | ConnectionWrapper, kwargs: dict[str, Any]
+    ) -> tuple[int, bytes, bool, Lane | None]:
+        """A send's (message id, serialized message, to ALL, lane): the
+        message built from the payload and `kwargs` unless it is one, a
+        ConnectionWrapper as a lane that prefers it. NotConnected for a
+        pinned lane whose connection is gone."""
         mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
-        raw = mxmsg.SerializeToString()
-        every = multiplexer is ThreadedClient.ALL
         lane = multiplexer if isinstance(multiplexer, Lane) else None
+        if lane is not None and lane.closed:
+            raise NotConnected()
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
-        if not flush:
-            if every:
-                self._native.send_all(raw, timeout=timeout)
-            elif lane is not None:
-                if lane.closed:
-                    raise NotConnected()
-                self._native.send(raw, lane, timeout=timeout)
-            else:
-                self._native.send(raw, timeout=timeout)
-            return mxmsg.id
-        if callback is not None:
-            self._native.send_with_callback(raw, every, timeout, callback, lane)
-            return mxmsg.id
-        if self._native.send_and_wait(raw, every, timeout, lane) == 0:
-            self._raise_for_nothing_written(lane)
-        return mxmsg.id
+        return mxmsg.id, mxmsg.SerializeToString(), multiplexer is ThreadedClient.ALL, lane
 
-    def _raise_for_nothing_written(self, lane: Lane | None) -> None:
-        """A flushing send wrote nothing: the reason, as an exception."""
-        if (lane is not None and lane.closed) or self.connections_count() == 0:
+    def _raise_for_nothing_written(self, lane: Lane | None, given_up: bool) -> None:
+        """A flushing send wrote nothing: the reason, as an exception, the
+        synchronous client's rule. NotConnected when its message was given
+        up on, a pinned lane's connection being gone, or no connection is
+        live, OperationTimedOut otherwise."""
+        if given_up or (lane is not None and lane.closed) or self.connections_count() == 0:
             raise NotConnected()
         raise OperationTimedOut()
 
@@ -399,14 +450,18 @@ class ThreadedClient:
         """send_message() with `data` pickled as the payload; the kwargs are send_message's."""
         return self.send_message(pickle.dumps(data), **kwargs)
 
-    def shutdown(self) -> None:
-        """Fail every query in flight, close the connections, stop the thread.
-        Returns once every multiplexer has closed its side too, a round
-        trip, a second at most, so that what was written arrives. The
-        client lets go of its callbacks then, so that it is freed when
-        dropped: until shut down, one given on_message refers to itself
-        through it and stays alive."""
-        self._native.shutdown()
+    def shutdown(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
+        """Fail every query in flight, write what was sent before the call,
+        and what the io thread sends meanwhile, a server's refusal of what
+        still arrives say, `timeout` seconds in all; any other send meanwhile
+        raises NotConnected. Then close the connections and stop the
+        thread; what is still unwritten then is dropped and reported
+        (on_drop), at once with timeout=0. Returns once every multiplexer
+        has closed its side too, a round trip, a second at most, so that
+        what was written arrives. The client lets go of its callbacks then,
+        so that it is freed when dropped: until shut down, one given
+        on_message refers to itself through it and stays alive."""
+        self._native.shutdown(timeout)
 
     def __enter__(self: _ThreadedClientT) -> _ThreadedClientT:
         """The client, for a `with` block, at whose end it is shut down

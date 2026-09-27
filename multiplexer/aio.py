@@ -19,12 +19,12 @@ docs/recipes/async_web_server.md an asyncio web server.
     async for mxmsg in client.messages():                        # or pull
         ...
 
-Every send is awaited: there is no fire-and-forget form, since an await
-costs the loop microseconds and blocks nothing; many at once is
-asyncio.gather. Messages that are not replies, events and requests
-addressed to this peer, go to the subscriptions and to messages(); the io
-thread never waits for the loop, so a queue nobody drains drops its
-oldest message with a warning.
+A send is as on every client: the await returns once the io thread has
+the message; flush=True awaits its write, a callback hears how it ended,
+and `await flush_all()` waits for everything sent before it. Messages
+that are not replies, events and requests addressed to this peer, go to
+the subscriptions and to messages(); the io thread never waits for the
+loop, so a queue nobody drains drops its oldest message with a warning.
 
 A query with `to` is addressed, and `multiplexer=` takes a Lane from
 lane() or a ConnectionWrapper, as on ThreadedClient.
@@ -40,7 +40,14 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxclient import ConnectionWrapper, Lane, NotConnected, OperationTimedOut
+from multiplexer.mxclient import (
+    CLOSE_FLUSH_SECONDS,
+    ConnectionWrapper,
+    DropReason,
+    Lane,
+    NotConnected,
+    OperationTimedOut,
+)
 from multiplexer.mxlog import WARNING, LOWVERBOSITY, log
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
 
@@ -63,29 +70,58 @@ class AsyncClient:
         timeout: float = DEFAULT_TIMEOUT,
         loop: asyncio.AbstractEventLoop | None = None,
         queue_size: int = 1024,
+        *,
+        on_drop: Callable[[int, DropReason], None] | None = None,
     ):
         """Connect to every (host, port) in `addresses` and bind to `loop`,
         the running one by default. Connecting blocks briefly, like
         ThreadedClient's constructor; a program that must not block its
         loop at all uses `await AsyncClient.create(...)`. `queue_size` bounds
-        what messages() holds for a slow reader."""
+        what messages() holds for a slow reader. `on_drop(message_id,
+        reason)` runs on the loop for every message the client gives up on,
+        each copy of one sent to ALL, with a DropReason; `dropped` counts
+        them."""
         self._loop = loop or asyncio.get_running_loop()
         self._subscriptions: list[tuple[int | None, Matcher | None, Handler]] = []
         self._queue: asyncio.Queue[MultiplexerMessage] | None = None
         self._queue_size = queue_size
         self._dropped_since_warning = 0
         self._lock = threading.Lock()  # the subscriptions, read on the io thread
-        self._threaded = ThreadedClient(addresses, type, timeout, on_message=self._on_message)
+        self._on_drop = on_drop
+        self._threaded = ThreadedClient(
+            addresses,
+            type,
+            timeout,
+            on_message=self._on_message,
+            on_drop=self._on_drop_reported if on_drop is not None else None,
+        )
         self.type = type
 
     @classmethod
     async def create(
-        cls, addresses: list[Endpoint], type: int, timeout: float = DEFAULT_TIMEOUT, queue_size: int = 1024
+        cls,
+        addresses: list[Endpoint],
+        type: int,
+        timeout: float = DEFAULT_TIMEOUT,
+        queue_size: int = 1024,
+        *,
+        on_drop: Callable[[int, DropReason], None] | None = None,
     ) -> "AsyncClient":
         """The constructor run in the default executor, so the loop does
         not wait for the connections; bound to the running loop."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: cls(addresses, type, timeout, loop, queue_size))
+        return await loop.run_in_executor(
+            None, lambda: cls(addresses, type, timeout, loop, queue_size, on_drop=on_drop)
+        )
+
+    def _on_drop_reported(self, message_id: int, reason: DropReason) -> None:
+        """A drop, as the io thread reports it, handed to `on_drop` on the loop."""
+        on_drop = self._on_drop
+        assert on_drop is not None
+        try:
+            self._loop.call_soon_threadsafe(on_drop, message_id, reason)
+        except RuntimeError:
+            pass  # the loop is closed: nobody left to tell
 
     # Identity and connections.
 
@@ -93,6 +129,12 @@ class AsyncClient:
     def instance_id(self) -> int:
         """This peer's instance id, the `from` of everything it sends."""
         return self._threaded.instance_id
+
+    @property
+    def dropped(self) -> int:
+        """How many messages this client gave up on so far, each copy of one
+        sent to ALL; `on_drop` hears of each as it goes."""
+        return self._threaded.dropped
 
     def connections_count(self) -> int:
         """Live connections right now; the io thread keeps it current."""
@@ -201,30 +243,64 @@ class AsyncClient:
         message: Any,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         timeout: float = DEFAULT_TIMEOUT,
+        flush: bool = False,
+        callback: Callable[[int], None] | None = None,
         **kwargs: Any,
     ) -> int:
-        """Send an event and await it reaching a socket; returns the message
-        id. `message` is a MultiplexerMessage or a payload wrapped with the
-        remaining kwargs, such as type= and to=. On one connection, resent
-        through another if the first dies under it, on every connection
-        with multiplexer=ALL, on a Lane's connection, or on a
-        ConnectionWrapper's while it is live. Raises NotConnected when no
-        connection took it by `timeout`, or the pinned lane given is gone,
-        OperationTimedOut when the write did not finish."""
+        """Send an event and return its message id, as every client sends
+        (ThreadedClient.send_message): `message` is a MultiplexerMessage or
+        a payload wrapped with the remaining kwargs, such as type= and to=;
+        on one connection, on every one with multiplexer=ALL, on a Lane's
+        connection, or on a ConnectionWrapper's while it is live and
+        another after. It returns once the io thread has the message, which
+        it writes right after, or holds until a connection comes up or has
+        room, within `timeout`, and drops and reports (on_drop) after that.
+        With `flush=True` it returns once the message reached a socket, for
+        ALL once one copy did, a connection that dies under it handing it
+        to another or having it held, and raises NotConnected when nothing
+        wrote it with no connection live, else OperationTimedOut. With a
+        `callback`, flush or not, it returns at once and `callback(written)`
+        runs on the client's loop once the message's end is known: 1 once
+        it was written, the first copy for ALL, 0 once it was given up on
+        or close() came first. NotConnected at once for a pinned lane whose
+        connection is gone, and after close()."""
+        if callback is not None:
+            return self._threaded.send_message(
+                message,
+                multiplexer,
+                timeout=timeout,
+                callback=lambda written: self._call_on_loop(callback, written),
+                **kwargs,
+            )
+        if not flush:
+            return self._threaded.send_message(message, multiplexer, timeout=timeout, **kwargs)
         future = self._future()
         lane = multiplexer if isinstance(multiplexer, Lane) else None
-        mxmsg_id = self._threaded.send_message(
-            message,
-            multiplexer,
-            flush=True,
-            timeout=timeout,
-            callback=lambda written: self._settle(future, written),
-            **kwargs,
+        mxmsg_id = self._threaded._send_and_notify(
+            message, multiplexer, timeout, lambda written, given_up: self._settle(future, (written, given_up)), **kwargs
         )
-        written = await future
+        written, given_up = await future
         if written == 0:
-            self._threaded._raise_for_nothing_written(lane)
+            self._threaded._raise_for_nothing_written(lane, given_up)
         return mxmsg_id
+
+    async def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
+        """Await until everything sent before the call was written or given
+        up on, what still waits for a connection or for room included, or
+        `timeout` seconds; whether every one was written, as
+        ThreadedClient.flush_all() says. The
+        callbacks of those sends have run by then when awaited on the
+        client's loop, where they run."""
+        future = self._future()
+        self._threaded._flush_all_and_notify(timeout, lambda flushed: self._settle(future, flushed))
+        return await future
+
+    def _call_on_loop(self, callback: Callable[[int], None], written: int) -> None:
+        """A send's callback, as the io thread calls it, run on the loop."""
+        try:
+            self._loop.call_soon_threadsafe(callback, written)
+        except RuntimeError:
+            pass  # the loop is closed: nobody left to tell
 
     async def send_pickle(self, data: Any, **kwargs: Any) -> int:
         """send_message() with `data` pickled as the payload."""
@@ -323,15 +399,17 @@ class AsyncClient:
 
     # Lifetime.
 
-    def close(self) -> None:
-        """Close the connections and stop the io thread; the client is done.
-        Blocks for a round trip to the multiplexers, which close their side
-        too, a second at most; fine at shutdown. Idempotent."""
-        self._threaded.shutdown()
+    def close(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
+        """Write what was sent before the call, `timeout` seconds at most,
+        then close the connections and stop the io thread, as
+        ThreadedClient.shutdown(timeout) does; the client is done. Blocks
+        for that and for a round trip to the multiplexers, which close their
+        side too, a second at most; fine at shutdown. Idempotent."""
+        self._threaded.shutdown(timeout)
 
-    async def aclose(self) -> None:
+    async def aclose(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
         """close() in the default executor, so the loop does not wait for the join."""
-        await asyncio.get_running_loop().run_in_executor(None, self.close)
+        await asyncio.get_running_loop().run_in_executor(None, self.close, timeout)
 
     async def __aenter__(self) -> "AsyncClient":
         return self
@@ -498,16 +576,16 @@ class Holder:
             self._generation += 1
         return client
 
-    def close(self) -> None:
-        """Close the held client, if any; one being made is closed when it
-        is there, and its callers get RuntimeError. The next get() or
-        aget() makes a new one."""
+    def close(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
+        """Close the held client, if any, as its close(timeout) does; one
+        being made is closed when it is there, and its callers get
+        RuntimeError. The next get() or aget() makes a new one."""
         client = self._detach()
         if client is not None:
-            client.close()
+            client.close(timeout)
 
-    async def aclose(self) -> None:
+    async def aclose(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
         """close() in the default executor, so the loop does not wait for the join."""
         client = self._detach()
         if client is not None:
-            await client.aclose()
+            await client.aclose(timeout)

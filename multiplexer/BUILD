@@ -680,11 +680,32 @@ py_test(
     ],
 )
 
+# About 12 s: a send with no deadline outlasting DEFAULT_TIMEOUT.
+py_test(
+    name = "no_deadline_send_test",
+    size = "medium",
+    srcs = ["no_deadline_send_test.py"],
+    data = ["//tests:testing.rules"],
+    tags = ["slow"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "no_connection_test",
     size = "small",
     srcs = ["no_connection_test.py"],
-    deps = [":mxclient"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":mxclient",
+        ":servers",
+        "//multiplexer/testing",
+    ],
 )
 
 py_test(
@@ -823,6 +844,101 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "drop_reports_test",
+    size = "medium",
+    srcs = ["drop_reports_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "end_calls_test",
+    size = "medium",
+    srcs = ["end_calls_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "outage_test",
+    size = "medium",
+    srcs = ["outage_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "send_callbacks_test",
+    size = "medium",
+    srcs = ["send_callbacks_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "server_replies_test",
+    size = "medium",
+    srcs = ["server_replies_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "sync_waits_test",
+    size = "medium",
+    srcs = ["sync_waits_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "send_reports_test",
+    size = "medium",
+    srcs = ["send_reports_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
         "//multiplexer/testing",
     ],
 )

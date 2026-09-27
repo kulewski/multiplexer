@@ -18,7 +18,7 @@ from typing import Any, Callable, Literal, TypeVar, overload
 
 from multiplexer import mxclient
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.mxclient import ConnectionWrapper, Lane
+from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, DropReason, Lane
 
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
@@ -128,11 +128,9 @@ class BasicClient(mxclient.Client):
 
     @log_call
     def send_and_receive(self, *args, **kwargs):
-        """Like mxclient.Client.send_and_receive, ignoring REQUEST_RECEIVED notifications."""
-        kwargs.setdefault(
-            "ignore_function",
-            lambda mxmsg, connwrap: mxmsg.type == types.REQUEST_RECEIVED,
-        )
+        """Like mxclient.Client.send_and_receive, skipping REQUEST_RECEIVED
+        notifications as well as the `ignore_types` given."""
+        kwargs["ignore_types"] = tuple(kwargs.get("ignore_types", ())) + (types.REQUEST_RECEIVED,)
         return super(BasicClient, self).send_and_receive(*args, **kwargs)
 
 
@@ -149,11 +147,18 @@ class SyncClient(BasicClient):
     """
 
     @log_call
-    def __init__(self, addresses, type=None):
-        """`addresses`: (host, port) pairs of every multiplexer; `type`: a peers.* constant."""
+    def __init__(self, addresses, type=None, *, on_drop: Callable[[int, DropReason], None] | None = None):
+        """`addresses`: (host, port) pairs of every multiplexer; `type`: a
+        peers.* constant. `on_drop(message_id, reason)` hears of every
+        message the client gives up on, each copy of one sent to ALL, with
+        a DropReason, inside whichever call runs the loop when it happens;
+        `dropped` counts them. Held until shutdown(), so that a callback
+        referring to the client keeps it alive until then."""
         if type is None:
             raise ValueError
         super(SyncClient, self).__init__(type)
+        if on_drop is not None:
+            self._set_drop_observer(on_drop)
         for host, port in addresses:
             self.connect((host, port))
 
@@ -206,8 +211,9 @@ class MxClient:
             self._client = SyncClient(self.addresses(), type=self.peer_type)
         return self._client
 
-    def shutdown(self) -> None:
-        """Close the held SyncClient, if any; the next get() makes a new one."""
+    def shutdown(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
+        """Close the held SyncClient, if any, as its shutdown(timeout) does;
+        the next get() makes a new one."""
         if self._client is not None:
-            self._client.shutdown()
+            self._client.shutdown(timeout)
             self._client = None

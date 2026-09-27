@@ -62,12 +62,9 @@ struct ThreadedClient::Core::PendingSend {
   std::chrono::steady_clock::time_point deadline;
   bool expiring = false;  // its deadline is in expiring_
   LanePtr lane;
-  SendCallback done;              // a flushing send's completion, cleared once called
-  bool waiting = false;           // in waiting_any_, for a connection to come up
-  unsigned int in_queue = 0;      // flushing: copies queued or waiting for room, neither written nor lost yet
-  unsigned int sent = 0;          // flushing: copies written
-  std::vector<Tracker> trackers;  // flushing: the copies in_queue counts, keys of tracked_sends_
-  bool over = false;              // ended: where it is still listed, it is skipped
+  SendCallback done;        // its end, once: the written copies, 1 at the first, or 0
+  FlushedCallback flushed;  // or that, and whether the message was given up on
+  bool over = false;        // ended: where it is still listed, it is skipped
 };
 
 // A deadline in expiring_, a heap whose top is the earliest deadline.
@@ -84,7 +81,7 @@ struct ThreadedClient::Core::Expiring {
 // call's timeout and the promise its caller waits on.
 struct ThreadedClient::Core::FlushWait {
   BasicClient::FlushPtr flush;
-  std::shared_ptr<std::promise<bool>> done;
+  FlushCallback done;
   std::unique_ptr<asio::steady_timer> timer;
 };
 
@@ -118,16 +115,22 @@ ThreadedClient::ThreadedClient(std::uint32_t peer_type, MessageSink on_message)
   core_->start(core_);
 }
 
-// On the io thread itself, in a callback or where the last reference to a
-// Python client was dropped, shutdown() leaves the thread to end on its own
-// and the Core with it; an orphan gets the orphan teardown.
-ThreadedClient::~ThreadedClient() { core_->shutdown(); }
+// shutdown() with its default drain. On the io thread itself, in a
+// callback or where the last reference to a Python client was dropped, it
+// leaves the thread to end on its own and the Core with it; an orphan gets
+// the orphan teardown.
+ThreadedClient::~ThreadedClient() { core_->shutdown(CLOSE_FLUSH_SECONDS); }
 
 void ThreadedClient::set_search_policy(SearchPolicy answer) { core_->set_search_policy(answer); }
+void ThreadedClient::set_drop_observer(DropObserver observer) { core_->set_drop_observer(observer); }
+std::uint64_t ThreadedClient::dropped() { return core_->dropped(); }
 void ThreadedClient::set_resolver(BasicClient::Resolver resolver) { core_->set_resolver(resolver); }
 void ThreadedClient::set_routing(const Routing& routing) { core_->set_routing(routing); }
 bool ThreadedClient::routing_acknowledged() { return core_->routing_acknowledged(); }
 bool ThreadedClient::flush_all(float timeout) { return core_->flush_all(timeout); }
+void ThreadedClient::flush_all_with_callback(float timeout, FlushCallback done) {
+  core_->flush_all_with_callback(timeout, done);
+}
 std::uint64_t ThreadedClient::random64() { return core_->random64(); }
 bool ThreadedClient::connect(const std::string& host, std::uint16_t port, float timeout) {
   return core_->connect(host, port, timeout);
@@ -135,11 +138,15 @@ bool ThreadedClient::connect(const std::string& host, std::uint16_t port, float 
 unsigned int ThreadedClient::connections_count() { return core_->connections_count(); }
 std::size_t ThreadedClient::watched_ids() { return core_->watched_ids(); }
 std::uint64_t ThreadedClient::retries() { return core_->retries(); }
+std::size_t ThreadedClient::waiting_queries() { return core_->waiting_queries(); }
+std::size_t ThreadedClient::waiting_messages() { return core_->waiting_messages(); }
 void ThreadedClient::send(const MultiplexerMessage& msg) { core_->send(msg); }
-void ThreadedClient::send(const MultiplexerMessage& msg, LanePtr lane) { core_->send(msg, lane); }
-void ThreadedClient::send_all(const MultiplexerMessage& msg) { core_->send_all(msg); }
-void ThreadedClient::send(const MultiplexerMessage& msg, const ConnectionWrapper& connection) {
-  core_->send(msg, connection);
+void ThreadedClient::send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done) {
+  core_->send(msg, lane, done);
+}
+void ThreadedClient::send_all(const MultiplexerMessage& msg, SendCallback done) { core_->send_all(msg, done); }
+void ThreadedClient::send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, SendCallback done) {
+  core_->send(msg, connection, done);
 }
 unsigned int ThreadedClient::send(const MultiplexerMessage& msg, float timeout) { return core_->send(msg, timeout); }
 unsigned int ThreadedClient::send(const MultiplexerMessage& msg, LanePtr lane, float timeout) {
@@ -151,18 +158,23 @@ unsigned int ThreadedClient::send(const MultiplexerMessage& msg, const Connectio
 unsigned int ThreadedClient::send_all(const MultiplexerMessage& msg, float timeout) {
   return core_->send_all(msg, timeout);
 }
-void ThreadedClient::send_serialized(std::string serialized, LanePtr lane, float timeout) {
-  core_->send_serialized(std::move(serialized), lane, timeout);
+void ThreadedClient::send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done) {
+  core_->send_serialized(std::move(serialized), lane, timeout, done);
 }
-void ThreadedClient::send_all_serialized(std::string serialized, float timeout) {
-  core_->send_all_serialized(std::move(serialized), timeout);
+void ThreadedClient::send_all_serialized(std::string serialized, float timeout, SendCallback done) {
+  core_->send_all_serialized(std::move(serialized), timeout, done);
 }
-unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane) {
-  return core_->send_serialized_and_wait(std::move(serialized), all, timeout, lane);
+unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane,
+                                                      bool* given_up) {
+  return core_->send_serialized_and_wait(std::move(serialized), all, timeout, lane, given_up);
 }
 void ThreadedClient::send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                                    LanePtr lane) {
   core_->send_serialized_with_callback(std::move(serialized), all, timeout, done, lane);
+}
+void ThreadedClient::send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done,
+                                                LanePtr lane) {
+  core_->send_serialized_and_notify(std::move(serialized), all, timeout, done, lane);
 }
 MultiplexerMessage ThreadedClient::new_message(std::uint32_t type, const std::string& payload) {
   return core_->new_message(type, payload);
@@ -189,7 +201,7 @@ ThreadedClient::Result ThreadedClient::query(const MultiplexerMessage& msg, cons
                                              float timeout, Probe probe) {
   return core_->query(msg, connection, timeout, probe);
 }
-void ThreadedClient::shutdown() { core_->shutdown(); }
+void ThreadedClient::shutdown(float timeout) { core_->shutdown(timeout); }
 LogSummary& ThreadedClient::drop_lines() { return core_->drop_lines(); }
 
 bool ThreadedClient::orphaned() const { return core_->orphaned(); }
@@ -218,10 +230,6 @@ void ThreadedClient::Core::start(const std::shared_ptr<Core>& self) {
     basic_client_->set_connection_observer([this](const ConnectionWrapper& connection, bool up) {
       MX_DCHECK_RUN_ON(&io_thread_);
       _on_connection(connection, up);
-    });
-    basic_client_->set_tracked_observer([this](const std::shared_ptr<SendState>& state, bool written) {
-      MX_DCHECK_RUN_ON(&io_thread_);
-      _on_tracked(state, written);
     });
     ready.set_value();
   });
@@ -256,6 +264,7 @@ void ThreadedClient::Core::_orphan_teardown() {
 void ThreadedClient::Core::_release_callbacks() MX_NO_THREAD_SAFETY_ANALYSIS {
   on_message_ = MessageSink();
   search_policy_ = SearchPolicy();
+  basic_client_->release_drop_observer();
 }
 
 void ThreadedClient::Core::_io_thread_main() {
@@ -265,6 +274,7 @@ void ThreadedClient::Core::_io_thread_main() {
     try {
       io_service_.run();
       MX_LOG(DEBUG, HIGHVERBOSITY, CTX("ThreadedClient") TEXT("io thread done"));
+      basic_client_->end_follows();  // a send still followed hears 0: nothing more runs here
       _release_callbacks();
       return;
     } catch (const std::exception& e) {
@@ -412,6 +422,16 @@ void ThreadedClient::Core::set_search_policy(SearchPolicy answer) {
   });
 }
 
+void ThreadedClient::Core::set_drop_observer(DropObserver observer) {
+  _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    basic_client_->set_drop_observer(observer);
+    return 0;
+  });
+}
+
+std::uint64_t ThreadedClient::Core::dropped() { return basic_client_->dropped(); }
+
 unsigned int ThreadedClient::Core::connections_count() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -423,6 +443,20 @@ std::size_t ThreadedClient::Core::watched_ids() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
     return by_id_.size();
+  });
+}
+
+std::size_t ThreadedClient::Core::waiting_queries() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return waiting_queries_.size();
+  });
+}
+
+std::size_t ThreadedClient::Core::waiting_messages() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->outbox_entries();
   });
 }
 
@@ -461,12 +495,29 @@ bool ThreadedClient::Core::flush_all(float timeout) {
   if (_stopped()) {
     return true;  // nothing left to write
   }
-  std::shared_ptr<std::promise<bool>> done(new std::promise<bool>());
-  std::future<bool> future = done->get_future();
+  std::shared_ptr<std::promise<bool>> promise(new std::promise<bool>());
+  std::future<bool> future = promise->get_future();
+  _begin_flush_all(timeout, [promise](bool flushed) { promise->set_value(flushed); });
+  return future.get();
+}
+
+void ThreadedClient::Core::flush_all_with_callback(float timeout, FlushCallback done) {
+  basic_client_->check_not_orphaned();
+  if (_stopped()) {
+    done(true);  // nothing left to write, as flush_all() says
+    return;
+  }
+  _begin_flush_all(timeout, done);
+}
+
+// A flush on the io thread: BasicClient's, which counts what was sent
+// before it, with a timer of its own; `done` hears how it ended, once
+// (_end_flush).
+void ThreadedClient::Core::_begin_flush_all(float timeout, FlushCallback done) {
   _post([this, done, timeout] {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (shut_down_) {
-      done->set_value(true);
+    if (torn_down_) {
+      _guarded([&] { done(true); }, [] { return std::string("a flush_all() callback"); });
       return;
     }
     std::shared_ptr<FlushWait> wait(new FlushWait());
@@ -474,10 +525,10 @@ bool ThreadedClient::Core::flush_all(float timeout) {
     wait->timer.reset(new asio::steady_timer(io_service_));
     flushes_.push_back(wait);
     std::weak_ptr<FlushWait> weak = wait;
-    wait->flush = basic_client_->begin_flush([this, weak] {
+    wait->flush = basic_client_->begin_flush([this, weak](bool all_written) {
       MX_DCHECK_RUN_ON(&io_thread_);
       if (std::shared_ptr<FlushWait> flushed = weak.lock()) {
-        _end_flush(flushed, true);
+        _end_flush(flushed, all_written);
       }
     });
     if (std::find(flushes_.begin(), flushes_.end(), wait) == flushes_.end()) {
@@ -492,7 +543,6 @@ bool ThreadedClient::Core::flush_all(float timeout) {
       }
     });
   });
-  return future.get();
 }
 
 // A flush_all() call ends, flushed or out of time: BasicClient forgets its
@@ -508,20 +558,22 @@ void ThreadedClient::Core::_end_flush(const std::shared_ptr<FlushWait>& wait, bo
   }
   asio::error_code ignored;
   wait->timer->cancel(ignored);
-  wait->done->set_value(flushed);
+  FlushCallback done;
+  done.swap(wait->done);
+  _guarded([&] { done(flushed); }, [] { return std::string("a flush_all() callback"); });
 }
 
 // ---------------------------------------------------------------------------
 // Sends
 //
-// A send goes to the io thread, which hands it to BasicClient: queued on a
-// connection at once, or waiting there for room, as BasicClient's outbox
-// has it (outbox.cc). What finds no connection live waits here, in the
-// order it was made, until one comes up. A flushing send follows its
-// copies' trackers: the connection says when a frame is written or lost,
-// and one timer runs to the earliest deadline, so nothing is polled. It
-// ends when its frame is written, for ALL the first copy, or at its
-// deadline with what was written by then.
+// A send goes to the io thread, which hands it to BasicClient, as every
+// client does: queued on a connection at once, waiting there for room, or
+// held until a connection comes up (outbox.cc). A send with a callback
+// or a wait has BasicClient follow it to its end: the connection says
+// when a frame is written or lost, so nothing is polled. A flushing send,
+// waited for or with a callback (send_serialized_with_callback), also
+// ends at its deadline, one timer running to the earliest, with 0 when
+// nothing was written by then.
 
 namespace {
 // A blocking send's completion: the promise its caller waits on.
@@ -530,20 +582,23 @@ ThreadedClient::SendCallback settle(std::shared_ptr<std::promise<unsigned int>> 
 }
 }  // namespace
 
-void ThreadedClient::Core::send(const MultiplexerMessage& msg) { send(msg, LanePtr()); }
+void ThreadedClient::Core::send(const MultiplexerMessage& msg) { send(msg, LanePtr(), SendCallback()); }
 
-void ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane) {
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, false, DEFAULT_TIMEOUT,
-               ThreadedClient::SendCallback(), lane);
+void ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done) {
+  if (lane && lane->closed()) {
+    MXTHROW(NotConnected());  // a pinned lane whose connection is gone; the Python client raises it too
+  }
+  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, false, DEFAULT_TIMEOUT, done,
+               lane);
 }
 
-void ThreadedClient::Core::send_all(const MultiplexerMessage& msg) {
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, false, DEFAULT_TIMEOUT,
-               ThreadedClient::SendCallback(), LanePtr());
+void ThreadedClient::Core::send_all(const MultiplexerMessage& msg, SendCallback done) {
+  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, false, DEFAULT_TIMEOUT, done,
+               LanePtr());
 }
 
-void ThreadedClient::Core::send(const MultiplexerMessage& msg, const ConnectionWrapper& connection) {
-  send(msg, std::make_shared<Lane>(connection));
+void ThreadedClient::Core::send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, SendCallback done) {
+  send(msg, std::make_shared<Lane>(connection), done);
 }
 
 unsigned int ThreadedClient::Core::send(const MultiplexerMessage& msg, float timeout) {
@@ -579,27 +634,33 @@ unsigned int ThreadedClient::Core::send_all(const MultiplexerMessage& msg, float
   return future.get();
 }
 
-void ThreadedClient::Core::send_serialized(std::string serialized, LanePtr lane, float timeout) {
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), false, false, timeout,
-               ThreadedClient::SendCallback(), lane);
+void ThreadedClient::Core::send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done) {
+  if (lane && lane->closed()) {
+    MXTHROW(NotConnected());  // as send() does
+  }
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), false, false, timeout, done, lane);
 }
 
-void ThreadedClient::Core::send_all_serialized(std::string serialized, float timeout) {
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), true, false, timeout,
-               ThreadedClient::SendCallback(), LanePtr());
+void ThreadedClient::Core::send_all_serialized(std::string serialized, float timeout, SendCallback done) {
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), true, false, timeout, done, LanePtr());
 }
 
 unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serialized, bool all, float timeout,
-                                                            LanePtr lane) {
+                                                            LanePtr lane, bool* given_up) {
   basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("flushing ThreadedClient send called on the io thread, from a callback");
   }
-  std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
-  std::future<unsigned int> future = promise->get_future();
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, settle(promise),
-               lane);
-  return future.get();
+  std::shared_ptr<std::promise<std::pair<unsigned int, bool>>> promise(
+      new std::promise<std::pair<unsigned int, bool>>());
+  std::future<std::pair<unsigned int, bool>> future = promise->get_future();
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, SendCallback(), lane,
+               [promise](unsigned int written, bool lost) { promise->set_value(std::make_pair(written, lost)); });
+  const std::pair<unsigned int, bool> ended = future.get();
+  if (given_up) {
+    *given_up = ended.second;
+  }
+  return ended.first;
 }
 
 void ThreadedClient::Core::send_serialized_with_callback(std::string serialized, bool all, float timeout,
@@ -607,16 +668,26 @@ void ThreadedClient::Core::send_serialized_with_callback(std::string serialized,
   _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, done, lane);
 }
 
+void ThreadedClient::Core::send_serialized_and_notify(std::string serialized, bool all, float timeout,
+                                                      FlushedCallback done, LanePtr lane) {
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, SendCallback(), lane,
+               done);
+}
+
 // Hands a send to the io thread. Never blocks the caller: a plain post, so
 // callbacks may send. A flushing send carries a completion the io thread
 // calls once the message is written or the deadline passed.
 void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout,
-                                        SendCallback done, LanePtr lane) {
+                                        SendCallback done, LanePtr lane, FlushedCallback flushed) {
   basic_client_->check_not_orphaned();
   if (lane) {
     lane->check_not_inherited();  // here, not on the io thread, where it would throw into nobody
   }
-  if (_stopped()) {
+  // After shutdown() a send fails, but one made on the io thread while
+  // what was sent before is written out, a server's refusal of what still
+  // arrives say, goes out with it, placed at once.
+  const bool stopped = _stopped();
+  if (stopped && !_writing_out_here()) {
     MXTHROW(NotConnected());
   }
   PendingSendPtr pending(new PendingSend());
@@ -625,31 +696,22 @@ void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, b
   pending->wait = wait;
   pending->deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout * 1e6));
   pending->done = done;
+  pending->flushed = flushed;
   pending->lane = lane;
+  if (stopped) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    _place(pending);
+    return;
+  }
   _post([this, pending] {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (shut_down_) {
-      if (pending->done) {
-        _guarded([&] { pending->done(0); }, [] { return std::string("a send's callback"); });
-      }
+      basic_client_->report_drop(pending->raw, DropReason::SHUT_DOWN);  // posted just before the shutdown
+      _settle(pending, 0, /*given_up=*/true);
       return;
     }
     _place(pending);
   });
-}
-
-// A new send: numbered, then handed to BasicClient, which queues it or has
-// it wait for room; with no connection live, or others waiting for one
-// before it, it waits here for one to come up.
-void ThreadedClient::Core::_place(const PendingSendPtr& pending) {
-  pending->number = basic_client_->next_number();
-  if (pending->wait) {
-    _expire_at(pending);  // a flushing send ends at its deadline whatever happens
-  }
-  if (!waiting_any_.empty() || !_try_place(pending)) {
-    _wait_any(pending);
-  }
-  _settle(pending);
 }
 
 namespace {
@@ -661,120 +723,56 @@ float left_until(std::chrono::steady_clock::time_point deadline) {
 }
 }  // namespace
 
-// Hands `pending` to BasicClient: ALL to every live connection, ONE through
-// its lane or round robin. False when no connection is live; true when it
-// went, whether queued or waiting for room, or was refused (a pinned lane
-// whose connection is gone).
-bool ThreadedClient::Core::_try_place(const PendingSendPtr& pending) {
-  const float timeout = left_until(pending->deadline);
-  if (pending->all) {
-    std::vector<Tracker> trackers;
-    if (!basic_client_->schedule_all(pending->raw, NULL, timeout, pending->number, &trackers)) {
-      return false;
-    }
-    for (const Tracker& tracker : trackers) {
-      _queued(pending, tracker);
-    }
-    return true;
-  }
-  ConnectionWrapper used;
-  bool refused = false;
-  Tracker tracker = _schedule(pending->raw, pending->lane, &used, &refused, timeout, pending->number);
-  if (tracker) {
-    _queued(pending, tracker);
-    return true;
-  }
-  if (refused) {
-    _refuse(pending);
-    return true;
-  }
-  return false;
-}
-
-// A copy of `pending` is with BasicClient: a flushing send follows it until
-// it is written or lost.
-void ThreadedClient::Core::_queued(const PendingSendPtr& pending, const Tracker& tracker) {
-  if (pending->wait && pending->done) {
-    pending->trackers.push_back(tracker);
-    ++pending->in_queue;
-    tracked_sends_[tracker.get()] = pending;
-  }
-}
-
-// `pending` waits for a connection to come up, in order; BasicClient holds
-// its place for flush_all().
-void ThreadedClient::Core::_wait_any(const PendingSendPtr& pending) {
-  waiting_any_.push_back(pending);
-  pending->waiting = true;
-  basic_client_->hold(pending->number, 1);
-  if (!pending->expiring) {
+// A new send: numbered and handed to BasicClient, which queues it, has it
+// wait for room, or holds it until a connection comes up, and follows it
+// to its end for `done` (BasicClient::send), which a message given up on
+// ends with 0. A flushing send (`wait`) also ends at its deadline,
+// whatever its message does, a timeout rather than a message given up on:
+// the message waits ROOM_GRACE_SECONDS longer, as a synchronous flushing
+// send's does, and is dropped then. A pinned lane whose connection is
+// gone takes nothing: the message is dropped and reported.
+void ThreadedClient::Core::_place(const PendingSendPtr& pending) {
+  pending->number = basic_client_->next_number();
+  if (pending->wait) {
     _expire_at(pending);
   }
-}
-
-// `pending` no longer waits for a connection: placed, dropped or ended.
-void ThreadedClient::Core::_unwait(const PendingSendPtr& pending) {
-  if (pending->waiting) {
-    pending->waiting = false;
-    basic_client_->release(pending->number, 1);
+  BasicClient::SendCallback followed;
+  if (pending->done || pending->flushed) {
+    followed = [this, pending](unsigned int written) {
+      MX_DCHECK_RUN_ON(&io_thread_);
+      _settle(pending, written, /*given_up=*/written == 0);
+    };
+  }
+  const float timeout = left_until(pending->deadline) + (pending->wait ? ROOM_GRACE_SECONDS : 0.0f);
+  if (!basic_client_->send(pending->raw, pending->all, pending->lane, timeout, pending->number, NULL, NULL, followed)) {
+    _refuse(pending);
+    _settle(pending, 0, /*given_up=*/true);
   }
 }
 
 // A pinned lane's connection is gone: the message goes nowhere.
 void ThreadedClient::Core::_refuse(const PendingSendPtr& pending) {
-  if (!pending->wait) {
-    MX_LOG(WARNING, MEDIUMVERBOSITY,
-           CTX("ThreadedClient") TEXT("message dropped: the pinned lane's connection is gone"));
-  }
+  basic_client_->report_drop(pending->raw, DropReason::CONNECTION_LOST);
   pending->over = true;
 }
 
-// A flushing message lost with its connection goes through another, the
-// way the synchronous Client's flush sends it again; a pinned lane's has
-// nowhere else to go.
-void ThreadedClient::Core::_retry(const PendingSendPtr& pending) {
-  if (pending->over || (pending->lane && pending->lane->pinned())) {
+// A send's end, once: `done` hears the copies written, 1 at the first, or
+// 0 when none was, by the deadline or ever, and `flushed` whether the
+// message was given up on as well; what follows is not heard.
+void ThreadedClient::Core::_settle(const PendingSendPtr& pending, unsigned int written, bool given_up) {
+  pending->over = true;
+  if (pending->flushed) {
+    FlushedCallback flushed;
+    flushed.swap(pending->flushed);
+    _guarded([&] { flushed(written, given_up); }, [] { return std::string("a send's callback"); });
     return;
   }
-  ++retries_;
-  if (_try_place(pending)) {
-    return;
-  }
-  // No connection is live: it waits for one, older than what was sent after it.
-  std::deque<PendingSendPtr>::iterator at =
-      std::upper_bound(waiting_any_.begin(), waiting_any_.end(), pending->number,
-                       [](std::uint64_t number, const PendingSendPtr& other) { return number < other->number; });
-  waiting_any_.insert(at, pending);
-  pending->waiting = true;
-  basic_client_->hold(pending->number, 1);
-}
-
-// A flushing send's end, once there is one: a copy written (ONE: the
-// message), nothing left that could be, or the send ended (refused, or its
-// deadline passed); `done` hears how many copies were written. What an ALL
-// send still has waiting for room goes out all the same, unfollowed.
-void ThreadedClient::Core::_settle(const PendingSendPtr& pending) {
   if (!pending->done) {
-    return;
-  }
-  const bool nothing_left = pending->in_queue == 0 && !pending->waiting;
-  if (pending->sent == 0 && !nothing_left && !pending->over) {
     return;
   }
   SendCallback done;
   done.swap(pending->done);
-  _untrack(pending);
-  _guarded([&] { done(pending->sent); }, [] { return std::string("a send's callback"); });
-}
-
-// A flushing send is not followed any more: its queued copies go out, or
-// not, unwatched.
-void ThreadedClient::Core::_untrack(const PendingSendPtr& pending) {
-  for (const Tracker& tracker : pending->trackers) {
-    tracked_sends_.erase(tracker.get());
-  }
-  pending->trackers.clear();
-  pending->in_queue = 0;
+  _guarded([&] { done(written); }, [] { return std::string("a send's callback"); });
 }
 
 // One _fill() on its way, however many events asked for it.
@@ -792,68 +790,11 @@ void ThreadedClient::Core::_post_fill() {
   });
 }
 
-// A connection came up: what waited for one goes to BasicClient, in order,
-// and the queries that waited start again.
+// A connection came up: the queries that waited for one start again. What
+// was sent meanwhile BasicClient placed itself.
 void ThreadedClient::Core::_fill() {
-  while (!waiting_any_.empty()) {
-    PendingSendPtr pending = waiting_any_.front();
-    if (pending->over) {
-      waiting_any_.pop_front();  // ended while it waited
-      continue;
-    }
-    ++retries_;
-    if (!_try_place(pending)) {
-      break;  // gone again already
-    }
-    waiting_any_.pop_front();
-    _unwait(pending);
-    _settle(pending);
-  }
   if (!waiting_queries_.empty()) {
     _restart_waiting_queries();
-  }
-}
-
-// A tracked frame was written or lost (the observer, from inside the
-// connection's handlers): noted, and handled in one pass per loop turn.
-void ThreadedClient::Core::_on_tracked(const std::shared_ptr<SendState>& state, bool written) {
-  tracked_events_.emplace_back(state, written);
-  if (tracked_posted_) {
-    return;
-  }
-  tracked_posted_ = true;
-  _post([this] {
-    MX_DCHECK_RUN_ON(&io_thread_);
-    tracked_posted_ = false;
-    if (shut_down_) {
-      tracked_events_.clear();
-      return;
-    }
-    _process_tracked();
-  });
-}
-
-// The flushing sends whose copies were written or lost: settled, or, lost,
-// sent again through another connection.
-void ThreadedClient::Core::_process_tracked() {
-  std::vector<std::pair<std::shared_ptr<SendState>, bool>> events;
-  events.swap(tracked_events_);
-  for (const std::pair<std::shared_ptr<SendState>, bool>& event : events) {
-    std::unordered_map<const SendState*, PendingSendPtr>::iterator found = tracked_sends_.find(event.first.get());
-    if (found == tracked_sends_.end()) {
-      continue;  // a flush's mark, or a send no longer followed
-    }
-    PendingSendPtr pending = found->second;
-    tracked_sends_.erase(found);
-    pending->trackers.erase(std::remove(pending->trackers.begin(), pending->trackers.end(), event.first),
-                            pending->trackers.end());
-    --pending->in_queue;
-    if (event.second) {
-      ++pending->sent;
-    } else if (!pending->all) {
-      _retry(pending);
-    }
-    _settle(pending);
   }
 }
 
@@ -880,11 +821,11 @@ void ThreadedClient::Core::_expire_at(const PendingSendPtr& pending) {
 }
 
 // Sets the timer to the earliest deadline that still matters, if any: a
-// flushing send not settled, or a send waiting for a connection.
+// flushing send not settled.
 void ThreadedClient::Core::_arm_expiry() {
   while (!expiring_.empty()) {
     PendingSendPtr send = expiring_.front().send.lock();
-    if (send && !send->over && (send->done || send->waiting)) {
+    if (send && !send->over && (send->done || send->flushed)) {
       break;
     }
     std::pop_heap(expiring_.begin(), expiring_.end());
@@ -909,18 +850,17 @@ void ThreadedClient::Core::_arm_expiry() {
   expiry_timer_->expires_at(next);  // cancels a wait set for another time
   expiry_timer_->async_wait([this](const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error != asio::error::operation_aborted && !shut_down_) {
+    if (error != asio::error::operation_aborted && !torn_down_) {
       expiry_armed_ = std::chrono::steady_clock::time_point::max();
       _expire();
     }
   });
 }
 
-// The deadline timer: a send that waited for a connection past its deadline
-// is dropped, and a flushing send reports what was written by then.
+// The deadline timer: a flushing send reports what was written by then.
+// What it sent waits on in BasicClient within its own timeout.
 void ThreadedClient::Core::_expire() {
   const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-  std::size_t dropped = 0;
   while (!expiring_.empty() && expiring_.front().deadline <= now) {
     PendingSendPtr pending = expiring_.front().send.lock();
     std::pop_heap(expiring_.begin(), expiring_.end());
@@ -928,19 +868,7 @@ void ThreadedClient::Core::_expire() {
     if (!pending || pending->over) {
       continue;
     }
-    if (pending->waiting) {
-      ++dropped;
-      _unwait(pending);
-    }
-    pending->over = true;
-    _settle(pending);
-  }
-  while (!waiting_any_.empty() && waiting_any_.front()->over) {
-    waiting_any_.pop_front();
-  }
-  if (dropped) {
-    MX_LOG(WARNING, MEDIUMVERBOSITY,
-           CTX("ThreadedClient") TEXT(repr(dropped) + " message(s) dropped: no connection came up in time"));
+    _settle(pending, 0, /*given_up=*/false);  // out of time
   }
   _arm_expiry();
 }
@@ -1062,7 +990,7 @@ ThreadedClient::Result ThreadedClient::Core::query(const MultiplexerMessage& msg
   return query(msg, timeout, std::make_shared<Lane>(connection), probe);
 }
 
-void ThreadedClient::Core::shutdown() {
+void ThreadedClient::Core::shutdown(float timeout) {
   if (orphaned()) {
     _orphan_teardown();
     return;
@@ -1074,12 +1002,11 @@ void ThreadedClient::Core::shutdown() {
     }
     stopped_ = true;
   }
-  _post([this] {
+  _post([this, timeout] {
     MX_DCHECK_RUN_ON(&io_thread_);
     shut_down_ = true;
     MX_LOG(DEBUG, HIGHVERBOSITY,
-           CTX("ThreadedClient") TEXT("shutting down: " + repr(in_flight_.size()) + " queries in flight, " +
-                                      repr(waiting_any_.size()) + " messages waiting for a connection"));
+           CTX("ThreadedClient") TEXT("shutting down: " + repr(in_flight_.size()) + " queries in flight"));
     // A callback that throws is logged and the others still run
     // (_guarded): the teardown below must happen, or the io thread runs on
     // and join() waits for good.
@@ -1089,41 +1016,30 @@ void ThreadedClient::Core::shutdown() {
         _finish(in_flight, SHUT_DOWN, NULL);
       }
     }
-    // Every flushing send not settled yet hears 0, queued or waiting.
-    std::vector<PendingSendPtr> sends(waiting_any_.begin(), waiting_any_.end());
-    for (const auto& tracked : tracked_sends_) {
-      sends.push_back(tracked.second);
-    }
-    waiting_any_.clear();
-    tracked_sends_.clear();
-    tracked_events_.clear();
     waiting_queries_.clear();
-    expiring_.clear();
+    waiting_ended_ = 0;
+    // A connect() still waiting ends: nothing new comes up for this client.
     asio::error_code ignored;
-    if (expiry_timer_) {
-      expiry_timer_->cancel(ignored);
-    }
-    for (const PendingSendPtr& send : sends) {
-      if (send->done) {
-        SendCallback done;
-        done.swap(send->done);
-        _guarded([&] { done(0); }, [] { return std::string("a send's callback, on shutdown"); });
-      }
-    }
-    // A flush_all() or connect() still waiting ends: nothing goes out now.
-    std::vector<std::shared_ptr<FlushWait>> flushes = flushes_;
-    for (const std::shared_ptr<FlushWait>& flush : flushes) {
-      _end_flush(flush, false);
-    }
     for (const std::shared_ptr<ConnectWaiter>& waiter : connects_) {
       waiter->timer->cancel(ignored);
       waiter->done->set_value(false);
     }
     connects_.clear();
-    basic_client_->shutdown();
-    work_.reset();
-    MX_LOG(DEBUG, HIGHVERBOSITY,
-           CTX("ThreadedClient") TEXT("shut down; the io thread ends when its handlers are done"));
+    if (timeout <= 0) {
+      _teardown();
+      return;
+    }
+    // What was sent before is written first: the connections close once it
+    // is, or at `timeout`.
+    _write_out();
+    drain_timer_.reset(new asio::steady_timer(io_service_));
+    drain_timer_->expires_after(std::chrono::microseconds(static_cast<long>(timeout * 1e6)));
+    drain_timer_->async_wait([this](const asio::error_code& error) {
+      MX_DCHECK_RUN_ON(&io_thread_);
+      if (error != asio::error::operation_aborted) {
+        _teardown();
+      }
+    });
   });
   if (io_thread_.is_current()) {
     // From a callback, or from the destructor of a handle whose last
@@ -1135,6 +1051,69 @@ void ThreadedClient::Core::shutdown() {
     return;
   }
   thread_.join();
+}
+
+// The end of a shutdown, once, after its drain: a send BasicClient still
+// follows hears its end from there, written, or 0 for what it drops and
+// reports, at the latest when the io thread ends (end_follows); a
+// flush_all() still waiting ends; the connections close, and the io
+// thread ends once its handlers are done.
+// The shutdown's write-out: what was sent before is written, and then
+// what the io thread sent meanwhile, a flush again while anything newer
+// was sent, until drain_timer_ ends it; then the teardown. A flush ends
+// from wherever its last frame was written, a connection's handler maybe,
+// so what follows it is posted.
+void ThreadedClient::Core::_write_out() {
+  const std::uint64_t sent = basic_client_->last_number();
+  drain_ = basic_client_->begin_flush([this, sent](bool) {
+    _post([this, sent] {
+      MX_DCHECK_RUN_ON(&io_thread_);
+      if (torn_down_) {
+        return;
+      }
+      if (basic_client_->last_number() != sent) {
+        _write_out();
+      } else {
+        _teardown();
+      }
+    });
+  });
+}
+
+// Whether this is the io thread while shutdown() writes out what was sent
+// before: a send made here then goes out with it.
+bool ThreadedClient::Core::_writing_out_here() {
+  if (!io_thread_.is_current()) {
+    return false;
+  }
+  MX_DCHECK_RUN_ON(&io_thread_);
+  return !torn_down_;
+}
+
+void ThreadedClient::Core::_teardown() {
+  if (torn_down_) {
+    return;
+  }
+  torn_down_ = true;
+  asio::error_code ignored;
+  if (drain_timer_) {
+    drain_timer_->cancel(ignored);
+  }
+  if (drain_) {
+    basic_client_->end_flush(drain_);
+    drain_.reset();
+  }
+  expiring_.clear();
+  if (expiry_timer_) {
+    expiry_timer_->cancel(ignored);
+  }
+  std::vector<std::shared_ptr<FlushWait>> flushes = flushes_;
+  for (const std::shared_ptr<FlushWait>& flush : flushes) {
+    _end_flush(flush, false);
+  }
+  basic_client_->shutdown();
+  work_.reset();
+  MX_LOG(DEBUG, HIGHVERBOSITY, CTX("ThreadedClient") TEXT("shut down; the io thread ends when its handlers are done"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +1291,7 @@ void ThreadedClient::Core::_wait_for_connection(const InFlightPtr& in_flight) {
 void ThreadedClient::Core::_restart_waiting_queries() {
   std::deque<InFlightPtr> pass;
   pass.swap(waiting_queries_);
+  waiting_ended_ = 0;
   for (const InFlightPtr& in_flight : pass) {
     in_flight->listed = false;
     if (in_flight->stage != InFlight::WAITING || !in_flight->callback) {
@@ -1576,6 +1556,32 @@ void ThreadedClient::Core::_finish(InFlightPtr in_flight, Outcome outcome, const
     _guarded([&] { callback(result); },
              [&] { return "the callback of a query of type " + repr(in_flight->prototype.type()); });
   }
+  if (in_flight->listed) {
+    in_flight->prototype.Clear();  // its request goes now, its entry when the list is cleared out
+    ++waiting_ended_;
+    _clear_out_waiting();
+  }
+}
+
+// The waiting queries that ended are cleared out once they are as many as
+// those still waiting and 64 more, or none waits any more: however long no
+// connection comes up, the list holds what waits and a bounded rest, at an
+// amortized constant cost per query.
+void ThreadedClient::Core::_clear_out_waiting() {
+  const std::size_t live = waiting_queries_.size() - waiting_ended_;
+  if (live != 0 && waiting_ended_ < live + 64) {
+    return;
+  }
+  waiting_queries_.erase(std::remove_if(waiting_queries_.begin(), waiting_queries_.end(),
+                                        [](const InFlightPtr& in_flight) {
+                                          if (in_flight->callback) {
+                                            return false;  // waiting still
+                                          }
+                                          in_flight->listed = false;
+                                          return true;
+                                        }),
+                         waiting_queries_.end());
+  waiting_ended_ = 0;
 }
 
 }  // namespace multiplexer
