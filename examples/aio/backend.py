@@ -14,6 +14,7 @@ class ChatServer(BaseMultiplexerServer):
     """Upper-cases what it is asked; a "shout" goes to everyone as well."""
 
     def handle_message(self, mxmsg):
+        """The line upper-cased to its sender; after "shout ", the rest to every gateway first."""
         line = mxmsg.message.decode(errors="replace")
         if line.startswith("shout "):
             self.send_message(message=line[6:].upper().encode(), type=types.CHAT_BROADCAST, to=0, references=0)
@@ -21,6 +22,7 @@ class ChatServer(BaseMultiplexerServer):
 
 
 def main() -> None:
+    """The multiplexers' addresses from the command line: serve until killed."""
     addresses = [(host, int(port)) for host, port in (address.rsplit(":", 1) for address in sys.argv[1:])]
     ChatServer(addresses, type=peers.CHAT_SERVER).serve_forever()
 
