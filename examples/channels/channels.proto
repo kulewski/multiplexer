@@ -1,0 +1,20 @@
+// The one payload of the channel layer. Compiled once with `protoc
+// --python_out=. --pyi_out=. channels.proto`; the generated channels_pb2.py
+// is committed next to it. The message itself, a dict as Channels defines
+// it, is msgpack inside, as channels_redis carries it.
+syntax = "proto3";
+
+package mxchannels;
+
+// CHANNEL_SEND carries the channel, CHANNEL_GROUP_SEND the group. `seq`
+// numbers what one event loop of a process sends to the others, both
+// kinds, from 1, and `stream` tells that loop's numbers from another's: a
+// receiver delivers a stream's messages only in that order, so a repeat,
+// or a message a later one overtook at a multiplexer failing, is dropped.
+message ChannelEnvelope {
+  string channel = 1;
+  string group = 2;
+  bytes payload = 3;
+  uint64 stream = 4;
+  uint64 seq = 5;
+}

@@ -11,6 +11,7 @@
   "include": [
     "aio",
     "cache",
+    "channels",
     "echo",
     "inference"
   ],
@@ -46,6 +47,14 @@
       "extraPaths": [
         "cache",
         "cache/web",
+        ".venv/mxtree"
+      ]
+    },
+    {
+      "root": "channels",
+      "extraPaths": [
+        "channels",
+        "channels/web",
         ".venv/mxtree"
       ]
     },

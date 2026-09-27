@@ -1,0 +1,8 @@
+# What the example runs on: `pip install -r requirements.txt`. daphne is
+# the ASGI server `runserver` uses under Channels; websockets is only for
+# chat_cli.py, the command-line client of the walkthrough's steps.
+mx-multiplexer
+channels[daphne]
+msgpack
+protobuf
+websockets

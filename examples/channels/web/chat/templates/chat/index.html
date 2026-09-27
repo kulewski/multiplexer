@@ -1,0 +1,11 @@
+<!doctype html>
+<title>Chat rooms</title>
+<h1>Chat rooms</h1>
+<p>Which room? <input id="room" size="30"> <button id="go">Enter</button></p>
+<script>
+  const room = document.querySelector("#room");
+  room.focus();
+  const go = () => { if (room.value) window.location.pathname = "/" + room.value + "/"; };
+  document.querySelector("#go").onclick = go;
+  room.onkeyup = (event) => { if (event.key === "Enter") go(); };
+</script>
