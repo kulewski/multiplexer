@@ -34,6 +34,7 @@
 #include <atomic>
 #include <deque>
 #include <exception>
+#include <list>
 #include <memory>
 #include <string>
 
@@ -196,14 +197,18 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
-  // Set by the multiplexer once it knows the peer's type. A passive peer runs
-  // no loop between calls, so it is neither expected to send heartbeats nor
-  // sent more than one heartbeat per message it delivers (see
-  // _send_heartbit_now); cancelling the require timer is what exempts it.
-  // The same flag again changes nothing: a rules reload sets it on every
-  // connected peer, and re-arming the require timer each time would restart
-  // the drop of a peer gone silent, which reloads less than its 30 + 60 s
-  // apart would keep connected for good. start_rest() arms the timer.
+  // Set by the multiplexer once it knows the peer's type, and again by a
+  // rules reload. A passive peer runs no loop between calls, so it is
+  // neither expected to send heartbeats nor sent more than one heartbeat
+  // per message it delivers (see _send_heartbit_later); cancelling the
+  // require timer is what exempts it. A peer turned active is required to
+  // send from then on and sent a heartbeat every HEARTBIT_INTERVAL of
+  // silence, the send timer turned on if it was off; one turned passive
+  // is sent the heartbeat it is owed, if any, and then none. The same flag
+  // again changes nothing: a rules reload sets it on every connected peer,
+  // and re-arming the require timer each time would restart the drop of a
+  // peer gone silent, which reloads less than its 30 + 60 s apart would
+  // keep connected for good. start_rest() arms both timers.
   inline void set_is_passive(bool is_passive) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (is_passive == is_passive_) {
@@ -211,6 +216,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     is_passive_ = is_passive;
     _require_heartbit_later();
+    if (heartbit_timer_off_) {
+      _send_heartbit_later();
+    }
   }
 
   // Which routing paths reach this peer (Multiplexer.proto's Routing): set
@@ -405,9 +413,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // Returns what the manager's traits say a scheduling result is: a tribool
   // tracker for the client (unknown until written or lost), a bool for the
   // multiplexer. A full queue drops the message with a warning, which is the
-  // only back-pressure there is; `force` bypasses that for protocol messages
-  // (welcome, heartbeat) and `asap` puts them right behind the frame being
-  // written so that a long queue cannot delay the handshake or a heartbeat.
+  // only back-pressure there is; `force` lets protocol messages (welcome,
+  // heartbeat, a status reply, a routing request) past a full queue, by
+  // FORCED_FRAMES_PAST_FULL_QUEUE frames at most, and `asap` puts them right
+  // behind the frame being written so that a long queue cannot delay the
+  // handshake or a heartbeat.
   typename MessagesBufferTraits::SchedulingResultFunctor::result_type schedule(std::shared_ptr<const RawMessage> msg,
                                                                                bool force = false, bool asap = false) {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -421,7 +431,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     Assert(msg->usability() == RawMessage::WRITING);
     Assert(!shuts_down_);
 
-    if (!force && outgoing_queue_full()) {
+    if (outgoing_queue_full() &&
+        (!force || outgoing_queue_.size() >= std::size_t(outgoing_queue_max_size_) + FORCED_FRAMES_PAST_FULL_QUEUE)) {
       // Per message, so off unless asked for: the manager, which knows the
       // peer and the message, says it (the multiplexer through LogSummary).
       MX_LOG(DEBUG, CHATTERBOX, TEXT("outgoing queue full, dropping message"));
@@ -501,7 +512,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
    * frame every interval. require_heartbit_timer_ is re-armed on every frame
    * read and drops the connection in two phases, NO_HEARTBIT_SO_PREPARE_DROP
    * then NO_HEARTBIT_SO_REALLY_DROP, when nothing arrives. Both are off for
-   * passive peers, in the sense described at set_is_passive(). */
+   * passive peers, in the sense described at set_is_passive(): the send
+   * timer runs for one only while a heartbeat is owed, so an idle passive
+   * connection costs no wakeup at all. */
   template <typename WaitHandler>
   void _do_later(asio::steady_timer& timer, const float seconds, WaitHandler handler) {
     // timer.cancel();
@@ -509,12 +522,30 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     timer.async_wait(handler);
   }
 
+  // Arms the send timer, HEARTBIT_INTERVAL from now, with nothing queued;
+  // with something queued the write in progress calls this again when the
+  // queue is empty. To a passive peer, at most one heartbeat per frame
+  // received: it reads only inside calls, and a stream of heartbeats would
+  // fill its socket buffer and then its incoming queue while it is away.
+  // One owed nothing leaves the timer off, heartbit_timer_off_, until it
+  // sends a frame (_handle_read_body) or its type turns active
+  // (set_is_passive). Not on a connection that is no longer living, whose
+  // reading to the end bounds itself with this timer (_read_to_the_end).
   void _send_heartbit_later() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (outgoing_queue_.empty()) {
-      _do_later(send_heartbit_timer_, HEARTBIT_INTERVAL,
-                [self = this->shared_from_this()](const asio::error_code& error) { self->_send_heartbit_now(error); });
+    if (!is_living_) {
+      return;
     }
+    heartbit_timer_off_ = false;
+    if (!outgoing_queue_.empty()) {
+      return;
+    }
+    if (is_passive_ && !should_send_heartbit_) {
+      heartbit_timer_off_ = true;
+      return;
+    }
+    _do_later(send_heartbit_timer_, HEARTBIT_INTERVAL,
+              [self = this->shared_from_this()](const asio::error_code& error) { self->_send_heartbit_now(error); });
   }
 
   void _send_heartbit_now(const asio::error_code& error) {
@@ -525,12 +556,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     if (error == asio::error::operation_aborted || shuts_down_ || !is_living_) {
       return;
     }
-    // To a passive peer, at most one heartbeat per frame received: it reads
-    // only inside calls, and a stream of heartbeats would fill its socket
-    // buffer and then its incoming queue while it is away.
+    // A passive peer is sent the heartbeat it is owed (_send_heartbit_later);
+    // one owed nothing, turned passive while the timer ran, leaves it off.
     if (is_passive_) {
       if (!should_send_heartbit_) {
-        _send_heartbit_later();
+        heartbit_timer_off_ = true;
         return;
       }
       should_send_heartbit_ = false;
@@ -661,6 +691,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
     } else {
       _require_heartbit_later();
+      if (heartbit_timer_off_) {
+        _send_heartbit_later();  // the heartbeat this frame is owed
+      }
       // Whatever handling the frame throws, the connection reads on: the
       // exception used to leave it registered, writing and never reading
       // again. The clients catch their callbacks' own exceptions; this is
@@ -960,6 +993,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     return managers_private_data_;
   }
 
+  // Where the manager keeps this connection among those of its peer type,
+  // while it is registered, so that unregistering takes it out in O(1).
+  typename std::list<weak_pointer>::iterator type_list_place;
+  bool in_type_list = false;
+
   /* members */
  private:
   asio::ip::tcp::socket socket_;
@@ -978,7 +1016,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   float close_bound_;
   std::uint64_t dropped_while_closing_;
   std::weak_ptr<ConnectionsManagerImplementation> manager_;
-  bool should_send_heartbit_;
+  bool should_send_heartbit_;  // a frame arrived since the last heartbeat: a passive peer is owed one
+  // The send timer neither waits nor will be armed by a write in progress:
+  // a passive peer owed nothing (see _send_heartbit_later).
+  bool heartbit_timer_off_ = false;
 
  public:
   // Makes the calling thread the one this connection is driven from, for a

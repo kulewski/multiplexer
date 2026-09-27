@@ -5,9 +5,12 @@
 #define MX_MXCONTROL_TASK_H_
 
 #include <asio/io_service.hpp>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <ostream>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "lib/logging/logging.h"
@@ -60,6 +63,10 @@ class Task {
    * connected to every address given.
    */
   void _add_multiplexer_client_options(mx::options::Options&);
+
+  // The --multiplexer addresses as (host, port), 127.0.0.1 for an empty
+  // host; a malformed one is logged and left out.
+  std::vector<std::pair<std::string, std::uint16_t>> _multiplexer_addresses() const;
 
   // For subcommands that must reach every replica: connects `client` to
   // every address each of `addresses` (host:port; a name resolves to all

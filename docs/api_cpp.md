@@ -554,7 +554,12 @@ client.shutdown();
   addressed to this peer, and a `DELIVERY_ERROR` for a message that was
   not a query, an event whose rule reports errors, one from each
   multiplexer that could not deliver it. Without one such messages are
-  logged and dropped; nothing is queued. A late reply to a
+  logged and dropped; nothing is queued. A sink says what it drops
+  through `drop_lines()`, on the io thread, at the library's rate for
+  such lines, the first of a kind at once and the rest as a count about
+  once a second ([multiplexer/log_summary.h](../multiplexer/log_summary.h)),
+  its kinds numbered from `BasicClient::OWN_LINES`: so `mxcontrol
+  streamlogs` says that no log receiver took its chunks. A late reply to a
   query that already ended, `REQUEST_RECEIVED` for an untracked query, a
   `PING`, which the client answers itself, and a
   `BACKEND_FOR_PACKET_SEARCH`, answered with a `PING` when addressed to

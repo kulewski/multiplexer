@@ -9,3 +9,15 @@ cc_library(
         "//lib:fd",
     ],
 )
+
+cc_test(
+    name = "stream_test",
+    size = "medium",
+    srcs = ["stream_test.cc"],
+    deps = [
+        ":stream",
+        "//lib/logging",
+        "//lib/logging:logging_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

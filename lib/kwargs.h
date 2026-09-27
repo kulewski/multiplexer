@@ -13,7 +13,10 @@ namespace mx {
 namespace util {
 namespace kwargs {
 
-struct KeyError : mx::Exception {};
+// The key Kwargs::get() without a default did not find.
+struct KeyError : mx::Exception {
+  explicit KeyError(const std::string& key) : mx::Exception("no key '" + key + "'") {}
+};
 
 struct Kwargs;
 struct KwargsKeys;
@@ -37,25 +40,24 @@ struct Kwargs {
     return *this;
   }
 
-  // The value under `key` as T, or `default_` when absent.
+  // The value under `key` as T, or `default_` when absent: a lookup, no
+  // KeyError thrown and caught on the way, which ABORT_ON_EXCEPTION would
+  // stop at.
   template <typename T>
   T get(const std::string& key, const T& default_) {
-    try {
-      return get<T>(key);
-    } catch (const KeyError&) {
-      return default_;
-    }
+    KwValuesMap::const_iterator pos = __values.find(key);
+    return pos != __values.end() ? __cast<T>(pos) : default_;
   }
 
-  // The value under `key` as T; KeyError when absent, bad_any_cast on a type mismatch.
+  // The value under `key` as T; a KeyError naming it when absent,
+  // bad_any_cast on a type mismatch.
   template <typename T>
   T get(const std::string& key) {
     KwValuesMap::const_iterator pos = __values.find(key);
-    if (pos != __values.end()) {
-      return __cast<T>(pos);
-    } else {
-      throw KeyError();
+    if (pos == __values.end()) {
+      MXTHROW(KeyError(key));
     }
+    return __cast<T>(pos);
   }
 
   // get<T> without the presence check: the key must exist.

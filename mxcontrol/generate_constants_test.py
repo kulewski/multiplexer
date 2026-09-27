@@ -1,6 +1,7 @@
-"""`mxcontrol generate_constants` writes the files a Bazel build writes: the
-Python module and its stub byte for byte, the C++ header but for its random
-include guard; it refuses a rules file with a repeated name, and a call
+"""`mxcontrol generate_constants` writes the files a Bazel build writes, byte
+for byte: the Python module, its stub, and the C++ header, whose include
+guard comes from the rules fingerprint where it was random, read from
+/dev/urandom; it refuses a rules file with a repeated name, and a call
 that names no output."""
 
 import os
@@ -47,8 +48,7 @@ class GenerateConstantsTest(unittest.TestCase):
         self.assertEqual([paths["py"], paths["pyi"], paths["h"]], result.stdout.split())
         self.assertEqual(read(GENERATED["py"]), read(paths["py"]))
         self.assertEqual(read(GENERATED["pyi"]), read(paths["pyi"]))
-        without_guard = lambda text: [line for line in text.splitlines() if "GENERATED_" not in line]
-        self.assertEqual(without_guard(read(GENERATED["h"])), without_guard(read(paths["h"])))
+        self.assertEqual(read(GENERATED["h"]), read(paths["h"]))
         self.assertIn("RULES_FINGERPRINT", read(paths["py"]))
 
     def test_one_file_alone(self):

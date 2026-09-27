@@ -358,6 +358,20 @@ cc_test(
 )
 
 cc_test(
+    name = "routing_index_test",
+    size = "small",
+    srcs = ["routing_index_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":multiplexer_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "threaded_client_test",
     size = "small",
     srcs = ["threaded_client_test.cc"],
@@ -709,6 +723,16 @@ py_test(
 )
 
 py_test(
+    name = "recording_read_test",
+    size = "small",
+    srcs = ["recording_read_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":recording",
+    ],
+)
+
+py_test(
     name = "frames_at_the_limit_test",
     size = "medium",
     srcs = ["frames_at_the_limit_test.py"],
@@ -718,6 +742,18 @@ py_test(
         ":mxclient",
         ":recording",
         ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "forced_frames_test",
+    size = "medium",
+    srcs = ["forced_frames_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
         "//multiplexer/testing",
     ],
 )
@@ -735,6 +771,17 @@ py_test(
 )
 
 py_test(
+    name = "all_types_test",
+    size = "small",
+    srcs = ["all_types_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "drop_lines_test",
     size = "medium",
     srcs = ["drop_lines_test.py"],
@@ -743,6 +790,17 @@ py_test(
         ":multiplexer_constants",
         ":mxclient",
         ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "keepalive_test",
+    size = "small",
+    srcs = ["keepalive_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":mxclient",
         "//multiplexer/testing",
     ],
 )
@@ -767,6 +825,18 @@ py_test(
     deps = [
         ":multiplexer_constants",
         ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "log_reader_gone_test",
+    size = "small",
+    srcs = ["log_reader_gone_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
         "//multiplexer/testing",
     ],
 )

@@ -3,6 +3,10 @@
 // translation unit so it inlines the way it did as header code.
 #include "multiplexer/server.h"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -150,6 +154,41 @@ void Server::_stop_if_done() {
   }
 }
 
+namespace {
+// Whether rules route to a peer type, ALL_TYPES included: never to a
+// reserved one, the controllers mxcontrol connects as being the only such
+// peers there are, which only answers and addressed messages reach.
+bool routable(std::uint32_t peer_type) { return peer_type > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE; }
+
+// TCP keepalive on an accepted connection: the kernel probes it once it
+// has been silent NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL seconds, every
+// KEEPALIVE_PROBE_INTERVAL seconds, and closes it once the probes went
+// unanswered NO_HEARTBIT_SO_REALLY_DROP_INTERVAL seconds. A peer whose host
+// or network is gone gives its descriptor back after the 90 s the heartbeats
+// give an active peer, also a passive one and one that has not sent its
+// welcome, which nothing else asks; a live peer's kernel answers for it,
+// however long its program stays away. Best effort: an option the system
+// lacks keeps its default.
+void keep_alive(asio::ip::tcp::socket& socket) {
+  const int descriptor = socket.native_handle();
+#if defined(TCP_KEEPIDLE)
+  const int idle = static_cast<int>(NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL);
+  ::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+#endif
+#if defined(TCP_KEEPINTVL)
+  const int interval = static_cast<int>(KEEPALIVE_PROBE_INTERVAL);
+  ::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof interval);
+#endif
+#if defined(TCP_KEEPCNT)
+  const int probes = static_cast<int>(NO_HEARTBIT_SO_REALLY_DROP_INTERVAL / KEEPALIVE_PROBE_INTERVAL);
+  ::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof probes);
+#endif
+  (void)descriptor;
+  asio::error_code ignored;
+  socket.set_option(asio::socket_base::keep_alive(true), ignored);  // last: the timer starts with the times above
+}
+}  // namespace
+
 void Server::_start_accept() {
   Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
   acceptor_.async_accept(new_connection->socket(), [this, new_connection](const asio::error_code& error) {
@@ -180,6 +219,7 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
     // reading only, until the peer has introduced itself with
     // CONNECTION_WELCOME; routed traffic before that closes the connection
     accepted_[new_connection.get()] = new_connection;
+    keep_alive(new_connection->socket());
     new_connection->start_only_read();
   } else {
     // the connection is dropped, or -- in fact -- has never been established
@@ -482,10 +522,14 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
 
       if (rule.peer_type() == peers::ALL_TYPES) {
         for (ConnectionsByType::value_type& by_type : connections_by_type_) {
-          _schedule(meta_handler, by_type.second, rule, by_type.first);
+          if (routable(by_type.first)) {
+            _schedule(meta_handler, by_type.second, rule, by_type.first);
+          }
         }
       } else {
-        _schedule(meta_handler, connections_by_type_[rule.peer_type()], rule);
+        ConnectionsByType::iterator found = connections_by_type_.find(rule.peer_type());
+        ConnectionsList nobody;  // a type no peer has connected as stays out of the index
+        _schedule(meta_handler, found != connections_by_type_.end() ? found->second : nobody, rule);
       }
     }
       return true;
@@ -522,10 +566,17 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
   unsigned int scheduled = 0;
   if (rule.peer_type() == peers::ALL_TYPES) {
     for (ConnectionsByType::value_type& by_type : connections_by_type_) {
-      scheduled += _schedule(meta_handler, by_type.second, rule, by_type.first);
+      if (routable(by_type.first)) {
+        scheduled += _schedule(meta_handler, by_type.second, rule, by_type.first);
+      }
     }
   } else {
-    scheduled += _schedule(meta_handler, connections_by_type_[rule.peer_type()], rule);
+    // A rule, or a peer's override_rrules, may name any type: looking it up
+    // must not add it to the index, which every ALL_TYPES rule and search
+    // walks, and which a peer naming ever new types grew without bound.
+    ConnectionsByType::iterator found = connections_by_type_.find(rule.peer_type());
+    ConnectionsList nobody;
+    scheduled += _schedule(meta_handler, found != connections_by_type_.end() ? found->second : nobody, rule);
   }
 
   if (!scheduled) {
@@ -555,7 +606,9 @@ Server::Unrouted Server::_unrouted(const MultiplexerMessageDescription::RoutingR
   };
   if (rule.peer_type() == peers::ALL_TYPES) {
     for (const ConnectionsByType::value_type& by_type : connections_by_type_) {
-      look_at(by_type.second);
+      if (routable(by_type.first)) {
+        look_at(by_type.second);
+      }
     }
   } else {
     ConnectionsByType::const_iterator found = connections_by_type_.find(rule.peer_type());
@@ -1186,8 +1239,13 @@ void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   // Forced past a full queue: the one answer to one frame received, which
   // a peer waits for; pushed at the back, behind everything routed to the
-  // peer before it, as PEER_STATUS promises.
-  meta_handler.conn->schedule(raw, /*force=*/true);
+  // peer before it, as PEER_STATUS promises. A peer that sends control
+  // frames faster than it reads loses the answers past the forced frames'
+  // room (FORCED_FRAMES_PAST_FULL_QUEUE), logged, rather than growing its
+  // queue for good.
+  if (!meta_handler.conn->schedule(raw, /*force=*/true)) {
+    _dropped_queue_full(meta_handler, *meta_handler.conn);
+  }
 }
 
 }  // namespace multiplexer

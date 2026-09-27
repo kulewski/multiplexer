@@ -13,7 +13,7 @@ sequenceDiagram
     participant C as client
     participant M as multiplexer
     C->>M: TEST_UNROUTED (no rule)
-    M-->>C: DELIVERY_ERROR (is_known_type: false)
+    M-->>C: DELIVERY_ERROR (is_known_type: true, an entry without a rule)
     C->>M: BACKEND_FOR_PACKET_SEARCH
     M-->>C: DELIVERY_ERROR
     Note over C: OperationFailed, at once

@@ -36,6 +36,8 @@ import sys
 import time
 from typing import Any, Iterator
 
+from google.protobuf.message import DecodeError
+
 from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
 from multiplexer.mxclient import NotConnected, OperationTimedOut
 
@@ -58,18 +60,26 @@ class RulesMismatch(Exception):
     """The recording was made with a rules file other than the one the constants come from."""
 
 
-def _decode_varint(data: bytes, position: int) -> tuple[int, int]:
+class TruncatedRecording(Exception):
+    """The file ends partway through a record, or a record in it does not
+    parse: what a multiplexer leaves while it writes the file, or when it
+    dies. Raised after every whole record before it."""
+
+
+def _decode_varint(data: bytes, position: int) -> tuple[int, int] | None:
     """The base-128 varint at `position`: (value, position after it), as the
-    length prefix of every record in a recording is written."""
+    length prefix of every record in a recording is written; None when the
+    data ends inside it."""
     result = 0
     shift = 0
-    while True:
+    while position < len(data):
         byte = data[position]
         position += 1
         result |= (byte & 0x7F) << shift
         if not byte & 0x80:
             return result, position
         shift += 7
+    return None
 
 
 def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
@@ -78,16 +88,26 @@ def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -
     generated constants module of the rules file the multiplexer ran with,
     and so must every later `rules` record's, one for a file put in use
     while recording: RulesMismatch is raised there, after the records
-    before it were yielded."""
+    before it were yielded. A file that ends partway through a record, as
+    one a session is still writing or a multiplexer that died left can,
+    raises TruncatedRecording there, after every whole record."""
     with open(path, "rb") as recording:
         data = recording.read()
     position = 0
     first = True
     while position < len(data):
-        size, position = _decode_varint(data, position)
+        prefix = _decode_varint(data, position)
+        if prefix is None or prefix[1] + prefix[0] > len(data):
+            raise TruncatedRecording("%s ends partway through the record at byte %d" % (path, position))
+        size, start = prefix
         record = Record()
-        record.ParseFromString(data[position : position + size])
-        position += size
+        try:
+            record.ParseFromString(data[start : start + size])
+        except DecodeError as error:
+            raise TruncatedRecording(
+                "%s: the record at byte %d does not parse: %s" % (path, position, error)
+            ) from error
+        position = start + size
         if first:
             first = False
             if (
@@ -112,12 +132,24 @@ def read_many(paths: list[str], check_rules: bool = True, constants=multiplexer_
     """Every record of every file, merged by timestamp, each with
     `multiplexer_id` set from its file's header: the recordings of several
     multiplexers as one session. Clocks of different hosts differ, so the
-    order between multiplexers is as good as their clocks."""
+    order between multiplexers is as good as their clocks. A file that
+    ends partway through a record ends there, the others merge on to
+    their ends, and TruncatedRecording then names every such file."""
+    broken: list[str] = []
+
+    def advance(records: Iterator[Record]) -> Record | None:
+        """The stream's next record; None at its end, or where it breaks off, which is noted."""
+        try:
+            return next(records, None)
+        except TruncatedRecording as error:
+            broken.append(str(error))
+            return None
+
     streams = []
     for path in paths:
         records = read(path, check_rules=check_rules, constants=constants)
         multiplexer_id = 0
-        first = next(records, None)
+        first = advance(records)
         if first is None:
             continue
         if first.HasField("header"):
@@ -129,11 +161,13 @@ def read_many(paths: list[str], check_rules: bool = True, constants=multiplexer_
         if multiplexer_id and not record.multiplexer_id:
             record.multiplexer_id = multiplexer_id
         yield record
-        following = next(records, None)
+        following = advance(records)
         if following is None:
             del streams[index]
         else:
             streams[index] = (following, records, multiplexer_id)
+    if broken:
+        raise TruncatedRecording("; ".join(broken))
 
 
 def peer_name(peer_type: int, constants=multiplexer_constants) -> str:
@@ -312,12 +346,17 @@ def main(argv: list[str] | None = None) -> int:
     wanted_type = None
     if args.type is not None:
         wanted_type = int(args.type) if args.type.isdigit() else getattr(constants.types, args.type)
-    for record in read_many(args.paths, check_rules=not args.no_rules_check):
-        if wanted_type is not None and not (record.HasField("routed") and record.routed.type == wanted_type):
-            continue
-        if args.peer is not None and not involves_peer(record, args.peer):
-            continue
-        print(describe(record))
+    try:
+        for record in read_many(args.paths, check_rules=not args.no_rules_check):
+            if wanted_type is not None and not (record.HasField("routed") and record.routed.type == wanted_type):
+                continue
+            if args.peer is not None and not involves_peer(record, args.peer):
+                continue
+            print(describe(record))
+    except TruncatedRecording as error:
+        # Printed up to there, it must not pass for the whole recording.
+        print("recording: %s; printed up to it" % error, file=sys.stderr)
+        return 1
     return 0
 
 

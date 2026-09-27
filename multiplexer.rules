@@ -36,7 +36,6 @@ peer {
 peer {
     type: 108
     name: "LOG_STREAMER"
-    is_passive: true
 }
 
 peer {

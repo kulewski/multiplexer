@@ -231,6 +231,7 @@ class Mx:
         rules_check_interval: float | None = None,
         prefix: str = "",
         drain_seconds: float | None = None,
+        logging_fd: int | None = None,
     ):
         self.index = index
         self.rules = rules
@@ -248,6 +249,9 @@ class Mx:
         # --drain-seconds: how long a stop goes on sending what is queued;
         # None keeps the multiplexer's default, 0 stops at once.
         self.drain_seconds = drain_seconds
+        # --logging-fd: a descriptor of this process, passed on to the
+        # multiplexer, that gets its binary log stream.
+        self.logging_fd = logging_fd
         self.proc: subprocess.Popen | None = None
         stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
         self.log_path = stem + ".log"
@@ -308,8 +312,14 @@ class Mx:
             command += ["--rules-check-interval", str(self.rules_check_interval)]
         if self.drain_seconds is not None:
             command += ["--drain-seconds", str(self.drain_seconds)]
+        passed: tuple[int, ...] = ()
+        if self.logging_fd is not None:
+            command += ["--logging-fd", str(self.logging_fd)]
+            passed = (self.logging_fd,)
         self._log = open(self.log_path, "ab")
-        self.proc = subprocess.Popen(command, stdout=self._log, stderr=self._log, env=child_env(native=True))
+        self.proc = subprocess.Popen(
+            command, stdout=self._log, stderr=self._log, env=child_env(native=True), pass_fds=passed
+        )
         deadline = time.time() + timeout
         while not os.path.exists(self.port_file):
             if self.proc.poll() is not None:

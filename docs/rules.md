@@ -35,7 +35,9 @@ peer {
   refer to peer types by this name.
 - `comment`: optional, for the reader.
 - `queue_size`: how many messages the multiplexer will hold for one
-  connection of this type before dropping new ones. Default 1024.
+  connection of this type before dropping new ones. Default 1024. A file
+  that gives 0, which would hold none, is refused: the multiplexer does
+  not start with it, and a reload keeps the rules in use.
 - `is_passive`: true for peer types built on `SyncClient`,
   which runs the library's loop only inside calls. The multiplexer then
   does not expect heartbeats from them and does not drop them for
@@ -74,7 +76,9 @@ type {
 A routing rule has these fields:
 
 - `peer`: the name of the receiving peer type. The special name `ALL_TYPES`
-  means every peer type that has a connection.
+  means every peer type that has a connection, the reserved ones apart: the
+  controllers `mxcontrol` connects as get only answers and addressed
+  messages.
 - `whom`: `ANY` delivers to one connected peer of the type, round robin,
   skipping peers whose queue is full. `ALL` delivers to every connected peer
   of the type. Default `ANY`. The sender is not left out: a peer that sends
@@ -102,7 +106,7 @@ and never pass it to `handle_message`.
 | Peer type | Value | Meaning |
 |---|---|---|
 | `MULTIPLEXER` | 1 | what a multiplexer announces in its welcome |
-| `ALL_TYPES` | 2 | in a rule: every peer type |
+| `ALL_TYPES` | 2 | in a rule: every peer type but the reserved ones |
 | `RECORDING_CONTROLLER` | 3 | a peer that drives recording; accepted, as passive, only by a multiplexer started with `--recording-dir` or `--allow-tap`; defined in `Recording.proto`, not in the rules file |
 | `RULES_CONTROLLER` | 4 | what `mxcontrol rules` connects as; accepted, as passive, by every multiplexer; defined in `Multiplexer.proto`, not in the rules file |
 | `MAX_MULTIPLEXER_SPECIAL_PEER_TYPE` | 99 | end of the reserved range |
@@ -156,7 +160,7 @@ At build time `generate_constants`, and `mxcontrol generate_constants` for
 a build outside Bazel, refuses a file where a name or a number repeats. At
 start the multiplexer refuses a rule whose `peer` names no peer type, a
 file that does not parse, one without a peer type, or one that repeats a
-number or a peer name, and stops; a running multiplexer given such a file
+number or a name, and stops; a running multiplexer given such a file
 keeps the rules it has and says so ([changing the
 rules](operations.md#changing-the-rules)). A message whose type has no
 entry is dropped at run time and reported as a delivery error with

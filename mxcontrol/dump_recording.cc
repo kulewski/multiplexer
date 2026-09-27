@@ -96,7 +96,7 @@ std::string when(std::uint64_t timestamp_us) {
 // One recording being read: its stream, the record at its front, and the
 // multiplexer that wrote it, from its header.
 struct Stream {
-  explicit Stream(int fd) : input(fd, true), multiplexer_id(0), pending(false) {}
+  Stream(int fd, const std::string& file) : input(fd, true), path(file), multiplexer_id(0), pending(false) {}
   bool next() {
     record.Clear();
     pending = input.read(record);
@@ -106,6 +106,7 @@ struct Stream {
     return pending;
   }
   mx::protobuf::FileMessageInputStream input;
+  std::string path;
   multiplexer::Record record;
   std::uint64_t multiplexer_id;
   bool pending;
@@ -127,7 +128,7 @@ int DumpRecording::run() {
       std::cerr << "dump_recording: cannot open " << *file << "\n";
       return 1;
     }
-    streams.emplace_back(new Stream(fd));
+    streams.emplace_back(new Stream(fd, *file));
     streams.back()->next();
   }
   const bool several = streams.size() > 1;
@@ -197,7 +198,17 @@ int DumpRecording::run() {
     }
     earliest->next();
   }
-  return 0;
+  // A file whose reading broke off is said, after what it held before:
+  // printed up to there, it must not pass for the whole recording.
+  int broken = 0;
+  for (const std::unique_ptr<Stream>& stream : streams) {
+    if (stream->input.failed()) {
+      std::cerr << "dump_recording: " << stream->path
+                << ": a record cut short or garbled, or a read error; printed up to it\n";
+      broken = 1;
+    }
+  }
+  return broken;
 }
 
 }  // namespace mxcontrol

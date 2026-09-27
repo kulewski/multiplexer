@@ -122,9 +122,13 @@ static inline const char* logging_get_verbosity_name(const unsigned int verbosit
 /*
  * process_context()
  *	    Get context of the whole process as required for
- *	    MX_LOG(., ., context).
+ *	    MX_LOG(., ., context), a copy.
+ *
+ * The context and the verbosity may be set from any thread at any time,
+ * other threads logging meanwhile: each line takes the one or the other
+ * whole.
  */
-static inline const std::string& process_context() MX_ATTRIBUTE_ALWAYS_INLINE;
+static inline std::string process_context() MX_ATTRIBUTE_ALWAYS_INLINE;
 
 /*
  * set_maximal_logging_verbosity(for_level, minimal_verbosity)
@@ -157,7 +161,7 @@ void set_logging_file(const std::string& file);
 
 std::uint64_t create_log_id();
 
-static inline const std::string& process_context();
+static inline std::string process_context();
 static inline void set_process_context(const std::string& s);
 void set_process_context_program_name(const std::string& s);
 

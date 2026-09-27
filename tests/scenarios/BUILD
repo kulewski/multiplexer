@@ -37,6 +37,12 @@ mx_integration_test(
     scenario = "rules_reload_by_mxcontrol/rules_reload_by_mxcontrol.py",
 )
 
+# What an idle passive peer costs the multiplexer.
+mx_integration_test(
+    name = "idle_passive_peers_test",
+    scenario = "idle_passive_peers/idle_passive_peers.py",
+)
+
 # What a reload does to the peers already connected.
 mx_integration_test(
     name = "rules_reload_peers_test",

@@ -9,12 +9,16 @@ namespace mx {
 
 // Base of every exception thrown by this code: an explanation plus the
 // throw site, which MXTHROW fills in. With ABORT_ON_EXCEPTION set in the
-// environment, constructing one aborts instead, for a core dump at the
-// origin.
+// environment, constructing one with an explanation aborts instead, for a
+// core dump at the origin. One made without does not: the clients' own
+// outcomes are, a query's OperationTimedOut and the one every idle poll
+// of a backend ends in, which a program under the switch would otherwise
+// not outlive.
 struct Exception : public std::exception {
   static bool abort_on_exception();
   static void abort_on_exception(bool);
 
+  // No explanation, the throw site unknown until MXTHROW sets it.
   Exception() throw();
   explicit Exception(const std::string explanation, const std::string& file = "<unknown file>", int line = 0,
                      const std::string& function = "<unknown function>") throw();

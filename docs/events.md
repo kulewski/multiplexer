@@ -4,8 +4,10 @@ An event is a message nobody answers: `send_message()` in Python, and in C++
 `queue()` or `queue_all()` on `SyncClient`, `send()` or `send_all()` on
 `ThreadedClient`. The client chooses how many of its multiplexer
 connections carry the message; each multiplexer then delivers it to the
-backends its rules name. Nothing comes back unless the client sets
-`report_delivery_error` and delivery fails.
+backends its rules name. Nothing comes back unless no backend receives
+it: then the sender gets `DELIVERY_ERROR` when the rule says
+`report_delivery_error`, as it does by default, or, for a message
+addressed with `to`, when the message itself does.
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says

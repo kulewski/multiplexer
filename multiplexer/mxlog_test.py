@@ -1,10 +1,13 @@
-"""Unit tests for multiplexer.mxlog: entries with data must not fail, and
-the log streamer's child never returns into its caller's code."""
+"""Unit tests for multiplexer.mxlog: entries with data must not fail, the
+log streamer's child never returns into its caller's code, a worker forked
+from a streaming process that turns streaming on again streams to a
+streamer of its own, and a process with stdin closed streams too."""
 
 import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 
@@ -76,6 +79,67 @@ class StreamingTest(unittest.TestCase):
         )
         result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
         self.assertEqual(["after"], result.stdout.split(), result.stderr)
+
+    def streams_of(self, script: str) -> tuple[dict[str, bytes], str]:
+        """Run `script` in a fresh interpreter, with a shell script standing
+        in for mxcontrol as sys.argv[1]: each copy of it writes what it reads
+        to a file of its own. Returns what each copy read, by file name, and
+        the script's stderr; stderr is read to its end, which waits for
+        every copy."""
+        directory = tempfile.mkdtemp(dir=os.environ.get("TEST_TMPDIR"))
+        streamer = os.path.join(directory, "streamer")
+        with open(streamer, "w") as script_file:
+            script_file.write('#!/bin/sh\nexec cat > "$0.$$"\n')
+        os.chmod(streamer, 0o755)
+        result = subprocess.run([sys.executable, "-c", script, streamer], capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, result.returncode, result.stderr)
+        streams = {}
+        for name in os.listdir(directory):
+            if name.startswith("streamer."):
+                with open(os.path.join(directory, name), "rb") as stream:
+                    streams[name] = stream.read()
+        return streams, result.stderr
+
+    def test_a_worker_that_turns_streaming_on_again_streams_to_its_own_streamer(self):
+        # The documented use: a process streams, forks a worker, and the
+        # worker turns streaming on again. Python closed the stream's
+        # descriptor, which C++ still owned, the new pipe took its number,
+        # and C++ closed that as it replaced the stream: the worker's entries
+        # went nowhere.
+        streams, stderr = self.streams_of(
+            "import os, sys\n"
+            "from multiplexer import mxlog\n"
+            "from multiplexer.mxlog.streaming import enable_single_thread_log_streaming\n"
+            "enable_single_thread_log_streaming([('127.0.0.1', 1)], mxcontrol=sys.argv[1])\n"
+            "mxlog.log(mxlog.ERROR, mxlog.LOWVERBOSITY, text='from the parent')\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    enable_single_thread_log_streaming([('127.0.0.1', 1)], mxcontrol=sys.argv[1])\n"
+            "    mxlog.log(mxlog.ERROR, mxlog.LOWVERBOSITY, text='from the worker')\n"
+            "    os._exit(0)\n"
+            "os.waitpid(pid, 0)\n"
+        )
+        self.assertEqual(2, len(streams), stderr)
+        parent = [name for name, data in streams.items() if b"from the parent" in data]
+        worker = [name for name, data in streams.items() if b"from the worker" in data]
+        self.assertEqual(1, len(parent), stderr)
+        self.assertEqual(1, len(worker), "the worker's entry reached no streamer, or both")
+        self.assertNotEqual(parent, worker)
+
+    def test_a_process_with_stdin_closed_streams(self):
+        # The pipe's reading end took descriptor 0, and the streamer, which
+        # reads stdin, started with it closed: close-on-exec, as os.pipe()
+        # makes it, where dup2() onto 0 had made any other inheritable.
+        streams, stderr = self.streams_of(
+            "import os, sys\n"
+            "os.close(0)\n"
+            "from multiplexer import mxlog\n"
+            "from multiplexer.mxlog.streaming import enable_single_thread_log_streaming\n"
+            "enable_single_thread_log_streaming([('127.0.0.1', 1)], mxcontrol=sys.argv[1])\n"
+            "mxlog.log(mxlog.ERROR, mxlog.LOWVERBOSITY, text='with stdin closed')\n"
+        )
+        self.assertEqual(1, len(streams), stderr)
+        self.assertIn(b"with stdin closed", list(streams.values())[0], stderr)
 
 
 if __name__ == "__main__":

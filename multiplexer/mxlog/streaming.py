@@ -23,12 +23,6 @@ def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str
     """Fork the `mxcontrol streamlogs` child and point our logging at the pipe to it."""
     global logging_fd_set_from_pid, logging_fd
 
-    if logging_fd is not None:
-        try:
-            os.close(logging_fd)
-        except Exception:
-            pass
-
     if mxcontrol is None:
         mxcontrol = binary_path()  # FileNotFoundError here, in the caller, when there is none
 
@@ -39,7 +33,10 @@ def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str
 
     # Spawn a log streamer for this stream.
     if os.fork():
-        # parent
+        # parent: the stream set before, the one inherited across a fork say,
+        # is the C++ logging's, which closes it as it sets this one; closed
+        # here too, its number could go to the pipe above, which C++ would
+        # then close
         os.close(reading)
         multiplexer.mxlog.set_logging_fd(writing, True)
         logging_fd = writing
@@ -52,6 +49,11 @@ def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str
             if reading != 0:
                 os.dup2(reading, 0)
                 os.close(reading)
+            else:
+                # the caller's stdin was closed and the pipe took its place:
+                # made close-on-exec, as os.pipe() makes it, the streamer
+                # would start with no stdin and read nothing
+                os.set_inheritable(0, True)
 
             command = (
                 [mxcontrol, "streamlogs"]

@@ -206,6 +206,16 @@ cc_library(
 )
 
 cc_test(
+    name = "exception_test",
+    size = "small",
+    srcs = ["exception_test.cc"],
+    deps = [
+        ":exception",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "kwargs_test",
     size = "small",
     srcs = ["kwargs_test.cc"],

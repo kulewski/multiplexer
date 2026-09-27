@@ -134,23 +134,6 @@ void write_cxx_mapping(std::ostream& out, const Map& map, const std::string& set
       << "\n";
 }
 
-// The generated header's include guard is random rather than derived from
-// the path, because the same header is generated under different names in
-// different workspaces (this one, and every consumer of @mx).
-inline std::string random_identifier(unsigned int length) {
-  std::ifstream in("/dev/urandom");
-  std::string identifier;
-  while (identifier.size() < length) {
-    char character;
-    do {
-      in >> character;
-    } while (!((character >= 'A' && character <= 'Z') | (character >= 'a' && character <= 'z') |
-               (character >= '0' && character <= '9')));
-    identifier += character;
-  }
-  return identifier;
-}
-
 }  // namespace detail
 
 // Refuses a rules file where a peer or message name or number repeats.
@@ -198,11 +181,16 @@ void write_python_stub(const Config& config, std::ostream& out, const std::strin
   detail::write_python_stub_mapping(out, config.peer_by_type(), "peers(_constants_base)");
 }
 
+// The include guard comes from the rules file's fingerprint, not from a
+// path, since the same header is generated under different names in
+// different workspaces (this one, and every consumer of @mx): headers of
+// different rules get different guards, and the same rules give the same
+// header, byte for byte, in every build.
 template <typename Config>
 void write_cxx(const Config& config, std::ostream& out, const std::string& source_file) {
-  std::string identifier = detail::random_identifier(10);
-  out << "#ifndef GENERATED_" << identifier << "\n"
-      << "#define GENERATED_" << identifier << "\n"
+  const std::string fingerprint = rules_fingerprint(source_file);
+  out << "#ifndef GENERATED_MX_CONSTANTS_" << fingerprint << "\n"
+      << "#define GENERATED_MX_CONSTANTS_" << fingerprint << "\n"
       << "\n"
       << "#include <cstdint>\n"
       << "\n";
@@ -210,7 +198,7 @@ void write_cxx(const Config& config, std::ostream& out, const std::string& sourc
   detail::write_signature("//", out, source_file);
   out << "namespace multiplexer {\n"
       << "\t// CRC-32 of the rules file these constants were generated from.\n"
-      << "\tstatic const char *const RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\";\n\n";
+      << "\tstatic const char *const RULES_FINGERPRINT = \"" << fingerprint << "\";\n\n";
   detail::write_cxx_mapping(out, config.message_description_by_id(), "types");
   detail::write_cxx_mapping(out, config.peer_by_type(), "peers");
 

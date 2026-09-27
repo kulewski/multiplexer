@@ -580,6 +580,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     SENT_NO_CONNECTION,    // DropReason::NO_CONNECTION
     SENT_CONNECTION_LOST,  // DropReason::CONNECTION_LOST
     SENT_SHUT_DOWN,        // DropReason::SHUT_DOWN
+    OWN_LINES = 1000,      // and up: a message callback's own kinds (ThreadedClient::drop_lines)
   };
   LogSummary& drop_lines() { return drop_lines_; }
 

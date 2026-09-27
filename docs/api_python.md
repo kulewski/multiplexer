@@ -1146,7 +1146,12 @@ written by a multiplexer, checking that the recording's rules match the
 generated constants (`check_rules=False` to skip); `read_many(paths)`
 merges several files by time, each record tagged with its multiplexer;
 `describe(record)` renders one with names, `involves_peer(record, id)`
-filters by instance id. A `Cluster(record=True)` records every multiplexer;
+filters by instance id. A file that ends partway through a record, as
+one a session is still writing or a multiplexer that died left can,
+gives every whole record and then raises `TruncatedRecording`;
+`read_many()` merges the other files to their ends first, and
+`python -m multiplexer.recording` prints up to the break and exits 1.
+A `Cluster(record=True)` records every multiplexer;
 [operations](operations.md#recording) describes the file.
 
 The same module drives recording on running multiplexers, through any

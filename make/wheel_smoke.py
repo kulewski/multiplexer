@@ -3,9 +3,11 @@ mx-multiplexer` gives, through the installed package alone. The mxcontrol
 inside it is executable and runs as the `mxcontrol` command and as `python
 -m multiplexer.mxcontrol`; its generate_rules and generate_constants give
 back the package's own constants; the multiplexer the command starts is the
-package's binary, under the command's pid and name, with no signal ignored,
-and it ends with 0 on SIGTERM; a host name resolves; Client, the
-synchronous client's name up to 2.3.1, is the class SyncClient; and a
+package's binary, under the command's pid and name, and ends with 0 on
+SIGTERM; the command leaves SIGPIPE and SIGXFSZ at their defaults, which
+only run_multiplexer changes, ignoring SIGPIPE itself; a host name
+resolves; Client, the synchronous client's name up to 2.3.1, is the class
+SyncClient; and a
 rules file of the smoke's own, the system rules with a client's and a
 backend's types after them, runs two multiplexers that answer every query.
 With MXCONTROL set, the harness runs that binary instead, and its rules and
@@ -21,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 os.chdir(tempfile.mkdtemp())
 
@@ -57,6 +60,12 @@ def exe(pid: int) -> str:
     return os.path.realpath(os.readlink("/proc/%d/exe" % pid))
 
 
+def ignored_signals(pid: int) -> int:
+    """The mask of the signals process `pid` ignores, bit N - 1 for signal N."""
+    with open("/proc/%d/status" % pid) as status:
+        return int(re.search(r"SigIgn:\s*([0-9a-f]+)", status.read()).group(1), 16)
+
+
 # The binary is inside the package, executable.
 assert BINARY.startswith(PACKAGE + os.sep), BINARY
 assert os.access(BINARY, os.X_OK), BINARY
@@ -76,7 +85,9 @@ assert read("system.py") == read(os.path.join(PACKAGE, "multiplexer_constants.py
 assert read("system.pyi") == read(os.path.join(PACKAGE, "multiplexer_constants.pyi"))
 
 # A multiplexer started by the command: the package's binary under the
-# command's pid and name, no signal ignored, and a host name resolved.
+# command's pid and name, SIGXFSZ not ignored, and a host name resolved.
+# SIGPIPE it ignores itself, so that a log reader that goes away does not
+# end it; the command leaves both at their defaults, as streamlogs shows.
 process = subprocess.Popen(
     [COMMAND, "run_multiplexer", "--address", "127.0.0.1:0", "--rules", "multiplexer.rules", "--port-file", "port"],
     stderr=subprocess.PIPE,
@@ -92,12 +103,23 @@ drain.start()
 assert exe(process.pid) == os.path.realpath(BINARY), exe(process.pid)
 with open("/proc/%d/comm" % process.pid) as comm:
     assert comm.read().strip() == "mxcontrol"
-with open("/proc/%d/status" % process.pid) as status:
-    ignored = int(re.search(r"SigIgn:\s*([0-9a-f]+)", status.read()).group(1), 16)
-assert ignored & (1 << 12 | 1 << 24) == 0, "SIGPIPE or SIGXFSZ ignored: %x" % ignored
+ignored = ignored_signals(process.pid)
+assert ignored & 1 << 24 == 0, "SIGXFSZ ignored: %x" % ignored
 with open("port") as port_file:
     port = port_file.read().strip().rsplit(":", 1)[1]
 run(BINARY, "rules", "status", "-M", "localhost:" + port)
+# A command that changes neither: streamlogs, reading its stdin, once the
+# command's exec made it the binary.
+streamer = subprocess.Popen([COMMAND, "streamlogs", "--multiplexer", "localhost:" + port], stdin=subprocess.PIPE)
+deadline = time.monotonic() + 30
+while exe(streamer.pid) != os.path.realpath(BINARY):
+    assert time.monotonic() < deadline, "the command did not exec the binary"
+    time.sleep(0.01)
+ignored = ignored_signals(streamer.pid)
+assert ignored & (1 << 12 | 1 << 24) == 0, "SIGPIPE or SIGXFSZ ignored: %x" % ignored
+assert streamer.stdin is not None
+streamer.stdin.close()
+assert streamer.wait() == 0, streamer.returncode
 process.send_signal(signal.SIGTERM)
 assert process.wait() == 0, process.returncode
 drain.join()

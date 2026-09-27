@@ -144,6 +144,7 @@ cc_library(
         ":task",
         ":tasks_holder",
         "//multiplexer:multiplexer_cc_proto",
+        "//multiplexer:threaded_client",
     ],
     alwayslink = 1,
 )
@@ -195,6 +196,47 @@ py_test(
         "//tests:testing.rules",
     ],
     deps = ["//multiplexer/testing"],
+)
+
+py_test(
+    name = "log_streamer_type_test",
+    size = "small",
+    srcs = ["log_streamer_type_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        "//multiplexer:multiplexer_constants",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "streamlogs_test",
+    size = "medium",
+    srcs = ["streamlogs_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = [
+        "//multiplexer:multiplexer_constants",
+        "//multiplexer:multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "stream_readers_test",
+    size = "small",
+    srcs = ["stream_readers_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = [
+        "//multiplexer:multiplexer_py_proto",
+        "//multiplexer:recording_py_proto",
+        "//multiplexer/testing",
+    ],
 )
 
 py_test(

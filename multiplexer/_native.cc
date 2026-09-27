@@ -665,7 +665,7 @@ PYBIND11_MODULE(_native, module) {
       [](unsigned int logging_fd, bool close_on_delete) { mx::logging::set_logging_fd(logging_fd, close_on_delete); },
       pybind11::arg("fd"), pybind11::arg("close_on_delete") = false);
   module.def("create_log_id", &mx::logging::create_log_id);
-  module.def("process_context", &mx::logging::process_context, pybind11::return_value_policy::copy);
+  module.def("process_context", &mx::logging::process_context);
   module.def("set_process_context", &mx::logging::set_process_context, pybind11::arg("context"));
   module.def("set_process_context_program_name", &mx::logging::set_process_context_program_name, pybind11::arg("name"));
   module.def("set_maximal_logging_verbosity", &mx::logging::set_maximal_logging_verbosity, pybind11::arg("level"),
@@ -952,6 +952,7 @@ PYBIND11_MODULE(_native, module) {
              "Bytes currently allocated from the C heap by this process (exact, glibc mallinfo2).");
 
   module.attr("DEFAULT_INCOMING_QUEUE_MAX_SIZE") = pybind11::int_(multiplexer::DEFAULT_INCOMING_QUEUE_MAX_SIZE);
+  module.attr("FORCED_FRAMES_PAST_FULL_QUEUE") = pybind11::int_(multiplexer::FORCED_FRAMES_PAST_FULL_QUEUE);
   module.attr("AUTO_RECONNECT_TIME") = pybind11::int_(multiplexer::AUTO_RECONNECT_TIME);
   module.attr("DEFAULT_TIMEOUT") = pybind11::float_(multiplexer::DEFAULT_TIMEOUT);
   module.attr("ROOM_GRACE_SECONDS") = pybind11::float_(multiplexer::ROOM_GRACE_SECONDS);
@@ -963,4 +964,5 @@ PYBIND11_MODULE(_native, module) {
       pybind11::float_(multiplexer::NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL);
   module.attr("NO_HEARTBIT_SO_REALLY_DROP_INTERVAL") =
       pybind11::float_(multiplexer::NO_HEARTBIT_SO_REALLY_DROP_INTERVAL);
+  module.attr("KEEPALIVE_PROBE_INTERVAL") = pybind11::float_(multiplexer::KEEPALIVE_PROBE_INTERVAL);
 }

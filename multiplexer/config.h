@@ -195,12 +195,19 @@ class Config {
     std::set<std::uint32_t> peer_types_seen;
     std::set<std::string> peer_names_seen;
     std::set<std::uint32_t> message_types_seen;
+    std::set<std::string> message_names_seen;
     for (const MultiplexerPeerDescription& description : rules.peer()) {
       if (REJECTS_DUPLICATES && !peer_types_seen.insert(description.type()).second) {
         MXTHROW(typename Config::Exception("duplicate peer type " + std::to_string(description.type())));
       }
       if (REJECTS_DUPLICATES && !peer_names_seen.insert(description.name()).second) {
         MXTHROW(typename Config::Exception("duplicate peer name " + description.name()));
+      }
+      // A queue of 0 holds nothing: every message to the type would be
+      // dropped, addressed ones too, while its peers stay connected.
+      if (!description.queue_size()) {
+        MXTHROW(typename Config::Exception("peer type " + std::to_string(description.type()) + " (" +
+                                           description.name() + "): queue_size 0 holds no message"));
       }
       /* Multiplexer peer description */
       peer_by_type_.insert(std::make_pair(description.type(), description));
@@ -210,6 +217,9 @@ class Config {
     for (const MultiplexerMessageDescription& message_type : rules.type()) {
       if (REJECTS_DUPLICATES && !message_types_seen.insert(message_type.type()).second) {
         MXTHROW(typename Config::Exception("duplicate message type " + std::to_string(message_type.type())));
+      }
+      if (REJECTS_DUPLICATES && !message_names_seen.insert(message_type.name()).second) {
+        MXTHROW(typename Config::Exception("duplicate message name " + message_type.name()));
       }
       /* package descirption with routing rules definitions */
       MultiplexerMessageDescription& description =

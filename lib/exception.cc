@@ -18,7 +18,7 @@ bool Exception::abort_on_exception() { return _abort_on_exception; }
 
 void Exception::abort_on_exception(bool aoe) { _abort_on_exception = aoe; }
 
-Exception::Exception() throw() {}
+Exception::Exception() throw() : file_("<unknown file>"), function_("<unknown function>"), line_(0) {}
 
 Exception::Exception(const std::string explanation, const std::string& file, int line,
                      const std::string& function) throw()

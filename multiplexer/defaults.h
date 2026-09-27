@@ -12,6 +12,12 @@ namespace multiplexer {
 
 // Unread messages a client library holds before dropping new ones.
 static const unsigned int DEFAULT_INCOMING_QUEUE_MAX_SIZE = 1024;
+// Protocol frames, a welcome, a heartbeat, a status reply or a routing
+// request, that a connection's full queue still takes past its limit, so
+// that ordinary traffic cannot keep them out; past that they are dropped
+// as any message is, and a peer that sends control requests without
+// reading cannot grow the queue for good.
+static const unsigned int FORCED_FRAMES_PAST_FULL_QUEUE = 64;
 // Seconds between a connection dropping and the library reconnecting.
 static const unsigned int AUTO_RECONNECT_TIME = 3;
 // Seconds for connect, flush, and each stage of a query.
@@ -41,6 +47,11 @@ static const float CLOSE_FLUSH_SECONDS = 1.0;
 // starts the drop, and how much longer it then waits before closing.
 static const float NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL = 30;
 static const float NO_HEARTBIT_SO_REALLY_DROP_INTERVAL = 60;
+// Seconds between the TCP keepalive probes on the multiplexer's accepted
+// connections, which start after NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL of
+// silence and close a connection after NO_HEARTBIT_SO_REALLY_DROP_INTERVAL
+// of unanswered ones (Server::_handle_accept).
+static const float KEEPALIVE_PROBE_INTERVAL = 10;
 
 // A recording session started over the protocol closes itself at this
 // size unless the request says otherwise (RecordingControl.max_bytes).

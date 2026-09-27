@@ -62,6 +62,7 @@ cc_library(
         ":log_tokens",
         "//lib:assert",
         "//lib:initialization",
+        "//lib:mutex",
         "//lib:random",
         "//lib:repr",
         "//lib/preproc:common",
@@ -75,6 +76,27 @@ cc_test(
     srcs = ["verbosity_test.cc"],
     deps = [
         ":logging",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "concurrent_settings_test",
+    size = "small",
+    srcs = ["concurrent_settings_test.cc"],
+    deps = [
+        ":logging",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "stream_test",
+    size = "small",
+    srcs = ["stream_test.cc"],
+    deps = [
+        ":logging",
+        "//lib/protobuf:stream",
         "@com_google_googletest//:gtest_main",
     ],
 )

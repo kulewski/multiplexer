@@ -13,8 +13,8 @@ use, and the query still works. The file put back as it was is "unchanged",
 and the status is clean again; a file that is missing is refused the same
 way and changes nothing, and the status repeats the reason until a reload
 finds the file back; so are an empty file, one without a peer type and
-one that repeats a number. An address nobody listens on fails the command
-while the reachable multiplexer still answers.
+one that repeats a number or a name. An address nobody listens on fails
+the command while the reachable multiplexer still answers.
 """
 
 import os
@@ -147,6 +147,18 @@ class RulesReloadByMxcontrol(unittest.TestCase):
                 rules.write(original + NEW_ENTRIES + NEW_ENTRIES)  # the same numbers twice
             for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
                 self.assertTrue(line.startswith("error: duplicate peer type %d (content " % NEW_BACKEND), line)
+            with open(path, "w") as rules:  # a message name twice, under two numbers, as generate_constants refuses
+                rules.write(original + NEW_ENTRIES + 'type {\n    type: 251\n    name: "TEST_NEW_REQUEST"\n}\n')
+            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+                self.assertTrue(line.startswith("error: duplicate message name TEST_NEW_REQUEST (content "), line)
+            with open(path, "w") as rules:  # a peer type whose queue holds nothing
+                rules.write(
+                    original
+                    + NEW_ENTRIES.replace('"TEST_NEW_BACKEND"\n}', '"TEST_NEW_BACKEND"\n    queue_size: 0\n}', 1)
+                )
+            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+                prefix = "error: peer type %d (TEST_NEW_BACKEND): queue_size 0 holds no message (content " % NEW_BACKEND
+                self.assertTrue(line.startswith(prefix), line)
             self.assertEqual("LAST", self.ask(cluster, "last"), "the rules in use serve on")
             with open(path, "w") as rules:
                 rules.write(original + NEW_ENTRIES)

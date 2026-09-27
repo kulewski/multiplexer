@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <string>
 
 using mx::util::kwargs::KeyError;
@@ -21,6 +22,32 @@ TEST(Kwargs, MissingKeyThrowsUnlessDefaultGiven) {
   EXPECT_THROW(kw.get<int>("missing"), KeyError);
   EXPECT_EQ(5, kw.get<int>("missing", 5));
   EXPECT_FALSE(kw.has_key("missing"));
+}
+
+// The KeyError says which key, and where it was thrown: it said nothing,
+// and its line was whatever the memory held.
+TEST(Kwargs, KeyErrorNamesTheKeyAndTheThrowSite) {
+  Kwargs kw;
+  try {
+    kw.get<int>("missing");
+    FAIL() << "no KeyError";
+  } catch (const KeyError& error) {
+    EXPECT_EQ("no key 'missing'", std::string(error.what()));
+    EXPECT_NE(std::string::npos, error.file().find("lib/kwargs.h")) << error.file();
+    EXPECT_GT(error.line(), 0);
+  }
+}
+
+// A get with a default looks the key up: no KeyError on the way, which
+// ABORT_ON_EXCEPTION, set here, would abort at.
+TEST(Kwargs, GetWithADefaultThrowsNothingEvenUnderAbortOnException) {
+  EXPECT_EXIT(
+      {
+        mx::Exception::abort_on_exception(true);
+        Kwargs kw;
+        std::exit(kw.get<int>("missing", 5) == 5 ? 0 : 1);
+      },
+      ::testing::ExitedWithCode(0), "");
 }
 
 TEST(Kwargs, SetDefaultDoesNotOverwrite) {

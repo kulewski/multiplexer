@@ -34,7 +34,10 @@ that changes.
   connections than the one after it, one being down at that moment, or
   where a late copy came after the library forgot the first.
 - **Full queues drop.** Each connection on the multiplexer holds at most
-  `queue_size` unsent messages, 1024 by default per peer type. For `ANY` a
+  `queue_size` unsent messages, 1024 by default per peer type, and 64
+  protocol frames past that, heartbeats and the answers to the peer's
+  control requests, which a full queue does not keep out; an answer past
+  those 64 is dropped too, logged as any full queue's drop. For `ANY` a
   full peer is skipped in favour of the next one; for `ALL` a full peer's
   copy is dropped with a warning in the multiplexer's log, about one line
   a second for each peer however many it drops. When every peer
@@ -184,6 +187,16 @@ that changes.
   copy is written.
 - **A client is idle for a long time.** Nothing happens: passive peers are
   never dropped for silence, and a `ThreadedClient` keeps heartbeating.
+- **A peer's host or network goes away without closing its connection.**
+  The multiplexer closes the connection after 90 s: an active peer's
+  silence ends it, and for a passive peer, or one that has not sent its
+  welcome yet, which owe no heartbeats, TCP keepalive does, the kernel
+  probing a connection silent for 30 s every 10 s and closing it after
+  60 s without an answer. A live peer's kernel answers the probes for it,
+  however long its program stays away; a connection that stays up and
+  never sends its welcome is kept as long, whoever the peer: a
+  synchronous client's reconnect sends its welcome only inside the
+  client's next call, which may come much later.
 - **A multiplexer restarts while a synchronous client is idle.** The
   client's next call runs the loop before it picks a connection, so the
   connection that multiplexer closed is retired first and the message goes
@@ -290,9 +303,11 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `MX_LOG_VERBOSITY` | `DEBUG:HIGH` | connections logged, traffic not; the environment variable changes it per process ([operations](operations.md#logs)) |
 | `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence on a connection, from a non-passive peer or from a multiplexer, before the other side starts to worry |
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
+| `KEEPALIVE_PROBE_INTERVAL` | 10 s | between the TCP keepalive probes on the multiplexer's accepted connections, which start after the first interval above and close the connection after the second without an answer |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client, or a `ThreadedClient` with no `on_message`, holds |
 | `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
+| `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |
 | `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
 | dedup window | 2048 ids | repeats the library recognizes |
 

@@ -1,10 +1,11 @@
 // run_multiplexer: creates the Server, reads the rules, binds, optionally
 // writes the port file, and runs the io_service until a signal stops it;
 // SIGHUP reloads the rules on the way. The first SIGTERM or SIGINT drains,
-// a second one stops at once.
+// a second one stops at once; SIGPIPE is ignored.
 #include "mxcontrol/start_multiplexer_server.h"
 
 #include <asio.hpp>
+#include <csignal>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -84,6 +85,12 @@ void reload_on_signal(multiplexer::Server::pointer server, asio::signal_set& sig
 int StartMultiplexerServer::run() {
   using mx::repr;
   using std::string;
+
+  // A log reader that goes away, the other end of --logging-fd or of
+  // stderr, must not take the broker down with it: its writes fail with
+  // EPIPE instead, and the binary stream is dropped (lib/logging). The other
+  // commands keep the default, so that `mxcontrol ... | head` ends quietly.
+  std::signal(SIGPIPE, SIG_IGN);
 
   string host = host_port_;
   std::uint16_t port = 1980;

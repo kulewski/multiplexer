@@ -70,7 +70,9 @@ second `SIGINT` or `SIGTERM` stops it at once, as does `--drain-seconds 0`.
 Its last line says how long the stop took and what it dropped, if
 anything. `SIGHUP` makes it read the rules file again now, and it no longer
 exits on one. An exception thrown while handling one connection is logged
-and the process keeps serving.
+and the process keeps serving. So does a log reader that goes away, the
+other end of `--logging-fd` or of stderr: the multiplexer ignores
+`SIGPIPE`, drops the binary stream with a `WARNING`, and serves on.
 
 Each peer that connects is logged at `INFO` with its instance id and peer
 type, and again when it leaves. A message nobody could receive is
@@ -85,7 +87,8 @@ program built outside Bazel: the Python module (classes `peers` and
 `types`), its stub for type checkers, and the C++ header (namespaces
 `multiplexer::peers` and `multiplexer::types`), whichever are asked for.
 The files are the ones a Bazel build generates from the same rules file,
-byte for byte apart from the header's include guard.
+byte for byte; the header's include guard comes from the rules file's
+fingerprint, so the same rules give the same header in every build.
 
 ```
 mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE]
@@ -136,6 +139,10 @@ mxcontrol dump_recording FILE... [--rules FILE] [--type N] [--peer ID]
 | `--rules FILE` | the rules file the multiplexer ran with, for peer and message type names instead of numbers |
 | `--type N` | only routed messages of this type |
 | `--peer ID` | only records involving this instance id, as sender, recipient or the peer arriving or leaving |
+
+A recording of any length is read whole. A file that ends in a record cut
+short, or holds one it cannot read, is printed up to that record, which is
+said on stderr, and the command exits with 1 once the other files are done.
 
 The Python reader, `multiplexer.recording`, prints the same with names from
 the generated constants: `bazel run @mx//multiplexer:dump_recording -- FILE...`,
@@ -213,14 +220,34 @@ mxcontrol rules reload -M mx.svc:1980
 ## streamlogs
 
 ```
-mxcontrol streamlogs [--multiplexer [HOST]:PORT ...] [--chunksize N]
+mxcontrol streamlogs [--multiplexer [HOST]:PORT ...] [--chunksize N] [--timeout SECONDS]
 ```
 
 Reads a binary log stream, as written by `--logging-file`, from stdin, and
 sends it as `LOGS_STREAM` messages through every listed multiplexer, `N`
 entries per message, 32 by default and 0 for everything in one message. It
 connects as the peer type `LOG_STREAMER`. `--multiplexer` may be repeated;
-the host defaults to `127.0.0.1`.
+the host defaults to `127.0.0.1`. It exits with 0 at the end of stdin,
+however long the stream; one that breaks off, an entry cut short or
+garbled, is sent up to there, logged as an error, and the command exits
+with 1.
+
+It never waits for a multiplexer, so that the program whose log it reads,
+which blocks writing into the pipe once nobody reads it, never waits
+either. Each message goes to every connection through a `ThreadedClient`,
+whose io thread holds a copy a multiplexer does not take, one that stopped
+reading or is restarting, for `--timeout` seconds, 10 by default, and then
+drops it: such a multiplexer costs log entries, counted in a warning at
+the end, and meanwhile memory, up to what is logged in that time. It does
+not wait to connect either: what it reads in the first moment, before a
+multiplexer's handshake is done, goes through those connected already, or
+waits for the first.
+
+A chunk no log receiver takes, none being connected, the multiplexers drop
+and answer with a `DELIVERY_ERROR`, and `streamlogs` says so in a
+`WARNING`, `no log receiver took the log stream`, the first at once and
+then a count about once a second, so that a log that goes nowhere does not
+go unnoticed.
 
 ## receivelogs
 

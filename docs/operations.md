@@ -136,7 +136,7 @@ frame, reloads or not. The second
 check is what keeps a file caught in the middle of being written from
 ever being applied; it costs one more interval. A file that is missing,
 empty, without a peer type, that does not parse, that repeats a number or
-a peer name, or that names a peer that does not exist, changes nothing:
+a name, or that names a peer that does not exist, changes nothing:
 the rules in use stay, the log says why once, and `mxcontrol rules
 status` repeats the reason until a later read,
 the next check, a `SIGHUP` or a `reload`, finds the file good. At start
@@ -338,8 +338,14 @@ peer that would take it is full.
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a
 varint. `mxcontrol streamlogs` can send such a stream on through a
-multiplexer, and `mxcontrol receivelogs` prints what arrives; together they
-are a minimal log shipper and the smallest example of a backend.
+multiplexer, never waiting for one, so that a multiplexer that stops
+reading costs log entries rather than stopping the program that logs, and
+`mxcontrol receivelogs` prints what arrives; together they are a minimal
+log shipper and the smallest example of a backend. A stream
+whose reader goes away, a shipper that exits, is dropped at the first
+entry that finds it gone, with a `WARNING` saying so (`the binary log
+stream's reader is gone`); stderr goes on. The multiplexer ignores
+`SIGPIPE` so as to outlive such a reader, of the stream or of stderr.
 
 The Python library logs through the same mechanism, so a Python backend's
 stderr has the same shape.
@@ -358,7 +364,8 @@ verbosity, `MX_LOG_VERBOSITY=MEDIUM`, applies to every level; names are
 those of the constants, with or without the `VERBOSITY` suffix, in any
 case. A malformed value is reported at `WARNING` and ignored. In code,
 `set_maximal_logging_verbosity(level, verbosity)` does the same in both
-languages; `mxcontrol --verbosity` is the multiplexer's own setting and
+languages, from any thread at any time, as does setting the process
+context; `mxcontrol --verbosity` is the multiplexer's own setting and
 wins over the variable when given explicitly. A disabled entry costs one
 comparison, so leaving the library's debug lines compiled in is free; an
 emitted one costs a write to stderr per line, which is why traffic is off
@@ -406,7 +413,11 @@ rules file, `--type` and `--peer` to filter), with
 `bazel run @mx//multiplexer:dump_recording -- FILE` (names from the
 generated constants), or from Python with `multiplexer.recording.read()`,
 which yields the records and refuses a file made with other rules than the
-constants were generated from. A `RoutedMessage` says whether it was
+constants were generated from. A file a session is still writing, or one
+a multiplexer that died left, can end partway through a record: both
+readers give every whole record and then say so, `dump_recording` with
+exit status 1, `recording.read()` by raising `TruncatedRecording`. A
+`RoutedMessage` says whether it was
 `DELIVERED` or why not: `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`,
 `QUEUE_FULL`, or `NOT_ACCEPTED` for a peer whose routing turned the path
 off ([how a backend leaves](leaving.md)). A `PeerEvent` marks a peer
@@ -492,10 +503,10 @@ good as their clocks.
 One multiplexer is one thread with one event loop. Every message is forwarded
 as the bytes it arrived in, without re-serialization, so the cost per message
 is a few map lookups and the socket writes. Memory is the sum of the outgoing
-queues: up to `queue_size` messages per connection, each held as long as it
-is unsent, so a slow backend can pin up to 1024 messages of whatever size
-your peers send. Lower `queue_size` for peer types that receive large
-messages.
+queues: up to `queue_size` messages per connection, and 64 small protocol
+frames past that, each held as long as it is unsent, so a slow backend can
+pin up to 1024 messages of whatever size your peers send. Lower
+`queue_size` for peer types that receive large messages.
 
 Backends are where the work is; add more of a type and `whom: ANY` spreads
 requests over them. A backend built on `BaseMultiplexerServer` handles one

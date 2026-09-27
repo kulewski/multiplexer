@@ -21,10 +21,15 @@ struct LittleEndian<std::uint32_t> {
     enc.write_byte((n >> 24) & 0xff);
   }
 
+  // One statement a byte: each read advances the decoder, and the
+  // operands of one expression are read in an order C++ leaves unspecified.
   template <typename Decoder>
   static void decode(Decoder& dec, std::uint32_t& n) {
-    n = dec.read_byte() + ((std::uint32_t)dec.read_byte() << 8) + ((std::uint32_t)dec.read_byte() << 16) +
-        ((std::uint32_t)dec.read_byte() << 24);
+    const std::uint32_t byte0 = dec.read_byte();
+    const std::uint32_t byte1 = dec.read_byte();
+    const std::uint32_t byte2 = dec.read_byte();
+    const std::uint32_t byte3 = dec.read_byte();
+    n = byte0 | (byte1 << 8) | (byte2 << 16) | (byte3 << 24);
   }
 };
 

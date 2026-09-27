@@ -149,9 +149,14 @@ PY_FILES := \
 # Unit tests: one binary per C++ test file, one unittest module per Python one.
 CC_TEST_SRCS := \
   lib/digest_test.cc \
+  lib/encoding/little_endian_test.cc \
+  lib/exception_test.cc \
   lib/kwargs_test.cc \
+  lib/logging/concurrent_settings_test.cc \
+  lib/logging/stream_test.cc \
   lib/logging/verbosity_test.cc \
   lib/options_test.cc \
+  lib/protobuf/stream_test.cc \
   lib/thread_checker_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
@@ -160,30 +165,36 @@ CC_TEST_SRCS := \
   multiplexer/fork_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/recorder_test.cc \
+  multiplexer/routing_index_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
 
 
 PY_TEST_FILES := \
   multiplexer/aio_test.py \
+  multiplexer/all_types_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_by_name_test.py \
   multiplexer/drop_lines_test.py \
   multiplexer/drop_reports_test.py \
   multiplexer/end_calls_test.py \
+  multiplexer/forced_frames_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
   multiplexer/graceful_stop_test.py \
   multiplexer/interpreter_exit_test.py \
+  multiplexer/keepalive_test.py \
   multiplexer/leak_test.py \
   multiplexer/lifetime_test.py \
+  multiplexer/log_reader_gone_test.py \
   multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \
   multiplexer/no_connection_test.py \
   multiplexer/outage_test.py \
   multiplexer/pickle_test.py \
   multiplexer/query_acknowledged_test.py \
+  multiplexer/recording_read_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
   multiplexer/serve_thread_test.py \

@@ -49,6 +49,12 @@ reserved 99, the two controllers apart (`RULES_CONTROLLER` always,
 `CONNECTION_WELCOME`: type `MULTIPLEXER` (1) and its instance id. A second
 welcome on the same connection closes it.
 
+There is no deadline for the welcome: a connection that never sends one
+stays open, whoever the peer, for as long as its host answers TCP keepalive
+(see [Heartbeats](#heartbeats)), since a synchronous client may send its
+welcome long after it connected, its reconnect going on only inside its
+next call. One whose host or network is gone is closed after 90 s.
+
 The `id` is the peer's own choice. Two connections announcing the same id
 from the same host replace each other, the newer one winning; from different
 hosts the second is refused. [Connecting to a multiplexer](handshake.md)
@@ -61,7 +67,13 @@ connection by both sides. The multiplexer expects some frame from a
 non-passive peer within 30 s, then grants 60 s more before closing the
 connection. Any frame counts; a peer that keeps sending real messages need
 not send heartbeats. To a passive peer the multiplexer sends at most one
-heartbeat per frame received and expects none.
+heartbeat per frame received, 3 s after its last write, and expects none;
+an idle passive connection owed none costs it no wakeup. Below the protocol, the
+multiplexer turns TCP keepalive on for every connection it accepts: the
+kernel probes a connection silent for 30 s every 10 s and closes it after
+60 s without an answer, so that a passive peer, or one that has not sent
+its welcome, whose host or network is gone, is closed as an active one
+is. The peer's kernel answers the probes; it needs to do nothing.
 
 ## Protocol messages
 

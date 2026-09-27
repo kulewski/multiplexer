@@ -143,6 +143,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // unregistration, one line per connected peer: "<instance id> <peer type
   // name> <peer type>". Empty, the default, writes nothing.
   void set_peers_file(const std::string& path) { peers_file_ = path; }
+  // How many peer types the routing index holds: those some peer has
+  // connected as, a type a rule only names never entering it. For tests;
+  // on the io thread.
+  std::size_t peer_types_indexed() const { return connections_by_type_.size(); }
 
   // Port the acceptor is bound to; meaningful when constructed with port 0.
   unsigned short local_port() const { return acceptor_.local_endpoint().port(); }

@@ -187,7 +187,10 @@ class ConnectionsManager {
     }
 
     connection_by_id_[welcome.id()] = conn;
-    connections_by_type_[welcome.type()].push_front(conn);
+    ConnectionsList& of_its_type = connections_by_type_[welcome.type()];
+    of_its_type.push_front(conn);
+    conn->type_list_place = of_its_type.begin();
+    conn->in_type_list = true;
 
     conn->set_outgoing_queue_max_size(outgoing_queue_max_size(conn->peer_type()));
 
@@ -213,7 +216,11 @@ class ConnectionsManager {
   }
 
   // Called from Connection::shutdown. Removes the connection from both
-  // indexes; expired entries found on the way are removed too.
+  // indexes, each in O(1): its place among its type's connections is kept
+  // since registration, where a walk of that list made N departures at
+  // once, a stop() or a mass disconnect, cost O(N^2). Entries of
+  // connections that ended unregistered go as the routing meets them
+  // (choose_free_connections, send_to_all).
   void unregister_connection(Connection* conn) {
     MX_DCHECK_RUN_ON(&owner_thread_);
     if (connection_by_id_.find(conn->peer_id()) == connection_by_id_.end()) {
@@ -233,30 +240,10 @@ class ConnectionsManager {
 
     static_cast<ConnectionsManagerImplementation&>(*this).connection_unregistered(conn);
 
-    bool scan_connections_by_id = false;
-
     connection_by_id_.erase(conn->peer_id());
-    ConnectionsList& cons = connections_by_type_[conn->peer_type()];
-    for (typename ConnectionsList::iterator next = cons.begin(), current;
-         next != cons.end() && (current = next++, true);) {
-      typename Connection::pointer pointer = current->lock();
-      if (!pointer) {
-        MX_LOG(WARNING, HIGHVERBOSITY, CTX("ConnectionsManager") TEXT("dead connection found in connections_by_type_"));
-        scan_connections_by_id = true;
-        cons.erase(current);
-      } else if (pointer.get() == conn) {
-        cons.erase(current);
-      }
-    }
-
-    if (scan_connections_by_id) {
-      for (typename ConnectionById::iterator next = connection_by_id_.begin(), current;
-           next != connection_by_id_.end() && (current = next++, true);) {
-        Assert(!current->second.lock() || current->second.lock().get() != conn);  // assume we are not in threaded env.
-        if (!current->second.lock()) {
-          connection_by_id_.erase(current);
-        }
-      }
+    if (conn->in_type_list) {
+      connections_by_type_[conn->peer_type()].erase(conn->type_list_place);
+      conn->in_type_list = false;
     }
   }
 

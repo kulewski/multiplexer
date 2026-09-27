@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdint>
 #include <iostream>
 #include <sstream>
@@ -71,8 +72,28 @@ namespace impl {
 static const unsigned int NO_FLAGS = 0;
 static const unsigned int SKIP_LOGGING_TO_STREAM = 1;
 
-extern std::string process_context_;
-extern unsigned int maximal_logging_verbosity[];
+// The process context, "<host>.<program>", every entry starts from: one
+// node per value set, published whole through an atomic pointer, so that
+// a thread logging while another sets it copies the one or the other,
+// never a string half written, and takes no lock a parent thread could
+// hold at a fork. A replaced node is kept, reachable from the next, since
+// a thread may still be copying it: the context is set a handful of times
+// in a process.
+struct ProcessContext {
+  std::string text;
+  const ProcessContext* replaced;
+};
+extern std::atomic<const ProcessContext*> process_context_;
+void publish_process_context(const std::string& text);
+// The process context now; empty before the library set its default.
+inline std::string current_process_context() {
+  const ProcessContext* now = process_context_.load(std::memory_order_acquire);
+  return now ? now->text : std::string();
+}
+
+// The highest verbosity logged at each level: set from any thread, read by
+// should_log() on every one, a relaxed load, the plain load it was.
+extern std::atomic<unsigned int> maximal_logging_verbosity[];
 
 /*
  * current_timestamp()
@@ -89,7 +110,7 @@ inline bool should_log(unsigned int level, unsigned int verbosity) MX_ATTRIBUTE_
 inline bool should_log(unsigned int level, unsigned int verbosity) {
   DbgAssert(level <= MAX_LEVEL);
   DbgAssert(verbosity <= MAX_VERBOSITY);
-  return impl::maximal_logging_verbosity[level] >= verbosity;
+  return impl::maximal_logging_verbosity[level].load(std::memory_order_relaxed) >= verbosity;
 }
 
 /*
@@ -132,7 +153,7 @@ static inline void emit_log(const LogEntry& log_msg, unsigned int flags = 0) {
 class Entry {
  public:
   Entry(unsigned int level, unsigned int verbosity, const char* file, unsigned int line)
-      : level_(level), context_(impl::process_context_), flags_(impl::NO_FLAGS) {
+      : level_(level), context_(impl::current_process_context()), flags_(impl::NO_FLAGS) {
     entry_.set_id(create_log_id());
     entry_.set_pid(getpid());
     entry_.set_level(level);
@@ -192,9 +213,9 @@ class Entry {
   bool has_data_ = false;
 };
 
-static inline const std::string& process_context() { return impl::process_context_; }
+static inline std::string process_context() { return impl::current_process_context(); }
 
-static inline void set_process_context(const std::string& s) { impl::process_context_ = s; }
+static inline void set_process_context(const std::string& s) { impl::publish_process_context(s); }
 
 };  // namespace logging
 };  // namespace mx

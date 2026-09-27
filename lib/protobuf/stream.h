@@ -10,6 +10,8 @@
 #include <google/protobuf/stubs/common.h>
 #include <unistd.h>
 
+#include <climits>
+#include <cstdint>
 #include <memory>
 
 #include "lib/fd.h"
@@ -37,7 +39,7 @@ struct MessageOutputStream {
 };
 
 // The reader for the same format; read() returns false at end of stream or
-// on a truncated message.
+// on a message it cannot read whole, cut short or garbled.
 struct MessageInputStream {
   virtual ~MessageInputStream() {}
   virtual bool read(google::protobuf::Message& m) = 0;
@@ -45,11 +47,13 @@ struct MessageInputStream {
   // helper
   static inline bool Read(google::protobuf::Message& m, google::protobuf::io::CodedInputStream& cis) {
     std::uint64_t length;
-    if (!cis.ReadVarint64(&length)) {
-      return false;
+    if (!cis.ReadVarint64(&length) || length > static_cast<std::uint64_t>(INT_MAX)) {
+      return false;  // no length, or one no message of this format has
     }
-    google::protobuf::io::CodedInputStream::Limit limit = cis.PushLimit(length);
-    bool ok = m.ParseFromCodedStream(&cis) && cis.ConsumedEntireMessage();
+    google::protobuf::io::CodedInputStream::Limit limit = cis.PushLimit(static_cast<int>(length));
+    // Whole: a message that ends with the stream before its length, at a
+    // field's end, parses without complaint.
+    bool ok = m.ParseFromCodedStream(&cis) && cis.ConsumedEntireMessage() && cis.BytesUntilLimit() == 0;
     cis.PopLimit(limit);
     return ok;
   }
@@ -85,28 +89,59 @@ struct FileMessageOutputStream : MessageOutputStream {
     if (!file_output_stream_) {
       file_output_stream_.reset(new google::protobuf::io ::FileOutputStream(fd_.fd()));
     }
-    return Write(m, *file_output_stream_);
+    if (Write(m, *file_output_stream_)) {
+      return true;
+    }
+    error_ = file_output_stream_->GetErrno();
+    return false;
   }
 
-  virtual void flush() { file_output_stream_.reset(); }
+  virtual void flush() {
+    if (file_output_stream_ && !file_output_stream_->Flush()) {
+      error_ = file_output_stream_->GetErrno();
+    }
+    file_output_stream_.reset();
+  }
+
+  // The errno of the last write to the descriptor that failed, 0 while
+  // none has.
+  int error() const { return error_; }
 
  private:
   util::Fd fd_;
   std::unique_ptr<google::protobuf::io::FileOutputStream> file_output_stream_;
+  int error_ = 0;
 };
 
 struct FileMessageInputStream : MessageInputStream {
   explicit FileMessageInputStream(int fd, bool own_fd = false)
-      : fd_(fd, own_fd),
-        file_input_stream_(new google::protobuf::io ::FileInputStream(fd_.fd())),
-        coded_input_stream_(new google::protobuf::io ::CodedInputStream(file_input_stream_.get())) {}
+      : fd_(fd, own_fd), file_input_stream_(new google::protobuf::io ::FileInputStream(fd_.fd())) {}
 
-  virtual bool read(google::protobuf::Message& m) { return Read(m, *coded_input_stream_); }
+  // Each message through a CodedInputStream of its own, whose limit on the
+  // bytes it reads, 2 GiB, counts from that message, so that a stream of
+  // any length reads whole, where one for the whole stream stopped there as
+  // if the stream ended. Its destructor gives what it read past the message
+  // back to the file stream, for the next.
+  virtual bool read(google::protobuf::Message& m) {
+    google::protobuf::io::CodedInputStream coded(file_input_stream_.get());
+    const void* data;
+    int size;
+    if (!coded.GetDirectBufferPointer(&data, &size)) {
+      failed_ = file_input_stream_->GetErrno() != 0;  // the end, or a read error
+      return false;
+    }
+    failed_ = !Read(m, coded);
+    return !failed_;
+  }
+
+  // Whether the last read() that returned false met a broken stream, a
+  // message cut short or garbled, or a read error, rather than its end.
+  bool failed() const { return failed_; }
 
  private:
   util::Fd fd_;
   std::unique_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
-  std::unique_ptr<google::protobuf::io::CodedInputStream> coded_input_stream_;
+  bool failed_ = false;
 };
 
 };  // namespace protobuf
