@@ -256,8 +256,10 @@ class Client(_mxclient.Client):
         return self.__receive_message(timeout)
 
     def handle_drop(self, mxmsg, connwrap=None):
-        """overide in subclass if you want to get hold on every message
-        dropped"""
+        """A message a synchronous query, send_and_receive() or receive()
+        read while it waited for another, the reply: logged and dropped.
+        Override in a subclass to keep such messages, a DELIVERY_ERROR for
+        an event sent before, say."""
         log(
             WARNING,
             HIGHVERBOSITY,
@@ -352,10 +354,11 @@ class Client(_mxclient.Client):
         behind it, or the connection dies under the wait, the peer is located
         with a `probe` addressed to it on every connection, a
         BACKEND_FOR_PACKET_SEARCH (which reaches the instance whatever its
-        routing, as every addressed message does) or a
-        PING (answered as long as the peer lives), and the request goes
-        again through the connection that found it. A peer nobody has is
-        OperationFailed; one `timeout` covers the three stages.
+        routing, as every addressed message does) or a PING (answered as long
+        as the peer lives, by the server classes, ThreadedClient and
+        AsyncClient, never by a SyncClient), and the request goes again through
+        the connection that found it. A peer nobody has is OperationFailed; one
+        `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() or a ConnectionWrapper: with
         a lane the request goes through the lane's connection and the lane
@@ -723,8 +726,10 @@ class Client(_mxclient.Client):
         later call runs the loop; one the client gives up on is reported
         (on_drop). With `flush` it waits until the message reached the
         socket, the first copy for ALL, within `timeout`, a connection that
-        dies under it handing it to another or having it held, and raises
-        NotConnected when nothing wrote it with no connection live, or
+        dies under it handing it to another or having it held (a copy for
+        ALL is held only when no connection is live, and dropped otherwise),
+        and raises NotConnected when nothing wrote it with no connection
+        live, or when every copy for ALL went with its connection, or
         OperationTimedOut. With a `callback`, flush or not, it returns at
         once and `callback(written)` runs inside a later call that runs the
         loop, 1 once the message is written, the first copy for ALL, 0 once

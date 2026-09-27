@@ -121,7 +121,12 @@ class BaseThreadedMultiplexerServer {
                                 const Options& options = Options());
 
  public:
-  virtual ~BaseThreadedMultiplexerServer();  // close()
+  // close(), when nothing closed the server before. By then a subclass's
+  // part is destroyed, so a subclass whose server may still be connected,
+  // connect() called without serve_forever(), or serve_forever() running
+  // on another thread, calls close() in its own destructor: a request
+  // still queued would otherwise reach the pure virtual handle_message().
+  virtual ~BaseThreadedMultiplexerServer();
 
   // connect(); then, until
   // stop() or a drain is over: every `poll` seconds, or sooner when
@@ -144,7 +149,7 @@ class BaseThreadedMultiplexerServer {
   // connection go, is refused with DELIVERY_ERROR, a reply dropped.
   // Idempotent: a second call, from another thread too, returns once the
   // first is done, and a serve_forever() running on another thread returns.
-  // The destructor calls it.
+  // The destructor calls it too, after a subclass is destroyed: see there.
   // Joins the workers, so from a handler, on a worker, it throws
   // std::logic_error, during another thread's close() too: a handler that
   // wants the server gone calls stop().
@@ -173,9 +178,11 @@ class BaseThreadedMultiplexerServer {
 
  protected:
   // Called on a worker thread with every message that is not the
-  // protocol's own. Answer with request->reply(), or call
-  // request->no_response() for an event; either may happen later, from
-  // any thread, as long as it happens.
+  // protocol's own, and with the DELIVERY_ERRORs for messages the server
+  // sent that were not queries, which a handler tells by the type. Answer
+  // with request->reply(), or call request->no_response() for an event or
+  // a DELIVERY_ERROR; either may happen later, from any thread, as long as
+  // it happens.
   virtual void handle_message(const RequestPtr& request) = 0;
   // Called from serve_forever() after every poll, on its thread.
   virtual void periodic_task() {}

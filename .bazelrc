@@ -25,6 +25,12 @@ build:release -c opt
 # debuggable (cores, perf). maybe_strip produces the stripped copies we ship.
 build:release --copt=-g
 
+# Every test on a network of its own, a loopback and nothing else, where
+# Bazel's linux-sandbox can make one: tests running at once never take each
+# other's ports, the one a restarted multiplexer binds again included.
+# multiplexer/testing/private_network_test.py says whether it holds.
+test --sandbox_default_allow_network=false
+
 # Sanitizers. asan also switches the generate_constants tool (see
 # multiplexer/BUILD); tsan finds data races the annotations cannot.
 build:asan --//:is_asan=true --copt=-fsanitize=address --linkopt=-fsanitize=address

@@ -29,7 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
-      - run: bazel test //...
+      # Bazel's linux-sandbox gives each test a network of its own through an
+      # unprivileged user namespace, which Ubuntu 24.04's AppArmor withholds.
+      - run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - run: bazel test --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
       # What is published is a release build: everything compiled the same
       # way first, so that a warning only -O2 raises fails here.
       - run: bazel build --config=release //...
@@ -97,14 +103,23 @@ jobs:
     # Each end of the CPythons the wheels are for, on a distribution of its
     # own: the wheel installed into a fresh environment and smoke-tested
     # with the mxcontrol it carries, then with the static one of the same
-    # run, whose rules and constants must be the wheel's.
+    # run, whose rules and constants must be the wheel's. Twice more on
+    # 3.10: with the oldest protobuf make/setup.py allows, and on Ubuntu
+    # 22.04 beside the distribution's own protobuf 3.12, which that floor
+    # must replace.
     needs: [static, wheels]
     strategy:
       matrix:
-        python: ["3.10", "3.14"]
+        include:
+          - {python: "3.10", image: "python:3.10-slim"}
+          - {python: "3.14", image: "python:3.14-slim"}
+          - {python: "3.10", image: "python:3.10-slim", protobuf: "protobuf==3.20.3"}
+          - {python: "3.10", image: "ubuntu:22.04", apt: "python3-venv python3-protobuf", venv: "--system-site-packages"}
     runs-on: ubuntu-24.04
-    container: python:${{ matrix.python }}-slim
+    container: ${{ matrix.image }}
     steps:
+      - if: matrix.apt
+        run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${{ matrix.apt }}
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -116,8 +131,8 @@ jobs:
           path: static
       - run: |
           tag="cp$(echo "${{ matrix.python }}" | tr -d .)"
-          python -m venv /venv
-          /venv/bin/pip install -q dist/*-"$tag"-"$tag"-*.whl
+          python3 -m venv ${{ matrix.venv }} /venv
+          /venv/bin/pip install -q dist/*-"$tag"-"$tag"-*.whl ${{ matrix.protobuf }}
           /venv/bin/python make/wheel_smoke.py
           chmod +x static/mxcontrol-*-linux-amd64
           MXCONTROL="$PWD/$(ls static/mxcontrol-*-linux-amd64)" /venv/bin/python make/wheel_smoke.py

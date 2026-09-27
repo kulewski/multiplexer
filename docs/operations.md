@@ -430,16 +430,20 @@ as new as the multiplexer that made it: an older one shows what it does
 not know as something it does, a `NOT_ACCEPTED` route as `DELIVERED` say.
 
 Recording costs one serialization and one buffered write per message and
-grows by the payloads; `--record-payload-bytes N` keeps only the first N
-bytes of each (`truncated` is set), which is enough to see what happened
-and keeps a long recording small. Use it for a session, not forever: there
-is no rotation.
+grows by the payloads. The file is opened, written and closed on the
+multiplexer's io thread, the one that routes, with blocking calls, and a
+full buffer waits for the disk there: record to local storage, since a slow
+or stalled file system, a network mount gone quiet say, holds up routing,
+heartbeats and signals while it waits. `--record-payload-bytes N` keeps only
+the first N bytes of each (`truncated` is set), which is enough to see what
+happened and keeps a long recording small. Use it for a session, not
+forever: there is no rotation.
 
 ### Recording on demand, over the protocol
 
 A running multiplexer can be asked to record by any peer, so a session on a
 cluster starts and stops from one command, without restarts or a shell on
-the hosts. It is off unless the multiplexer was started with one of:
+the hosts. Starting one is off unless the multiplexer was started with one of:
 
 | Option | Allows |
 |---|---|
@@ -452,7 +456,9 @@ the answer is a `RECORDING_STATUS` (7) referencing it. A peer may connect
 for this alone as the reserved peer type `RECORDING_CONTROLLER` (3),
 accepted only when one of the options is on, so no rules file needs an
 entry. Anyone who can reach the port can ask, as with everything else on
-this network; the options are the operator's consent.
+this network; the options are the operator's consent. STATUS and STOP
+need neither: every multiplexer answers them, and a STOP closes whatever
+session is open, one started with `--record` too.
 
 `mxcontrol recording` is the command
 ([mxcontrol](mxcontrol.md#recording)); from Python, `multiplexer.recording`

@@ -24,8 +24,10 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /work
 COPY . /work
+# The wheel goes into a venv without the distribution's packages, as pip
+# users have it: the protobuf it asks for is what it gets.
 CMD make -j"$(nproc)" all check wheel \
-    && python3 -m venv --system-site-packages /venv \
+    && python3 -m venv /venv \
     && /venv/bin/pip install -q build/dist/*.whl \
     && /venv/bin/python make/wheel_smoke.py \
     && MXCONTROL=/work/build/bin/mxcontrol /venv/bin/python make/wheel_smoke.py

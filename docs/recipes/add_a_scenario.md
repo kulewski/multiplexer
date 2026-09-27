@@ -28,6 +28,6 @@ roles, their options and their events.
 
 If the roles cannot express the behaviour, extend them: the option and the
 event have to be added to both `tests/roles/py/<role>.py` and the matching
-class in `tests/roles/cc/mxtestroles.cc`, with the same names, and to the
+class in `tests/roles/cc/<role>.cc`, with the same names, and to the
 table in `tests/README.md`. A protocol-level scenario that needs bytes on
 the wire uses `multiplexer.testing.raw_peer` instead of a role.

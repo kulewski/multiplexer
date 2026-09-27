@@ -49,9 +49,12 @@ class BackendThread(Generic[ServedT]):
     where it is connected and then served with serve_forever(poll,
     drain_seconds); start() returns once it is built and connected,
     raising what the factory raised. stop() asks it to leave, joins the
-    thread and re-raises what serving raised, so a failing handler fails
-    the test. `backend` is the instance, `error` the exception if there
-    was one. `drain_seconds` is the cap of a drain the test starts with
+    thread and re-raises what serve_forever() raised: a handler's
+    exception only when the backend's on_handler_exception() returns
+    False, since by default a backend reports it to the requester and
+    serves on; FakePeer keeps its handlers' exceptions and raises the
+    first at stop(). `backend` is the instance, `error` the exception if
+    there was one. `drain_seconds` is the cap of a drain the test starts with
     the backend's start_draining(); 0, the default, ends one at once.
     """
 

@@ -21,26 +21,13 @@ import unittest
 
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.testing import Cluster, runfile, wait_until
+from multiplexer.testing.buffers import fill_frames
 from multiplexer.testing.raw_peer import RawPeer, frame
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 PAYLOAD = b"x" * (64 * 1024)
 QUEUED = 200  # messages beyond what the sockets hold, in the multiplexer's queue at the stop
-
-
-def beyond_the_sockets() -> int:
-    """How many PAYLOADs fill both sockets of a receiver that does not read,
-    the largest the kernel allows each, twice, and QUEUED more for the
-    multiplexer's queue: PYTHON_TEST_SERVER's holds a million."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // len(PAYLOAD) + QUEUED
 
 
 def read(path: str) -> str:
@@ -61,13 +48,13 @@ def queue_for_a_receiver(cluster: Cluster) -> tuple[RawPeer, RawPeer, int]:
     receiver.handshake()
     sender = RawPeer(cluster.endpoints[0], peers.PYTHON_TEST_CLIENT)
     sender.handshake()
-    sent = beyond_the_sockets()
-    for _ in range(sent):
-        sender.send(PAYLOAD, types.PYTHON_TEST_REQUEST)
+    sending = fill_frames() + [PAYLOAD] * QUEUED  # the sockets full, then QUEUED in the multiplexer's queue
+    for payload in sending:
+        sender.send(payload, types.PYTHON_TEST_REQUEST)
     marker = sender.send(b"routed", types.PYTHON_TEST_RESPONSE, to=sender.instance_id)
     while sender.receive(timeout=60).id != marker:
         pass
-    return receiver, sender, sent
+    return receiver, sender, len(sending)
 
 
 def count_until_the_end(peer: RawPeer, type_: int) -> int:
@@ -144,6 +131,7 @@ class GracefulStopTest(unittest.TestCase):
             multiplexer = cluster.mx[0]
             receiver, sender, _ = queue_for_a_receiver(cluster)
             assert multiplexer.proc is not None
+            multiplexer.expect_exit()  # the test's own two signals end it
             multiplexer.proc.send_signal(signal.SIGTERM)
             wait_until(lambda: multiplexer.log_contains("stopping:"), 20, "the stop began")
             multiplexer.proc.send_signal(signal.SIGTERM)

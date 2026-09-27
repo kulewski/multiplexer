@@ -30,6 +30,10 @@ trap 'rm -rf "$staging"' EXIT
 make -j"$(nproc)" all
 make -j"$(nproc)" check-cc
 make install DESTDIR="$staging" PREFIX=/usr
+# The pkg-config file says the package's version: a tag in the environment,
+# v2.3.1, once made it say that instead.
+grep -qx "Version: $version" "$staging/usr/lib/pkgconfig/multiplexer.pc" ||
+  { echo "multiplexer.pc does not say Version: $version" >&2; exit 1; }
 # What is published is stripped: the executables of their symbols, the
 # library of its debug information only, since a program links against its
 # symbol table. Then the stripped executables are run once.

@@ -101,7 +101,9 @@ that changes.
 ## Failure modes
 
 - **A backend dies mid-request.** The client waits out its timeout, searches,
-  and repeats the request elsewhere; the total wait is up to three timeouts.
+  and repeats the request elsewhere; the total wait is up to three timeouts,
+  more on a `ThreadedClient` or `AsyncClient` that loses the connection of
+  the search or of the direct request, which starts the query over.
   [How a query is answered](query.md) shows it.
 - **The addressee of an addressed request dies or leaves.** Every
   multiplexer reports it gone and the request fails with `OperationFailed`
@@ -111,17 +113,18 @@ that changes.
 - **A multiplexer dies.** Requests in flight on that connection go out again
   with a fresh id through another connection, at once, so a backend may see
   them twice and the caller sees nothing. A reply that was to go back
-  through the dead connection goes through another live one, or the first
-  to come up, so it can reach the caller through another multiplexer than
-  its request took. What a client's connection to it had not written goes
+  through the dead connection goes through another live one, or the first to
+  come up, so it can reach the caller through another multiplexer than its
+  request took. What a client's connection to it had not written goes
   through another live connection, or, with none live, waits for the next:
   what still waited for room within its own timeout, what was queued
   `DEFAULT_TIMEOUT` from then, so that it rides through a restart however
   long ago it was sent; a pinned lane's messages are dropped, and so are the
-  copies of messages sent to every connection, the other multiplexers
-  having theirs, each drop reported. Backends and clients reconnect to the
-  restarted multiplexer within about 3 s. [Connecting to a
-  multiplexer](handshake.md) shows it.
+  copies of messages sent to every connection while another connection
+  lives, the other multiplexers having theirs, each drop reported; with none
+  live, the message is held once, whole, until one comes up. Backends and
+  clients reconnect to the restarted multiplexer within about 3 s.
+  [Connecting to a multiplexer](handshake.md) shows it.
 - **A multiplexer is stopped.** On `SIGTERM` it accepts nothing new and
   closes each connection once what is queued for it is written, so what it
   held for the peers that read still arrives; a peer that reads nothing by
@@ -310,6 +313,13 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |
 | `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
 | dedup window | 2048 ids | repeats the library recognizes |
+
+The silence intervals count whole frames: the clock restarts when a
+frame's header has arrived and when its body has, never in between, so a
+frame must arrive whole within 90 s of its header. A body that takes
+longer, a frame near the 128 MiB limit on a link slower than about
+1.5 MB/s, ends the connection mid-frame, and so does every attempt to
+send it again.
 
 Changing a constant means rebuilding everything that embeds it, and the
 heartbeat intervals must agree between the multiplexer and its peers.

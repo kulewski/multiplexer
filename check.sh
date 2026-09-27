@@ -10,8 +10,9 @@
 # ./check.sh --leaks runs the scenarios and unit tests under AddressSanitizer
 # with LeakSanitizer: the harness turns leak detection on for the C++
 # processes (the multiplexer, the C++ roles), whose scenarios then fail on
-# a leaked allocation at exit, and off for the Python ones. The runtime is
-# preloaded because the test's own process is the Python interpreter.
+# a leaked allocation at exit, an exit code leaving the Cluster checks, and
+# off for the Python ones. The runtime is preloaded because the test's own
+# process is the Python interpreter.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -29,7 +30,7 @@ fi
 
 ./format.sh --check
 python3 docs/check_mermaid.py          # renders every Mermaid block with mermaid-cli
-bazel test --test_tag_filters=-slow //...
+bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 bazel build --config=clang //...
 bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
 bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test

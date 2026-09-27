@@ -227,8 +227,10 @@ class BaseThreadedMultiplexerServer:
         nothing reaches handle_message() before the subclass's __init__ is
         done, and no multiplexer knows the backend until it serves. `queue_size`
         bounds the requests waiting for a worker; beyond it a request is
-        dropped with a warning, as a full queue on the multiplexer drops,
-        and the requester retries through the search. A request that
+        dropped with a warning and no answer, so the requester waits out
+        its first stage's timeout and searches, and the backend keeps its
+        round-robin share, since the multiplexer skips a peer only for its
+        own full queue. A request that
         arrives while the server is leaving (close() under way) is
         refused with DELIVERY_ERROR instead, so the requester retries at
         once; one that answers another is dropped, since refusing a reply
@@ -300,9 +302,11 @@ class BaseThreadedMultiplexerServer:
 
     def handle_message(self, request: Request) -> None:
         """Override: called on a worker thread with every message that is
-        not one of the protocol's own. Answer with request.reply(), or
-        call request.no_response() for an event; either may happen later,
-        from any thread, as long as it happens."""
+        not one of the protocol's own, and with the DELIVERY_ERRORs for
+        messages the server sent that were not queries, which a handler
+        tells by the type. Answer with request.reply(), or call
+        request.no_response() for an event or a DELIVERY_ERROR; either may
+        happen later, from any thread, as long as it happens."""
         raise NotImplementedError()
 
     def periodic_task(self) -> None:
@@ -527,8 +531,8 @@ class BaseThreadedMultiplexerServer:
                 thread.start()
 
     def _on_message(self, mxmsg: MultiplexerMessage, connection: ConnectionWrapper) -> None:
-        """The io thread: queue the message for a worker; drop it when the
-        queue is full, as a full queue on the multiplexer drops; refuse it
+        """The io thread: queue the message for a worker; drop it, unanswered,
+        when the queue is full; refuse it
         when leaving, with the DELIVERY_ERROR a multiplexer sends for a
         peer that is gone, so that a query retries elsewhere at once, and
         drop it then if it answers another message."""

@@ -1,9 +1,11 @@
 // Recording: the Record messages (Recording.proto) a multiplexer produces,
-// and the Recorder that writes them to a file, through a buffered stream on
-// the io thread, so routing never waits on the disk. A write error switches
-// the file off and is logged once; the multiplexer keeps serving. The
-// server (server.h) owns one Recorder per file session and streams the
-// same records to the peers that tapped in.
+// and the Recorder that writes them to a file through a buffered stream.
+// It runs on the io thread, with blocking calls: the open, every write, the
+// flush when the buffer fills, and the close, so a slow or stalled file
+// system holds up routing while it lasts; record to local storage. A write
+// error switches the file off and is logged once; the multiplexer keeps
+// serving. The server (server.h) owns one Recorder per file session and
+// streams the same records to the peers that tapped in.
 #ifndef MX_MULTIPLEXER_RECORDER_H_
 #define MX_MULTIPLEXER_RECORDER_H_
 

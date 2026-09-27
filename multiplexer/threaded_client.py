@@ -222,14 +222,16 @@ class ThreadedClient:
         and reported (on_drop) after that: for ALL, a full connection gets
         its copy once it has room, and a lane waits for room on its own
         connection while that lives. Through a pinned lane whose connection
-        is gone it raises NotConnected at once.
+        is gone, and after shutdown(), it raises NotConnected at once.
 
         Without `flush` the call returns at once and is safe from
         callbacks. With `flush=True` it waits until the message reached the
         socket, for ALL until one copy did, a connection that dies under it
-        handing it to another or having it held, and raises NotConnected
-        when nothing wrote it with no connection live, else
-        OperationTimedOut; not from a callback. With a `callback`, flush or
+        handing it to another or having it held (a copy for ALL is held
+        only when no connection is live, and dropped otherwise), and raises
+        NotConnected when nothing wrote it with no connection live, or when
+        every copy for ALL went with its connection, else OperationTimedOut;
+        not from a callback. With a `callback`, flush or
         not, it returns at once and `callback(written)` runs on the io
         thread once the message's end is known: 1 once it was written, the
         first copy for ALL, 0 once it was given up on, and reported, or
@@ -364,17 +366,20 @@ class ThreadedClient:
         a callback, on the io thread, where it would block that thread. With
         `callback`, return None at once and call `callback(result)` on the io
         thread with the reply or with the exception instance the blocking
-        form would have raised; safe from callbacks.
+        form would have raised; safe from callbacks. After shutdown() the
+        callback runs at once, on the calling thread, with NotConnected, so
+        it must not query again then, nor take a lock its caller holds.
 
         With `to`, the instance id of a peer, the request is addressed: only
         that peer ever gets it; when a multiplexer reports it is not behind
         it, or the connection dies under the wait, the peer is located with
         a `probe` addressed to it on every connection, a
         BACKEND_FOR_PACKET_SEARCH (which reaches the instance whatever its
-        routing, as every addressed message does) or a
-        PING (answered as long as the peer lives), and the request goes
-        again through the connection that found it. A peer nobody has is
-        OperationFailed; one `timeout` covers the three stages.
+        routing, as every addressed message does) or a PING (answered as long
+        as the peer lives, by the server classes, ThreadedClient and
+        AsyncClient, never by a SyncClient), and the request goes again through
+        the connection that found it. A peer nobody has is OperationFailed; one
+        `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() (the request goes through
         the lane's connection and the lane adopts the connection the reply

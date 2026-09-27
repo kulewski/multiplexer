@@ -5,7 +5,8 @@ multiplexer.testing; this repository's own integration tests (tests/) are
 built on it.
 
 Cluster starts one or more multiplexers on ephemeral ports (Mx is one of
-them). spawn() launches a role process that plays one peer and reports what it
+them), and leaving it fails the test when one of its processes did not end
+cleanly. spawn() launches a role process that plays one peer and reports what it
 does as Event lines on stdout (events.proto, one message per line in protocol
 buffer text format); Role collects those events as dicts. The roles this
 repository ships (tests/roles, in Python and C++) play a client or a backend
@@ -170,6 +171,17 @@ def tail(path: str, lines: int = 20) -> str:
         return "(no log)"
 
 
+def exit_status(code: int | None) -> str:
+    """An exit code as a failure message says it: a death by a signal
+    names the signal, -11 (SIGSEGV)."""
+    if code is not None and code < 0:
+        try:
+            return "%d (%s)" % (code, signal.Signals(-code).name)
+        except ValueError:
+            pass
+    return str(code)
+
+
 class Config:
     """What mx_integration_test passed on the command line: the number of
     multiplexers, who plays each role, the rules file, and free-form
@@ -216,7 +228,13 @@ class Mx:
     """One multiplexer process, started on an ephemeral port unless told
     otherwise. Its log goes to <prefix>mx<index>.log in the output
     directory; a Cluster gives its multiplexers a prefix of their own,
-    c<n>-, so that two clusters alive at once never share a file."""
+    c<n>-, so that two clusters alive at once never share a file.
+
+    Every process it runs is expected to end at a stop() with exit code 0.
+    One that ends otherwise, exits on its own or has to be killed when its
+    stop() runs out of time, is kept with the end of its log for the
+    Cluster to report (unclean_ends()); kill() and expect_exit() say the
+    test ends the process itself."""
 
     def __init__(
         self,
@@ -253,6 +271,15 @@ class Mx:
         # multiplexer, that gets its binary log stream.
         self.logging_fd = logging_fd
         self.proc: subprocess.Popen | None = None
+        # How the running process ends: "stop" or "kill" once the harness
+        # ended it, "itself" once it was found ended without either, None
+        # until then; and whether the test said it ends it itself
+        # (expect_exit). Both start over with each start().
+        self._ended_by: str | None = None
+        self._exit_expected = False
+        # The processes that did not end cleanly, one line each with the
+        # end of the log, until the Cluster takes them (unclean_ends).
+        self._unclean: list[str] = []
         stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
         self.log_path = stem + ".log"
         self.port_file = stem + ".port"
@@ -282,6 +309,8 @@ class Mx:
         that `address` names the port it actually listens on. A peers file
         from an earlier run goes first: a restarted multiplexer has no peers
         until they reconnect, and a wait must not read the old list."""
+        self._note_own_end()  # a process that died on its own is reported, though another replaces it
+        self._ended_by, self._exit_expected = None, False
         if os.path.exists(self.port_file):
             os.unlink(self.port_file)
         if os.path.exists(self.peers_file):
@@ -334,30 +363,82 @@ class Mx:
             self.address = port_file.read().strip()
         return self
 
-    def stop(self, timeout: float = 10) -> int | None:
+    def stop(self, timeout: float | None = None) -> int | None:
         """Ask the process to exit (SIGTERM, which it handles by sending
         what it holds, within its --drain-seconds, then closing everything
-        and exiting 0), wait up to `timeout`, and return its exit code.
-        Falls back to kill() if it does not exit in time. None if it was
-        never started; the old exit code if it had already exited."""
-        if self.proc is None or self.proc.poll() is not None:
-            return None if self.proc is None else self.proc.returncode
+        and exiting 0, and SIGCONT, so that one pause() froze handles it),
+        wait up to `timeout`, by default 10 s, or drain_seconds + 5 s for
+        one started with more than 5, and return its exit code. Falls back
+        to kill() if it does not exit in time. None if it was
+        never started; the old exit code if it had already exited. An exit
+        code other than 0, a kill for want of time and a process that had
+        exited on its own are kept for the Cluster to report."""
+        if self.proc is None:
+            return None
+        if self.proc.poll() is not None:
+            self._note_own_end()
+            self._log.close()
+            return self.proc.returncode
+        if timeout is None:
+            timeout = max(10, self.drain_seconds + 5) if self.drain_seconds else 10
+        self._ended_by = "stop"
         self.proc.terminate()
+        self.proc.send_signal(signal.SIGCONT)  # a frozen process handles its SIGTERM once it runs
         try:
-            return self.proc.wait(timeout)
+            code = self.proc.wait(timeout)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-            return self.proc.wait(5)
+            code = self.proc.wait(5)
+            self._note_unclean("did not exit within %ss of SIGTERM and was killed" % timeout)
+            return code
         finally:
             self._log.close()
+        if code != 0:
+            self._note_unclean("exited with %s on SIGTERM" % exit_status(code))
+        return code
 
     def kill(self) -> None:
         """End the process at once (SIGKILL), for scenarios that simulate a
-        crash rather than a shutdown. Nothing happens if it is not running."""
+        crash rather than a shutdown; the Cluster does not report the end
+        of a process killed this way. Nothing happens if it is not
+        running."""
         if self.proc is not None and self.proc.poll() is None:
+            self._ended_by = "kill"
             self.proc.kill()
             self.proc.wait(5)
             self._log.close()
+
+    def expect_exit(self) -> None:
+        """Say that the test ends the running process itself, by other means
+        than stop() and kill(): a signal of its own, another process's kill.
+        The Cluster then does not report how it ends; the next start()
+        expects a clean stop again."""
+        self._exit_expected = True
+
+    def unclean_ends(self) -> list[str]:
+        """What went wrong at the end of this multiplexer's processes since
+        the last call, one message each with the end of its log: an exit
+        on its own, an exit code other than 0 at a stop, a kill for want of
+        time. Taken by the Cluster when it stops."""
+        self._note_own_end()
+        unclean, self._unclean = self._unclean, []
+        return unclean
+
+    def _note_own_end(self) -> None:
+        """A process that has ended though nothing here ended it: kept as
+        unclean, once, unless the test expected it."""
+        if self.proc is None or self._ended_by is not None or self.proc.poll() is None:
+            return
+        self._ended_by = "itself"
+        self._note_unclean("exited on its own with %s" % exit_status(self.proc.returncode))
+
+    def _note_unclean(self, what: str) -> None:
+        """Keep `what`, which happened to the process, with the end of its
+        log for the Cluster's report, unless the test said it ends the
+        process itself."""
+        if not self._exit_expected:
+            name = os.path.basename(self.log_path)
+            self._unclean.append("%s %s; the end of %s:\n%s" % (name[: -len(".log")], what, name, tail(self.log_path)))
 
     def restart(self) -> "Mx":
         """stop() then start() on the same address: what a supervisor does.
@@ -446,7 +527,22 @@ class Cluster:
     how long a stop goes on sending what is queued (its default when
     None, 0 at once). Use as a context
     manager: entering starts the multiplexers, leaving stops every role
-    that is still running and then them."""
+    that is still running and then them. The in-process peers of fakes.py
+    are the test's to stop, inside the cluster's block, since they would
+    go on reconnecting.
+
+    Leaving fails the block with AssertionError when a process did not
+    end cleanly: a role still running that SIGTERM did not end within
+    10 s with 0, or by the signal itself for a role that does not catch
+    it; a multiplexer that exited on its own, exited other than 0 at a
+    stop (the test's own, a restart()'s or the cluster's), or had to be
+    killed when a stop ran out of time, 10 s, or drain_seconds + 5 s for a
+    cluster that drains longer; a process pause() froze is continued
+    after its SIGTERM. LeakSanitizer's exit code for a
+    leak at exit (check.sh --leaks) is such an end. A multiplexer ended
+    with Mx.kill(), or after Mx.expect_exit(), is the test's doing and is
+    not reported, nor is a role that had exited before: its exit code is
+    the test's to check."""
 
     _counter = 0
 
@@ -492,7 +588,8 @@ class Cluster:
         ]
 
     def recording_files(self) -> list[str]:
-        """Every session file written so far under `recording_dir`, oldest first."""
+        """Every session file written so far under `recording_dir`, sorted
+        by name: by session label, then oldest first within a label."""
         if not self.recording_dir:
             return []
         paths = [os.path.join(self.recording_dir, name) for name in os.listdir(self.recording_dir)]
@@ -542,10 +639,26 @@ class Cluster:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """Stop every role still running and then the multiplexers, and
+        raise AssertionError naming every process that did not end cleanly
+        (see the class comment), with the end of its log. When the block is
+        failing already its own error goes on, and the report goes to
+        stderr."""
+        unclean: list[str] = []
         for role in list(Role.running_roles()):
-            role.stop()
+            problem = role._stop_checked()
+            if problem:
+                unclean.append(problem)
         for multiplexer in self.mx:
             multiplexer.stop()
+            unclean += multiplexer.unclean_ends()
+        if not unclean:
+            return
+        report = "%d process(es) did not end cleanly:\n%s" % (len(unclean), "\n\n".join(unclean))
+        if exc and exc[0] is not None:
+            print(report, file=sys.stderr)
+            return
+        raise AssertionError(report)
 
     @property
     def addresses(self) -> list[str]:
@@ -597,6 +710,7 @@ class Role:
         self.argv = executable + argv
         self.events: list[Event] = []
         self._eof = False
+        self._killed_at_stop = False  # stop() ran out of time and killed it
         self._cond = threading.Condition()
         self.stderr_path = os.path.join(output_dir(), self.name + ".stderr.log")
         self._stderr = open(self.stderr_path, "wb")
@@ -737,18 +851,44 @@ class Role:
 
     def stop(self, timeout: float = 10) -> int | None:
         """Ask the process to exit (SIGTERM; the roles catch it and finish
-        cleanly), wait up to `timeout`, kill it if it does not exit, and
-        return the exit code."""
+        cleanly; and SIGCONT, so that one pause() froze handles it), wait up
+        to `timeout`, kill it if it does not exit, and return the exit
+        code."""
         if self.proc.poll() is None:
             self.proc.terminate()
+            self.proc.send_signal(signal.SIGCONT)  # a frozen process handles its SIGTERM once it runs
             try:
                 self.proc.wait(timeout)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait(5)
+                self._killed_at_stop = True
         self._reader.join(5)
         self._stderr.close()
         return self.proc.returncode
+
+    def _stop_checked(self, timeout: float = 10) -> str | None:
+        """stop() the role, as a Cluster does when it stops, and say what was
+        wrong with its end, with the end of its stderr: None when it exited
+        0 or of the SIGTERM itself, which a role that does not catch it dies
+        of, and when it had exited before, which is the test's to check."""
+        was_running = self.proc.poll() is None
+        self._killed_at_stop = False
+        code = self.stop(timeout)
+        if not was_running:
+            return None
+        if self._killed_at_stop:
+            what = "did not exit within %ss of SIGTERM and was killed" % timeout
+        elif code in (0, -signal.SIGTERM):
+            return None
+        else:
+            what = "exited with %s on SIGTERM" % exit_status(code)
+        return "%s %s; the end of %s:\n%s" % (
+            self.name,
+            what,
+            os.path.basename(self.stderr_path),
+            tail(self.stderr_path),
+        )
 
     def kill(self) -> int | None:
         """End the process at once (SIGKILL), simulating a crash, and return

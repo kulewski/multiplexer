@@ -24,6 +24,17 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   `wait_for_peer_gone(type)` wait on the multiplexers' peers files,
   `wait_until(predicate, timeout, what)` on anything else. Every process's
   stderr and events land in the test's undeclared outputs directory.
+  Leaving the `Cluster` stops every role still running and then the
+  multiplexers, and fails the test with the end of the log of every
+  process that did not end cleanly: a role that `SIGTERM` did not end
+  within 10 s with 0, or by the signal for one that does not catch it,
+  and a multiplexer that exited on its own, exited other than 0 at a stop
+  or had to be killed when a stop ran out of time: 10 s, or
+  `drain_seconds` + 5 s for a cluster that drains longer. A process that
+  `pause()` froze is continued after its `SIGTERM`, so that it handles it.
+  A scenario that ends a
+  multiplexer itself says so: `Mx.kill()`, or `Mx.expect_exit()` before
+  a signal of its own.
   `harness/` here re-exports it with the constants of `testing.rules`.
   `FakePeer`, `BackendThread`, `TestClient` and `ThreadedTestClient` are the in-process peers for
   unit tests, described in [docs/api_python.md](../docs/api_python.md#testing).
@@ -60,7 +71,9 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   watches the Python side and the binding with tracemalloc by source line,
   the object count after a collection, reference counts and weak references. Under `check.sh --leaks` the
   harness turns LeakSanitizer on for the C++ processes, so an allocation
-  still held at exit fails the scenario through the exit code.
+  still held at exit fails the scenario through the exit code: leaving
+  the `Cluster` checks the multiplexers' and those of the roles still
+  running, the scenario those of the roles it waited for.
 - `scenarios/`: one folder per scenario with the test and a README that
   draws what happens; [scenarios/README.md](scenarios/README.md) is the
   generated index. One `mx_integration_test` target per
@@ -136,8 +149,10 @@ role. The contract is the command line and the events:
   Event is kept as a `stdout` event. The harness waits for `connected`
   with `connections` equal to the number of multiplexers; the other names
   are yours.
-- Exit: on `SIGTERM`, cleanly; `Role.stop()` sends it and reports the
-  exit code.
+- Exit: on `SIGTERM`, with 0 within 10 s, or by the signal if the binary
+  does not catch it; `Role.stop()` sends it and reports the exit code,
+  and leaving the `Cluster` fails the test on any other end of a role
+  still running then.
 
 [scenarios/label_role/upper_backend.py](scenarios/label_role/upper_backend.py)
 is the smallest such program, a `BaseMultiplexerServer` that follows the

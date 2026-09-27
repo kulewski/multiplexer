@@ -82,6 +82,12 @@ setup(
     },
     # The command runs the package's binary in its own place (multiplexer/mxcontrol.py).
     entry_points={"console_scripts": ["mxcontrol = multiplexer.mxcontrol:main"]},
-    install_requires=["protobuf"],
+    # What the generated *_pb2.py need of the protobuf runtime, from the
+    # protoc that made them, which `make wheel` fills in (the Makefile's
+    # PROTOBUF_REQUIREMENT): protobuf>=3.20 for the protoc packaging/wheels.sh
+    # pins (PROTOBUF_VERSION, 3.21.12), whose code needs the runtime's
+    # builder module, new in 3.20, and which the release's smoke job installs
+    # the wheel with; a range below 4 for an older protoc's code.
+    install_requires=["@PROTOBUF_REQUIREMENT@"],
     python_requires=">=3.10",
 )

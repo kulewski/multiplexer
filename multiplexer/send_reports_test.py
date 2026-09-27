@@ -82,6 +82,7 @@ class HandedOverTest(unittest.TestCase):
                     client.send_message(CHUNK, type=UNROUTED, multiplexer=lane)
                 assert frozen.proc is not None
                 # another process kills it during the call below, whatever the call holds meanwhile
+                frozen.expect_exit()
                 killer = subprocess.Popen(["sh", "-c", "sleep 0.5; kill -9 %d" % frozen.proc.pid])
                 question = client.new_message(message=b"question", type=REQUEST)
                 sent_ids: list[int] = []

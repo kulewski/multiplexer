@@ -33,7 +33,7 @@ sequenceDiagram
 
 ## What is checked
 
-- The header carries the rules file's SHA-1, which equals the one in the generated constants.
+- The header carries the rules file's fingerprint, a CRC-32, which equals the one in the generated constants.
 - The request and its reply are recorded with sender, recipient and both peer types resolved, the request first.
 - A broadcast yields one record per subscriber, with the same message id.
 - A request nobody serves is recorded as NO_RECIPIENT for the intended peer type, with the error reported, and the DELIVERY_ERROR sent back appears as a routed message.

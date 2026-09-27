@@ -383,8 +383,9 @@ graph LR
 The only backend anywhere is of another type. The query cannot succeed; this
 picture shows how quickly the client finds that out. A type that has no
 routing rule at all is quicker still: the multiplexer answers the request
-itself with `DELIVERY_ERROR` marked `is_known_type`, and the client raises
-`OperationFailed` without searching.
+itself with `DELIVERY_ERROR` marked `is_known_type`, and every multiplexer
+answers the search that follows the same way, so the client raises
+`OperationFailed` after two round trips, never waiting out a timeout.
 
 ### 1. The client sends the request
 

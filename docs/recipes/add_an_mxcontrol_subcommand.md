@@ -23,6 +23,7 @@
    `bazel run //mxcontrol -- help name` prints its options, then add it to
    [mxcontrol.md](../mxcontrol.md).
 
-The test roles in `tests/roles/cc/mxtestroles.cc` are subcommands of a
-different binary built the same way; a tool that belongs to the tests goes
-there rather than into `mxcontrol`.
+The test roles, one file each in `tests/roles/cc/` (`backend.cc`,
+`client.cc`, `event_backend.cc`, `event_client.cc`), are subcommands of a
+different binary, `mxtestroles`, built the same way; a tool that belongs to
+the tests goes there rather than into `mxcontrol`.

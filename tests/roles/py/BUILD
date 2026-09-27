@@ -1,4 +1,5 @@
-# Role processes in Python. Each plays one peer, prints JSON lines on stdout.
+# Role processes in Python. Each plays one peer and prints its events on
+# stdout, one protobuf text-format message a line.
 py_library(
     name = "common",
     srcs = ["common.py"],

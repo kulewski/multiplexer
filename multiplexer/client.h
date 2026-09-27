@@ -55,7 +55,8 @@ class Client : public ExceptionDefinitions {
   // written to the socket (which the kernel then holds; the multiplexer
   // may not have it yet), or was dropped: its connection ended before
   // writing it, or it waited past its timeout. Null (false as bool) when no
-  // connection took the message at all.
+  // connection took the message at all; test it first, since in_queue(),
+  // is_sent() and is_lost() fail an Assert on a null tracker.
   struct ScheduledMessageTracker {
     ScheduledMessageTracker(BasicScheduledMessageTracker basic_tracker) : basic_tracker_(basic_tracker) {}
 
@@ -78,6 +79,8 @@ class Client : public ExceptionDefinitions {
   };
 
   // With its own io_service, sharing one, or borrowing one that outlives it.
+  // A call runs whatever handler of the service is ready, another client's
+  // too, so the clients sharing one service are driven from one thread.
   Client(std::uint32_t client_type);
   Client(shared_ptr<asio::io_service> io_service, std::uint32_t client_type);
   Client(asio::io_service& io_service, std::uint32_t client_type);

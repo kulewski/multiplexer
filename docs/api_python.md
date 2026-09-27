@@ -88,48 +88,55 @@ the time and their peer types are ordinary ones.
   [Lanes, pinning and addressed queries](#lanes-pinning-and-addressed-queries).
   `on_received` hears which backend acknowledged the request, see
   [Knowing a backend took the request](#knowing-a-backend-took-the-request).
-- `send_message(message, type=..., to=0, multiplexer=SyncClient.ONE, flush=False, timeout=10, callback=None)`:
-  sends an event and returns its message id, as every client sends.
-  `multiplexer=SyncClient.ONE` uses one connection; `SyncClient.ALL` uses
-  every connection, in which case the receivers drop the copies; a
-  `ConnectionWrapper` from an earlier reply prefers that connection, and a
-  `Lane` from `lane()` keeps a stream on one, see below. Without `flush`
-  the call returns at once: the message is queued, or waits for room on a
-  full connection (1024 queued), or, with no connection live, is held
-  until one comes up, in order, `timeout` seconds at most each way; it is
-  written inside the call on an idle connection, otherwise as a later
-  call runs the loop, the only time a `SyncClient` runs it. A connection
-  that dies with the message unwritten hands it to
-  another, or has it held for the next. One the client gives up on is
+- `send_message(message, type=..., to=0, multiplexer=SyncClient.ONE,
+  flush=False, timeout=10, callback=None)`: sends an event and returns its
+  message id, as every client sends. `multiplexer=SyncClient.ONE` uses one
+  connection; `SyncClient.ALL` uses every connection, in which case the
+  receivers drop the copies; a `ConnectionWrapper` from an earlier reply
+  prefers that connection, and a `Lane` from `lane()` keeps a stream on one,
+  see below. Without `flush` the call returns at once: the message is
+  queued, or waits for room on a full connection (1024 queued), or, with no
+  connection live, is held until one comes up, in order, `timeout` seconds
+  at most each way; it is written inside the call on an idle connection,
+  otherwise as a later call runs the loop, the only time a `SyncClient` runs
+  it. A connection that dies with the message unwritten hands it to another,
+  or has it held for the next; a copy for `ALL` is held too when no
+  connection is live, and dropped while one is, so a flushing send to `ALL`
+  whose copies all went with their connections raises `NotConnected`, even
+  with a connection that came up since. One the client gives up on is
   reported ([Messages the library gives up
   on](#messages-the-library-gives-up-on)). `flush=True` waits until the
   message reached the socket, the first copy for `ALL`, within `timeout`,
   and raises `NotConnected` when nothing wrote it with no connection live,
   else `OperationTimedOut`; with `timeout=-1` it waits as long as that
-  takes, and its message has no deadline either. Written means the kernel's buffer
-  ([semantics](semantics.md)). With `callback`, flushing or not, the call
-  returns at once and `callback(written)` runs once, with the GIL, inside
-  a later call that runs the loop: 1 when the message was written, the
-  first copy for `ALL`, 0 when it was given up on or `shutdown()` came
-  first. `flush_all(timeout)` runs the loop until everything sent before
-  it was written or given up on, and returns once the callbacks of those
-  sends have run: `True` when every one was written, `False` when one
-  was given up on, which `on_drop` names, or `timeout` passed first;
-  [Sending](#sending) sets the calls side by side. Either way the loop runs before a
-  connection is chosen, so a connection the multiplexer closed while the
-  client sat idle is retired rather than written into, which would
-  succeed and lose the message. `NotConnected` at once for a pinned lane
-  whose connection is gone, and after `shutdown()`. Extra
-  keyword arguments become message fields, such as `to=` or `workflow=`.
-  Nothing comes back for an event; a `DELIVERY_ERROR`, if you asked for
-  one, arrives on the next call that reads. The lower-level
+  takes, and its message has no deadline either. Written means the kernel's
+  buffer ([semantics](semantics.md)). With `callback`, flushing or not, the
+  call returns at once and `callback(written)` runs once, with the GIL,
+  inside a later call that runs the loop: 1 when the message was written,
+  the first copy for `ALL`, 0 when it was given up on or `shutdown()` came
+  first. `flush_all(timeout)` runs the loop until everything sent before it
+  was written or given up on, and returns once the callbacks of those sends
+  have run: `True` when every one was written, `False` when one was given up
+  on, which `on_drop` names, or `timeout` passed first; [Sending](#sending)
+  sets the calls side by side. Either way the loop runs before a connection
+  is chosen, so a connection the multiplexer closed while the client sat
+  idle is retired rather than written into, which would succeed and lose the
+  message. `NotConnected` at once for a pinned lane whose connection is
+  gone, and after `shutdown()`. Extra keyword arguments become message
+  fields, such as `to=` or `workflow=`. Nothing comes back for an event; a
+  `DELIVERY_ERROR`, if you asked for one, arrives on the next call that
+  reads, `read_message()` say. A `query()` or `send_and_receive()` that
+  waits meanwhile reads it too: every message that is not the reply it waits
+  for goes to `handle_drop(mxmsg, connection)`, which logs it and drops it,
+  unless a subclass overrides it to keep such messages. The lower-level
   `schedule_one()` returns a tracker instead, null when no connection is
-  live, since it holds nothing, for code that wants to look
-  at a queued message's state: `in_queue()`; `is_sent()`, written to the
-  socket, which the kernel then holds and the multiplexer may not have
-  yet; `is_lost()`, dropped, its connection having ended before writing
-  it or its timeout having passed. `schedule_all()` returns how many
-  connections took a copy.
+  live, since it holds nothing, for code that wants to look at a queued
+  message's state: `in_queue()`; `is_sent()`, written to the socket, which
+  the kernel then holds and the multiplexer may not have yet; `is_lost()`,
+  dropped, its connection having ended before writing it or its timeout
+  having passed. A null tracker is false; test it first, since the three
+  raise `RuntimeError` on it. `schedule_all()` returns how many connections
+  took a copy.
 - `event(message, type=...)`: `send_message` through every connection.
 - `query_pickle(data, type, timeout=10)` and `send_pickle(data, ...)`: the
   pickle convention, for Python peers talking to Python peers on a trusted
@@ -480,10 +487,14 @@ it is the simplest class and the one most backends are built on. Use
 several requests should be handled at once (`workers=4`), or when a
 handler must block, on a `query()` to another backend for instance,
 without the multiplexer taking the backend for dead. With `workers=1`
-it handles requests one at a time in arrival order, exactly as
-`BaseMultiplexerServer` does, and only the heartbeats differ. The
-interface differs in one place: the handler gets a `Request` and answers
-through it, rather than through `self`.
+it handles requests one at a time in arrival order, as
+`BaseMultiplexerServer` does; what differs is the heartbeats, which its
+io thread keeps up, and one kind of message: a `DELIVERY_ERROR` for a
+message the server sent that was not a query, an event whose rule
+reports delivery errors say, reaches `handle_message()` here, where
+`BaseMultiplexerServer` keeps it to itself. The interface differs in one
+place: the handler gets a `Request` and answers through it, rather than
+through `self`.
 
 - `BaseThreadedMultiplexerServer(addresses, type=None, workers=1,
   queue_size=1024, decline_searches_when_full=False, timeout=10,
@@ -502,8 +513,11 @@ through it, rather than through `self`.
   backend, and queues every other message for the workers. `queue_size`
   bounds the requests waiting for a worker, the same 1024 the library's
   incoming queue and the multiplexer's per-connection queue hold; beyond
-  it a request is dropped with a warning, as a full queue on the
-  multiplexer drops, and the requester's retry goes through the search.
+  it a request is dropped with a warning and no answer, so its requester
+  waits out its first stage's timeout and searches. Unlike a peer whose
+  queue on the multiplexer is full, which round robin skips, a saturated
+  backend keeps its share of the requests, and the search may find it
+  again unless `decline_searches_when_full=True`.
   A request that arrives while the server is leaving, `close()` under
   way after `serve_forever()` returned, routed before the multiplexer
   applied the drain routing, is refused with `DELIVERY_ERROR`, the
@@ -513,7 +527,9 @@ through it, rather than through `self`.
   nobody retries a reply and refusing one could start a loop
   ([how a backend leaves](leaving.md#what-stays)).
 - `handle_message(request)` runs on a worker with every message that is
-  not the protocol's own. `request.mxmsg` is the message and
+  not the protocol's own, and with the `DELIVERY_ERROR`s for messages the
+  server sent that were not queries, which a handler tells by the type
+  and answers with `no_response()`. `request.mxmsg` is the message and
   `request.connection` the connection it came on. `request.reply(message,
   type=..., **fields)` answers it, with `to`, `references`, `workflow` and
   the connection filled in from the request, the empty ones of a whole
@@ -594,7 +610,10 @@ client.shutdown()
 on](#messages-the-library-gives-up-on).
 
 - `query(message, type, timeout=10, callback=None, to=0, probe=..., multiplexer=ONE, with_connection=False, on_received=None)`
-  is the same three-stage algorithm as `SyncClient.query()` and raises the
+  is the same three-stage algorithm as `SyncClient.query()`, but that a
+  connection lost under the search or the direct request starts a typed
+  query over from its first stage, the stage's deadline running on, so
+  each such loss can add up to two timeouts to the three; it raises the
   same exceptions, plus `threaded_client.BackendError`, and `ValueError`
   at the call for a message over the 128 MiB limit, as every send of
   every client does (`MAX_MESSAGE_SIZE`); `to`, `probe`,
@@ -606,9 +625,11 @@ on](#messages-the-library-gives-up-on).
   they reference, never by arrival order. With `callback` it returns
   `None` at once and calls `callback(result)` on the io thread with the
   reply, `(reply, connection)` with `with_connection`, or with the
-  exception instance, the shape C++'s callback overload has. The blocking
-  form raises `RuntimeError` when called from a callback, where it would
-  block the io thread.
+  exception instance, the shape C++'s callback overload has; after
+  `shutdown()` it calls `callback` at once, on the calling thread, with
+  `NotConnected`, so a callback must not query again then, nor take a
+  lock its caller holds. The blocking form raises `RuntimeError` when
+  called from a callback, where it would block the io thread.
 - `send_message(message, type=..., multiplexer=ONE|ALL|lane|connection,
   flush=False, timeout=10, callback=None)` queues an event on one connection, on all of
   them, on a lane's or on a connection's, and returns its message id at
@@ -619,12 +640,14 @@ on](#messages-the-library-gives-up-on).
   reported after that: with `ALL` a full connection gets its copy as soon
   as it has room, and a lane waits for room on its own connection while
   that lives.
-  Through a pinned lane whose connection is gone it raises
-  `NotConnected` at once. With `flush=True` it waits until the message reached the socket,
-  for `ALL` until one copy did, a connection that dies under it handing
-  it to another or having it held, and raises `NotConnected` when nothing
-  wrote it with no connection live, else `OperationTimedOut`; the flushing
-  form must not be called from a callback. With `callback`, flushing or
+  Through a pinned lane whose connection is gone, and after `shutdown()`,
+  it raises `NotConnected` at once. With `flush=True` it waits until the
+  message reached the socket, for `ALL` until one copy did, a connection
+  that dies under it handing it to another or having it held, and raises
+  `NotConnected` when nothing wrote it with no connection live, else
+  `OperationTimedOut`; the flushing form must not be called from a
+  callback. A copy for `ALL` is held only when no connection is live and
+  dropped otherwise, as on `SyncClient`. With `callback`, flushing or
   not, it returns at once and `callback(written)` runs once on the io
   thread: 1 when the message was written, the first copy for `ALL`, 0
   when it was given up on or `shutdown()` came first; safe from
@@ -712,7 +735,10 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
 
 - `AsyncClient(addresses, type, timeout=10, loop=None, queue_size=1024, *, on_drop=None)`
   connects and binds to the running loop (`on_drop` and `dropped`: [Messages
-  the library gives up on](#messages-the-library-gives-up-on));
+  the library gives up on](#messages-the-library-gives-up-on)), blocking
+  the loop while it connects: one address after another, a round trip
+  each when its multiplexer is up, up to `timeout` for one that hangs, so
+  `holder.get()` below costs the same;
   `await AsyncClient.create(...)` does the connecting in the default
   executor for a program that must not block its loop even once; a caller
   that gives up meanwhile, a timeout around the await say, leaves nothing
@@ -741,8 +767,9 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   `timeout`, and dropped and reported (`on_drop`) after that. With
   `flush=True` it returns once the message reached a socket, for `ALL`
   once one copy did, a connection that dies under it handing it to
-  another or having it held, and raises `NotConnected` when nothing wrote
-  it with no connection live, else `OperationTimedOut`. With a
+  another or having it held (a copy for `ALL` only held, with no
+  connection live, as on `SyncClient`), and raises `NotConnected` when
+  nothing wrote it with no connection live, else `OperationTimedOut`. With a
   `callback`, `callback(written)` runs on the client's loop once the
   message's end is known: 1 when it was written, the first copy for
   `ALL`, 0 when it was given up on or `close()` came first. `NotConnected`
@@ -906,23 +933,30 @@ violation fails an assertion.
 **Interpreter exit.** A thread blocked in one of the library's waits when
 the interpreter starts to exit, say a daemon thread in `read_message()`
 while the main thread returns, never takes the GIL again: it parks. The
-extension does this on every version; without it CPython 3.11 would end
-such a thread with `pthread_exit` inside the extension's C++ frames, which
-crashes. Two things follow. A daemon thread in a wait costs nothing at
-exit. A non-daemon thread in `serve_forever()` keeps the interpreter alive
-until something clears `working`, and `threading._shutdown` runs before
-`atexit`, so a backend on a thread runs as a daemon or the program calls
-`stop()` on it before exiting. The extension registers an `atexit` hook
-that marks the exit and lets every callback and wait that was already
-about to take the GIL finish first; do not install another `_native`
-import path that skips `multiplexer.mxclient`. A program that exits with
-an `AsyncClient` or a `ThreadedClient` alive exits without a crash, but
-only a client that is freed writes what it still holds, its destructor
-shutting it down: a `ThreadedClient` given `on_message`, an `AsyncClient`
-and a threaded server are never collected while they run
-([Lifetimes](#lifetimes)), so their io thread ends with the process and
-what it had not written is lost, unreported. A program shuts them down or
-closes them, or leaves their `with` block, before it exits.
+extension does this on every version; without it CPython 3.11 would end such
+a thread with `pthread_exit` inside the extension's C++ frames, which
+crashes. Two things follow. A daemon thread in a wait costs nothing at exit.
+A non-daemon thread in `serve_forever()` keeps the interpreter alive until
+something clears `working`, and `threading._shutdown` runs before `atexit`,
+so a backend on a thread runs as a daemon or the program calls `stop()` on
+it before exiting. The extension registers an `atexit` hook, when
+`multiplexer.mxclient` is first imported, that marks the exit and lets every
+callback and wait that was already about to take the GIL finish first, two
+seconds at most: a callback still running then, a slow one on the io thread,
+may take the process down as the interpreter ends it inside the extension's
+frames, so callbacks stay short. From the hook on, a thread coming back from
+one of the library's waits parks, so a hook of yours that shuts a client
+down or stops a server, waiting for the library's threads, must run first:
+`atexit` runs the hook registered last first, so register yours after
+importing `multiplexer`. Do not install another `_native` import path that
+skips `multiplexer.mxclient`. A program that exits with an `AsyncClient` or
+a `ThreadedClient` alive exits without a crash, but only a client that is
+freed writes what it still holds, its destructor shutting it down: a
+`ThreadedClient` given `on_message`, an `AsyncClient` and a threaded server
+are never collected while they run ([Lifetimes](#lifetimes)), so their io
+thread ends with the process and what it had not written is lost,
+unreported. A program shuts them down or closes them, or leaves their `with`
+block, before it exits.
 
 **Fork.** A client inherited by a forked child, from gunicorn's workers,
 `multiprocessing`, or Django's parallel test runner, is an orphan there:
@@ -1007,8 +1041,23 @@ class SearchTest(unittest.TestCase):
 
 - `Cluster(count, rules, record=False, record_payload_bytes=0,
   rules_check_interval=None, drain_seconds=None)` starts `count`
-  multiplexers on entering and
-  stops every peer and multiplexer on leaving. `rules` is the path of the
+  multiplexers on entering and, on leaving, stops every role process
+  still running and then the multiplexers; the in-process peers,
+  `FakePeer`, `BackendThread`, `TestClient` and `ThreadedTestClient`,
+  are the test's to stop, best with their own `with` blocks inside the
+  cluster's, since they would go on reconnecting. Leaving also fails the
+  block with an `AssertionError` naming every process that did not end
+  cleanly, with the end of its log: a role that `SIGTERM` did not end
+  within 10 s with 0, or by the signal for one that does not catch it,
+  and a multiplexer that exited on its own, exited other than 0 at any
+  stop, the test's, a `restart()`'s or the cluster's, or had to be
+  killed when a stop ran out of time, 10 s, or `drain_seconds` + 5 s for
+  a cluster that drains longer (a process that `pause()` froze is
+  continued after its `SIGTERM`, so that it handles it); so a crash, a
+  hang at shutdown and,
+  under LeakSanitizer, a leak at exit fail the test. A block that is
+  failing already keeps its own error, and the report goes to stderr.
+  `rules` is the path of the
   rules file, the one your constants were generated from, which the test
   names: under Bazel `runfile("your/pkg/deployment.rules")` with the file
   in the test's `data`. A scenario under `mx_integration_test` may leave
@@ -1032,7 +1081,9 @@ class SearchTest(unittest.TestCase):
   `Mx` in `mx` has `connected_peers()`, `stop()`, `kill()`, `restart()`,
   `pause()`, `resume()`, `log_path` and, with `record=True`, `record_file`:
   `stop()` sends `SIGTERM` and waits for the exit, through the drain, and
-  `kill()` `SIGKILL`; `start()` starts a
+  `kill()` `SIGKILL`, an end the cluster does not report, as it does not
+  after `expect_exit()`, for a test that ends the process by other means,
+  a signal of its own; `start()` starts a
   stopped or killed one again on the same port and returns once it
   listens, and `restart()` is both; `pause()` freezes it with `SIGSTOP`, a
   hung multiplexer whose sockets stay open, and `resume()` thaws it;
@@ -1066,7 +1117,9 @@ class SearchTest(unittest.TestCase):
 - `BackendThread(factory, poll=0.05, name=None, drain_seconds=0.0)` serves a
   `BaseMultiplexerServer` of yours on its own thread: `factory()` builds it
   there, `start()` returns once it is connected, `stop()` asks it to leave
-  and re-raises what serving raised; `backend` is the instance.
+  and re-raises what `serve_forever()` raised, a handler's exception only
+  when the backend's `on_handler_exception()` returns `False`; `backend`
+  is the instance.
 - `TestClient(cluster, peer_type)` sends and queries from the test:
   `send(payload, type, to=0, flush=True, multiplexer=ONE)` returns the
   message id, `query(payload, type, timeout=10, to=0, probe=...,

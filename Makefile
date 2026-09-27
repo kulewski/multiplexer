@@ -27,6 +27,10 @@ CXX ?= g++
 AR ?= ar
 STRIP ?= strip
 VERSION ?= 2.3.1
+# A version given as its tag, v2.3.1, as the release workflow passes it in
+# the environment, is taken without the v: the .pc file carries the number,
+# which pkg-config compares.
+override VERSION := $(VERSION:v%=%)
 # The optimisation and debug flags; the rest is what the code needs.
 CXXFLAGS ?= -O2 -g -DNDEBUG
 GTEST_LIBS ?= -lgtest -lgtest_main
@@ -51,6 +55,15 @@ PROTO_PY := $(patsubst %.proto,$(GEN)/%_pb2.py,$(PROTOS))
 # protoc writes the stubs of the generated modules (--pyi_out) from 3.20 on;
 # an older one, Ubuntu 22.04's 3.12, builds the package without them.
 PROTOC_HAS_PYI := $(if $(shell printf '%s\n' 3.20 "$$($(PROTOC) --version | sed 's/.* //')" | sort -V | head -1 | grep -qx 3.20 && echo yes),yes,)
+# The protobuf runtime the wheel asks for, from the same protoc: its code
+# from 3.20 on needs the runtime's builder module, new in 3.20, and from
+# 3.19 that release; an older protoc's, Ubuntu 22.04's 3.12 say, needs a
+# runtime as new as itself and one older than 4, which refuses that code
+# at import. packaging/wheels.sh's pinned protoc makes it protobuf>=3.20.
+PROTOC_VERSION := $(shell $(PROTOC) --version | sed 's/.* //')
+PROTOC_HAS_319 := $(if $(shell printf '%s\n' 3.19 "$(PROTOC_VERSION)" | sort -V | head -1 | grep -qx 3.19 && echo yes),yes,)
+comma := ,
+PROTOBUF_REQUIREMENT := $(if $(PROTOC_HAS_PYI),protobuf>=3.20,$(if $(PROTOC_HAS_319),protobuf>=3.19,protobuf>=$(PROTOC_VERSION)$(comma)<4))
 PYI_OUT := $(if $(PROTOC_HAS_PYI),--pyi_out=$(GEN),)
 PROTO_PYI := $(if $(PROTOC_HAS_PYI),$(PROTO_PY:.py=.pyi),)
 CONSTANTS_H := $(GEN)/multiplexer/multiplexer.constants.h
@@ -249,7 +262,8 @@ wheel: python
 	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
 	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so $(BUILD)/wheel/multiplexer/bin/mxcontrol
-	sed 's/@VERSION@/$(VERSION)/' make/setup.py > $(BUILD)/wheel/setup.py
+	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@PROTOBUF_REQUIREMENT@/$(PROTOBUF_REQUIREMENT)/' make/setup.py \
+	    > $(BUILD)/wheel/setup.py
 	cp make/pyproject.toml README.md $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .
 	@ls $(BUILD)/dist/*.whl

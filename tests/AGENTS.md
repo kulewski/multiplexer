@@ -15,7 +15,7 @@ workspace that tests with it: keep names and signatures.
   configuration in `scenarios/BUILD`.
 - Roles exist in both languages with identical options and events. A new
   option or event is added to `roles/py/<role>.py`, to the matching class in
-  `roles/cc/mxtestroles.cc`, and to the table in `README.md`, in one change.
+  `roles/cc/<role>.cc`, and to the table in `README.md`, in one change.
 - Client roles are passive unless spawned with `threaded=True`, which uses
   `ThreadedClient` and may use the active `TEST_ACTIVE_CLIENT` type. Do not
   write a scenario that needs a synchronous client running the loop between

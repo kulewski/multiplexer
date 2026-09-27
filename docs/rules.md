@@ -84,9 +84,16 @@ A routing rule has these fields:
   of the type. Default `ANY`. The sender is not left out: a peer that sends
   a message routed to its own type gets a copy of it with `ALL`, and may
   get it with `ANY` when its turn comes.
-- `report_delivery_error`: when no peer received the message, send the sender
-  a `DELIVERY_ERROR`. Default true. Requests need it; the client's `query()`
-  starts its search on that report instead of waiting out its timeout.
+- `report_delivery_error`: when no peer received the message by this rule,
+  send the sender a `DELIVERY_ERROR`. Default true. Requests need it; the
+  client's `query()` starts its search on that report instead of waiting
+  out its timeout. The report is per rule, and with `ALL_TYPES` per peer
+  type, whatever the other rules delivered, while a query takes any
+  `DELIVERY_ERROR` for its request to mean that nobody took it: give a
+  request type one rule that reports, the one naming its backends, and
+  set `report_delivery_error: false` on any other, such as a copy to a
+  monitor, or a request a backend is already handling is searched for and
+  sent again.
 - `include_original_packet_in_report`: put the whole undelivered message
   inside the `DELIVERY_ERROR`. Default false.
 - `delivery_error_is_error`: only changes the level at which the multiplexer

@@ -201,8 +201,10 @@ PY_TEST_FILES := \
   multiplexer/server_replies_test.py \
   multiplexer/servers_drain_test.py \
   multiplexer/sync_waits_test.py \
+  multiplexer/testing/cluster_exit_test.py \
   multiplexer/testing/fakes_test.py \
   multiplexer/testing/lanes_test.py \
+  multiplexer/testing/private_network_test.py \
   multiplexer/threaded_client_py_test.py \
   multiplexer/threaded_lanes_test.py \
   multiplexer/threaded_sends_test.py \

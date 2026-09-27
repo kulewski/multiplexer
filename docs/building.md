@@ -108,7 +108,7 @@ What comes out, and how a program uses it:
 | `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
 | `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles and links with `$(pkg-config --cflags --libs multiplexer)`, which `make install` also puts under `PREFIX/lib/pkgconfig`, together with `generate_constants` for your own rules file; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
 | `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension and `mxcontrol` included |
-| `build/dist/*.whl` | `pip install` it: the package and the `mxcontrol` command; the package needs only `protobuf`. The wheel also carries `lib.logging`, one generated module the package imports |
+| `build/dist/*.whl` | `pip install` it: the package and the `mxcontrol` command; the package needs only `protobuf`, 3.20 or newer. The wheel also carries `lib.logging`, one generated module the package imports |
 
 `make check` runs the C++ unit tests with googletest and the Python ones
 with `unittest`, in a build of its own under `build/check` whose constants
@@ -123,7 +123,7 @@ starts real multiplexers with nothing set. `make/` holds the pieces:
 exist), `setup.py` and `pyproject.toml` for the wheel, and
 `wheel_smoke.py`, which `docker/check.sh make` runs with the wheel
 installed in a fresh virtual environment, once with the wheel's
-`mxcontrol` and once with `MXCONTROL=build/bin/mxcontrol`. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
+`mxcontrol` and once with `MXCONTROL=build/bin/mxcontrol`. The wheel asks for the protobuf runtime its generated modules need, from the `protoc` that made them: `protobuf>=3.20` from protoc 3.20 on, as the released wheels have it, and a range below 4 for an older one, whose code protobuf 4 refuses. `VERSION=1.2.3 make wheel` names the wheel; `CXXFLAGS`,
 `PREFIX`, `PYTHON`, `PROTOC` and `STRIP` are variables like `RULES`.
 
 Not built this way: the test roles and scenarios under `tests/`, the

@@ -46,3 +46,16 @@ py_test(
     srcs = ["config_test.py"],
     deps = [":testing"],
 )
+
+py_test(
+    name = "private_network_test",
+    size = "small",
+    srcs = ["private_network_test.py"],
+)
+
+py_test(
+    name = "cluster_exit_test",
+    size = "medium",
+    srcs = ["cluster_exit_test.py"],
+    deps = [":testing"],
+)

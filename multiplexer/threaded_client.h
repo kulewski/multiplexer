@@ -40,9 +40,10 @@
 // BACKEND_FOR_PACKET_SEARCH addressed to this instance, is answered with a
 // PING carrying its payload back (BACKEND_ERROR when that echo would be
 // over MAX_MESSAGE_SIZE), a search routed by type is dropped unless a
-// search policy is set (set_search_policy), and the rest, events and
-// requests addressed to this peer, go to on_message, or are logged and
-// dropped when there is none. Nothing is ever queued for a reader that may
+// search policy is set (set_search_policy), and the rest, events,
+// requests addressed to this peer and the DELIVERY_ERRORs for messages
+// that were not queries, go to on_message, or are logged and dropped when
+// there is none. Nothing is ever queued for a reader that may
 // never come.
 //
 // Threading, as declared: everything under io_thread_ runs on the io thread
@@ -95,8 +96,9 @@ class ThreadedClient : public ExceptionDefinitions {
   typedef std::function<void(const IncomingMessage&)> MessageSink;
 
   // `on_message` receives, on the io thread, every message that is not a
-  // reply to a query or one of the protocol's own (see the file comment);
-  // without it such messages are logged and dropped.
+  // reply to a query, the DELIVERY_ERRORs for messages that were not
+  // queries included, and none of the protocol's own (see the file
+  // comment); without it such messages are logged and dropped.
   explicit ThreadedClient(std::uint32_t peer_type, MessageSink on_message = MessageSink());
   ~ThreadedClient();  // shutdown() if not done
 
@@ -203,8 +205,10 @@ class ThreadedClient : public ExceptionDefinitions {
   // multiplexer frozen with its socket open holds nobody to the timeout;
   // or until `timeout` passes. Return 1 once a copy is written, 0 when none
   // was in time or the message was given up on, a pinned lane's
-  // connection being gone for instance; throw NotConnected after
-  // shutdown(), as every send does. flush_all() waits for every copy.
+  // connection being gone for instance, or every send_all() copy lost
+  // with its connection: a copy is held only when no connection is live,
+  // and dropped otherwise. Throw NotConnected after shutdown(), as every
+  // send does. flush_all() waits for every copy.
   unsigned int send(const MultiplexerMessage& msg, float timeout);
   unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
@@ -242,7 +246,9 @@ class ThreadedClient : public ExceptionDefinitions {
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
 
   // A request with a reply, see the file comment. The callback runs on the
-  // io thread. The blocking form throws std::logic_error when called on the
+  // io thread; after shutdown(), at once, on the calling thread, with
+  // SHUT_DOWN, so it must not query again then, nor take a lock its caller
+  // holds. The blocking form throws std::logic_error when called on the
   // io thread, that is from a callback, where it would deadlock. The
   // message forms take the request as a whole, `to` included, and set its
   // id and from per attempt; `probe` is how an addressed query locates its

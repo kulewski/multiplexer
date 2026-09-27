@@ -78,8 +78,10 @@ class AsyncClient:
         on_drop: Callable[[int, DropReason], None] | None = None,
     ):
         """Connect to every (host, port) in `addresses` and bind to `loop`,
-        the running one by default. Connecting blocks briefly, like
-        ThreadedClient's constructor; a program that must not block its
+        the running one by default. Connecting blocks the loop, like
+        ThreadedClient's constructor: one address after another, a
+        handshake each, a round trip when its multiplexer is up, up to
+        `timeout` for one that hangs; a program that must not block its
         loop at all uses `await AsyncClient.create(...)`. `queue_size` bounds
         what messages() holds for a slow reader, and only that: what waits
         for the loop has no bound. `on_drop(message_id, reason)` runs on
@@ -295,8 +297,10 @@ class AsyncClient:
         room, within `timeout`, and drops and reports (on_drop) after that.
         With `flush=True` it returns once the message reached a socket, for
         ALL once one copy did, a connection that dies under it handing it
-        to another or having it held, and raises NotConnected when nothing
-        wrote it with no connection live, else OperationTimedOut. With a
+        to another or having it held (a copy for ALL is held only when no
+        connection is live, and dropped otherwise), and raises NotConnected
+        when nothing wrote it with no connection live, or when every copy
+        for ALL went with its connection, else OperationTimedOut. With a
         `callback`, flush or not, it returns at once and `callback(written)`
         runs on the client's loop once the message's end is known: 1 once
         it was written, the first copy for ALL, 0 once it was given up on
