@@ -1,0 +1,9 @@
+# What the gateway runs on: `pip install -r requirements.txt`. The channel
+# layer comes from ../channels; daphne is the ASGI server `runserver` uses
+# under Channels; websockets is for audio_cli.py, the participant for the
+# command line. The worker is C++, built with Bazel under worker/.
+mx-multiplexer
+channels[daphne]
+msgpack
+protobuf
+websockets

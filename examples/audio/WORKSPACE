@@ -1,0 +1,19 @@
+# The worker's workspace: it consumes the multiplexer as @mx, the way your
+# own would. This example lives inside the multiplexer repository, so it
+# points at the checkout it is in; your own workspace would pin a released
+# commit with git_repository or http_archive, as examples/echo/WORKSPACE
+# shows.
+workspace(name = "audio_example")
+
+local_repository(
+    name = "mx",
+    path = "../..",
+)
+
+load("@mx//bazel:deps.bzl", "mx_dependencies")
+
+mx_dependencies()
+
+load("@mx//bazel:setup.bzl", "mx_setup")
+
+mx_setup()

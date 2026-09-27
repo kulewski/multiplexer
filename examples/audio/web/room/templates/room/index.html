@@ -1,0 +1,16 @@
+<!doctype html>
+<title>Audio rooms</title>
+<h1>Audio rooms</h1>
+<p>Which room? <input id="room" size="30"> <button id="go">Enter</button></p>
+<p>Everyone in a room hears everyone, with the effect each chose, applied by a worker.</p>
+<script>
+  const room = document.querySelector("#room");
+  room.focus();
+  // What a room name can hold: letters, digits, - and _, at most 90.
+  const go = () => {
+    const name = room.value.trim().replace(/[^-a-zA-Z0-9_]+/g, "-").slice(0, 90);
+    if (name) window.location.pathname = "/" + name + "/";
+  };
+  document.querySelector("#go").onclick = go;
+  room.onkeyup = (event) => { if (event.key === "Enter") go(); };
+</script>

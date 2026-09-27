@@ -1,0 +1,19 @@
+{% load static %}
+<!doctype html>
+<title>Room {{ room_name }}</title>
+<style>
+  body { font-family: sans-serif; margin: 1em; }
+  canvas { border: 1px solid #ccc; display: block; margin: 0.5em 0; }
+  #meter { font-family: monospace; white-space: pre; }
+  label { margin-right: 1em; }
+</style>
+<h1>Room {{ room_name }}</h1>
+<p>
+  <button id="start">Start</button>
+  <span id="effects"></span>
+  <label><input type="checkbox" id="self" checked> hear myself</label>
+</p>
+<canvas id="spectrum" width="640" height="160"></canvas>
+<div id="meter">not started</div>
+<script>const ROOM = "{{ room_name|escapejs }}";</script>
+<script src="{% static 'room/room.js' %}"></script>
