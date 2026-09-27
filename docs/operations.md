@@ -187,7 +187,10 @@ which the second check catches. Two things to know:
 
 The `rules_edited_on_disk`, `rules_reload_on_sighup` and
 `rules_reload_by_mxcontrol` scenarios in `tests/scenarios/` show each
-trigger, the first one against a ConfigMap-style mount.
+trigger, the first one against a ConfigMap-style mount. The cache
+example adds a peer type and a destination under a running cache, with
+what each side prints:
+[examples/cache/walkthrough.md](../examples/cache/walkthrough.md#6-a-journal-added-while-it-runs).
 
 ## Restarting one
 

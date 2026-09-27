@@ -174,13 +174,6 @@ type {
 exactly what is promised, for the deployment the multiplexer is designed for:
 several of them, every peer connected to all.
 
-Start with [docs/README.md](docs/README.md): it defines the terminology,
-shows the reference deployment, and traces a query and an event step by step.
-Then follow [docs/walkthrough.md](docs/walkthrough.md), which runs
-[examples/echo](examples/echo), a complete backend and client in both
-languages. The reference pages under [docs/](docs/) cover the rules file, both
-client libraries, `mxcontrol`, the wire format and operations.
-
 ## Quick start
 
 ```
@@ -188,6 +181,43 @@ bazel build //...                       # see docs/building.md for the packages
 bazel test --test_tag_filters=-slow //...
 cd examples/echo && bazel test //...    # a backend and a client, built the way your code will be
 ```
+
+## Examples
+
+Complete programs under [examples/](examples/), each with a README that
+runs it and a walkthrough that builds it from nothing, echo's apart, which
+runs it step by step. Two small ones first, then building blocks, then
+what the broker's latency makes possible:
+
+- [echo](examples/echo/): a backend and a client, in Python and in C++,
+  and threads sharing one client.
+- [aio](examples/aio/): an asyncio TCP gateway in front of a chat backend,
+  a reply to the one who asked and a broadcast to everyone.
+- [cache](examples/cache/): a replicated cache as a Django cache backend, a
+  write to every replica and a read from any, and a journal added by
+  changing the rules under the running multiplexers.
+- [channels](examples/channels/): a Django Channels channel layer, Redis
+  replaced by one setting.
+- [inference](examples/inference/): a web app asking a pool of PyTorch
+  workers, with a worker killed, a rolling restart and a multiplexer
+  killed, in an executed notebook.
+- [stream](examples/stream/): an answer that arrives token by token, as
+  a language model's does, one request and one reply with the pieces
+  addressed and numbered between them, a multiplexer killed under it
+  and the lost pieces asked for again, and the answer as Server-Sent
+  Events.
+- [audio](examples/audio/): an audio room, a query per 10 ms frame to a
+  C++ worker and the answer heard by everyone, the worker replaced under
+  the stream.
+
+## Where to read next
+
+[docs/README.md](docs/README.md) defines the terminology, shows the
+reference deployment and traces a query and an event step by step;
+[examples/echo/walkthrough.md](examples/echo/walkthrough.md) runs the
+smallest example and reads what each side prints. The reference pages
+under [docs/](docs/) cover the rules file, both client libraries,
+`mxcontrol`, the wire format and operations.
 
 ## Rules and routing
 

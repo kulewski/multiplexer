@@ -186,7 +186,12 @@ through the lane leaves it on the connection the reply came through, so
 the events after a request follow the request, and a message its full
 connection cannot take waits there for room. When the connection dies
 the lane lets go and takes another, with a gap or a reorder at the
-failover and no other; a sequencer on the receiving side is for that.
+failover and no other; a sequencer on the receiving side is for that,
+and [the stream example](../examples/stream/walkthrough.md#how-it-fits-together)
+is one, its tokens numbered, held back until their turn and asked for
+again. It pins its request hard, and when the connection dies sends it
+again itself, addressed to the generator that has the answer, since the
+library would send a typed request to whichever backend comes next.
 `lane(pinned=True)` is the hard pin: once its connection is gone, every
 send and query through it raises `NotConnected`, and `lane.closed` says
 so, until the caller makes a new lane; a pinned lane is the guarantee
@@ -784,7 +789,10 @@ Everything in-process uses the client library as your code does, so what a
 test sees is what production sees, including the thread rules: a
 `FakePeer` or `BackendThread` is served on its own thread, a
 `TestClient` belongs to the test's thread, and a `ThreadedTestClient`
-may be used from any.
+may be used from any. [examples/cache/test.py](../examples/cache/test.py)
+is a complete test of a backend of your own on this harness, a cluster,
+replicas on threads, a multiplexer killed under traffic and Django
+configured against the cluster, and its walkthrough walks through it.
 
 ### Tests that hold up under load
 

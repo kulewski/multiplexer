@@ -8,7 +8,9 @@ backends its rules name. Nothing comes back unless the client sets
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says
-`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)).
+`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)). The
+[cache example](../examples/cache/README.md) is this in a program: a
+write is an event to every replica, and its walkthrough counts the copies.
 
 ## Through one connection
 

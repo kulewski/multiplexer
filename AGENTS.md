@@ -31,7 +31,9 @@ both talk to multiplexers. Spell out "multiplexer" in prose, "mx" only in code.
   other workspaces as `multiplexer.testing`; changes there change every
   consumer's tests, so keep names and signatures.
 - `tests/`: integration tests; see `tests/README.md`.
-- `examples/`: separate Bazel workspaces consuming this one as `@mx`.
+- `examples/`: complete programs, Bazel workspaces consuming this one as
+  `@mx` and pip projects on the package; `examples/README.md` says how to
+  add one.
 - `bazel/`: dependency macros and patches.
 - `docker/`: `check.sh` builds and tests the tree on a clean distribution;
   `docs/building.md` is the page it proves.
@@ -114,14 +116,13 @@ bazel run //compdb                         # compile_commands.json for clangd, a
 - A scenario: one file under `tests/scenarios/`, one `mx_integration_test`
   per configuration in its BUILD; see `tests/README.md` for the harness and
   the roles.
-- An example: copy `examples/echo/`, keep its `WORKSPACE` and `.bazelrc`,
-  replace the rules file and programs, keep a `py_test` that drives it end to
-  end.
+- An example: as `examples/README.md` says under "Adding an example": a
+  Bazel one copies `examples/echo/`, a pip one `examples/cache/`; each has
+  a README and a walkthrough, whose steps' output comes from a real run.
 - A diagram: add a `Page` or a `Section` in `docs/diagrams/generate.py` and
   link the page from `docs/README.md`.
 - A recipe: a numbered page under `docs/recipes/`, linked from
   `docs/README.md` and `llms.txt`, for a task that comes up more than once.
 - A reference page: hand-written Markdown under `docs/`, linked from the
-  "Reference" list in `docs/README.md` and from `llms.txt`. State behaviour the code has, and
-  point at the scenario that shows it; the walkthrough's output comes from a
-  real run of `examples/echo`.
+  "Reference" list in `docs/README.md` and from `llms.txt`. State behaviour
+  the code has, and point at the scenario that shows it.
