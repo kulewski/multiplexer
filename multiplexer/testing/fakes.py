@@ -344,11 +344,14 @@ class TestClient:
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = SyncClient.ONE,
         with_connection: bool = False,
+        on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send `payload` as a request of `type` and return the reply; with
         `to`, addressed to that instance, located with `probe` when it
         moved; through a Lane or a ConnectionWrapper as `multiplexer`;
-        (reply, connection) with `with_connection`. SyncClient.query() says the rest."""
+        (reply, connection) with `with_connection`; `on_received(backend)`
+        for each backend that acknowledged the request. SyncClient.query()
+        says the rest."""
         return self.client.query(
             payload,
             type=type,
@@ -357,6 +360,7 @@ class TestClient:
             probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
+            on_received=on_received,
         )
 
     def receive(self, timeout: float = 10) -> MultiplexerMessage:
@@ -442,10 +446,11 @@ class ThreadedTestClient:
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ThreadedClient.ONE,
         with_connection: bool = False,
+        on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send `payload` as a request of `type` and return the reply, or
         raise as ThreadedClient.query() does; its `to`, `probe`,
-        `multiplexer` and `with_connection`."""
+        `multiplexer`, `with_connection` and `on_received`."""
         return self.client.query(
             payload,
             type,
@@ -454,6 +459,7 @@ class ThreadedTestClient:
             probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
+            on_received=on_received,
         )
 
     def messages(self, type: int, matching: Matcher | None = None) -> list[MultiplexerMessage]:

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <utility>
 
 #include "multiplexer/Multiplexer.pb.h"
 #include "multiplexer/multiplexer.constants.h"
@@ -148,7 +149,15 @@ void adopt(const LanePtr& lane, const ConnectionWrapper& connection) {
 // The query algorithm; the Python Client.query in mxclient.py is the same
 // steps and the two must stay in agreement. A request with `to` set is an
 // addressed query, with stages of its own below.
-IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe) {
+IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe,
+                               ReceivedCallback received) {
+  // The query's on_received for its duration, where _receive meets the
+  // acknowledgements; whatever was there before is back afterwards.
+  struct Holding {
+    ReceivedCallback& slot;
+    ReceivedCallback previous;
+    ~Holding() { slot = std::move(previous); }
+  } holding{received_, std::exchange(received_, std::move(received))};
   if (query.to()) {
     return _query_addressed(query, timeout, lane, probe);
   }
@@ -162,8 +171,8 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
 
   try {
     timer = basic_client_->create_timer(timeout);
-    result = _send_and_receive(query, *timer, false, false, std::vector<uint64_t>(), 0, -1, ConnectionWrapper(), lane,
-                               &attempts);
+    result = _send_and_receive(query, *timer, false, false, std::vector<uint64_t>(), types::REQUEST_RECEIVED, -1,
+                               ConnectionWrapper(), lane, &attempts);
     if (result.third->type() != types::DELIVERY_ERROR) {
       adopt(lane, result.second);
       return result;
@@ -179,7 +188,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
 
   timer = basic_client_->create_timer(timeout);
   const bool pinned = lane && lane->pinned();
-  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, -1,
+  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, mxmsg.id(),
                              ConnectionWrapper(), lane);
 
   if (result.third->type() == types::DELIVERY_ERROR) {
@@ -251,7 +260,7 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   // requested, so that a multiplexer without the instance says so.
   MultiplexerMessage mxmsg = _probe_for(request, probe);
   const bool pinned = lane && lane->pinned();
-  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, -1,
+  result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, mxmsg.id(),
                              ConnectionWrapper(), lane);
   if (result.third->type() == types::DELIVERY_ERROR) {
     MXTHROW(OperationFailed());  // no multiplexer has the instance
@@ -304,8 +313,9 @@ MultiplexerMessage Client::_probe_for(const MultiplexerMessage& query, Probe pro
 // schedule_all and handle_delivery_errors, one DELIVERY_ERROR per
 // connection is expected before giving up: that is how "every multiplexer
 // said no" is detected. Messages of ignore_type (REQUEST_RECEIVED) are
-// skipped; others that reference ignore_id are skipped silently, the rest
-// are logged and dropped.
+// skipped, after the query's on_received hears of those that acknowledge
+// the request; ignore_id is the probe's, whose late answers are skipped
+// silently, and the rest are logged and dropped.
 IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all,
                                           bool handle_delivery_errors, const std::vector<uint64_t>& also_accept,
                                           std::uint32_t ignore_type, std::uint64_t ignore_id,
@@ -472,6 +482,18 @@ IncomingMessage Client::_receive(mx::SimpleTimer& timer, const std::vector<uint6
     const MultiplexerMessage& mxmsg = *result.third;
 
     if (mxmsg.type() == ignore_type) {
+      if (received_ && mxmsg.type() == types::REQUEST_RECEIVED && mxmsg.references() != ignore_id &&
+          contains(accept_ids, mxmsg.references())) {
+        // A backend acknowledged the request, or a retry of it: the query's
+        // on_received hears which, and the query goes on as before, whatever
+        // the callback does.
+        try {
+          received_(mxmsg.from());
+        } catch (const std::exception& error) {
+          MX_LOG(ERROR, LOWVERBOSITY,
+                 CTX("SyncClient") TEXT(std::string("the on_received of a query threw: ") + error.what()));
+        }
+      }
       continue;
     }
     if (contains(accept_ids, mxmsg.references())) {

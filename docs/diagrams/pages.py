@@ -50,8 +50,9 @@ everyone. This is what nearly every query looks like.
                     "The client sends the request through one connection",
                     "The client is connected to both multiplexers and picks one of them "
                     "round robin, multiplexer 1 this time. It sends the request and waits "
-                    "for a message that references the request id, ignoring "
-                    "`REQUEST_RECEIVED` acknowledgements.",
+                    "for a message that references the request id. A `REQUEST_RECEIVED`, "
+                    "what a backend's `notify_start()` sends, does not end the wait; the "
+                    "caller's `on_received`, when given, hears of it.",
                     [0],
                     ["Q"],
                 ),

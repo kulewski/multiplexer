@@ -436,8 +436,13 @@ class BaseMultiplexerServer(MultiplexerPeer):
     @log_call
     def report_error(self, message="", type=types.BACKEND_ERROR, flush=False, **kwargs):
         """Answer the current request with BACKEND_ERROR (or `type`) carrying
-        `message`, queued as every reply is; `flush=True` waits for the write."""
+        `message`, queued as every reply is; `flush=True` waits for the write.
+        Text that UTF-8 cannot carry, a lone surrogate echoed from a request
+        say, goes with those characters escaped, so that the requester still
+        hears of the error."""
         assert self.last_mxmsg is not None
+        if isinstance(message, str):
+            message = message.encode("utf-8", "backslashreplace")
         self.send_message(message=message, type=type, flush=flush, **kwargs)
 
     @log_call

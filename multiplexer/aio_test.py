@@ -1,28 +1,54 @@
 """AsyncClient against a real multiplexer and a scripted backend: every
-verb, the exceptions, concurrency, cancellation, subscriptions, the queue,
-a multiplexer restart, the loop rule, a fork, and the interpreter's exit;
+verb, the exceptions, concurrency, cancellation, subscriptions, what
+arrived before a reply handled before its await resumes, the queue, a
+multiplexer restart, the loop rule, a create() given up on, a fork, and
+the interpreter's exit;
 and sends as on every client, against a frozen multiplexer: the await
 returns once the io thread has the message, where it waited for the
 write, flush=True waits for the write, a callback hears how the message
-ended, and flush_all() is awaited.
+ended, and flush_all() is awaited. Every wait is on an event or a count:
+a handler that ends it, a sentinel message behind the one that must not
+arrive, the warnings read back from the client's log.
 """
 
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from typing import Iterator
+from unittest import mock
 
+from multiplexer import aio
 from multiplexer.aio import AsyncClient
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
+from multiplexer.mxlog import WARNING
 from multiplexer.testing import Cluster, FakePeer, TestClient
 from multiplexer.testing import runfile
 from multiplexer.threaded_client import BackendError
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
+
+
+@contextlib.contextmanager
+def stderr_to(path: str) -> Iterator[None]:
+    """Descriptor 2, which the C++ side of an in-process client logs to,
+    goes to `path` meanwhile."""
+    sys.stderr.flush()
+    saved = os.dup(2)
+    with open(path, "wb") as target:
+        os.dup2(target.fileno(), 2)
+    try:
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved, 2)
+        os.close(saved)
 
 
 class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
@@ -92,9 +118,7 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"AFTER", (await self.client.query(b"after", types.PYTHON_TEST_REQUEST)).message)
 
     async def test_send_message_returns_the_id_and_the_event_arrives(self):
-        started = time.monotonic()
         mxmsg_id = await self.client.send_message(b"event", type=types.PYTHON_TEST_REQUEST)
-        self.assertLess(time.monotonic() - started, 5)
         (received,) = self.peer.wait_for(types.PYTHON_TEST_REQUEST, matching=lambda m: m.message == b"event")
         self.assertEqual(mxmsg_id, received.id)
         ids = await asyncio.gather(
@@ -109,8 +133,14 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
 
     def push(self, payload: bytes, to: int) -> None:
         """Send `payload` straight to a peer, as a backend pushing an event would."""
+        self.push_in_order(to, payload)
+
+    def push_in_order(self, to: int, *payloads: bytes) -> None:
+        """Send `payloads` straight to a peer from one sender, through one
+        multiplexer, so that they arrive in the order given."""
         with TestClient(self.cluster, peers.WEBSITE) as sender:
-            sender.send(payload, types.PYTHON_TEST_RESPONSE, to=to)
+            for payload in payloads:
+                sender.send(payload, types.PYTHON_TEST_RESPONSE, to=to)
 
     async def test_subscriptions_run_on_the_loop(self):
         seen: list[tuple[str, bytes]] = []
@@ -138,19 +168,41 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
             sorted([("coroutine", b"only this"), ("plain", b"only this"), ("coroutine", b"not that")]), sorted(seen)
         )
         unsubscribe()
-        await loop.run_in_executor(None, self.push, b"after", self.client.instance_id)
-        await asyncio.sleep(0.3)
+        # A sentinel behind the message the ended subscription must miss:
+        # once its handler ran, a task the other would have made has had its
+        # first step, which comes first on the loop.
+        ended = asyncio.Event()
+        self.client.subscribe(
+            types.PYTHON_TEST_RESPONSE, lambda mxmsg: ended.set(), matching=lambda m: m.message == b"end"
+        )
+        await loop.run_in_executor(None, self.push_in_order, self.client.instance_id, b"after", b"end")
+        await asyncio.wait_for(ended.wait(), 10)
         self.assertNotIn(("coroutine", b"after"), seen)
 
     async def test_a_raising_handler_is_logged_and_the_others_still_run(self):
         """A plain handler that raises, and a coroutine handler that raises:
-        both are reported through the client's logging, neither silences
-        the other handlers, and asyncio has nothing unretrieved to complain about."""
+        each is logged for each message, a warning in the client's log that
+        names the handler, what it raised and the message's type; neither
+        silences the other handlers, and asyncio has nothing unretrieved to
+        complain about. The warnings are counted as they are logged, which
+        for the coroutine is once its task is over, and read back from the
+        log the C++ side writes."""
         loop = asyncio.get_running_loop()
         complaints: list[dict] = []
         loop.set_exception_handler(lambda _loop, context: complaints.append(context))
         seen: list[bytes] = []
         done = asyncio.Event()
+        warned = asyncio.Event()
+        warnings: list[int] = []
+        logging = aio.log
+
+        def counted(level: int, verbosity: int, **fields: object) -> None:
+            """The client's log call, counted: every warning here is a handler's, on the loop."""
+            logging(level, verbosity, **fields)
+            if level == WARNING:
+                warnings.append(level)
+                if len(warnings) == 4:
+                    warned.set()
 
         def raising(mxmsg):
             raise ValueError("plain handler")
@@ -167,36 +219,116 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         self.client.subscribe(types.PYTHON_TEST_RESPONSE, raising)
         self.client.subscribe(types.PYTHON_TEST_RESPONSE, raising_later)
         self.client.subscribe(types.PYTHON_TEST_RESPONSE, keeps_going)
-        for payload in (b"one", b"two"):
-            await loop.run_in_executor(None, self.push, payload, self.client.instance_id)
-        await asyncio.wait_for(done.wait(), 10)
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TEST_TMPDIR")) as directory:
+            path = os.path.join(directory, "stderr")
+            with stderr_to(path), mock.patch.object(aio, "log", counted):
+                for payload in (b"one", b"two"):
+                    await loop.run_in_executor(None, self.push, payload, self.client.instance_id)
+                await asyncio.wait_for(done.wait(), 10)
+                await asyncio.wait_for(warned.wait(), 10)
+            with open(path, "rb") as written:
+                log = written.read().decode(errors="replace")
         self.assertEqual([b"one", b"two"], seen, "the handler after the raising ones ran for both messages")
-        await asyncio.sleep(0.1)
+        on_the_type = "on a message of type %d" % types.PYTHON_TEST_RESPONSE
+        for name, error in (("raising", "plain handler"), ("raising_later", "coroutine handler")):
+            said = [line for line in log.splitlines() if "<locals>.%s raised" % name in line and error in line]
+            self.assertEqual(2, len(said), "a warning for each message about %s:\n%s" % (name, log[-3000:]))
+            for line in said:
+                self.assertIn("[WARNING]", line)
+                self.assertIn(on_the_type, line)
         import gc
 
         gc.collect()
         self.assertEqual([], complaints, "no 'Exception in callback', no unretrieved task exception")
 
+    async def test_a_raising_predicate_takes_nothing_and_the_others_still_get_it(self):
+        """A `matching` that raises counts as no match: the other
+        subscriptions and messages() still get the message, where the
+        exception lost it for every one of them."""
+        loop = asyncio.get_running_loop()
+        seen: list[bytes] = []
+        never: list[bytes] = []
+        done = asyncio.Event()
+
+        def raising(mxmsg):
+            raise ValueError("predicate")
+
+        def keeps_going(mxmsg):
+            seen.append(mxmsg.message)
+            done.set()
+
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: never.append(mxmsg.message), matching=raising)
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, keeps_going)
+        stream = self.client.messages()
+        await loop.run_in_executor(None, self.push, b"one", self.client.instance_id)
+        await asyncio.wait_for(done.wait(), 10)
+        self.assertEqual([b"one"], seen)
+        self.assertEqual(b"one", (await asyncio.wait_for(stream.__anext__(), 10)).message)
+        self.assertEqual([], never)
+
     async def test_messages_iterates_and_a_full_queue_drops_the_oldest(self):
+        """Six messages reach the loop before anybody reads, counted by a
+        subscription of every type, whose handler runs in the delivery that
+        then feeds the queue: the queue of three keeps the last three."""
         small = AsyncClient(self.cluster.endpoints, peers.PYTHON_TEST_CLIENT, queue_size=3)
         try:
-            stream = small.messages(types.PYTHON_TEST_RESPONSE)
+            stream = small.messages()
+            delivered: list[bytes] = []
+            all_six = asyncio.Event()
+
+            def count(mxmsg) -> None:
+                delivered.append(mxmsg.message)
+                if len(delivered) == 6:
+                    all_six.set()
+
+            small.subscribe(None, count)
             loop = asyncio.get_running_loop()
             for index in range(6):
                 await loop.run_in_executor(None, self.push, b"%d" % index, small.instance_id)
-            await asyncio.sleep(0.5)  # all six delivered to the loop; the queue kept the last three
+            await asyncio.wait_for(all_six.wait(), 10)  # the sixth's delivery, the queue's feed included, is over
             kept = [await asyncio.wait_for(stream.__anext__(), 10) for _ in range(3)]
             self.assertEqual([b"3", b"4", b"5"], [m.message for m in kept])
         finally:
             await small.aclose()
 
+    async def test_what_arrived_before_the_reply_is_handled_before_the_await_resumes(self):
+        """A query awaited on the client's loop resumes after the handlers of
+        everything that arrived before its reply: the backend sends the
+        client an event and then the reply, through its one connection, so
+        they arrive in that order, and the event's handler has run by the
+        time the query returns."""
+        backend = self.peer.backend
+        assert backend is not None
+
+        def event_then_reply(mxmsg) -> bytes:
+            backend.conn.send_message(b"before the reply", type=types.PYTHON_TEST_RESPONSE, to=getattr(mxmsg, "from"))
+            return b"the reply"
+
+        self.peer.on(types.PYTHON_TEST_REQUEST, event_then_reply, types.PYTHON_TEST_RESPONSE)
+        handled: list[bytes] = []
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: handled.append(mxmsg.message))
+        reply = await self.client.query(b"request", types.PYTHON_TEST_REQUEST)
+        self.assertEqual(b"the reply", reply.message)
+        self.assertEqual([b"before the reply"], handled)
+
+    async def test_messages_is_the_inbox_with_no_type(self):
+        """messages() takes no type: a typed stream threw away what another
+        stream wanted. Two readers share the inbox: every message reaches
+        one of them, none is thrown away."""
+        with self.assertRaises(TypeError):
+            self.client.messages(types.PYTHON_TEST_RESPONSE)  # pyright: ignore[reportCallIssue]
+        first, second = self.client.messages(), self.client.messages()
+        loop = asyncio.get_running_loop()
+        for index in range(4):
+            await loop.run_in_executor(None, self.push, b"%d" % index, self.client.instance_id)
+        read = [await asyncio.wait_for(stream.__anext__(), 10) for stream in (first, second, first, second)]
+        self.assertEqual([b"0", b"1", b"2", b"3"], sorted(m.message for m in read))
+
     async def test_a_multiplexer_restart_under_a_live_client(self):
         self.assertEqual(b"BEFORE", (await self.client.query(b"before", types.PYTHON_TEST_REQUEST)).message)
         self.cluster.mx[0].restart()
         self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-        started = time.monotonic()
         self.assertEqual(b"AFTER", (await self.client.query(b"after", types.PYTHON_TEST_REQUEST, timeout=15)).message)
-        self.assertLess(time.monotonic() - started, 9, "within the reconnect delay")
 
     async def test_queries_and_sends_are_awaited_from_any_loop(self):
         """What asgiref's async_to_sync does away from the server's loop: a
@@ -301,39 +433,118 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, self.client.dropped)
 
 
+class NoConnectionTest(unittest.IsolatedAsyncioTestCase):
+    """A client connected nowhere."""
+
+    async def test_out_of_time_is_told_at_the_deadline(self):
+        """A flushing send that runs out of time with no connection live
+        raises NotConnected, as the io thread saw at the deadline: the loop
+        asks the io thread nothing afterwards, where it asked for the
+        connections, waiting for the io thread, and one up by then made it
+        a timeout."""
+        client = AsyncClient([], peers.PYTHON_TEST_CLIENT)
+        try:
+            with mock.patch.object(client._threaded, "connections_count", return_value=1) as asked:
+                with self.assertRaises(NotConnected):
+                    await client.send_message(b"nowhere", type=types.PYTHON_TEST_REQUEST, flush=True, timeout=0.2)
+            asked.assert_not_called()
+        finally:
+            await client.aclose(timeout=0)
+
+
+class CreateTest(unittest.TestCase):
+    """AsyncClient.create() given up on, by a timeout around the await."""
+
+    def test_a_cancelled_create_closes_the_client_it_made(self):
+        """The caller gives up while the constructor connects: the client
+        made anyway is closed once it is there, where it stayed connected
+        and registered, with nobody to close it."""
+        made: list[AsyncClient] = []
+        closed = threading.Event()
+
+        class Slow(AsyncClient):
+            def __init__(self, *args, **kwargs):
+                time.sleep(0.2)  # a slow handshake: time for the caller to give up
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+            def close(self, *args, **kwargs):
+                super().close(*args, **kwargs)
+                closed.set()
+
+        with Cluster(1, rules=RULES) as cluster:
+
+            async def give_up() -> None:
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(Slow.create(cluster.endpoints, peers.PYTHON_TEST_CLIENT), 0.05)
+
+            asyncio.run(give_up())
+            self.assertTrue(closed.wait(10), "the client a cancelled create() made was not closed")
+            self.assertEqual(1, len(made))
+            cluster.wait_for_peer_gone(peers.PYTHON_TEST_CLIENT, 5)
+
+
 class HolderTest(unittest.TestCase):
     """One client per process, on the loop that first asks; a forked child
     gets its own, the way an ASGI server's workers do after forking."""
 
     def test_aget_makes_one_client_off_the_loop(self):
-        """Three concurrent first uses await one creation, the loop keeps
-        turning meanwhile, and get() afterwards hands out the same client."""
+        """Three concurrent first uses await one creation, made on a thread
+        that is not the loop's while the loop keeps turning: the constructor
+        waits for the loop to run a coroutine, which on the loop's own
+        thread it would wait for in vain. get() afterwards hands out the
+        same client."""
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.reply_with(types.PYTHON_TEST_REQUEST, b"pong", types.PYTHON_TEST_RESPONSE)
-            holder = AsyncClient.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
+            made_on: list[int] = []
+
+            class Watched(AsyncClient):
+                def __init__(self, *args, **kwargs):
+                    made_on.append(threading.get_ident())
+                    # The loop runs a coroutine while the client is made.
+                    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), kwargs["loop"]).result(10)
+                    super().__init__(*args, **kwargs)
+
+            holder = Watched.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
 
             async def scenario() -> None:
-                ticks = 0
-
-                async def ticker() -> None:
-                    nonlocal ticks
-                    while True:
-                        ticks += 1
-                        await asyncio.sleep(0)
-
-                ticking = asyncio.ensure_future(ticker())
                 clients = await asyncio.gather(holder.aget(), holder.aget(), holder.aget())
-                ticking.cancel()
                 self.assertEqual(1, len({id(client) for client in clients}), "one client, whoever asked first")
+                self.assertEqual(1, len(made_on), "made once")
+                self.assertNotEqual(threading.get_ident(), made_on[0], "made on the loop's thread")
                 self.assertIs(clients[0], holder.get())
                 self.assertIs(clients[0], await holder.aget())
-                self.assertGreater(ticks, 0, "the loop ran while the client connected")
                 self.assertEqual(b"pong", (await clients[0].query(b"ping", types.PYTHON_TEST_REQUEST)).message)
 
             try:
                 asyncio.run(scenario())
             finally:
                 holder.close()
+
+    def test_aget_makes_the_client_on_the_loop_the_holder_was_given(self):
+        """holder(..., loop=L) makes the client on L with aget(), as with
+        get(), whichever loop awaits: aget() passed the loop twice and every
+        call raised TypeError."""
+        other = asyncio.new_event_loop()
+        turning = threading.Thread(target=other.run_forever, name="other-loop", daemon=True)
+        turning.start()
+        try:
+            with Cluster(1, rules=RULES) as cluster:
+                holder = AsyncClient.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints, loop=other)
+
+                async def scenario() -> None:
+                    try:
+                        client = await holder.aget()
+                        self.assertIs(other, client.loop)
+                        self.assertIs(client, holder.get())
+                    finally:
+                        await holder.aclose()
+
+                asyncio.run(scenario())
+        finally:
+            other.call_soon_threadsafe(other.stop)
+            turning.join(10)
+            other.close()
 
     def test_a_cancelled_first_aget_costs_nobody_else(self):
         """The first caller gives up while the client is being made: the

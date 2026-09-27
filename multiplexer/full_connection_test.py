@@ -13,25 +13,15 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import past_the_queue
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 EVENT = types.PYTHON_TEST_REQUEST
 CHUNK = b"x" * (16 * 1024)
-
-
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer, the largest the
-    kernel allows each, and twice the queue."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 2 * 1024
+FILLER_TIMEOUT = (
+    120  # seconds a message filling a connection may wait for room: none is given up on, however slow the fill
+)
 
 
 class FullConnectionTest(unittest.TestCase):
@@ -42,14 +32,17 @@ class FullConnectionTest(unittest.TestCase):
         the queue waiting; a flushing send then times out having used next
         to no CPU for its half second; and once the multiplexer reads again,
         flush_all() sees everything written but that send's message, given
-        up on right after it timed out, and so returns False."""
-        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
+        up on right after it timed out, and so returns False. The backend
+        receives every chunk, and that message not, as a marker sent after
+        it on the same connection, which comes behind it, shows."""
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as backend:
             client = Client(cluster.endpoints, type=peers.WEBSITE)
+            sending = past_the_queue(CHUNK)
             try:
                 cluster.mx[0].pause()
                 try:
-                    for _ in range(frames_to_fill(len(CHUNK))):
-                        client.send_message(CHUNK, type=EVENT)
+                    for payload in sending:
+                        client.send_message(payload, type=EVENT, timeout=FILLER_TIMEOUT)
                     cpu = time.process_time()
                     with self.assertRaises(OperationTimedOut):
                         client.send_message(b"last", type=EVENT, flush=True, timeout=0.5)
@@ -58,6 +51,11 @@ class FullConnectionTest(unittest.TestCase):
                     cluster.mx[0].resume()
                 self.assertFalse(client.flush_all(60))
                 self.assertEqual(1, client.dropped)
+                client.send_message(b"marker", type=EVENT, flush=True)
+                backend.wait_for(EVENT, timeout=60, matching=lambda mxmsg: mxmsg.message == b"marker")
+                arrived = backend.messages(EVENT, lambda mxmsg: mxmsg.message not in (b"last", b"marker"))
+                self.assertEqual(len(sending), len(arrived))
+                self.assertEqual([], backend.messages(EVENT, lambda mxmsg: mxmsg.message == b"last"))
             finally:
                 client.shutdown()
 

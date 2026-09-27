@@ -51,6 +51,7 @@ cc_test(
         ":base_multiplexer_server",
         "//multiplexer:in_process_multiplexer",
         "//multiplexer:multiplexer_cc_constants",
+        "//multiplexer:threaded_client",
         "@com_google_googletest//:gtest_main",
     ],
 )

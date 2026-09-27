@@ -148,6 +148,15 @@ threaded one stops taking requests into its queue and lets the workers
 finish it, the plain one serves the messages its client had read and
 refuses what the client reads after, a number fixed when the drain ends.
 
+One window stays open. A multiplexer routes to a backend that is still a
+last resort until it sees the connection close, and a request it routes
+in that moment arrives after the backend stopped answering. Like a
+request to a backend that dies, it gets no answer, and its sender waits
+out its timeout and searches. It is not lost unsaid: the backend's log
+has a `WARNING`, `N message(s) from multiplexer M arrived after the
+connection began closing, and were dropped`, and every client and server
+class counts them (in C++, `dropped_while_closing()`).
+
 The finishing has no time bound of its own: what was taken before the
 line is served, however long its handlers run. What was taken is bounded
 by count instead: the threaded class's `queue_size` requests waiting

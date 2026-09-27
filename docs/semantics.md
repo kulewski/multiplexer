@@ -45,8 +45,13 @@ that changes.
   saturated type fails with `OperationFailed` once its search finds the
   same full queues. The library on the receiving side holds
   at most 1024 unread messages and drops beyond that too. A backend that
-  reads slower than clients send loses messages rather than memory. On
-  the sending side a client's queue to each multiplexer holds 1024
+  reads slower than clients send loses messages rather than memory. A
+  `ThreadedClient` given `on_message` holds nothing: the callback runs on
+  the io thread, which reads no more until it returns, so a slow one
+  leaves the backlog to the multiplexer's queue. An `AsyncClient` hands
+  every message to its event loop and holds what the loop has not
+  reached yet in memory, unbounded: keeping up there is the program's to
+  do. On the sending side a client's queue to each multiplexer holds 1024
   messages as well, and every client library holds what does not fit, in
   order, until there is room, within the message's timeout, dropping it
   with a warning after that; a send to `ALL` gives each connection its
@@ -65,7 +70,12 @@ that changes.
   repeat after a timeout, the direct request after a search, and the resend
   after a lost connection. The client accepts a reply to any attempt, but a
   backend cannot tell the attempts apart by `id`, so deduplicate on
-  something in the payload, never on the message id.
+  something in the payload, never on the message id. A backend that calls
+  `notify_start()` lets the caller see it happen: a query's `on_received`
+  is called with each backend that acknowledged the request, so a second
+  call says the request may be running twice
+  ([Python](api_python.md#knowing-a-backend-took-the-request),
+  [C++](api_cpp.md#knowing-a-backend-took-the-request)).
 - **`references` means "this is the reply".** A client matches replies to
   its queries by the id they reference, and a threaded or asyncio client
   drops what references a query it has seen answered, the last 1024,
@@ -281,7 +291,7 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence on a connection, from a non-passive peer or from a multiplexer, before the other side starts to worry |
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
-| `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a library holds per peer |
+| `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client, or a `ThreadedClient` with no `on_message`, holds |
 | `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
 | dedup window | 2048 ids | repeats the library recognizes |

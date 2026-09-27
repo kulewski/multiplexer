@@ -325,11 +325,11 @@ TEST(Fork, InheritedClientsAreOrphansAndTheParentKeepsWorking) {
 // A parent thread inside a call, holding a lock the call took, at the
 // instant of the fork: the child's calls on what it inherited must not
 // wait for that lock. Frozen inside each kind of call in turn, one fork
-// each: the threaded client's lifecycle lock, the first its calls take;
-// asio's lock, which a send takes second, posting to the io thread; and
-// the lane's. Not under AddressSanitizer, whose allocator a fork leaves
-// locked in the child whenever another thread is allocating; the hazard
-// here is normal builds'.
+// each, in the first lock it takes: asio's, taken to post to the io
+// thread or, by a query, to make its timer; and the lane's. Not under
+// AddressSanitizer, whose allocator a fork leaves locked in the child
+// whenever another thread is allocating; the hazard here is normal
+// builds'.
 TEST(Fork, InheritedCallsRaiseWhileAParentThreadHoldsALock) {
 #if defined(MX_FORK_TEST_ASAN)
   GTEST_SKIP() << "the sanitizer's allocator is not fork-safe";
@@ -351,7 +351,7 @@ TEST(Fork, InheritedCallsRaiseWhileAParentThreadHoldsALock) {
       {"flush_all", 1, [&] { threaded.flush_all(1); }},
       {"query", 1, [&] { threaded.query(message, 1); }},
       {"a flushing send", 1, [&] { threaded.send(message, 1.0f); }},
-      {"a send, in asio's lock", 2, [&] { threaded.send(message); }},
+      {"a send", 1, [&] { threaded.send(message); }},
       {"the lane", 1, [&] { lane->connection(); }},
   };
   for (const auto& holder : holders) {
@@ -407,6 +407,68 @@ TEST(Fork, AnInheritedClientClosesTheChildsCopiesOnce) {
   EXPECT_EQ(0, exit_code_of(pid)) << "the first file of the child's that a client closed, counting from 1";
   EXPECT_EQ(1u, threaded->connections_count());
   EXPECT_EQ(1u, sync->connections_count());
+}
+
+// A child that makes a fresh client before it drops the inherited one, as a
+// post-fork hook assigning a new client does: glibc gives the fresh io
+// thread the handle the parent's io thread had, which the inherited
+// client's teardown must leave alone, where it detached it and the fresh
+// client's shutdown() then aborted the child.
+TEST(Fork, AFreshClientOutlivesTheInheritedOnesTeardown) {
+  InProcessMultiplexer mx;
+  std::unique_ptr<ThreadedClient> threaded(new ThreadedClient(multiplexer::peers::WEBSITE));
+  ASSERT_TRUE(threaded->connect("127.0.0.1", mx.port, 5));
+  threaded->connections_count();  // the io thread idle at the fork, as in the first test
+
+  pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+  if (pid == 0) {
+    alarm(10);
+    ThreadedClient fresh(multiplexer::peers::WEBSITE);
+    if (!fresh.connect("127.0.0.1", mx.port, 5)) {
+      _exit(2);
+    }
+    threaded.reset();  // the inherited one, after the fresh one started its io thread
+    fresh.shutdown();
+    _exit(0);
+  }
+  EXPECT_EQ(0, exit_code_of(pid)) << "2: the fresh client never connected; otherwise killed or aborted";
+  EXPECT_EQ(1u, threaded->connections_count());
+}
+
+// A child that makes a fresh client before it drops an inherited threaded
+// backend: glibc may give the fresh io thread the handle one of the
+// parent's workers had, which the backend's teardown must leave alone,
+// where it detached them and the fresh client's shutdown() then aborted
+// the child.
+TEST(Fork, AFreshClientOutlivesAnInheritedServersTeardown) {
+#if defined(MX_FORK_TEST_ASAN)
+  GTEST_SKIP() << "the sanitizer's allocator is not fork-safe";
+#endif
+  InProcessMultiplexer mx;
+  const int workers = 4;
+  std::unique_ptr<Idle> server(new Idle(mx.port, workers));
+  server->connect();
+  const char* object = reinterpret_cast<const char*>(server.get());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (sleeping_inside(object, object + sizeof(Idle)) < workers) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "the workers never waited on the condition variable";
+    sched_yield();
+  }
+
+  pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+  if (pid == 0) {
+    alarm(10);
+    ThreadedClient fresh(multiplexer::peers::WEBSITE);
+    if (!fresh.connect("127.0.0.1", mx.port, 5)) {
+      _exit(2);
+    }
+    server.reset();  // the inherited one, after the fresh one started its io thread
+    fresh.shutdown();
+    _exit(0);
+  }
+  EXPECT_EQ(0, exit_code_of(pid)) << "2: the fresh client never connected; otherwise killed or aborted";
 }
 
 // A threaded backend a forked child inherited, while its workers waited on

@@ -166,7 +166,11 @@ class Request:
         self.answered = answered
 
     def report_error(self, message: Any = "", type: int = types.BACKEND_ERROR, **kwargs: Any) -> int:
-        """Answer with BACKEND_ERROR (or `type`) carrying `message`; the requester's query() raises BackendError."""
+        """Answer with BACKEND_ERROR (or `type`) carrying `message`; the
+        requester's query() raises BackendError. Text that UTF-8 cannot
+        carry goes with those characters escaped, as the plain server's."""
+        if isinstance(message, str):
+            message = message.encode("utf-8", "backslashreplace")
         return self.reply(message, type=type, **kwargs)
 
     def parse_message(self, type: Any) -> Any:
@@ -310,7 +314,9 @@ class BaseThreadedMultiplexerServer:
         """Called on the worker thread when handle_message() raised, after
         the requester was sent BACKEND_ERROR, unless a reply had gone out or
         the report failed. Return True to keep serving (the default);
-        return False and the exception propagates out of serve_forever()."""
+        return False and the exception propagates out of serve_forever(),
+        as one this raises does, and a BaseException the handler raised,
+        such as SystemExit, which never comes here."""
         return True
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
@@ -471,6 +477,10 @@ class BaseThreadedMultiplexerServer:
                 thread.join()
             with self._cond:
                 self._threads = []
+                left = list(self._queue)  # no worker took them: those that failed left early
+                self._queue.clear()
+            for request in left:
+                self._refuse(request)
             client = self._client
             if client is not None:
                 client.shutdown(timeout)  # the last replies go out first
@@ -539,6 +549,15 @@ class BaseThreadedMultiplexerServer:
         if accepting:
             self._drop_lines.dropped(mxmsg)
             return
+        self._refuse(request)
+
+    def _refuse(self, request: Request) -> None:
+        """A request this server will not serve, as it leaves: refused with
+        the DELIVERY_ERROR a multiplexer sends for a peer that is gone, so
+        that a query retries elsewhere at once, or dropped when it answers
+        another message."""
+        mxmsg = request.mxmsg
+        request.dropped = True  # said here, not by __del__
         if mxmsg.references:
             # A message that answers another is dropped: nobody retries a
             # reply, and refusing one could start a loop, a peer whose
@@ -555,7 +574,12 @@ class BaseThreadedMultiplexerServer:
             request.reply(error, type=types.DELIVERY_ERROR)
 
     def _work(self) -> None:
-        """A worker: take the next request, handle it, report what the handler raised."""
+        """A worker: take the next request, handle it, report what the
+        handler raised. What gets past that, a BaseException such as
+        SystemExit from the handler or an exception out of
+        on_handler_exception(), is not the worker's to swallow: it stops
+        the server, whose serve_forever() raises it, as the plain server's
+        does, and the worker leaves."""
         while True:
             with self._cond:
                 while not self._queue and self._accepting:
@@ -566,6 +590,11 @@ class BaseThreadedMultiplexerServer:
                 self._busy += 1
             try:
                 self._handle(request)
+            except BaseException as exc:
+                if self._failure is None:
+                    self._failure = exc
+                self.stop()
+                return
             finally:
                 with self._cond:
                     self._busy -= 1

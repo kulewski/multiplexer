@@ -100,6 +100,13 @@ class RawMessage {
   // whole (BasicClient::handle_orphaned_outgoing_messages).
   inline void mark_for_all() const { for_all_ = true; }
   inline bool for_all() const { return for_all_; }
+  // A frame the connection's side of the protocol makes for that
+  // connection alone, its welcome, a heartbeat or the client's PEER_CONTROL:
+  // when the connection dies with it unsent, it goes with the connection,
+  // neither handed to another, where a second welcome makes the multiplexer
+  // close that one, nor reported lost, since nobody sent it.
+  inline void mark_own() const { own_ = true; }
+  inline bool own() const { return own_; }
   // The message's place in the order its client sent it, which flush_all()
   // goes by (BasicClient::next_number): kept here so that a message a dead
   // connection hands over keeps its place, its queue entry carrying none.
@@ -161,6 +168,7 @@ class RawMessage {
   std::string contents_;
   mutable bool pinned_ = false;
   mutable bool for_all_ = false;
+  mutable bool own_ = false;
   mutable std::uint64_t number_ = 0;
   std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
 };

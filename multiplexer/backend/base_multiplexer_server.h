@@ -113,6 +113,9 @@ class BaseMultiplexerServer {
   // Asks serve_forever() to return, from any thread: it notices within one
   // poll, closes the connections and returns.
   void stop() { working = false; }
+  // The client's dropped_while_closing(), kept past close(): the requests
+  // that reached the server while it closed, and went unanswered.
+  std::uint64_t dropped_while_closing() const { return conn ? conn->dropped_while_closing() : dropped_while_closing_; }
 
  protected:
   // Called with every message that is not the protocol's own. Reply with
@@ -221,6 +224,7 @@ class BaseMultiplexerServer {
 
  protected:
   multiplexer::Client* conn;
+  std::uint64_t dropped_while_closing_ = 0;  // the closed client's, see dropped_while_closing()
   std::shared_ptr<MultiplexerMessage> last_mxmsg;
   ConnectionWrapper last_connwrap;
 

@@ -46,6 +46,8 @@ class Backend(BaseMultiplexerServer):
             return
         if mxmsg.message == b"raise":
             raise RuntimeError("from the handler")
+        if mxmsg.message == b"raise oddly":
+            raise RuntimeError("unknown name \ud800")  # a lone surrogate, as echoed from a request
         if mxmsg.message == b"fail to reply":
             self.send_message(message=b"answer", type=RESPONSE, no_such_field=1)  # raises where it is built
         self.send_message(message=b"answer", type=RESPONSE)
@@ -89,6 +91,19 @@ class ServerRepliesTest(unittest.TestCase):
                     client.query(b"fail to reply", REQUEST, timeout=2)
                 assert served.backend is not None
                 self.assertEqual(1, len(served.backend.exceptions))
+            finally:
+                client.shutdown()
+
+    def test_an_error_text_utf8_cannot_carry_still_reaches_the_requester(self) -> None:
+        """A handler's exception whose text holds a lone surrogate: the
+        requester gets BACKEND_ERROR with it escaped, where the report
+        failed to encode and the requester waited out its timeout."""
+        with Cluster(1, rules=RULES) as cluster, BackendThread(lambda: Backend(cluster.endpoints)):
+            client = Client(cluster.endpoints, type=peers.WEBSITE)
+            try:
+                with self.assertRaises(BackendError) as raised:
+                    client.query(b"raise oddly", REQUEST, timeout=5)
+                self.assertIn(b"\\ud800", raised.exception.args[0])
             finally:
                 client.shutdown()
 

@@ -18,7 +18,7 @@ everyone. This is what nearly every query looks like.
 
 ### 1. The client sends the request through one connection
 
-The client is connected to both multiplexers and picks one of them round robin, multiplexer 1 this time. It sends the request and waits for a message that references the request id, ignoring `REQUEST_RECEIVED` acknowledgements.
+The client is connected to both multiplexers and picks one of them round robin, multiplexer 1 this time. It sends the request and waits for a message that references the request id. A `REQUEST_RECEIVED`, what a backend's `notify_start()` sends, does not end the wait; the caller's `on_received`, when given, hears of it.
 
 ```mermaid
 graph LR

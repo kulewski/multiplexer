@@ -132,6 +132,7 @@ void BasicClient::_send_routing(Connection::pointer conn) {
   control.SerializeToString(mxmsg.mutable_message());
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   raw->mark_pinned();
+  raw->mark_own();  // a connection made since carries the routing in its welcome
   conn->managers_private_data().routing_request_id = mxmsg.id();
   if (!conn->schedule(raw, /*force=*/true)) {
     MX_LOG(WARNING, LOWVERBOSITY,
@@ -217,6 +218,19 @@ bool BasicClient::closing() {
                                 [](const Connection::weak_pointer& conn) { return conn.expired(); }),
                  closing_.end());
   return !closing_.empty();
+}
+
+void BasicClient::connection_closed(Connection* conn) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  const std::uint64_t dropped = conn->dropped_while_closing();
+  if (!dropped) {
+    return;
+  }
+  dropped_while_closing_ += dropped;
+  MX_LOG(WARNING, LOWVERBOSITY,
+         CTX("BasicClient") TEXT(repr(dropped) + " message(s) from multiplexer " + repr(conn->peer_id()) +
+                                 " arrived after the connection began closing, and were dropped: a request among "
+                                 "them gets no answer"));
 }
 
 // Called from Connection::shutdown for any reason: the multiplexer closed,

@@ -23,8 +23,12 @@ A send is as on every client: the await returns once the io thread has
 the message; flush=True awaits its write, a callback hears how it ended,
 and `await flush_all()` waits for everything sent before it. Messages
 that are not replies, events and requests addressed to this peer, go to
-the subscriptions and to messages(); the io thread never waits for the
-loop, so a queue nobody drains drops its oldest message with a warning.
+the subscriptions and to messages(). The io thread never waits for the
+loop: it hands every one over, and what the loop has not reached yet
+waits in memory, as do the tasks of coroutine handlers, with no bound;
+keeping up is the program's to do, and `matching` sheds what it does not
+need before it costs the loop anything. messages() alone holds at most
+queue_size, dropping its oldest with a warning when nobody reads it.
 
 A query with `to` is addressed, and `multiplexer=` takes a Lane from
 lane() or a ConnectionWrapper, as on ThreadedClient.
@@ -77,10 +81,10 @@ class AsyncClient:
         the running one by default. Connecting blocks briefly, like
         ThreadedClient's constructor; a program that must not block its
         loop at all uses `await AsyncClient.create(...)`. `queue_size` bounds
-        what messages() holds for a slow reader. `on_drop(message_id,
-        reason)` runs on the loop for every message the client gives up on,
-        each copy of one sent to ALL, with a DropReason; `dropped` counts
-        them."""
+        what messages() holds for a slow reader, and only that: what waits
+        for the loop has no bound. `on_drop(message_id, reason)` runs on
+        the loop for every message the client gives up on, each copy of
+        one sent to ALL, with a DropReason; `dropped` counts them."""
         self._loop = loop or asyncio.get_running_loop()
         self._subscriptions: list[tuple[int | None, Matcher | None, Handler]] = []
         self._queue: asyncio.Queue[MultiplexerMessage] | None = None
@@ -108,11 +112,24 @@ class AsyncClient:
         on_drop: Callable[[int, DropReason], None] | None = None,
     ) -> "AsyncClient":
         """The constructor run in the default executor, so the loop does
-        not wait for the connections; bound to the running loop."""
+        not wait for the connections; bound to the running loop. A caller
+        that gives up meanwhile, a timeout around the await say, stops
+        waiting, and the client made anyway is closed once it is there,
+        rather than left connected with nobody to close it."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: cls(addresses, type, timeout, loop, queue_size, on_drop=on_drop)
-        )
+        making = loop.run_in_executor(None, lambda: cls(addresses, type, timeout, loop, queue_size, on_drop=on_drop))
+        try:
+            return await asyncio.shield(making)
+        except asyncio.CancelledError:
+            making.add_done_callback(cls._close_unwanted)
+            raise
+
+    @staticmethod
+    def _close_unwanted(making: asyncio.Future) -> None:
+        """The client a cancelled create() made, once it is there: closed on
+        a thread of its own, since close() waits for the io thread."""
+        if not making.cancelled() and making.exception() is None:
+            threading.Thread(target=making.result().close, name="mx-create-cancelled", daemon=True).start()
 
     def _on_drop_reported(self, message_id: int, reason: DropReason) -> None:
         """A drop, as the io thread reports it, handed to `on_drop` on the loop."""
@@ -191,6 +208,21 @@ class AsyncClient:
         except RuntimeError:
             pass  # the loop is closed; nobody is waiting
 
+    @staticmethod
+    def _before(future: asyncio.Future, callback: Callable[[int], None]) -> Callable[[int], None]:
+        """`callback` for the io thread to call: run on the loop that awaits
+        `future`, so that whatever the io thread told it before settling the
+        future (_settle) runs there before the awaiter resumes."""
+        loop = future.get_loop()
+
+        def on_loop(value: int) -> None:
+            try:
+                loop.call_soon_threadsafe(callback, value)
+            except RuntimeError:
+                pass  # the loop is closed; nobody is waiting
+
+        return on_loop
+
     def lane(self, pinned: bool = False, connection: ConnectionWrapper | None = None) -> Lane:
         """A Lane: one connection for a stream of messages, given as
         `multiplexer=` to send_message() and query(); ThreadedClient.lane()
@@ -208,6 +240,7 @@ class AsyncClient:
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
+        on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send a request and await its reply. Raises the same exceptions
         as SyncClient: NotConnected, OperationTimedOut,
@@ -216,7 +249,10 @@ class AsyncClient:
         `to`, `probe`, `multiplexer` and `with_connection` are
         ThreadedClient.query()'s: an addressed query, how it locates its
         addressee, a lane or a connection to go through, and (reply,
-        connection) as the result."""
+        connection) as the result. `on_received`, when given, is called on
+        the loop, before the reply is, with the instance id of each backend
+        that acknowledges the request (notify_start()), as in
+        ThreadedClient.query()."""
         future = self._future()
         self._threaded.query(
             message,
@@ -227,12 +263,14 @@ class AsyncClient:
             probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
+            on_received=None if on_received is None else self._before(future, on_received),
         )
         return await future
 
     async def query_pickle(self, data: Any, type: int, timeout: float = DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
         """query() with `data` pickled as the payload; the reply's payload
-        unpickled. The kwargs are query()'s: `to`, `probe`, `multiplexer`."""
+        unpickled. The kwargs are query()'s: `to`, `probe`, `multiplexer`,
+        `on_received`."""
         reply = await self.query(pickle.dumps(data), type, timeout, **kwargs)
         return pickle.loads(reply.message)
 
@@ -277,11 +315,15 @@ class AsyncClient:
         future = self._future()
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         mxmsg_id = self._threaded._send_and_notify(
-            message, multiplexer, timeout, lambda written, given_up: self._settle(future, (written, given_up)), **kwargs
+            message,
+            multiplexer,
+            timeout,
+            lambda written, not_connected: self._settle(future, (written, not_connected)),
+            **kwargs,
         )
-        written, given_up = await future
+        written, not_connected = await future
         if written == 0:
-            self._threaded._raise_for_nothing_written(lane, given_up)
+            self._threaded._raise_for_nothing_written(lane, not_connected)
         return mxmsg_id
 
     async def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
@@ -329,26 +371,38 @@ class AsyncClient:
 
         return unsubscribe
 
-    def messages(self, type: int | None = None) -> "MessageStream":
+    def messages(self) -> "MessageStream":
         """Every message that arrives on its own, as it arrives, as an async
-        iterator; with `type`, only those. The queue behind it exists from
-        this call on and holds `queue_size` messages: when nobody reads,
-        the oldest is dropped and a warning logged."""
+        iterator: the client's inbox, as read_message() is SyncClient's.
+        Every call reads the one queue, so tasks reading it share the
+        messages, each going to one of them; subscribe() gives a handler
+        every message of a type, each handler its own copy. The queue
+        exists from the first call on and holds `queue_size` messages: when
+        nobody reads, the oldest is dropped and a warning logged."""
         self._threaded._check_not_orphaned()  # a stream nothing would ever feed, in a forked child
         self._check_loop()
         if self._queue is None:
             self._queue = asyncio.Queue(self._queue_size)
-        return MessageStream(self._queue, type)
+        return MessageStream(self._queue)
 
     def _on_message(self, mxmsg: MultiplexerMessage) -> None:
-        """The io thread: hand the message to the loop, cheaply."""
+        """The io thread: hand the message to the loop, cheaply. A
+        `matching` that raises takes it for none of its subscription's
+        handlers, logged as a handler that raises is."""
         with self._lock:
             subscriptions = list(self._subscriptions)
-        handlers = [
-            handler
-            for wanted, matching, handler in subscriptions
-            if (wanted is None or wanted == mxmsg.type) and (matching is None or matching(mxmsg))
-        ]
+        handlers: list[Handler] = []
+        for wanted, matching, handler in subscriptions:
+            if wanted is not None and wanted != mxmsg.type:
+                continue
+            if matching is not None:
+                try:
+                    if not matching(mxmsg):
+                        continue
+                except Exception as error:  # one predicate's failure is not the others'
+                    self._subscription_failed("predicate", matching, mxmsg, error)
+                    continue
+            handlers.append(handler)
         if not handlers and self._queue is None:
             return
         try:
@@ -364,7 +418,7 @@ class AsyncClient:
             try:
                 result = handler(mxmsg)
             except Exception as error:  # one handler's failure is not the others'
-                self._handler_failed(handler, mxmsg, error)
+                self._subscription_failed("handler", handler, mxmsg, error)
                 continue
             if inspect.isawaitable(result):
                 task = asyncio.ensure_future(result, loop=self._loop)
@@ -385,16 +439,18 @@ class AsyncClient:
             return
         error = task.exception()
         if error is not None:
-            self._handler_failed(handler, mxmsg, error)
+            self._subscription_failed("handler", handler, mxmsg, error)
 
     @staticmethod
-    def _handler_failed(handler: Handler, mxmsg: MultiplexerMessage, error: BaseException) -> None:
-        """Log what a subscription handler raised, where the client's other logging goes."""
+    def _subscription_failed(
+        role: str, function: Callable[..., Any], mxmsg: MultiplexerMessage, error: BaseException
+    ) -> None:
+        """Log what a subscription's handler or predicate, `role`, raised, where the client's other logging goes."""
         log(
             WARNING,
             LOWVERBOSITY,
-            text="subscription handler %s raised %r on a message of type %d from %d"
-            % (getattr(handler, "__qualname__", repr(handler)), error, mxmsg.type, getattr(mxmsg, "from")),
+            text="subscription %s %s raised %r on a message of type %d from %d"
+            % (role, getattr(function, "__qualname__", repr(function)), error, mxmsg.type, getattr(mxmsg, "from")),
         )
 
     # Lifetime.
@@ -420,25 +476,23 @@ class AsyncClient:
     @classmethod
     def holder(cls, type: int, addresses: list[Endpoint] | Callable[[], list[Endpoint]], **kwargs: Any) -> "Holder":
         """One client per process, bound to the running loop at first
-        get() or aget(), forgotten in a forked child: what an ASGI server's
-        worker uses. `addresses` may be a callable, read at first use."""
+        get() or aget(), or to `loop=` among the kwargs, the constructor's,
+        forgotten in a forked child: what an ASGI server's worker uses.
+        `addresses` may be a callable, read at first use."""
         return Holder(cls, type, addresses, **kwargs)
 
 
 class MessageStream:
     """The async iterator messages() returns; `async for mxmsg in stream`."""
 
-    def __init__(self, queue: "asyncio.Queue[MultiplexerMessage]", type: int | None):
-        self._queue, self._type = queue, type
+    def __init__(self, queue: "asyncio.Queue[MultiplexerMessage]"):
+        self._queue = queue
 
     def __aiter__(self) -> "MessageStream":
         return self
 
     async def __anext__(self) -> MultiplexerMessage:
-        while True:
-            mxmsg = await self._queue.get()
-            if self._type is None or mxmsg.type == self._type:
-                return mxmsg
+        return await self._queue.get()
 
 
 class Holder:
@@ -508,7 +562,9 @@ class Holder:
             return client
         creating, generation = self._creation()
         if generation is not None:  # this call makes it, on a thread of its own
-            loop = asyncio.get_running_loop()
+            # On the loop the holder was given, as get() makes it, else on this one.
+            kwargs = dict(self._kwargs)
+            kwargs["loop"] = kwargs.get("loop") or asyncio.get_running_loop()
             try:
                 addresses = self._addresses_now()
             except BaseException as error:
@@ -516,7 +572,7 @@ class Holder:
                 raise
             threading.Thread(
                 target=self._make,
-                args=(creating, generation, lambda: self._cls(addresses, self._type, loop=loop, **self._kwargs)),
+                args=(creating, generation, lambda: self._cls(addresses, self._type, **kwargs)),
                 name="mx-holder",
                 daemon=True,
             ).start()

@@ -540,29 +540,30 @@ struct PythonThreadedClient {
     client.send_all_serialized(std::string(serialized), timeout,
                                callback ? send_callback_for(*callback) : ThreadedClient::SendCallback());
   }
-  // The flushing send: (written, given_up), the second what one that wrote
-  // nothing says about why (ThreadedClient::send_serialized_and_wait).
+  // The flushing send: (written, not_connected), the second what one that
+  // wrote nothing says about why (ThreadedClient::send_serialized_and_wait).
   mxtyping::Tuple<unsigned int, bool> send_and_wait(pybind11::bytes payload, bool all, float timeout,
                                                     std::optional<LanePtr> lane_given) {
     std::string serialized(payload);
     LanePtr lane = lane_given.value_or(LanePtr());
-    bool given_up = false;
+    bool not_connected = false;
     unsigned int written;
     {
       GilRelease release;
-      written = client.send_serialized_and_wait(serialized, all, timeout, lane, &given_up);
+      written = client.send_serialized_and_wait(serialized, all, timeout, lane, &not_connected);
     }
-    return pybind11::make_tuple(written, given_up);
+    return pybind11::make_tuple(written, not_connected);
   }
   // flush_all() with `callback(flushed)` on the io thread instead of the
   // wait; what the asyncio client awaits.
   void flush_all_and_notify(float timeout, mxtyping::Callable<void(bool)> callback) {
     client.flush_all_with_callback(timeout, python_callback<bool>(callback));
   }
-  // The flushing send with `callback(written, given_up)` on the io thread
-  // instead of a wait: 1 once the message reached a socket, the first copy
-  // for ALL, 0 when it was given up on, `given_up` then, or `timeout`
-  // passed first; what the asyncio client awaits.
+  // The flushing send with `callback(written, not_connected)` on the io
+  // thread instead of a wait: 1 once the message reached a socket, the
+  // first copy for ALL, 0 when it was given up on or `timeout` passed
+  // first, `not_connected` saying which the caller is told; what the
+  // asyncio client awaits.
   void send_and_notify(pybind11::bytes payload, bool all, float timeout,
                        mxtyping::Callable<void(unsigned int, bool)> callback, std::optional<LanePtr> lane_given) {
     client.send_serialized_and_notify(std::string(payload), all, timeout, python_callback<unsigned int, bool>(callback),
@@ -577,15 +578,23 @@ struct PythonThreadedClient {
     }
     return msg;
   }
+  // A query's on_received, when given: told on the io thread, with the
+  // GIL, the instance id of each backend that acknowledges the request.
+  typedef std::optional<mxtyping::Callable<void(std::uint64_t)>> OnReceived;
+  static ReceivedCallback received_for(const OnReceived& on_received) {
+    return on_received ? python_callback<std::uint64_t>(*on_received) : ReceivedCallback();
+  }
   mxtyping::Tuple<pybind11::bytes, ConnectionWrapper> query(pybind11::bytes serialized, float timeout,
-                                                            std::uint32_t probe, std::optional<LanePtr> lane_given) {
+                                                            std::uint32_t probe, std::optional<LanePtr> lane_given,
+                                                            OnReceived on_received) {
     LanePtr lane = lane_given.value_or(LanePtr());
     MultiplexerMessage msg = parse(std::string(serialized));
     Probe how = probe_from_type(probe);
+    ReceivedCallback received = received_for(on_received);
     ThreadedClient::Result result;
     {
       GilRelease release;
-      result = client.query(msg, timeout, lane, how);
+      result = client.query(msg, timeout, lane, how, received);
     }
     result.check();  // throws the C++ exception, translated below
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
@@ -595,7 +604,7 @@ struct PythonThreadedClient {
       pybind11::bytes serialized,
       mxtyping::Callable<void(std::optional<pybind11::bytes>, std::optional<ConnectionWrapper>, pybind11::object)>
           callback,
-      float timeout, std::uint32_t probe, std::optional<LanePtr> lane_given) {
+      float timeout, std::uint32_t probe, std::optional<LanePtr> lane_given, OnReceived on_received) {
     LanePtr lane = lane_given.value_or(LanePtr());
     MultiplexerMessage msg = parse(std::string(serialized));
     Probe how = probe_from_type(probe);
@@ -628,7 +637,7 @@ struct PythonThreadedClient {
             PyErr_Print();
           }
         },
-        timeout, lane, how);
+        timeout, lane, how, received_for(on_received));
   }
   void shutdown(float timeout) {
     GilRelease release;
@@ -902,10 +911,11 @@ PYBIND11_MODULE(_native, module) {
            pybind11::arg("all"), pybind11::arg("timeout"), pybind11::arg("callback"),
            pybind11::arg("lane") = multiplexer::LanePtr())
       .def("query", &multiplexer::PythonThreadedClient::query, pybind11::arg("serialized"), pybind11::arg("timeout"),
-           pybind11::arg("probe"), pybind11::arg("lane") = multiplexer::LanePtr())
+           pybind11::arg("probe"), pybind11::arg("lane") = multiplexer::LanePtr(),
+           pybind11::arg("on_received") = pybind11::none())
       .def("query_with_callback", &multiplexer::PythonThreadedClient::query_with_callback, pybind11::arg("serialized"),
            pybind11::arg("callback"), pybind11::arg("timeout"), pybind11::arg("probe"),
-           pybind11::arg("lane") = multiplexer::LanePtr())
+           pybind11::arg("lane") = multiplexer::LanePtr(), pybind11::arg("on_received") = pybind11::none())
       .def("shutdown", &multiplexer::PythonThreadedClient::shutdown,
            pybind11::arg("timeout") = multiplexer::CLOSE_FLUSH_SECONDS);
 

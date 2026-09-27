@@ -165,6 +165,8 @@ class Client : public ExceptionDefinitions {
     return basic_client_->connections_count(true);
   }
   std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }  // our `from`
+  // See BasicClient::dropped_while_closing().
+  std::uint64_t dropped_while_closing() const { return basic_client_->dropped_while_closing(); }
   std::uint32_t inline client_type() const { return basic_client_->client_type(); }  // our peer type
 
   // Incoming messages: the next one in arrival order, waiting up to
@@ -303,28 +305,35 @@ class Client : public ExceptionDefinitions {
   // `to` set is addressed and its stages share one, see _query. With a
   // lane, the request goes through the lane's connection and the lane
   // adopts the connection the reply came through; `probe` is how an
-  // addressed query locates its addressee.
+  // addressed query locates its addressee. `received`, when given, is told
+  // here, on the caller's thread while the query waits (so it must not
+  // read through this client), the instance id of each backend that
+  // acknowledges an attempt with REQUEST_RECEIVED (notify_start()): once,
+  // normally, or again when a retry reached a backend, the same or
+  // another; nothing about the query changes for it.
   IncomingMessage query(const MultiplexerMessage& mxmsg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
-                        Probe probe = PROBE_SEARCH) {
+                        Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback()) {
     basic_client_->check_not_orphaned();
-    return _query(mxmsg, timeout, lane, probe);
+    return _query(mxmsg, timeout, lane, probe, received);
   }
   // Through `connection` while it is live, another when it is gone; a
   // pinned Lane seeded with the connection is the form that refuses any
   // other.
   IncomingMessage query(const MultiplexerMessage& mxmsg, const ConnectionWrapper& connection,
-                        float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH) {
-    return query(mxmsg, timeout, std::make_shared<Lane>(connection), probe);
+                        float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH,
+                        ReceivedCallback received = ReceivedCallback()) {
+    return query(mxmsg, timeout, std::make_shared<Lane>(connection), probe, received);
   }
 
   IncomingMessage query(shared_ptr<const MultiplexerMessage> mxmsg, float timeout = DEFAULT_TIMEOUT,
-                        LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH) {
+                        LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH,
+                        ReceivedCallback received = ReceivedCallback()) {
     basic_client_->check_not_orphaned();
-    return _query(*mxmsg, timeout, lane, probe);
+    return _query(*mxmsg, timeout, lane, probe, received);
   }
 
   IncomingMessage query(const std::string& message, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
-                        LanePtr lane = LanePtr()) {
+                        LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback()) {
     basic_client_->check_not_orphaned();
 
     MultiplexerMessage mxmsg;
@@ -332,7 +341,7 @@ class Client : public ExceptionDefinitions {
     mxmsg.set_from(instance_id());
     mxmsg.set_type(type);
     mxmsg.set_message(message);
-    return _query(mxmsg, timeout, lane, PROBE_SEARCH);
+    return _query(mxmsg, timeout, lane, PROBE_SEARCH, received);
   }
 
   // Queues `msg` on every live connection, a full one's copy waiting for
@@ -356,7 +365,8 @@ class Client : public ExceptionDefinitions {
  protected:
   // The query algorithm and the send-and-receive it is built on live in
   // client.cc; see the comments there.
-  IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
+  IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe,
+                         ReceivedCallback received);
   IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
   IncomingMessage _send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all = false,
                                     bool handle_delivery_errors = false,
@@ -412,6 +422,7 @@ class Client : public ExceptionDefinitions {
 
  private:
   shared_ptr<asio::io_service> io_service_ptr_;
+  ReceivedCallback received_;  // the on_received of the query under way, see _query
 
  protected:
   asio::io_service& io_service_;

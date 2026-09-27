@@ -53,7 +53,10 @@ Yes. The original backend may have handled it and died before replying, or
 the connection may have died with the request on the wire; the client sends
 it again either way. Each attempt is a new message with a new `id`, so the
 backend cannot recognise the repeat by id. Put a key of your own in the
-payload when a request must not be applied twice.
+payload when a request must not be applied twice. A caller can see it
+happen when the backends call `notify_start()`: the query's `on_received`
+[is called](api_python.md#knowing-a-backend-took-the-request) once for
+each backend that acknowledged the request.
 
 **Why is a message's payload opaque bytes?**
 So that the multiplexer never has to be rebuilt for your types. It routes on

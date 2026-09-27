@@ -13,8 +13,9 @@ never share objects.
 
 import atexit
 import time
+import traceback
 from functools import wraps
-from typing import Any, Literal, overload
+from typing import Any, Callable, Literal, overload
 
 import google.protobuf.message
 
@@ -176,6 +177,7 @@ class Client(_mxclient.Client):
         """initialize a client with given client (peer) type"""
         self._client_type = client_type
         self.__instance_id: int | None = None
+        self.__on_received: Callable[[int], None] | None = None  # the query under way's, see query()
         super(Client, self).__init__(client_type)
 
     def __get_instance_id(self) -> int:
@@ -305,6 +307,8 @@ class Client(_mxclient.Client):
         probe: int = ...,
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
         with_connection: Literal[False] = ...,
+        *,
+        on_received: "Callable[[int], None] | None" = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -318,6 +322,7 @@ class Client(_mxclient.Client):
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
         *,
         with_connection: Literal[True],
+        on_received: "Callable[[int], None] | None" = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     def query(
@@ -329,6 +334,8 @@ class Client(_mxclient.Client):
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: "int | Lane | ConnectionWrapper" = ONE,
         with_connection: bool = False,
+        *,
+        on_received: "Callable[[int], None] | None" = None,
     ) -> "MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]":
         """Send a request and return its reply, a MultiplexerMessage.
 
@@ -356,12 +363,26 @@ class Client(_mxclient.Client):
         no other connection and raises NotConnected once its own is gone;
         a connection is preferred while it is live, as with send_message().
         With `with_connection` the result is (reply, connection).
+
+        `on_received`, when given, is called here, on the caller's thread
+        while the query waits (so it must not query or receive through this
+        client, which could take the reply), with the instance id of each
+        backend that acknowledges the request with REQUEST_RECEIVED
+        (notify_start()): once, normally, or again when a retry reached a
+        backend, the same or another. Nothing about the query changes for
+        it; one that raises has its traceback printed.
         """
         assert not isinstance(message, MultiplexerMessage)
-        if to:
-            response, connwrap = self.__query_addressed(message, type, timeout, to, probe, multiplexer)
-        else:
-            response, connwrap = self.__query_typed(message, type, timeout, multiplexer)
+        # Held for the query's duration, where the acknowledgements are met;
+        # whatever was there before is back afterwards.
+        previous, self.__on_received = self.__on_received, on_received
+        try:
+            if to:
+                response, connwrap = self.__query_addressed(message, type, timeout, to, probe, multiplexer)
+            else:
+                response, connwrap = self.__query_typed(message, type, timeout, multiplexer)
+        finally:
+            self.__on_received = previous
         return (response, connwrap) if with_connection else response
 
     def __query_typed(self, message, type, timeout, multiplexer):
@@ -401,6 +422,7 @@ class Client(_mxclient.Client):
         response, connwrap = self.send_and_receive(
             mxmsg,
             accept_ids=attempts,
+            ignore_ids=[mxmsg.id],
             multiplexer=lane if pinned else Client.ALL,
             timeout=timeout,
             handle_delivery_errors=not pinned,
@@ -478,6 +500,7 @@ class Client(_mxclient.Client):
         response, connwrap = self.send_and_receive(
             mxmsg,
             accept_ids=attempts,
+            ignore_ids=[mxmsg.id],
             multiplexer=lane if pinned else Client.ALL,
             timeout_ticker=ticker,
             handle_delivery_errors=not pinned,
@@ -601,6 +624,7 @@ class Client(_mxclient.Client):
                     break  # the connection died: send again
                 mxmsg_in, connwrap = self.__parse_incoming(got)
                 if mxmsg_in.type in ignore_types:
+                    self.__acknowledged(mxmsg_in, accept_ids, ignore_ids)
                     continue
                 if mxmsg_in.references in accept_ids:
                     return mxmsg_in, connwrap
@@ -619,6 +643,24 @@ class Client(_mxclient.Client):
                 mxmsg = MultiplexerMessage()
                 mxmsg.CopyFrom(message)
             mxmsg.id = self.random()
+
+    def __acknowledged(self, mxmsg, accept_ids, ignore_ids):
+        """A skipped message that is a REQUEST_RECEIVED (notify_start())
+        acknowledging the request of the query under way, or a retry of it:
+        the query's on_received hears from which backend, and the query goes
+        on as before, whatever the callback does. ignore_ids holds the
+        probe's id, as nothing acknowledges a probe."""
+        on_received = self.__on_received
+        if (
+            on_received is not None
+            and mxmsg.type == types.REQUEST_RECEIVED
+            and mxmsg.references in accept_ids
+            and mxmsg.references not in ignore_ids
+        ):
+            try:
+                on_received(mxmsg.from_)
+            except Exception:
+                traceback.print_exc()
 
     def __parse_incoming(self, got):
         """A (bytes, connection) pair from the C++ side as (MultiplexerMessage, connection)."""
@@ -643,6 +685,7 @@ class Client(_mxclient.Client):
         while timeout_ticker.permit():
             mxmsg, connwrap = self.__receive_message(timeout=timeout_ticker())
             if mxmsg.type in ignore_types:
+                self.__acknowledged(mxmsg, accept_ids, ignore_ids)
                 continue
 
             if mxmsg.references in accept_ids:

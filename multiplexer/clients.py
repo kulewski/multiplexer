@@ -70,6 +70,8 @@ class BasicClient(mxclient.Client):
         probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[False] = ...,
+        *,
+        on_received: Callable[[int], None] | None = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -83,6 +85,7 @@ class BasicClient(mxclient.Client):
         multiplexer: int | Lane | ConnectionWrapper = ...,
         *,
         with_connection: Literal[True],
+        on_received: Callable[[int], None] | None = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     @log_call
@@ -95,15 +98,17 @@ class BasicClient(mxclient.Client):
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = mxclient.Client.ONE,
         with_connection: bool = False,
+        *,
+        on_received: Callable[[int], None] | None = None,
     ) -> MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]:
         """Like mxclient.Client.query, but a BACKEND_ERROR reply raises BackendError."""
         if with_connection:
             reply, connection = super(BasicClient, self).query(
-                message, type, timeout, to, probe, multiplexer, with_connection=True
+                message, type, timeout, to, probe, multiplexer, with_connection=True, on_received=on_received
             )
             self.__check_backend_error(reply)
             return reply, connection
-        reply = super(BasicClient, self).query(message, type, timeout, to, probe, multiplexer)
+        reply = super(BasicClient, self).query(message, type, timeout, to, probe, multiplexer, on_received=on_received)
         self.__check_backend_error(reply)
         return reply
 
@@ -119,7 +124,7 @@ class BasicClient(mxclient.Client):
     def query_pickle(self, data: Any, type: int, timeout: float = mxclient.DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
         """query() with `data` pickled as the payload; returns the reply's
         payload unpickled. The kwargs are query()'s: `to`, `probe`,
-        `multiplexer`."""
+        `multiplexer`, `on_received`."""
         return pickle.loads(self.query(pickle.dumps(data), type, timeout, **kwargs).message)
 
     def send_pickle(self, data: Any, **kwargs: Any) -> int:

@@ -233,8 +233,12 @@ class ThreadedClientLanesTest(unittest.TestCase):
         chunks = self._all_chunks(4, lambda m: m.message.startswith(b"pin-"))
         self.assertTrue(all(self.via(m) is way for m in chunks))
         way.kill()
+        # A send the client writes into the killed multiplexer's socket
+        # before it notices the closure goes nowhere; from then on the
+        # pinned lane refuses every one.
         with self.assertRaises(NotConnected):
-            self.client.send_message(b"pin-5", type=REQUEST, multiplexer=pinned, flush=True, timeout=5)
+            for _ in range(100):
+                self.client.send_message(b"pin-5", type=REQUEST, multiplexer=pinned, flush=True, timeout=5)
         with self.assertRaises(NotConnected):
             self.client.query(b"pin-6", REQUEST, multiplexer=pinned, timeout=5)
         self.client.send_message(b"pin-7", type=REQUEST, multiplexer=connection, flush=True, timeout=10)

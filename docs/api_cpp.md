@@ -62,8 +62,9 @@ client.shutdown();
   library runs. `async_connect(host, port)` returns at once;
   `wait_for_connection(wrapper, timeout)` waits for it. The wrapper's
   `target()` is the host and port given, `endpoint()` the address in use.
-- `query(payload, type, timeout = 10, lane = nullptr)` and `query(mxmsg,
-  timeout, lane, probe)` send a request and return an `IncomingMessage`, a
+- `query(payload, type, timeout = 10, lane = nullptr, received = nullptr)`
+  and `query(mxmsg, timeout, lane, probe, received)` send a request and
+  return an `IncomingMessage`, a
   triple whose `third` is a `shared_ptr<MultiplexerMessage>` with the
   reply and whose `second` is the connection it came on. The algorithm is
   the one in [how a query is answered](query.md): one connection first,
@@ -75,6 +76,8 @@ client.shutdown();
   `SyncClient::OperationTimedOut` when a stage runs out of time,
   `SyncClient::NotConnected` when no connection is live. All three derive from
   `SyncClient::MxClientError`, which derives from `std::exception`.
+  `received` hears which backend acknowledged the request, see
+  [Knowing a backend took the request](#knowing-a-backend-took-the-request).
 - `queue(mxmsg, timeout, lane = nullptr, done)` and `queue_all(mxmsg,
   timeout, done)` send an event the way every client sends, `ThreadedClient`'s
   `send(msg)` included, and return at once: the event is queued on one
@@ -148,6 +151,12 @@ client.shutdown();
   sender retries elsewhere, and a reply is dropped; what was read before
   stays to be received. The second refuses what was read and not received
   yet.
+- `dropped_while_closing()`: the messages the client's connections read
+  after they began closing, which they could only drop, each connection's
+  logged as a `WARNING` when it ends. The protocol's own answers to what
+  the client sent, a `DELIVERY_ERROR`, `REQUEST_RECEIVED`, `BACKEND_ERROR`,
+  a control frame's status or a `PING` that answers, are not counted: only
+  the client waited for them.
 - `instance_id()`, `client_type()`, `connections_count()`, `random64()`, and
   `shutdown(timeout = CLOSE_FLUSH_SECONDS)`, also run by the destructor:
   it first writes what was sent before it, running the loop as
@@ -210,6 +219,32 @@ The same on `SyncClient` and `ThreadedClient`; the reasoning is in
   message and replaced when gone, as `BaseMultiplexerServer::send_message`
   replies the way the request came. `Result::reply.second` and
   `IncomingMessage::second` are where a connection comes from.
+
+### Knowing a backend took the request
+
+The same on `SyncClient` and `ThreadedClient`, and on the Python clients,
+[where the reasoning is](api_python.md#knowing-a-backend-took-the-request).
+Every `query()` overload takes a last, optional `ReceivedCallback
+received`, a `std::function<void(std::uint64_t backend)>` from
+`multiplexer/basic_client.h`, called with the instance id of each backend
+that acknowledges the request with `REQUEST_RECEIVED`, what
+`notify_start()` sends, as soon as the acknowledgement arrives:
+
+```cpp
+multiplexer::IncomingMessage reply = client.query(
+    "hello", multiplexer::types::ECHO_REQUEST, 60, multiplexer::LanePtr(),
+    [](std::uint64_t backend) { std::cerr << "backend " << backend << " is working on it\n"; });
+```
+
+Normally once; again, with the backend's id, when a retry reached a
+backend, the same or another, which says the request may be running
+twice. Nothing else
+about the query changes, and a query without one costs nothing more. On
+`SyncClient` it runs on the calling thread inside `query()`, while the
+query waits, so it must not query or receive through that client, which
+could take the reply; on `ThreadedClient` on the io thread, so it must be
+quick.
+One that throws a `std::exception` is logged, and the query goes on.
 
 ## BaseMultiplexerServer
 
@@ -298,7 +333,10 @@ wait for a condition of your own. `set_drain_routing(routing)` before the
 drain changes what it asks for: `all` kept keeps events coming,
 `last_resort` keeps a lone backend serving through its drain, and either
 makes the drain last its `drain_seconds`. [How a backend
-leaves](leaving.md) draws the phases and what each costs. Overriding
+leaves](leaving.md) draws the phases and what each costs; a request the
+multiplexer routed to the backend in the moment it closed goes
+unanswered, counted by `dropped_while_closing()`, kept past `close()`, and
+logged as a `WARNING`. Overriding
 `should_respond_to_backend_for_packet_search()` puts a condition of your
 own behind the search; a drain needs none. The library installs no signal handlers; a handler of
 your own must only set a `sig_atomic_t` that `periodic_task()` reads, as
@@ -312,7 +350,8 @@ true, the default, keeps serving; false lets the exception propagate out
 of `serve_forever`.
 
 `no_response()` marks a message as needing no reply; `notify_start()` sends
-`REQUEST_RECEIVED` to the requester at once; `parse_message<SomeProto>(mxmsg)`
+`REQUEST_RECEIVED` to the requester at once, which a query's `received`
+[hears of](#knowing-a-backend-took-the-request); `parse_message<SomeProto>(mxmsg)`
 parses the payload; `report_error(message)` answers the request with
 `BACKEND_ERROR`. An exception escaping `handle_message` is logged and, if no
 reply went out yet, reported the same way, so the requester fails at once
@@ -436,14 +475,17 @@ client.send(client.new_message(multiplexer::types::SOME_EVENT, "payload"));
 client.shutdown();
 ```
 
-- `query(payload, type, timeout, lane)` blocks and returns a `Result`: `outcome`
+- `query(payload, type, timeout, lane, received)` blocks and returns a `Result`: `outcome`
   is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend anywhere, or the
   addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and `check()` returns
   the reply or throws the exception `SyncClient::query` would have. `query(msg,
   timeout, lane, probe)` takes the request as a whole, `to` included, and
   sets its id and from per attempt: the addressed form, and
   `query(msg, connection, ...)` prefers a connection, see
-  [above](#lanes-pinning-and-addressed-queries). Any number of threads may
+  [above](#lanes-pinning-and-addressed-queries). `received`, the last
+  argument of every overload, is called on the io thread with each
+  backend that acknowledged the request, see
+  [above](#knowing-a-backend-took-the-request). Any number of threads may
   call it at once; replies are matched by the ids they reference. Called
   on the io thread, from a callback, it throws `std::logic_error` rather
   than deadlock. The callback form returns at once and runs the callback
@@ -483,13 +525,15 @@ client.shutdown();
   `send_serialized_with_callback(serialized, all, timeout, done, lane)` is
   the flushing send so, `done` hearing 1 once a copy is written, 0 when the
   message was given up on, `timeout` passed or `shutdown()` came first.
-  `send_serialized_and_wait(serialized, all, timeout, lane, &given_up)` and
+  `send_serialized_and_wait(serialized, all, timeout, lane, &not_connected)` and
   `send_serialized_and_notify(serialized, all, timeout, done, lane)`, with
-  `done(written, given_up)`, also say why a flushing send wrote nothing: its
-  message given up on, a pinned lane's connection gone or a shutdown, or
-  `timeout` passed, the message then waiting `ROOM_GRACE_SECONDS` more
-  before it is dropped; the Python clients raise `NotConnected` for the one
-  and `OperationTimedOut` for the other on it, and an asyncio layer awaits
+  `done(written, not_connected)`, also say why a flushing send wrote nothing,
+  as the synchronous client tells it at its deadline: its message given up
+  on, a pinned lane's connection gone or a shutdown, or no connection live
+  when `timeout` passed, else `timeout` passed with one live, the message
+  then waiting `ROOM_GRACE_SECONDS` more before it is dropped; the Python
+  clients raise `NotConnected` for the one and `OperationTimedOut` for the
+  other on it, and an asyncio layer awaits
   the second. All are safe from callbacks. A message over `MAX_MESSAGE_SIZE`
   is refused where it is sent or queried, with `std::length_error`.
   `new_message()` fills in id and from.

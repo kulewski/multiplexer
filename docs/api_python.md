@@ -68,7 +68,7 @@ one class that needs the mark, since nothing heartbeats between its calls;
 `ThreadedClient`, `AsyncClient` and both server classes run the loop all
 the time and their peer types are ordinary ones.
 
-- `query(message, type, timeout=10, to=0, probe=types.BACKEND_FOR_PACKET_SEARCH, multiplexer=SyncClient.ONE, with_connection=False)`:
+- `query(message, type, timeout=10, to=0, probe=types.BACKEND_FOR_PACKET_SEARCH, multiplexer=SyncClient.ONE, with_connection=False, on_received=None)`:
   sends a request and returns the reply, a
   `MultiplexerMessage`. `message` is bytes, a `str` (encoded as UTF-8), or a
   protocol buffer message (serialized). The request goes through one
@@ -86,6 +86,8 @@ the time and their peer types are ordinary ones.
   `timeout` covers the stages; `multiplexer` and `with_connection` are for
   lanes and pinning. All three are described under
   [Lanes, pinning and addressed queries](#lanes-pinning-and-addressed-queries).
+  `on_received` hears which backend acknowledged the request, see
+  [Knowing a backend took the request](#knowing-a-backend-took-the-request).
 - `send_message(message, type=..., to=0, multiplexer=SyncClient.ONE, flush=False, timeout=10, callback=None)`:
   sends an event and returns its message id, as every client sends.
   `multiplexer=SyncClient.ONE` uses one connection; `SyncClient.ALL` uses
@@ -270,6 +272,40 @@ carries `to`: keep the peer id beside it.
 `multiplexer=` on `query()` takes `ONE`, a lane or a connection, never
 `ALL`. The C++ forms are in [the C++ API](api_cpp.md#lanes-pinning-and-addressed-queries).
 
+### Knowing a backend took the request
+
+The same on `SyncClient`, `ThreadedClient` and `AsyncClient`. A backend
+whose handler takes long calls `notify_start()` first, which sends the
+requester a `REQUEST_RECEIVED` that references the request. A query goes
+on waiting for the reply whatever arrives; `on_received=callback` also
+calls `callback(backend)` with the instance id of the backend that
+acknowledged the request, as soon as the acknowledgement arrives:
+
+```python
+def taken(backend: int) -> None:
+    print("backend %d is working on it" % backend)
+
+reply = client.query(b"pears", types.SEARCH_REQUEST, timeout=60, on_received=taken)
+```
+
+Normally it is called once. A retry, the request sent again after its
+connection died or the direct request after a search, may reach a
+backend again, the same one or another, which acknowledges it too: the
+callback is called again with that backend's id, which tells the caller
+the request may be running twice ([what a retry means](semantics.md)). Nothing else changes: the
+timeouts, the retries, the search and the result are those of a query
+without the callback, and a query without one costs nothing more, as
+every client reads the acknowledgement anyway to skip it. Where it runs:
+on `SyncClient`, on the calling thread inside `query()`, while the query
+waits, so it must not query or receive through that client, which could
+take the reply; on `ThreadedClient`, on the io thread, as every callback there,
+so it must be quick; on `AsyncClient`, on the loop that awaits the
+query, before the await resumes. One that raises has its traceback
+printed, and the query goes on. Only a backend that calls
+`notify_start()` is heard of: a callback that was never called says
+nothing about whether a backend has the request. The C++ form is in
+[the C++ API](api_cpp.md#knowing-a-backend-took-the-request).
+
 ## BaseMultiplexerServer
 
 ```python
@@ -335,9 +371,14 @@ Inside `handle_message`:
 - `no_response()` says the message needed no reply, as for an event.
   Without a reply and without this call the library logs a warning.
 - `notify_start()` sends `REQUEST_RECEIVED` to the requester at once, for
-  handlers that take long; `query()` ignores it.
+  handlers that take long; the requester's `query()` goes on waiting for
+  the reply, and its `on_received`, when given,
+  [hears which backend took the request](#knowing-a-backend-took-the-request).
 - `report_error(message)` sends `BACKEND_ERROR` instead of a reply; the
-  requester's `query()` raises `BackendError`.
+  requester's `query()` raises `BackendError`. A `str` goes as UTF-8, any
+  character UTF-8 cannot carry, a lone surrogate echoed from a request
+  say, escaped as `\ud800`, so that the report is never lost to its text;
+  the threaded server's `request.report_error()` does the same.
 - `parse_message(SomeProto)` parses the payload as that protocol buffer type.
   It is the bound form of `mxclient.parse_message(SomeProto, payload_bytes)`,
   which any code may call on any message.
@@ -355,7 +396,9 @@ called. A reply that raised did not go out; a report that fails is logged,
 the requester waiting out its timeout, and `on_handler_exception(exc)` is
 called all the same. It returns `True` by default and the backend keeps serving; return
 `False` and the original exception propagates out of `serve_forever()`, for
-backends that would rather be restarted than continue. `close(timeout=1)`
+backends that would rather be restarted than continue. So does an exception
+`on_handler_exception()` raises, and a `BaseException` that is not an
+`Exception`, a handler's `SystemExit` say, which none of this catches. `close(timeout=1)`
 ends the connections as `SyncClient.shutdown(timeout)` does, what is still
 queued, the last replies, written first; a request that arrives meanwhile,
 or was read and will not be handled, is refused with `DELIVERY_ERROR`, so
@@ -512,6 +555,9 @@ through it, rather than through `self`.
   that raised being none, and the exception goes to
   `on_handler_exception()` on the worker thread, a report that fails
   logged; `False` from there makes `serve_forever()` return and re-raise.
+  So does an exception out of `on_handler_exception()`, or a handler's
+  `SystemExit` or other `BaseException`: the worker leaves, and what is
+  still queued once no worker is left is refused, as during a close.
   `close()` joins the workers, so from a handler it raises `RuntimeError`
   rather than join itself, during another thread's `close()` too; a
   handler that wants the server gone calls `stop()`. From another thread,
@@ -547,13 +593,15 @@ client.shutdown()
 `on_drop=` and `dropped` are under [Messages the library gives up
 on](#messages-the-library-gives-up-on).
 
-- `query(message, type, timeout=10, callback=None, to=0, probe=..., multiplexer=ONE, with_connection=False)`
+- `query(message, type, timeout=10, callback=None, to=0, probe=..., multiplexer=ONE, with_connection=False, on_received=None)`
   is the same three-stage algorithm as `SyncClient.query()` and raises the
   same exceptions, plus `threaded_client.BackendError`, and `ValueError`
   at the call for a message over the 128 MiB limit, as every send of
   every client does (`MAX_MESSAGE_SIZE`); `to`, `probe`,
   `multiplexer` and `with_connection` are
-  [the same too](#lanes-pinning-and-addressed-queries). Any number of
+  [the same too](#lanes-pinning-and-addressed-queries), and so is
+  [`on_received`](#knowing-a-backend-took-the-request), called on the io
+  thread. Any number of
   threads may call it at once; replies are matched to queries by the ids
   they reference, never by arrival order. With `callback` it returns
   `None` at once and calls `callback(result)` on the io thread with the
@@ -666,7 +714,9 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   connects and binds to the running loop (`on_drop` and `dropped`: [Messages
   the library gives up on](#messages-the-library-gives-up-on));
   `await AsyncClient.create(...)` does the connecting in the default
-  executor for a program that must not block its loop even once. What
+  executor for a program that must not block its loop even once; a caller
+  that gives up meanwhile, a timeout around the await say, leaves nothing
+  behind, the client made anyway being closed once it is there. What
   arrives on its own, the subscriptions and `messages()`, runs on that loop;
   `query()` and `send_message()` may be awaited from any loop, as a
   `ThreadedClient` may be called from any thread, which is what code run
@@ -675,12 +725,13 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   once it is closed, what arrives on its own is dropped without a warning,
   while `query()` and `send_message()` still work from other loops, so a
   program that must receive again makes a new client on a running loop.
-- `await query(message, type, timeout=10, to=0, probe=..., multiplexer=ONE, with_connection=False)`
+- `await query(message, type, timeout=10, to=0, probe=..., multiplexer=ONE, with_connection=False, on_received=None)`
   returns the reply and raises the same exceptions as `SyncClient`:
   `NotConnected`, `OperationTimedOut`, `OperationFailed`,
   `BackendError`; `to`, `probe`, `multiplexer` and `with_connection` are
   [the same too](#lanes-pinning-and-addressed-queries), and `lane()` makes
-  a lane. `await query_pickle(data, type)` for the pickle convention.
+  a lane; [`on_received`](#knowing-a-backend-took-the-request) is called
+  on the loop, before the await resumes. `await query_pickle(data, type)` for the pickle convention.
   Cancelling the await does not cancel the request: a backend may still
   get it, the reply is dropped.
 - `await send_message(message, multiplexer=ONE, timeout=10, flush=False, callback=None, **fields)`
@@ -715,18 +766,29 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   before its reply was handed over. A handler that raises, at
   once or later as a coroutine, is logged with the message's type and
   sender through the client's logging, and the other handlers still run.
-  Returns the function that ends the subscription. `messages(type=None)` is the pull form, an async
-  iterator over a queue of `queue_size`: when nobody reads, the oldest
-  message is dropped and a warning logged, because the io thread never
-  waits for the loop.
+  A `matching` that raises is logged the same way and takes the message
+  for none of its subscription's handlers; the other subscriptions and
+  `messages()` still get it. The io thread hands every message over and never waits for the loop:
+  what the loop has not reached yet waits in memory, as do the tasks of
+  coroutine handlers still running, and the library bounds neither. A
+  program whose loop may fall behind the traffic sheds load itself, in
+  `matching`, which runs before anything is handed over.
+  Returns the function that ends the subscription. `messages()` is the
+  pull form, the client's inbox, as `read_message()` is `SyncClient`'s: an
+  async iterator over one queue of `queue_size`, every message that
+  arrives on its own; tasks reading it share the messages, each going to
+  one of them, and a handler that needs every message of a type,
+  each its own copy, is a subscription. When nobody reads it, the oldest
+  message is dropped and a warning logged; what waits for the loop
+  itself is unbounded, as for the subscriptions.
 - `close(timeout=1)` ends the client as `ThreadedClient.shutdown(timeout)`
   does, writing what was sent before it first, and joins the io thread,
   blocking for that and a round trip to the multiplexers, a second at
   most each, and for a name lookup in progress, as there; `await
   aclose(timeout=1)` does it in the executor; `async with` works.
-- `AsyncClient.holder(type, addresses)` keeps one client per process,
-  created on the running loop at first use and forgotten in a forked
-  child, with `addresses` read lazily: what a worker of an ASGI server
+- `AsyncClient.holder(type, addresses, **kwargs)` keeps one client per
+  process, made with the constructor's `kwargs` on the running loop at
+  first use, or on `loop=` among them, and forgotten in a forked child, with `addresses` read lazily: what a worker of an ASGI server
   uses, since those fork before the loop runs. `await holder.aget()`
   makes it on a thread, so the first request does not hold the loop for
   the handshakes; callers that arrive meanwhile await the same one, and a
@@ -1008,7 +1070,7 @@ class SearchTest(unittest.TestCase):
 - `TestClient(cluster, peer_type)` sends and queries from the test:
   `send(payload, type, to=0, flush=True, multiplexer=ONE)` returns the
   message id, `query(payload, type, timeout=10, to=0, probe=...,
-  multiplexer=ONE, with_connection=False)` returns the reply,
+  multiplexer=ONE, with_connection=False, on_received=None)` returns the reply,
   `receive(timeout)` the next message addressed to it, `lane(pinned=False,
   connection=None)` a lane for `multiplexer=`, `instance_id` its id;
   `client` is the `clients.SyncClient` underneath. Its peer type should be

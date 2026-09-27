@@ -87,16 +87,18 @@ void BaseThreadedMultiplexerServer::_check_not_inherited() const {
 // A forked child's server, on its way out: the workers and the thread that
 // served are the parent's and do not exist here, and they may have held
 // the mutexes or waited on the condition variables at the fork. So the
-// thread handles are detached (destroying one joinable would terminate),
-// the condition variables get fresh state without their destructors
-// running (glibc's waits for waiters that existed at the fork, which here
-// is for good; their old state leaks), and the queued requests go
-// without a warning. client_ then tears itself down as an orphan. No lock
-// is taken: the child has no other thread that could race.
+// thread handles are leaked, with no pthread call (destroying one joinable
+// would terminate, and detaching one could detach a fresh thread of the
+// child's, which glibc may give the same handle, as in ThreadedClient's
+// teardown), the condition variables get fresh state without their
+// destructors running (glibc's waits for waiters that existed at the fork,
+// which here is for good; their old state leaks), and the queued requests
+// go without a warning. client_ then tears itself down as an orphan. No
+// lock is taken: the child has no other thread that could race.
 void BaseThreadedMultiplexerServer::_forget_the_parents_threads() MX_NO_THREAD_SAFETY_ANALYSIS {
   for (std::thread& thread : threads_) {
     if (thread.joinable()) {
-      thread.detach();
+      new std::thread(std::move(thread));  // leaked on purpose, with no pthread call
     }
   }
   new (&cond_) std::condition_variable_any();

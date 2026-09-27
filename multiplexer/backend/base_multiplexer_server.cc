@@ -320,6 +320,7 @@ void BaseMultiplexerServer::close(float timeout) {
     conn->refuse_unread();
   }
   conn->shutdown(timeout);  // the last replies go out first
+  dropped_while_closing_ = conn->dropped_while_closing();
   __conn.reset();
   conn = NULL;
 }

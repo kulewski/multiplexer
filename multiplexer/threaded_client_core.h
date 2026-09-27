@@ -9,10 +9,13 @@
 
 #include <asio/io_service.hpp>
 #include <asio/steady_timer.hpp>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <memory>
 #include <string>
 #include <thread>
@@ -61,23 +64,25 @@ class ThreadedClient::Core {
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
   void send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done);
   void send_all_serialized(std::string serialized, float timeout, SendCallback done);
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane, bool* given_up);
+  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane,
+                                        bool* not_connected);
   void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
                                      LanePtr lane = LanePtr());
   void send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done, LanePtr lane);
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
   void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
-             LanePtr lane = LanePtr());
+             LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   Result query(const std::string& payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
-               LanePtr lane = LanePtr());
+               LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
-             LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH);
+             LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
-               Probe probe = PROBE_SEARCH);
+               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
-             float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH);
+             float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH,
+             ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
-               Probe probe = PROBE_SEARCH);
+               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
   void shutdown(float timeout);
   bool orphaned() const { return basic_client_->orphaned(); }
   LogSummary& drop_lines() { return basic_client_->drop_lines(); }  // the io thread only
@@ -102,7 +107,7 @@ class ThreadedClient::Core {
                     LanePtr lane, FlushedCallback flushed = FlushedCallback());
   void _place(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
   void _refuse(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
-  void _settle(const PendingSendPtr& pending, unsigned int written, bool given_up) MX_RUN_ON(io_thread_);
+  void _settle(const PendingSendPtr& pending, unsigned int written, bool not_connected) MX_RUN_ON(io_thread_);
   void _post_fill() MX_RUN_ON(io_thread_);
   void _fill() MX_RUN_ON(io_thread_);
   void _expire_at(const PendingSendPtr& pending) MX_RUN_ON(io_thread_);
@@ -113,7 +118,7 @@ class ThreadedClient::Core {
                                                       ConnectionWrapper* used, bool* refused, float timeout,
                                                       std::uint64_t number = 0) MX_RUN_ON(io_thread_);
   // flush_all() and connect(); see the .cc.
-  void _begin_flush_all(float timeout, FlushCallback done);
+  bool _begin_flush_all(float timeout, const FlushCallback& done);
   void _end_flush(const std::shared_ptr<FlushWait>& wait, bool flushed) MX_RUN_ON(io_thread_);
   void _end_connect(const std::shared_ptr<ConnectWaiter>& waiter, bool up) MX_RUN_ON(io_thread_);
 
@@ -122,6 +127,9 @@ class ThreadedClient::Core {
   void _guarded(F function, D description);
   template <typename F>
   void _post(F function);
+  template <typename F>
+  bool _post_unless_stopped(F function) MX_EXCLUDES(lifecycle_mutex_);
+  void _end_posting() MX_EXCLUDES(lifecycle_mutex_);
   template <typename F>
   auto _call(F function) -> decltype(function());
 
@@ -133,6 +141,7 @@ class ThreadedClient::Core {
   void _restart_waiting_queries() MX_RUN_ON(io_thread_);
   void _clear_out_waiting() MX_RUN_ON(io_thread_);
   void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
+  void _acknowledged(const InFlightPtr& in_flight, const MultiplexerMessage& msg) MX_RUN_ON(io_thread_);
   void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
   bool _answered(const InFlightPtr& in_flight, const ConnectionWrapper& connection) MX_RUN_ON(io_thread_);
@@ -158,7 +167,9 @@ class ThreadedClient::Core {
 
   mx::ThreadChecker io_thread_{mx::ThreadChecker::BIND_LATER};
   std::unordered_map<std::uint64_t, InFlightPtr> by_id_ MX_GUARDED_BY(io_thread_);
-  std::vector<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_);  // every query, tracked by id or waiting
+  // Every query, tracked by id or waiting, in the order they started; a
+  // query keeps its place, so that its end takes it out in O(1).
+  std::list<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_);
   // The ids of recently finished queries, so that a late reply to one is
   // recognised and dropped instead of reaching on_message: a bounded ring,
   // small because a late reply arrives within a timeout of its query, and
@@ -199,15 +210,18 @@ class ThreadedClient::Core {
   mx::Mutex random_mutex_;
   mx::Random64 random_ MX_GUARDED_BY(random_mutex_);
 
-  // shutdown() is the only thing that touches the thread; every other entry
-  // point checks stopped_ first so that nothing posts to a stopped loop.
+  // shutdown() is the only thing that touches the thread. Every other entry
+  // point posts through _post_unless_stopped(), which counts itself in
+  // posting_ and then reads stopped_, while shutdown() sets stopped_ and
+  // then waits for posting_ to be 0 before it posts its own handler: a
+  // post that found the client up is queued ahead of that handler and runs
+  // before the loop ends, and nothing posts to a stopped loop. No lock on
+  // the way: posts from several threads go on side by side.
+  std::atomic<bool> stopped_{false};
+  std::atomic<int> posting_{0};
   mx::Mutex lifecycle_mutex_;
-  bool stopped_ MX_GUARDED_BY(lifecycle_mutex_) = false;
+  std::condition_variable_any posted_;  // posting_ fell to 0 once stopped_ was set
   std::thread thread_;
-  bool _stopped() MX_EXCLUDES(lifecycle_mutex_) {
-    mx::MutexLock lock(lifecycle_mutex_);
-    return stopped_;
-  }
 };
 
 }  // namespace multiplexer

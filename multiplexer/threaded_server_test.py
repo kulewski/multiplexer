@@ -1,8 +1,9 @@
 """BaseThreadedMultiplexerServer against a real multiplexer: serial order
 with one worker, parallel handling with four, a reply from another thread
 later, the search answered while every worker is busy unless told to
-decline, a full queue dropping, a handler that raises, draining, and
-leaving. What a request's reply is, as in C++: a reply that raised is no
+decline, a full queue dropping, a handler that raises, one whose
+SystemExit, or an exception out of on_handler_exception(), ends
+serve_forever(), draining, and leaving. What a request's reply is, as in C++: a reply that raised is no
 answer, so the requester gets BACKEND_ERROR, where the request counted as
 answered; a whole MultiplexerMessage is filled in from the request, where
 it went out without `to` and `references`; and a report that fails is
@@ -31,9 +32,24 @@ REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
 
 
+def frames_to_fill(size: int) -> int:
+    """How many messages of `size` bytes a frozen multiplexer's connection
+    cannot take: twice what the two sockets may buffer, the largest the
+    kernel allows each, and twice the queue."""
+    buffers = 0
+    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
+        try:
+            with open(path) as limits:
+                buffers += int(limits.read().split()[2])
+        except (OSError, IndexError, ValueError):
+            buffers += 8 << 20  # a guess where /proc does not say
+    return 2 * buffers // size + 2 * 1024
+
+
 class Scripted(BaseThreadedMultiplexerServer):
     """A backend the tests steer by payload: "block" waits for `release`,
-    "block, then close" calls close() after that, "wait" joins a barrier,
+    "block, then close" calls close() after that, "block, then exit" raises
+    SystemExit(3) after that, "wait" joins a barrier,
     "later" is answered by another thread, "raise"
     raises, "fail to reply" replies with a field that does not exist,
     "whole" replies with a MultiplexerMessage built without `to` and
@@ -49,6 +65,7 @@ class Scripted(BaseThreadedMultiplexerServer):
         self.barrier = threading.Barrier(4, timeout=10)
         self.kept: list[Request] = []
         self.keep_serving_after_error = True
+        self.raise_from_on_handler_exception = False
         self.exceptions: list[Exception] = []
 
     def handle_message(self, request: Request) -> None:
@@ -64,6 +81,8 @@ class Scripted(BaseThreadedMultiplexerServer):
             self.kept.append(request)  # answered by the test, from its thread
         elif payload == b"raise":
             raise ValueError("as asked")
+        elif payload == b"raise oddly":
+            raise ValueError("unknown name \ud800")  # a lone surrogate, as echoed from a request
         elif payload == b"fail to reply":
             request.reply(b"answer", type=RESPONSE, no_such_field=1)  # raises where it is built
         elif payload == b"whole":
@@ -76,6 +95,9 @@ class Scripted(BaseThreadedMultiplexerServer):
         elif payload == b"block, then close":
             self.release.wait(10)
             self.close()  # from a worker while another thread closes: an error too
+        elif payload == b"block, then exit":
+            self.release.wait(10)
+            raise SystemExit(3)
         elif payload.startswith(b"event"):
             request.no_response()
         else:
@@ -83,6 +105,8 @@ class Scripted(BaseThreadedMultiplexerServer):
 
     def on_handler_exception(self, exc: Exception) -> bool:
         self.exceptions.append(exc)
+        if self.raise_from_on_handler_exception:
+            raise RuntimeError("from on_handler_exception")
         return self.keep_serving_after_error
 
 
@@ -117,7 +141,7 @@ class ThreadedServerTest(unittest.TestCase):
     def serve(self, drain_seconds: float = 0.0, **kwargs) -> tuple[BackendThread, Scripted]:
         """A Scripted server on its own thread, registered; stopped at the end of the test."""
         served = BackendThread(lambda: Scripted(self.cluster.endpoints, **kwargs), drain_seconds=drain_seconds).start()
-        self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+        self.cluster.wait_for_peer(kwargs.get("type", peers.PYTHON_TEST_SERVER))
         self.addCleanup(lambda: served.stop() if served.running else None)
         assert isinstance(served.backend, Scripted)
         return served, served.backend
@@ -222,6 +246,57 @@ class ThreadedServerTest(unittest.TestCase):
                 client.query(b"raise", REQUEST)
         with self.assertRaises(ValueError):
             served.stop()  # serve_forever() raised what the handler raised
+
+    def test_a_handlers_system_exit_ends_serve_forever_and_the_queue_is_refused(self):
+        """SystemExit from a handler is not the worker's to swallow:
+        serve_forever() raises it, as the plain server's does, and the
+        request queued behind it, which no worker is left to take, is
+        refused at once. The worker used to die alone, the server serving
+        on, registered and answering searches, handling nothing."""
+        served, server = self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:  # one multiplexer: one connection, in order
+            client.send(b"block, then exit", REQUEST)
+            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+
+            def release_once_queued() -> None:
+                wait_until(lambda: server.pending == 2, 10, "the request queued behind it")
+                server.release.set()
+
+            releasing = threading.Thread(target=release_once_queued)
+            releasing.start()
+            message = client.client.new_message(message=b"after", type=REQUEST)
+            reply = client.client.send_and_receive(message, timeout=5)[0]
+            releasing.join()
+            self.assertEqual(types.DELIVERY_ERROR, reply.type, "refused, not left waiting")
+            self.assertEqual(message.id, reply.references)
+        wait_until(lambda: not served.running, 10, "serve_forever() to end")
+        with self.assertRaises(SystemExit) as raised:
+            served.stop()
+        self.assertEqual(3, raised.exception.code)
+        self.assertEqual([b"block, then exit"], server.handled)
+
+    def test_an_exception_out_of_on_handler_exception_ends_serve_forever(self):
+        """on_handler_exception() raising, after the requester heard
+        BACKEND_ERROR: serve_forever() raises it, where the worker died
+        and the server served on."""
+        served, server = self.serve()
+        server.raise_from_on_handler_exception = True
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            with self.assertRaises(BackendError):
+                client.query(b"raise", REQUEST)
+        wait_until(lambda: not served.running, 10, "serve_forever() to end")
+        with self.assertRaisesRegex(RuntimeError, "from on_handler_exception"):
+            served.stop()
+
+    def test_an_error_text_utf8_cannot_carry_still_reaches_the_requester(self):
+        """A lone surrogate in the handler's exception: BACKEND_ERROR with it
+        escaped, where the report failed to encode and the requester waited
+        out its timeout."""
+        self.serve()
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            with self.assertRaises(BackendError) as raised:
+                client.query(b"raise oddly", REQUEST, timeout=5)
+            self.assertIn(b"\\ud800", raised.exception.args[0])
 
     def test_a_reply_that_raised_is_answered_with_backend_error(self):
         self.serve()
@@ -385,26 +460,40 @@ class ThreadedServerTest(unittest.TestCase):
         self.assertIsNone(served.error)
 
     def test_a_drain_keeping_a_path_open_lasts_its_period(self):
-        """With `all` kept on, work may keep arriving, so the drain runs to its cap."""
-        served, server = self.serve(drain_seconds=1.5, drain_routing=Routing(any=False))
-        started = time.time()
+        """With `all` kept on, work may keep arriving, so the drain runs to
+        its cap: an event the multiplexer sends every backend of the type,
+        sent after it confirmed the drain routing, is still handled, which
+        a closing server would refuse, and serve_forever() returns once the
+        cap has passed since the drain began, on the monotonic clock. The
+        cap is far above what the confirmation and the event take, where
+        the check slept 0.5 s of a 1.5 s cap and a slow confirmation
+        failed it."""
+        cap = 5.0
+        served, server = self.serve(drain_seconds=cap, drain_routing=Routing(any=False), type=peers.TEST_EVENT_BACKEND)
+        started = time.monotonic()
         server.start_draining()
         wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed")
-        time.sleep(0.5)
-        self.assertTrue(served.running, "confirmed, but events may still come: the drain goes on")
-        wait_until(lambda: not served.running, 10, "serve_forever() returned at the cap")
-        self.assertGreaterEqual(time.time() - started, 1.4)
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"event", types.TEST_EVENT)
+            wait_until(lambda: b"event" in server.handled, cap, "the event through the path kept open, handled")
+        wait_until(lambda: not served.running, cap + 10, "serve_forever() returned at the cap")
+        self.assertGreaterEqual(time.monotonic() - started, cap, "not before the drain's deadline")
 
     def test_the_routing_reaches_a_multiplexer_past_a_full_queue(self):
         """A saturated backend's PEER_CONTROL is forced past its full outgoing
-        queue: with the multiplexer frozen and the queue full, the routing
-        is still confirmed once the multiplexer is back."""
+        queue: with the multiplexer frozen and the queue full, whatever the
+        machine's socket buffers, the routing is still confirmed once the
+        multiplexer is back."""
         _, server = self.serve()
         multiplexer = self.cluster.mx[0]
+        chunk = b"x" * 8192
         multiplexer.pause()
         try:
-            for _ in range(1200):  # the socket buffers, then the 1024 the queue holds, then drops
-                server.client.send_message(b"x" * 8192, type=9999, multiplexer=server.client.ONE)
+            # The sockets' buffers, then the 1024 the queue holds, then the
+            # rest waits for room behind them; the routing request comes
+            # after all of it on the io thread, and finds the queue full.
+            for _ in range(frames_to_fill(len(chunk))):
+                server.client.send_message(chunk, type=9999, multiplexer=server.client.ONE)
             server.client.set_routing(Routing(any=False))
         finally:
             multiplexer.resume()

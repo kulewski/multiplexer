@@ -183,6 +183,7 @@ PY_TEST_FILES := \
   multiplexer/no_connection_test.py \
   multiplexer/outage_test.py \
   multiplexer/pickle_test.py \
+  multiplexer/query_acknowledged_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
   multiplexer/serve_thread_test.py \

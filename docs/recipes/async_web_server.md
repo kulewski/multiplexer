@@ -76,10 +76,13 @@ forwards what it matched. Subscribe in `connect`, unsubscribe in
 
 The io thread hands messages to the loop and never waits for it. A
 subscription handler that awaits slowly does not slow the client, it
-only piles up tasks; `messages()`, the pull form, has a bounded queue that
-drops the oldest with a warning. Size the queue for the burst you expect,
-and prefer `subscribe` with a predicate to a consumer that reads
-everything.
+only piles up tasks, and a loop that falls behind piles up the messages
+it has not reached: the library bounds neither, so keeping up is the
+application's. `messages()`, the pull form, has a bounded queue that
+drops the oldest with a warning when nobody reads it. Size that queue for
+the burst you expect, and prefer `subscribe` with a predicate to a
+consumer that reads everything: the predicate runs on the io thread, and
+a message it refuses costs the loop nothing.
 
 At shutdown, `await MX.aclose()` from an ASGI lifespan shutdown handler
 writes what was sent first, a second at most, then closes. A worker that

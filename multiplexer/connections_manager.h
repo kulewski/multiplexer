@@ -46,6 +46,12 @@ struct DefaultConnectionsManagerTraits {
   // ends leaves to it and it cannot place (the client, which reports every
   // drop in one place), so that the connection does not log them as well.
   static constexpr bool REPORTS_DROPS = false;
+  // Whether what a connection reads ends with this peer, a client, rather
+  // than passing through it to others, as at the multiplexer: the
+  // protocol's own answers to what the peer sent, which only it waits for,
+  // are then no loss when they arrive while it closes, and are not counted
+  // with what it dropped (Connection::dropped_while_closing).
+  static constexpr bool READS_END_HERE = false;
 
   struct MessagesBufferTraits {
     struct SendingResultNotifier {

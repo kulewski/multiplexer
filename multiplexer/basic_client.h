@@ -89,6 +89,8 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
   // What a connection that ends leaves and nothing can take, the client
   // reports itself (BasicClient::report_drop).
   static constexpr bool REPORTS_DROPS = true;
+  // What a client's connection reads is for the client.
+  static constexpr bool READS_END_HERE = true;
 
   struct MessagesBufferTraits : public Base::MessagesBufferTraits {
     typedef ConnectionsManagerTraits::Base::MessagesBufferTraits Base;
@@ -349,6 +351,11 @@ typedef std::shared_ptr<Lane> LanePtr;
 // docs/query.md, "An addressed query".
 enum Probe { PROBE_SEARCH, PROBE_PING };
 
+// A query's on_received: told the instance id of the backend that
+// acknowledged one of the query's attempts with REQUEST_RECEIVED, what a
+// server's notify_start() sends. Nothing about the query changes for it.
+typedef std::function<void(std::uint64_t backend)> ReceivedCallback;
+
 // See the file comment. Created through Client; always held by shared_ptr
 // because connections keep weak references to their manager.
 class BasicClient : public ConnectionsManager<BasicClient>,
@@ -375,8 +382,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
   // The only way to make one: connections keep weak references to their
   // manager, so it must live in a shared_ptr.
-  static pointer Create(asio::io_service& io_service, unsigned short port) {
-    return pointer(new BasicClient(io_service, port));
+  static pointer Create(asio::io_service& io_service, std::uint32_t client_type) {
+    return pointer(new BasicClient(io_service, client_type));
   }
 
   // ConnectionsManager interface: what a Connection needs from its manager.
@@ -427,6 +434,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   void shutdown();
   bool shuts_down() const { return shuts_down_; }
   bool closing();
+  // The messages the client's connections read after they began closing,
+  // in shutdown() or after a failed write, and dropped: a request among
+  // them gets no answer, its sender waits out its timeout. Every one is
+  // logged, as a WARNING when its connection ends. The protocol's own
+  // answers to what the client sent, a DELIVERY_ERROR, REQUEST_RECEIVED,
+  // BACKEND_ERROR, a control frame's status or a PING that answers, are
+  // not counted: only the client waited for them.
+  std::uint64_t dropped_while_closing() const { return dropped_while_closing_; }
 
   // Fork, see lib/fork.h: a client a forked child inherited is an orphan
   // there. Every public entry point that would take a lock, run the loop
@@ -453,6 +468,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   ConnectionWrapper connect(const Endpoint& peer_endpoint, float timeout);       // async_connect + wait
   ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout);
   void connection_destroyed(Connection* conn);  // a connection ended; schedule the reconnect
+  // A connection has ended for good: the messages it read after it began
+  // closing, which it could only drop, are added up and logged.
+  void connection_closed(Connection* conn);
   // PEER_CONTROL with the current routing on `conn`.
   void _send_routing(Connection::pointer conn);
   // A PEER_STATUS from a multiplexer: the routing it now applies to us.
@@ -849,6 +867,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   ConnectionByTarget connection_by_target_;
   std::set<TimerPointer> reconnect_timers_;        // armed by lost connections; shutdown() cancels them
   std::vector<Connection::weak_pointer> closing_;  // closed by shutdown(), still reading to their end
+  std::uint64_t dropped_while_closing_ = 0;        // see dropped_while_closing()
   const unsigned int fork_generation_at_creation_;
   std::atomic<bool> orphan_descriptors_closed_{false};
   asio::ip::tcp::resolver resolver_;

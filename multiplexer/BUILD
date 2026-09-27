@@ -893,6 +893,21 @@ py_test(
 )
 
 py_test(
+    name = "query_acknowledged_test",
+    size = "medium",
+    srcs = ["query_acknowledged_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "send_callbacks_test",
     size = "medium",
     srcs = ["send_callbacks_test.py"],

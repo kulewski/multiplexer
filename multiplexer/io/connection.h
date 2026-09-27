@@ -24,6 +24,7 @@
 
 #include <google/protobuf/message.h>
 
+#include <algorithm>
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
@@ -114,6 +115,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     mxmsg.set_type(types::HEARTBIT);
     mxmsg.set_from(manager->instance_id());
     heartbit_message_.reset(RawMessage::FromMessage(mxmsg));
+    heartbit_message_->mark_own();
   }
 
  public:
@@ -182,7 +184,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     Assert(is_living_);
     ManagerPointer manager = manager_.lock();
-    if (manager && schedule(manager->get_welcome_message(), true, true)) {
+    std::shared_ptr<const RawMessage> welcome = manager ? manager->get_welcome_message() : nullptr;
+    if (welcome) {
+      welcome->mark_own();
+    }
+    if (welcome && schedule(welcome, true, true)) {
       _send_heartbit_later();  // included in schedule() >> _process_send_queue()
       _require_heartbit_later();
     } else {
@@ -389,8 +395,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
-  // Messages, not counting heartbeats, that arrived after the connection
-  // began closing and were dropped (see close_gracefully).
+  // Messages, not counting heartbeats, nor, on a client's connection
+  // (READS_END_HERE), the protocol's answers to what the client sent, that
+  // arrived after the connection began closing and were dropped (see
+  // close_gracefully).
   std::uint64_t dropped_while_closing() const { return dropped_while_closing_; }
 
   // Queues a frame for writing and starts the write if the channel is free.
@@ -668,6 +676,25 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
+  // Whether `msg` is one of the protocol's own answers to what this peer
+  // sent: a delivery error, a backend's acknowledgement or error report, a
+  // control frame's status, or a PING answering a PING or a search.
+  static bool _answers_this_peer(const MultiplexerMessage& msg) {
+    switch (msg.type()) {
+      case types::DELIVERY_ERROR:
+      case types::REQUEST_RECEIVED:
+      case types::BACKEND_ERROR:
+      case types::RECORDING_STATUS:
+      case types::RULES_STATUS:
+      case types::PEER_STATUS:
+        return true;
+      case types::PING:
+        return msg.references() != 0;
+      default:
+        return false;
+    }
+  }
+
   void _receive_message() {
     MX_DCHECK_RUN_ON(&io_thread_);
     // The frame is passed on as the RawMessage it arrived in, so that the
@@ -676,9 +703,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     incoming_message_.reset(new RawMessage());
     if (!delivering_) {
       // leaving: read only so that nothing is left unread when the socket
-      // closes; what was a message, rather than a heartbeat, is counted
+      // closes; what was a message, rather than a heartbeat or, at a
+      // client, an answer only it waited for, is counted
       MultiplexerMessage dropped;
-      if (dropped.ParseFromString(message->get_message()) && dropped.type() != types::HEARTBIT) {
+      if (dropped.ParseFromString(message->get_message()) && dropped.type() != types::HEARTBIT &&
+          !(ConnectionsManagerTraits::READS_END_HERE && _answers_this_peer(dropped))) {
         ++dropped_while_closing_;
       }
       return;
@@ -897,9 +926,15 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   }
 
   // Offers `entries` to `manager`, which takes out of the buffer what it
-  // hands to another connection, and reports what it left as lost.
+  // hands to another connection, and reports what it left as lost. The
+  // connection's own frames go first, silently (RawMessage::own).
   void _give_up(MessagesBuffer& entries, const std::weak_ptr<ConnectionsManagerImplementation>& manager) {
     MX_DCHECK_RUN_ON(&io_thread_);
+    typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw;
+    entries.erase(
+        std::remove_if(entries.begin(), entries.end(),
+                       [&to_raw](const typename MessagesBuffer::value_type& entry) { return to_raw(entry)->own(); }),
+        entries.end());
     if (ManagerPointer owner = manager.lock()) {
       owner->handle_orphaned_outgoing_messages(entries);
     }

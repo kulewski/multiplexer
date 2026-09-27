@@ -242,9 +242,9 @@ class ThreadedClient:
             else:
                 self._native.send(raw, lane, timeout=timeout, callback=callback)
             return mxmsg_id
-        written, given_up = self._native.send_and_wait(raw, every, timeout, lane)
+        written, not_connected = self._native.send_and_wait(raw, every, timeout, lane)
         if written == 0:
-            self._raise_for_nothing_written(lane, given_up)
+            self._raise_for_nothing_written(lane, not_connected)
         return mxmsg_id
 
     def _send_and_notify(
@@ -255,11 +255,11 @@ class ThreadedClient:
         notify: Callable[[int, bool], None],
         **kwargs: Any,
     ) -> int:
-        """send_message(flush=True) with `notify(written, given_up)` on the
-        io thread instead of the wait: 1 once the message was written, the
-        first copy for ALL, 0 when it was given up on, `given_up` then, or
-        `timeout` passed first; what multiplexer.aio awaits. Returns the
-        message id."""
+        """send_message(flush=True) with `notify(written, not_connected)` on
+        the io thread instead of the wait: 1 once the message was written,
+        the first copy for ALL, 0 when it was given up on or `timeout`
+        passed first, `not_connected` saying which exception that is; what
+        multiplexer.aio awaits. Returns the message id."""
         mxmsg_id, raw, every, lane = self._prepare(message, multiplexer, kwargs)
         self._native.send_and_notify(raw, every, timeout, notify, lane)
         return mxmsg_id
@@ -284,12 +284,13 @@ class ThreadedClient:
             lane = Lane(multiplexer)  # preferred, then any
         return mxmsg.id, mxmsg.SerializeToString(), multiplexer is ThreadedClient.ALL, lane
 
-    def _raise_for_nothing_written(self, lane: Lane | None, given_up: bool) -> None:
+    def _raise_for_nothing_written(self, lane: Lane | None, not_connected: bool) -> None:
         """A flushing send wrote nothing: the reason, as an exception, the
-        synchronous client's rule. NotConnected when its message was given
-        up on, a pinned lane's connection being gone, or no connection is
-        live, OperationTimedOut otherwise."""
-        if given_up or (lane is not None and lane.closed) or self.connections_count() == 0:
+        synchronous client's rule, which the io thread applied at the
+        deadline. NotConnected when its message was given up on, a pinned
+        lane's connection being gone, or no connection was live then,
+        OperationTimedOut otherwise."""
+        if not_connected or (lane is not None and lane.closed):
             raise NotConnected()
         raise OperationTimedOut()
 
@@ -313,6 +314,7 @@ class ThreadedClient:
         probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[False] = ...,
+        on_received: Callable[[int], None] | None = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -326,6 +328,7 @@ class ThreadedClient:
         probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[True],
+        on_received: Callable[[int], None] | None = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     @overload
@@ -340,6 +343,7 @@ class ThreadedClient:
         probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: bool = ...,
+        on_received: Callable[[int], None] | None = ...,
     ) -> None: ...
 
     def query(
@@ -352,6 +356,7 @@ class ThreadedClient:
         probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
+        on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send a request. Without `callback`, block and return the reply,
         raising OperationTimedOut, OperationFailed, NotConnected (from
@@ -376,7 +381,14 @@ class ThreadedClient:
         came through; a pinned lane allows no other and ends in
         NotConnected once its own is gone) or a ConnectionWrapper
         (preferred while it is live). With `with_connection` the result is
-        (reply, connection), so that a later message can go the same way."""
+        (reply, connection), so that a later message can go the same way.
+
+        `on_received`, when given, is called on the io thread, so it must
+        be quick, with the instance id of each backend that acknowledges
+        the request with REQUEST_RECEIVED (notify_start()): once, normally,
+        or again when a retry reached a backend, the same or another.
+        Nothing about the query changes for it; one that raises has its
+        traceback printed."""
         if probe not in (types.BACKEND_FOR_PACKET_SEARCH, types.PING):
             raise ValueError("probe must be types.BACKEND_FOR_PACKET_SEARCH or types.PING")
         if multiplexer is ThreadedClient.ALL:
@@ -389,7 +401,7 @@ class ThreadedClient:
             fields["to"] = to
         raw_request = self.new_message(**fields).SerializeToString()
         if callback is None:
-            raw, connection = self._native.query(raw_request, timeout, probe, lane)
+            raw, connection = self._native.query(raw_request, timeout, probe, lane, on_received)
             reply = self._parse(raw)
             if reply.type == types.BACKEND_ERROR:
                 raise BackendError(reply.message)
@@ -407,7 +419,7 @@ class ThreadedClient:
             else:
                 callback((reply, connection) if with_connection else reply)
 
-        self._native.query_with_callback(raw_request, on_result, timeout, probe, lane)
+        self._native.query_with_callback(raw_request, on_result, timeout, probe, lane, on_received)
         return None
 
     # The pickle convention: a payload that is a Python pickle, answered by a
@@ -435,7 +447,7 @@ class ThreadedClient:
         """query() with `data` pickled as the payload. Without `callback`,
         returns the reply's payload unpickled; with one, the callback gets the
         unpickled payload or the exception instance. The kwargs are query()'s:
-        `to`, `probe`, `multiplexer`."""
+        `to`, `probe`, `multiplexer`, `on_received`."""
         if callback is None:
             return pickle.loads(self.query(pickle.dumps(data), type, timeout, **kwargs).message)
 

@@ -4,12 +4,15 @@
 // what a BaseMultiplexerServer sends: a PING whose echo would be over
 // MAX_MESSAGE_SIZE answered with BACKEND_ERROR by a backend that goes on
 // serving, a reply that throws answered the same way, a reply naming its
-// multiplexer, and what periodic_task() sends routed by its type.
+// multiplexer, what periodic_task() sends routed by its type, and the
+// acknowledgement of notify_start() as a query's on_received hears it.
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -19,6 +22,7 @@
 #include "multiplexer/backend/base_multiplexer_server.h"
 #include "multiplexer/in_process_multiplexer.h"
 #include "multiplexer/multiplexer.constants.h"
+#include "multiplexer/threaded_client.h"
 
 using multiplexer::backend::BaseMultiplexerServer;
 using multiplexer::backend::MultiplexerAddresses;
@@ -97,17 +101,27 @@ class StrictBackend : public BaseMultiplexerServer {
 
 // Answers requests as told, and sends a TEST_EVENT from periodic_task():
 // once before any request arrived, and once after each it answered.
+// NOTIFY_THEN_HOLD acknowledges a request and never answers it, a handler
+// still at work as far as the requester can tell.
 class ReplyingBackend : public BaseMultiplexerServer {
  public:
-  enum Reply { ANSWER, ANSWER_EVERYWHERE, THROW };
+  enum Reply { ANSWER, ANSWER_EVERYWHERE, THROW, NOTIFY_THEN_ANSWER, NOTIFY_THEN_HOLD };
   ReplyingBackend(const MultiplexerAddresses& addresses, Reply reply)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER), reply_(reply) {}
   std::atomic<bool> serving{false};
   std::atomic<bool> leave{false};
   std::atomic<int> exceptions{0};
+  std::uint64_t instance_id() const { return conn->instance_id(); }
 
  protected:
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
+    if (reply_ == NOTIFY_THEN_ANSWER || reply_ == NOTIFY_THEN_HOLD) {
+      notify_start();  // what a long handler does first
+    }
+    if (reply_ == NOTIFY_THEN_HOLD) {
+      no_response();
+      return;
+    }
     mx::util::kwargs::Kwargs reply;
     reply.set("message", "re: " + mxmsg.message());
     if (reply_ != THROW) {  // a reply without a type throws KeyError where it is built
@@ -338,6 +352,165 @@ TEST(ServeThread, AReplyThatThrowsIsAnsweredWithBackendError) {
   EXPECT_EQ(1, backend.exceptions.load());
 }
 
+// A backend that calls notify_start() first, as the docs suggest for a long
+// handler: the synchronous client's query returns the reply, where its
+// first stage took the REQUEST_RECEIVED acknowledgement for the answer and
+// left the reply a stray.
+TEST(ServeThread, AQueryIgnoresTheBackendsAcknowledgement) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  ReplyingBackend backend(addresses, ReplyingBackend::NOTIFY_THEN_ANSWER);
+  Serving serving(backend);
+  ASSERT_TRUE(backend.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  multiplexer::IncomingMessage reply = client.query("question", multiplexer::types::PYTHON_TEST_REQUEST, 10);
+  EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, reply.third->type());
+  EXPECT_EQ("re: question", reply.third->message());
+}
+
+// A query's on_received hears the instance id of the backend that
+// acknowledged the request with notify_start(), once, before the reply:
+// on SyncClient on the caller's thread inside query(), on ThreadedClient
+// on the io thread, in both of its forms.
+TEST(ServeThread, AQueryHearsWhichBackendAcknowledgedIt) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  ReplyingBackend backend(addresses, ReplyingBackend::NOTIFY_THEN_ANSWER);
+  Serving serving(backend);
+  ASSERT_TRUE(backend.serving.load());
+  const std::vector<std::uint64_t> once{backend.instance_id()};
+
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  std::vector<std::uint64_t> heard;
+  std::thread::id heard_on;
+  multiplexer::IncomingMessage reply = client.query("question", multiplexer::types::PYTHON_TEST_REQUEST, 10,
+                                                    multiplexer::LanePtr(), [&](std::uint64_t from) {
+                                                      heard.push_back(from);
+                                                      heard_on = std::this_thread::get_id();
+                                                    });
+  EXPECT_EQ("re: question", reply.third->message());
+  EXPECT_EQ(once, heard) << "the SyncClient's, by the time query() returned";
+  EXPECT_EQ(std::this_thread::get_id(), heard_on);
+
+  // The ThreadedClient's: what the io thread told, in its order. Before the
+  // client: on an early exit, its shutdown still runs the callbacks.
+  std::mutex lock;
+  std::vector<std::string> told;
+  auto tell = [&](const std::string& what) {
+    std::lock_guard<std::mutex> hold(lock);
+    told.push_back(what);
+  };
+  const std::string received = "received from " + std::to_string(backend.instance_id());
+  multiplexer::ReceivedCallback on_received = [&](std::uint64_t from) {
+    tell("received from " + std::to_string(from));
+  };
+  std::promise<multiplexer::ThreadedClient::Result> done;
+  multiplexer::ThreadedClient threaded(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, 5));
+  multiplexer::ThreadedClient::Result result =
+      threaded.query(threaded.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "blocking"), 10,
+                     multiplexer::LanePtr(), multiplexer::PROBE_SEARCH, on_received);
+  ASSERT_EQ(multiplexer::ThreadedClient::REPLIED, result.outcome);
+  tell("returned");
+  threaded.query(
+      threaded.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "callback"),
+      [&](const multiplexer::ThreadedClient::Result& result) {
+        tell("answered");
+        done.set_value(result);
+      },
+      10, multiplexer::LanePtr(), multiplexer::PROBE_SEARCH, on_received);
+  std::future<multiplexer::ThreadedClient::Result> answered = done.get_future();
+  ASSERT_EQ(std::future_status::ready, answered.wait_for(std::chrono::seconds(10)));
+  EXPECT_EQ("re: callback", answered.get().reply.third->message());
+  threaded.shutdown();
+  std::lock_guard<std::mutex> hold(lock);
+  EXPECT_EQ((std::vector<std::string>{received, "returned", received, "answered"}), told);
+}
+
+// Two backends, each behind a multiplexer of its own: the first
+// acknowledges a request and never answers it, the second acknowledges and
+// answers.
+struct TwoBackends {
+  TwoBackends()
+      : first(new InProcessMultiplexer()),
+        holding({{"127.0.0.1", first->port}}, ReplyingBackend::NOTIFY_THEN_HOLD),
+        answering({{"127.0.0.1", second.port}}, ReplyingBackend::NOTIFY_THEN_ANSWER),
+        held(holding),
+        served(answering) {}
+  std::unique_ptr<InProcessMultiplexer> first;  // reset() takes it away
+  InProcessMultiplexer second;
+  ReplyingBackend holding;
+  ReplyingBackend answering;
+  Serving held;
+  Serving served;
+};
+
+// The first backend acknowledges the request and its multiplexer goes away
+// under the wait: the request goes again through the other multiplexer, to
+// the other backend, which acknowledges it too, and on_received hears
+// both, the second telling the caller the request may be running twice.
+// The SyncClient's callback takes the multiplexer away itself, on the
+// caller's thread, where it runs.
+TEST(ServeThread, AQueryHearsEachBackendItsRetriesReached) {
+  TwoBackends backends;
+  ASSERT_TRUE(backends.holding.serving.load() && backends.answering.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  multiplexer::ConnectionWrapper to_first = client.connect("127.0.0.1", backends.first->port, 5);
+  ASSERT_TRUE(to_first);
+  ASSERT_TRUE(client.connect("127.0.0.1", backends.second.port, 5));
+  std::vector<std::uint64_t> heard;
+  multiplexer::IncomingMessage reply =
+      client.query("question", multiplexer::types::PYTHON_TEST_REQUEST, 10,
+                   std::make_shared<multiplexer::Lane>(to_first), [&](std::uint64_t from) {
+                     heard.push_back(from);
+                     if (heard.size() == 1) {
+                       backends.first.reset();
+                     }
+                   });
+  EXPECT_EQ("re: question", reply.third->message());
+  EXPECT_EQ((std::vector<std::uint64_t>{backends.holding.instance_id(), backends.answering.instance_id()}), heard);
+}
+
+// The same on ThreadedClient, connected to the first multiplexer alone
+// until the first backend acknowledged, then to the second too, and the
+// first goes.
+TEST(ServeThread, AThreadedQueryHearsEachBackendItsRetriesReached) {
+  TwoBackends backends;
+  ASSERT_TRUE(backends.holding.serving.load() && backends.answering.serving.load());
+  // Before the client: its shutdown may still tell them, and they must be alive.
+  std::mutex lock;
+  std::vector<std::uint64_t> heard;
+  std::promise<void> acknowledged;
+  std::promise<multiplexer::ThreadedClient::Result> done;
+  multiplexer::ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", backends.first->port, 5));
+  client.query(
+      client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "question"),
+      [&](const multiplexer::ThreadedClient::Result& result) { done.set_value(result); }, 10, multiplexer::LanePtr(),
+      multiplexer::PROBE_SEARCH,
+      [&](std::uint64_t from) {
+        std::lock_guard<std::mutex> hold(lock);
+        heard.push_back(from);
+        if (heard.size() == 1) {
+          acknowledged.set_value();
+        }
+      });
+  ASSERT_EQ(std::future_status::ready, acknowledged.get_future().wait_for(std::chrono::seconds(10)));
+  ASSERT_TRUE(client.connect("127.0.0.1", backends.second.port, 5));
+  backends.first.reset();
+  std::future<multiplexer::ThreadedClient::Result> answered = done.get_future();
+  ASSERT_EQ(std::future_status::ready, answered.wait_for(std::chrono::seconds(10)));
+  multiplexer::ThreadedClient::Result result = answered.get();
+  ASSERT_EQ(multiplexer::ThreadedClient::REPLIED, result.outcome);
+  EXPECT_EQ("re: question", result.reply.third->message());
+  std::lock_guard<std::mutex> hold(lock);
+  EXPECT_EQ((std::vector<std::uint64_t>{backends.holding.instance_id(), backends.answering.instance_id()}), heard);
+}
+
 // A reply may name the connections it goes through, `multiplexer` being
 // one of send_message()'s documented keys, which the debug-build check of
 // the keys refused.
@@ -472,8 +645,10 @@ TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
 // flood twice as fast as it serves: it leaves at the end of its drain,
 // having handled what it had read by then and refused what arrived later,
 // where every reply's turn of the loop read more, handled in turn, so that
-// it never left. Every request the flood sent has one outcome: a response,
-// or a delivery error, the backend's or, once it is gone, the multiplexer's.
+// it never left. Every request the flood sent has one outcome: a response;
+// a delivery error, the backend's or, once it is gone, the multiplexer's;
+// or, for one the multiplexer routed to the backend, still its last
+// resort, in the moment it closed, a drop the backend counts and logs.
 TEST(ServeThread, ADrainUnderAFloodEnds) {
   InProcessMultiplexer mx;
   MultiplexerAddresses addresses;
@@ -532,7 +707,8 @@ TEST(ServeThread, ADrainUnderAFloodEnds) {
     } catch (const multiplexer::Client::OperationTimedOut&) {
     }
   }
-  EXPECT_EQ(count, responses + refused) << "none vanished into a timeout";
+  EXPECT_EQ(count, responses + refused + backend.dropped_while_closing())
+      << "none vanished into a timeout unless the backend counted it dropped at its close";
   EXPECT_EQ(static_cast<std::size_t>(backend.handled.load()), responses) << "what the backend served was answered";
   EXPECT_GT(refused, 0u) << "the flood outran it";
 }
