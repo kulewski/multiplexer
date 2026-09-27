@@ -11,6 +11,7 @@
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/threaded_client_core.h"
@@ -24,8 +25,8 @@ using mx::repr;
 struct ThreadedClient::Core::InFlight {
   // WAITING: no connection was live when the request had to be (re)sent; it
   // goes out as soon as one registers, the deadline still running. SEARCH
-  // is the locate phase of an addressed query too: the probe out, the
-  // answers counted the same way.
+  // is the locate phase of an addressed query too: the PING addressed to
+  // the instance out, the answers counted the same way.
   enum Stage { REQUEST, SEARCH, DIRECT, WAITING } stage = REQUEST;
   ConnectionWrapper sent_via;    // REQUEST and DIRECT: the connection used
   MultiplexerMessage prototype;  // the request; id and from set per attempt
@@ -33,7 +34,6 @@ struct ThreadedClient::Core::InFlight {
   // An addressed query's one deadline across its stages; a typed query
   // arms each stage with `timeout`.
   std::chrono::steady_clock::time_point deadline;
-  Probe probe = PROBE_SEARCH;
   LanePtr lane;  // held until the query ends, then released
   std::uint64_t request_id = 0, search_id = 0, direct_id = 0;
   // The request and direct ids of attempts sent again since, tracked still
@@ -190,21 +190,21 @@ ThreadedClient::Result ThreadedClient::query(const std::string& payload, std::ui
                                              LanePtr lane, ReceivedCallback received) {
   return core_->query(payload, type, timeout, lane, received);
 }
-void ThreadedClient::query(const MultiplexerMessage& msg, Callback callback, float timeout, LanePtr lane, Probe probe,
+void ThreadedClient::query(const MultiplexerMessage& msg, Callback callback, float timeout, LanePtr lane,
                            ReceivedCallback received) {
-  core_->query(msg, callback, timeout, lane, probe, received);
+  core_->query(msg, callback, timeout, lane, received);
 }
-ThreadedClient::Result ThreadedClient::query(const MultiplexerMessage& msg, float timeout, LanePtr lane, Probe probe,
+ThreadedClient::Result ThreadedClient::query(const MultiplexerMessage& msg, float timeout, LanePtr lane,
                                              ReceivedCallback received) {
-  return core_->query(msg, timeout, lane, probe, received);
+  return core_->query(msg, timeout, lane, received);
 }
 void ThreadedClient::query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
-                           float timeout, Probe probe, ReceivedCallback received) {
-  core_->query(msg, connection, callback, timeout, probe, received);
+                           float timeout, ReceivedCallback received) {
+  core_->query(msg, connection, callback, timeout, received);
 }
 ThreadedClient::Result ThreadedClient::query(const MultiplexerMessage& msg, const ConnectionWrapper& connection,
-                                             float timeout, Probe probe, ReceivedCallback received) {
-  return core_->query(msg, connection, timeout, probe, received);
+                                             float timeout, ReceivedCallback received) {
+  return core_->query(msg, connection, timeout, received);
 }
 void ThreadedClient::shutdown(float timeout) { core_->shutdown(timeout); }
 LogSummary& ThreadedClient::drop_lines() { return core_->drop_lines(); }
@@ -419,7 +419,7 @@ bool ThreadedClient::Core::connect(const std::string& host, std::uint16_t port, 
       waiter->connection = connection;
       waiter->done = done;
       waiter->timer.reset(new asio::steady_timer(io_service_));
-      waiter->timer->expires_after(std::chrono::microseconds(static_cast<long>(timeout * 1e6)));
+      waiter->timer->expires_after(mx::from_seconds(timeout));
       waiter->timer->async_wait([this, waiter](const asio::error_code& error) {
         MX_DCHECK_RUN_ON(&io_thread_);
         if (error != asio::error::operation_aborted) {
@@ -572,7 +572,7 @@ bool ThreadedClient::Core::_begin_flush_all(float timeout, const FlushCallback& 
     if (std::find(flushes_.begin(), flushes_.end(), wait) == flushes_.end()) {
       return;  // nothing to wait for: ended already
     }
-    wait->timer->expires_after(std::chrono::microseconds(static_cast<long>(timeout * 1e6)));
+    wait->timer->expires_after(mx::from_seconds(timeout));
     wait->timer->async_wait([this, weak](const asio::error_code& error) {
       MX_DCHECK_RUN_ON(&io_thread_);
       std::shared_ptr<FlushWait> timed_out = weak.lock();
@@ -620,19 +620,22 @@ ThreadedClient::SendCallback settle(std::shared_ptr<std::promise<unsigned int>> 
 }
 }  // namespace
 
+// A caller's whole message framed, its empty id and sender filled (frame_stamped).
+std::shared_ptr<const RawMessage> ThreadedClient::Core::_stamped(const MultiplexerMessage& msg) {
+  return frame_stamped(msg, instance_id_, [this] { return random64(); });
+}
+
 void ThreadedClient::Core::send(const MultiplexerMessage& msg) { send(msg, LanePtr(), SendCallback()); }
 
 void ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done) {
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // a pinned lane whose connection is gone; the Python client raises it too
   }
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, false, DEFAULT_TIMEOUT, done,
-               lane);
+  _submit_send(_stamped(msg), false, false, DEFAULT_TIMEOUT, done, lane);
 }
 
 void ThreadedClient::Core::send_all(const MultiplexerMessage& msg, SendCallback done) {
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, false, DEFAULT_TIMEOUT, done,
-               LanePtr());
+  _submit_send(_stamped(msg), true, false, DEFAULT_TIMEOUT, done, LanePtr());
 }
 
 void ThreadedClient::Core::send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, SendCallback done) {
@@ -650,8 +653,7 @@ unsigned int ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr l
   }
   std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
   std::future<unsigned int> future = promise->get_future();
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), false, true, timeout, settle(promise),
-               lane);
+  _submit_send(_stamped(msg), false, true, timeout, settle(promise), lane);
   return future.get();
 }
 
@@ -667,8 +669,7 @@ unsigned int ThreadedClient::Core::send_all(const MultiplexerMessage& msg, float
   }
   std::shared_ptr<std::promise<unsigned int>> promise(new std::promise<unsigned int>());
   std::future<unsigned int> future = promise->get_future();
-  _submit_send(std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg)), true, true, timeout, settle(promise),
-               LanePtr());
+  _submit_send(_stamped(msg), true, true, timeout, settle(promise), LanePtr());
   return future.get();
 }
 
@@ -725,7 +726,7 @@ void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, b
   pending->raw = std::move(raw);
   pending->all = all;
   pending->wait = wait;
-  pending->deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout * 1e6));
+  pending->deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout);
   pending->done = std::move(done);
   pending->flushed = std::move(flushed);
   pending->lane = std::move(lane);
@@ -752,11 +753,13 @@ void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, b
 }
 
 namespace {
-// What is left of the time until `deadline`, for BasicClient: a message
-// whose time is up gets a moment, and this client's own deadline ends it.
+// What is left of the time until `deadline`, for BasicClient: 0 for a
+// message whose time is up, a send given 0 or NaN included, which waits
+// for nothing there: placed now where a connection has room, or dropped at
+// once.
 float left_until(std::chrono::steady_clock::time_point deadline) {
   const float left = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
-  return std::max(0.001f, left);
+  return std::max(0.0f, left);
 }
 }  // namespace
 
@@ -964,7 +967,7 @@ void ThreadedClient::Core::query(const std::string& payload, std::uint32_t type,
   MultiplexerMessage msg;
   msg.set_type(type);
   msg.set_message(payload);
-  query(msg, callback, timeout, lane, PROBE_SEARCH, received);
+  query(msg, callback, timeout, lane, received);
 }
 
 ThreadedClient::Result ThreadedClient::Core::query(const std::string& payload, std::uint32_t type, float timeout,
@@ -972,11 +975,11 @@ ThreadedClient::Result ThreadedClient::Core::query(const std::string& payload, s
   MultiplexerMessage msg;
   msg.set_type(type);
   msg.set_message(payload);
-  return query(msg, timeout, lane, PROBE_SEARCH, received);
+  return query(msg, timeout, lane, received);
 }
 
 void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callback, float timeout, LanePtr lane,
-                                 Probe probe, ReceivedCallback received) {
+                                 ReceivedCallback received) {
   basic_client_->check_not_orphaned();
   if (lane) {
     lane->check_not_inherited();
@@ -1000,8 +1003,7 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
     in_flight->prototype.clear_to();
   }
   in_flight->timeout = timeout;
-  in_flight->deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout * 1e6));
-  in_flight->probe = probe;
+  in_flight->deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout);
   in_flight->lane = std::move(lane);
   in_flight->callback = std::move(callback);
   in_flight->received = std::move(received);
@@ -1020,7 +1022,7 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
 }
 
 ThreadedClient::Result ThreadedClient::Core::query(const MultiplexerMessage& msg, float timeout, LanePtr lane,
-                                                   Probe probe, ReceivedCallback received) {
+                                                   ReceivedCallback received) {
   basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error(
@@ -1029,18 +1031,18 @@ ThreadedClient::Result ThreadedClient::Core::query(const MultiplexerMessage& msg
   }
   std::shared_ptr<std::promise<Result>> promise(new std::promise<Result>());
   std::future<Result> future = promise->get_future();
-  query(msg, [promise](const Result& result) { promise->set_value(result); }, timeout, lane, probe, received);
+  query(msg, [promise](const Result& result) { promise->set_value(result); }, timeout, lane, received);
   return future.get();
 }
 
 void ThreadedClient::Core::query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
-                                 float timeout, Probe probe, ReceivedCallback received) {
-  query(msg, callback, timeout, std::make_shared<Lane>(connection), probe, received);
+                                 float timeout, ReceivedCallback received) {
+  query(msg, callback, timeout, std::make_shared<Lane>(connection), received);
 }
 
 ThreadedClient::Result ThreadedClient::Core::query(const MultiplexerMessage& msg, const ConnectionWrapper& connection,
-                                                   float timeout, Probe probe, ReceivedCallback received) {
-  return query(msg, timeout, std::make_shared<Lane>(connection), probe, received);
+                                                   float timeout, ReceivedCallback received) {
+  return query(msg, timeout, std::make_shared<Lane>(connection), received);
 }
 
 void ThreadedClient::Core::shutdown(float timeout) {
@@ -1078,15 +1080,16 @@ void ThreadedClient::Core::shutdown(float timeout) {
       waiter->done->set_value(false);
     }
     connects_.clear();
-    if (timeout <= 0) {
+    if (timeout == 0) {
       _teardown();
       return;
     }
     // What was sent before is written first: the connections close once it
-    // is, or at `timeout`.
+    // is, or at `timeout`, never for a negative one, as mx::from_seconds
+    // reads it, and at once for NaN.
     _write_out();
     drain_timer_.reset(new asio::steady_timer(io_service_));
-    drain_timer_->expires_after(std::chrono::microseconds(static_cast<long>(timeout * 1e6)));
+    drain_timer_->expires_after(mx::from_seconds(timeout));
     drain_timer_->async_wait([this](const asio::error_code& error) {
       MX_DCHECK_RUN_ON(&io_thread_);
       if (error != asio::error::operation_aborted) {
@@ -1204,23 +1207,22 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
       return;  // an answer to a ping nobody here is waiting for
     }
     if (msg.type() == types::BACKEND_FOR_PACKET_SEARCH) {
-      if (search_policy_) {
-        bool answer = false;  // a policy that throws answers no
-        _guarded(
-            [&] {
-              MX_DCHECK_RUN_ON(&io_thread_);
-              answer = search_policy_();
-            },
-            [&] { return "the search policy, for " + describe(msg); });
-        if (!answer) {
-          return;  // a backend whose policy declines, saturated for instance
-        }
-      } else if (msg.to() != instance_id_) {
-        return;  // a search by type with no search policy set: not answered
+      if (!search_policy_) {
+        return;  // a search looks for a backend, which a client without a search policy is not
+      }
+      bool answer = false;  // a policy that throws answers no
+      _guarded(
+          [&] {
+            MX_DCHECK_RUN_ON(&io_thread_);
+            answer = search_policy_();
+          },
+          [&] { return "the search policy, for " + describe(msg); });
+      if (!answer) {
+        return;  // a backend whose policy declines, saturated for instance
       }
     }
-    // An echo request, or a search, by type with a policy or addressed to
-    // this instance by an addressed query locating it: answered with a PING
+    // An echo request, an addressed query's PING locating this instance
+    // among them, or a search the policy said yes to: answered with a PING
     // carrying its payload back, through the connection it came on. An echo
     // that would be over MAX_MESSAGE_SIZE is answered with BACKEND_ERROR
     // saying so, rather than not at all.
@@ -1466,8 +1468,9 @@ void ThreadedClient::Core::_advance(InFlightPtr in_flight, const IncomingMessage
 }
 
 // The middle stage: a search for a backend of the type on every
-// connection, or, for an addressed query, the probe addressed to the
-// instance (a search, or a PING), with delivery errors requested so that a
+// connection, or, for an addressed query, a PING addressed to the
+// instance, which the server classes and ThreadedClient answer whatever
+// their search policy, with delivery errors requested so that a
 // multiplexer without the instance says so. Through a pinned lane the one
 // multiplexer behind it is asked instead of all.
 void ThreadedClient::Core::_search(InFlightPtr in_flight) {
@@ -1477,17 +1480,15 @@ void ThreadedClient::Core::_search(InFlightPtr in_flight) {
     return;
   }
   MultiplexerMessage msg;
-  if (in_flight->addressed() && in_flight->probe == PROBE_PING) {
+  if (in_flight->addressed()) {
     msg = new_message(types::PING, std::string());
+    msg.set_to(in_flight->prototype.to());
+    msg.set_report_delivery_error(true);
   } else {
     BackendForPacketSearch search;
     search.set_packet_type(in_flight->prototype.type());
     msg = new_message(types::BACKEND_FOR_PACKET_SEARCH, std::string());
     search.SerializeToString(msg.mutable_message());
-  }
-  if (in_flight->addressed()) {
-    msg.set_to(in_flight->prototype.to());
-    msg.set_report_delivery_error(true);
   }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(msg));
   std::vector<ConnectionWrapper> sent;
@@ -1571,7 +1572,7 @@ void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage&
 
 void ThreadedClient::Core::_arm(InFlightPtr in_flight, float timeout) {
   unsigned int generation = ++in_flight->generation;
-  in_flight->timer->expires_after(std::chrono::microseconds(static_cast<long>(timeout * 1e6)));
+  in_flight->timer->expires_after(mx::from_seconds(timeout));
   in_flight->timer->async_wait([this, in_flight, generation](const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
     _on_deadline(in_flight, generation, error);

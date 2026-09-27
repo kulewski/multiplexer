@@ -1,8 +1,12 @@
 // BaseThreadedMultiplexerServer against a Server in this process: serial
 // order with one worker, four requests at once with four, a reply from
 // another thread later, the search answered while busy unless told to
-// decline, a full queue dropping, a handler that throws, draining, a
-// request refused while leaving, nothing connected before serve_forever.
+// decline, a full queue dropping, a queue of none still giving every
+// worker a request, a handler that throws, one whose
+// exception not derived from std::exception, or an exception out of
+// on_handler_exception(), ends serve_forever(), draining, a
+// request refused while leaving, nothing connected before serve_forever,
+// a poll and a drain with no deadline.
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -12,6 +16,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <regex>
 #include <thread>
@@ -32,9 +37,11 @@ namespace {
 
 // A backend the tests steer by payload: "block" waits for release(),
 // "wait" joins a barrier of four, "later" is kept for the test to answer,
-// "throw" throws, "too big" replies over MAX_MESSAGE_SIZE, which throws
-// where the reply is built, "shut down and throw" shuts the client down
-// and throws, "event..." gets no reply, anything else is upper-cased.
+// "throw" throws, "block, then throw an int" waits for release() and
+// throws 3, "too big" replies over MAX_MESSAGE_SIZE, which throws where
+// the reply is built, "shut down and throw" shuts the client down and
+// throws, "event..." gets no reply, anything else is upper-cased.
+// on_handler_exception() throws when asked to.
 struct Scripted : BaseThreadedMultiplexerServer {
   Scripted(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
       : Scripted(multiplexer::backend::MultiplexerAddresses{{"127.0.0.1", port}}, options) {}
@@ -64,6 +71,12 @@ struct Scripted : BaseThreadedMultiplexerServer {
       kept = request;
     } else if (payload == "throw") {
       throw std::runtime_error("as asked");
+    } else if (payload == "block, then throw an int") {
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return released; });
+      }
+      throw 3;
     } else if (payload == "too big") {
       request->reply(std::string(multiplexer::MAX_MESSAGE_SIZE, 'x'), multiplexer::types::PYTHON_TEST_RESPONSE);
     } else if (payload == "shut down and throw") {
@@ -89,6 +102,9 @@ struct Scripted : BaseThreadedMultiplexerServer {
   }
   bool on_handler_exception(const std::exception&) override {
     ++exceptions;
+    if (throw_from_on_handler_exception) {
+      throw std::runtime_error("from on_handler_exception");
+    }
     return keep_serving;
   }
 
@@ -113,6 +129,7 @@ struct Scripted : BaseThreadedMultiplexerServer {
   std::vector<std::string> handled;
   RequestPtr kept;
   std::atomic<bool> keep_serving{true};
+  std::atomic<bool> throw_from_on_handler_exception{false};
   std::atomic<int> exceptions{0};
 };
 
@@ -143,6 +160,105 @@ struct Served {
   std::exception_ptr failure;
   std::atomic<bool> returned{false};  // serve_forever() is over
   std::thread thread;
+};
+
+// A Scripted that counts its periodic_task() calls and, once asked to
+// leave, starts a drain there and says whether drained() held right
+// after, on the serving thread.
+struct Periodic : Scripted {
+  using Scripted::Scripted;
+  void periodic_task() override {
+    ++calls;
+    if (leave.load() && !draining()) {
+      start_draining();
+      drained_at_once = drained();
+      checked = true;
+    }
+  }
+  std::atomic<int> calls{0};
+  std::atomic<bool> leave{false};
+  std::atomic<bool> drained_at_once{false};
+  std::atomic<bool> checked{false};
+};
+
+// A Scripted that stops itself from periodic_task(), on the serving thread.
+struct SelfStopping : Scripted {
+  using Scripted::Scripted;
+  void periodic_task() override { stop(); }
+};
+
+// serve_forever() of a server the test made, on a thread of its own: the
+// server stopped and the thread joined at the end of the scope, however
+// the test ends. A failure, from a handler, is the test's to look for.
+struct ServingThread {
+  ServingThread(BaseThreadedMultiplexerServer& server, float poll, float drain_seconds = 0.0f)
+      : server(server), thread([this, poll, drain_seconds] {
+          try {
+            this->server.serve_forever(poll, drain_seconds);
+          } catch (...) {
+            failure = std::current_exception();
+          }
+        }) {}
+  ~ServingThread() {
+    server.stop();
+    thread.join();
+  }
+  BaseThreadedMultiplexerServer& server;
+  std::exception_ptr failure;
+  std::thread thread;
+};
+
+// Throws on every message but the marker, on its one worker: sends `peer`
+// an event at its first poll, and the marker once its handler threw on a
+// BACKEND_ERROR, behind any report of that.
+struct RaisingThreaded : BaseThreadedMultiplexerServer {
+  explicit RaisingThreaded(unsigned short port)
+      : BaseThreadedMultiplexerServer(multiplexer::backend::MultiplexerAddresses{{"127.0.0.1", port}},
+                                      multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::atomic<std::uint64_t> peer{0};
+  std::atomic<int> reports{0};  // the BACKEND_ERRORs its handler got
+  std::atomic<bool> marked{false};
+  std::atomic<bool> handled_report{false};
+
+ protected:
+  void handle_message(const RequestPtr& request) override {
+    if (request->mxmsg().type() == multiplexer::types::PYTHON_TEST_RESPONSE) {
+      marked = true;
+      request->no_response();
+      return;
+    }
+    raised_on_report_ = request->mxmsg().type() == multiplexer::types::BACKEND_ERROR;
+    if (raised_on_report_) {
+      ++reports;
+    }
+    throw std::runtime_error("unexpected type " + std::to_string(request->mxmsg().type()));
+  }
+  bool on_handler_exception(const std::exception&) override {
+    if (raised_on_report_) {
+      handled_report = true;  // after the report, if any, went to the client
+    }
+    return true;
+  }
+  void periodic_task() override {
+    const std::uint64_t to = peer.load();
+    if (to && !sent_event_) {
+      sent_event_ = true;
+      multiplexer::MultiplexerMessage event =
+          client().new_message(multiplexer::types::PYTHON_TEST_REQUEST, "unexpected");
+      event.set_to(to);
+      client().send(event);
+    }
+    if (handled_report.load() && !sent_marker_) {
+      sent_marker_ = true;
+      multiplexer::MultiplexerMessage marker = client().new_message(multiplexer::types::PYTHON_TEST_RESPONSE, "marker");
+      marker.set_to(to);
+      client().send(marker);
+    }
+  }
+
+ private:
+  bool raised_on_report_ = false;                  // the one worker's
+  bool sent_event_ = false, sent_marker_ = false;  // serve_forever()'s thread's
 };
 
 // A synchronous client: sends events and requests, searches by hand.
@@ -197,6 +313,32 @@ bool eventually(Predicate predicate, float seconds = 10) {
 }
 
 }  // namespace
+
+// X sends Y an event, Y's handler throws and Y reports it to X with
+// BACKEND_ERROR, and X's handler throws on that report: X sends no report
+// back, where the two answered each other's reports for good. X's marker,
+// sent after it handled the report, reaches Y behind anything X sent.
+TEST(ThreadedServer, TwoBackendsAnswerNoReportWithAReport) {
+  InProcessMultiplexer mx;
+  RaisingThreaded x(mx.port), y(mx.port);
+  std::thread y_thread([&y] { y.serve_forever(0.05f); });
+  std::thread x_thread([&x] { x.serve_forever(0.05f); });
+  for (int waited = 0; waited < 500 && (x.client().connections_count() == 0 || y.client().connections_count() == 0);
+       ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  x.peer = y.instance_id();
+  for (int waited = 0; waited < 1000 && !y.marked.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  x.stop();
+  y.stop();
+  x_thread.join();
+  y_thread.join();
+  EXPECT_TRUE(y.marked.load()) << "the marker never came";
+  EXPECT_EQ(1, x.reports.load()) << "X got Y's report, once";
+  EXPECT_EQ(0, y.reports.load()) << "X did not report on Y's report";
+}
 
 TEST(ThreadedServer, OneWorkerHandlesInArrivalOrderAndAnswers) {
   InProcessMultiplexer mx;
@@ -282,15 +424,41 @@ TEST(ThreadedServer, AFullQueueDropsAndTheRestIsHandledInOrder) {
   Requester requester(mx.port);
   multiplexer::LanePtr lane(new multiplexer::Lane());
   requester.send("block", lane);
-  ASSERT_TRUE(eventually([&] { return served.server.pending() == 1; }));
+  // In the handler, not merely queued, so that the queue has its two
+  // places for the events: pending() counts a request still queued too.
+  ASSERT_TRUE(eventually([&] { return served.server.snapshot().size() == 1; })) << "the worker in the handler";
   for (int index = 0; index < 5; ++index) {
     requester.send("event-" + std::to_string(index), lane);
   }
   // A flushing send only says the bytes left; the drops say the rest arrived.
   ASSERT_TRUE(eventually([&] { return served.server.pending() == 3 && served.server.dropped() == 3; }));
   served.server.release();
+  // The queue drained first, so that the marker finds a place in it.
+  ASSERT_TRUE(eventually([&] { return served.server.pending() == 0; })) << "the events handled";
   EXPECT_EQ("MARKER", requester.query("marker", lane));
   EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "marker"}), served.server.snapshot());
+}
+
+// A queue of none still lets every idle worker take a request: queue_size
+// counts what waits for a worker, and a request an idle worker is about
+// to take waits for none, where it was counted and queue_size 0 dropped
+// every request. Two workers, no queue: two "block" requests are taken,
+// and a third, sent once both workers are in their handlers, is dropped.
+// Counted: the requests in the handlers, and the drops.
+TEST(ThreadedServer, AQueueOfNoneLetsEveryWorkerTakeARequest) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.workers = 2;
+  options.queue_size = 0;
+  Served served(mx.port, options);
+  Requester requester(mx.port);
+  requester.send("block");
+  requester.send("block");
+  ASSERT_TRUE(eventually([&] { return served.server.snapshot().size() == 2; })) << "both workers in their handlers";
+  requester.send("event-dropped");
+  ASSERT_TRUE(eventually([&] { return served.server.dropped() == 1; })) << "the third dropped";
+  served.server.release();
+  EXPECT_EQ((std::vector<std::string>{"block", "block"}), served.server.snapshot());
 }
 
 // The drops of a full queue said as one line and a count, not a line each:
@@ -341,6 +509,64 @@ TEST(ThreadedServer, AThrowingHandlerReportsBackendErrorAndServesOn) {
   served.thread.join();                // serve_forever() returned on its own, rethrowing
   served.thread = std::thread([] {});  // the destructor joins again
   EXPECT_TRUE(served.failure) << "serve_forever() should have rethrown";
+}
+
+// An exception not derived from std::exception out of a handler is not
+// the worker's to swallow: serve_forever() rethrows it, as
+// BaseMultiplexerServer's does, and the request queued behind it, which no
+// worker is left to take, is refused at once. It escaped the worker and
+// terminated the process.
+TEST(ThreadedServer, AHandlersNonStdExceptionEndsServeForeverAndTheQueueIsRefused) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  Requester requester(mx.port);  // one multiplexer: one connection, in order
+  requester.send("block, then throw an int");
+  ASSERT_TRUE(eventually([&] { return served.server.pending() == 1; })) << "the worker busy";
+  std::thread releasing([&] {
+    eventually([&] { return served.server.pending() == 2; });  // the request queued behind it
+    served.server.release();
+  });
+  std::uint32_t answer = 0;
+  try {
+    answer = requester.answer_to(requester.message("after", multiplexer::types::PYTHON_TEST_REQUEST), 20);
+  } catch (const multiplexer::Client::OperationTimedOut&) {
+  }
+  releasing.join();
+  EXPECT_EQ(multiplexer::types::DELIVERY_ERROR, answer) << "refused, not left waiting";
+  served.thread.join();                // serve_forever() returned on its own, rethrowing
+  served.thread = std::thread([] {});  // the destructor joins again
+  ASSERT_TRUE(served.failure) << "serve_forever() should have rethrown";
+  try {
+    std::rethrow_exception(served.failure);
+  } catch (int code) {
+    EXPECT_EQ(3, code);
+  } catch (...) {
+    ADD_FAILURE() << "not what the handler threw";
+  }
+  EXPECT_EQ(std::vector<std::string>{"block, then throw an int"}, served.server.snapshot());
+}
+
+// on_handler_exception() throwing, after the requester heard
+// BACKEND_ERROR: serve_forever() rethrows it, where it escaped the worker
+// and terminated the process.
+TEST(ThreadedServer, AnExceptionOutOfOnHandlerExceptionEndsServeForever) {
+  InProcessMultiplexer mx;
+  Served served(mx.port);
+  served.server.throw_from_on_handler_exception = true;
+  Requester requester(mx.port);
+  multiplexer::IncomingMessage reply =
+      requester.client.query(requester.message("throw", multiplexer::types::PYTHON_TEST_REQUEST), 10);
+  EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
+  served.thread.join();                // serve_forever() returned on its own, rethrowing
+  served.thread = std::thread([] {});  // the destructor joins again
+  ASSERT_TRUE(served.failure) << "serve_forever() should have rethrown";
+  try {
+    std::rethrow_exception(served.failure);
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ("from on_handler_exception", error.what());
+  } catch (...) {
+    ADD_FAILURE() << "not what on_handler_exception() threw";
+  }
 }
 
 // A reply that threw where it was built, one over MAX_MESSAGE_SIZE, did
@@ -636,6 +862,67 @@ TEST(ThreadedServer, ADrainAskedForOnEveryPollStillEndsAtItsCap) {
       << "serve_forever() returned a second after the first call";
   asking = false;
   asker.join();
+}
+
+// A drain with no cap, a negative drain_seconds as an infinite one, is
+// never over by time: with a path kept open only stop() or close() ends
+// it, where the negative cap had passed as the drain began.
+TEST(ThreadedServer, ADrainWithNoCapIsNotOverByTime) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.drain_routing.set_all(true);  // a path kept open: only the cap could end the drain
+  Periodic server(mx.port, options);
+  ServingThread serving(server, 0.05f, -1.0f);
+  ASSERT_TRUE(eventually([&server] { return server.client().connections_count() == 1; }));
+  server.leave = true;
+  ASSERT_TRUE(eventually([&server] { return server.checked.load(); }));
+  EXPECT_FALSE(server.drained_at_once.load()) << "no cap";
+}
+
+// With no deadline for its poll, a negative one as an infinite one,
+// serve_forever() calls periodic_task() only when woken, by a drain,
+// stop() or close(): the wait ended at once, and periodic_task() ran over
+// and over. A query answered meanwhile shows it serves.
+TEST(ThreadedServer, APollWithNoDeadlineWaitsUntilWoken) {
+  InProcessMultiplexer mx;
+  Periodic server(mx.port);
+  {
+    ServingThread serving(server, -1.0f);
+    ASSERT_TRUE(eventually([&server] { return server.client().connections_count() == 1; }));
+    Requester requester(mx.port);
+    EXPECT_EQ("SERVED", requester.query("served"));
+    EXPECT_EQ(0, server.calls.load()) << "nothing woke it";
+  }  // stopped: woken, the loop ends
+  EXPECT_EQ(0, server.calls.load()) << "a stop ends the loop before periodic_task()";
+}
+
+// A stop() from periodic_task() ends a serve_forever() whose poll has no
+// deadline, negative or infinite: its wake, sent while the serving thread
+// was not waiting, was lost, and the next wait never ended. A drain that
+// cannot end by itself, a path kept open and a cap far off, wakes the
+// loop, waiting or about to, into periodic_task(); a stop() from the test
+// frees a loop that lost the wake.
+TEST(ThreadedServer, AStopFromPeriodicTaskEndsAPollWithNoDeadline) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.drain_routing.set_all(true);  // a path kept open: only the cap could end the drain
+  for (const float poll : {-1.0f, std::numeric_limits<float>::infinity()}) {
+    SCOPED_TRACE(poll);
+    SelfStopping server(mx.port, options);
+    std::promise<void> returned;
+    std::thread serving([&server, &returned, poll] {
+      try {
+        server.serve_forever(poll, 1e9f);
+      } catch (...) {
+      }
+      returned.set_value();
+    });
+    server.start_draining();  // wakes the loop: periodic_task() stops it
+    EXPECT_TRUE(returned.get_future().wait_for(std::chrono::seconds(10)) == std::future_status::ready)
+        << "serve_forever() did not return: the wake periodic_task() sent was lost";
+    server.stop();  // wakes a loop that lost it
+    serving.join();
+  }
 }
 
 // close() from another thread while serve_forever() drains: serve_forever()

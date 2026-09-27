@@ -11,7 +11,10 @@
 // connection live, it is held, in order, behind whatever was held before
 // it, until one comes up (_place_held). A message waits `timeout` seconds
 // at most: one timer runs to the earliest deadline, and what still waits
-// then is dropped, its tracker reading LOST, and reported.
+// then is dropped, its tracker reading LOST, and reported. A message with
+// no time to wait, a timeout of 0 or NaN or a deadline already past, goes
+// only where a connection takes it now, and is dropped and reported at
+// once otherwise (_give_up): it never enters a backlog or the held.
 //
 // A connection that dies hands its queue to the others, and after it what
 // waited in its backlog: a pinned message is lost, which is what the pin
@@ -38,21 +41,25 @@
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 
 namespace multiplexer {
 
 using mx::repr;
 
 namespace {
-// When a message given `timeout` seconds stops waiting; a timeout that is
-// not positive gets the default, and an infinite one never ends: the
-// message waits until it is written or goes nowhere.
+// When a message given `timeout` seconds stops waiting. A negative or an
+// infinite timeout never ends, as lib/seconds.h reads every timeout: the
+// message waits until it is written or goes nowhere. 0 and NaN are no time
+// at all: a deadline already past, so that the message waits for nothing.
 std::chrono::steady_clock::time_point deadline_after(float timeout) {
-  if (std::isinf(timeout) && timeout > 0) {
+  if (timeout < 0 || std::isinf(timeout)) {
     return std::chrono::steady_clock::time_point::max();
   }
-  return std::chrono::steady_clock::now() +
-         std::chrono::microseconds(static_cast<long>((timeout > 0 ? timeout : DEFAULT_TIMEOUT) * 1e6));
+  if (!(timeout > 0)) {
+    return std::chrono::steady_clock::time_point::min();  // 0 and NaN
+  }
+  return std::chrono::steady_clock::now() + mx::from_seconds(timeout);
 }
 
 // The id and the type of a serialized MultiplexerMessage (fields 1 and 4,
@@ -200,8 +207,8 @@ BasicClient::BasicScheduledMessageTracker BasicClient::schedule_on(std::shared_p
   }
   MX_DCHECK_RUN_ON(&owner_thread());
   Connection::pointer conn = wrapper.lock();
-  if (!conn || !conn->living()) {
-    return BasicScheduledMessageTracker();
+  if (shuts_down_ || !conn || !conn->living()) {
+    return BasicScheduledMessageTracker();  // after shutdown() nothing is placed, as send() says
   }
   return _place_on(conn, raw, BasicScheduledMessageTracker(), number ? number : next_number(), deadline_after(timeout),
                    false, lane);
@@ -211,6 +218,9 @@ unsigned int BasicClient::schedule_all(std::shared_ptr<const RawMessage> raw, st
                                        float timeout, std::uint64_t number,
                                        std::vector<BasicScheduledMessageTracker>* trackers) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  if (shuts_down_) {
+    return 0;  // nothing is placed after shutdown(), as send() says
+  }
   raw->mark_for_all();
   if (!number) {
     number = next_number();
@@ -267,9 +277,19 @@ bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const La
     if (refused || (!all && lane && lane->pinned() && lane->holds_connection())) {
       return false;
     }
-    WaitingPtr held = _hold(raw, BasicScheduledMessageTracker(), number, deadline, all, lane);
-    if (trackers) {
-      trackers->push_back(held->state);
+    if (deadline <= std::chrono::steady_clock::now()) {
+      // No time to wait for a connection: given up on at once, an ALL send
+      // once, as it would have been held.
+      BasicScheduledMessageTracker state =
+          _give_up(raw, BasicScheduledMessageTracker(), number, DropReason::NO_CONNECTION);
+      if (trackers) {
+        trackers->push_back(state);
+      }
+    } else {
+      WaitingPtr held = _hold(raw, BasicScheduledMessageTracker(), number, deadline, all, lane);
+      if (trackers) {
+        trackers->push_back(held->state);
+      }
     }
   }
   if (done) {
@@ -279,6 +299,8 @@ bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const La
 }
 
 // `done` hears the end of the send whose copies are `copies`; see send().
+// A copy given up on already, with no time to wait, is heard as any end
+// is, posted.
 void BasicClient::_follow(const std::vector<BasicScheduledMessageTracker>& copies, SendCallback done) {
   FollowPtr follow(new Follow());
   follow->done = done;
@@ -286,6 +308,11 @@ void BasicClient::_follow(const std::vector<BasicScheduledMessageTracker>& copie
   follow->live = copies.size();
   for (const BasicScheduledMessageTracker& copy : copies) {
     outbox_->follows[copy.get()] = follow;
+  }
+  for (const BasicScheduledMessageTracker& copy : copies) {
+    if (copy && *copy == SendState::LOST) {
+      _follow_event(copy, false);
+    }
   }
 }
 
@@ -352,6 +379,16 @@ void BasicClient::_end_follow(const FollowPtr& follow, unsigned int written) {
     done(written);
   } catch (const std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("BasicClient") TEXT(std::string("a send's callback raised: ") + error.what()));
+  }
+}
+
+void BasicClient::drop_held(const BasicScheduledMessageTracker& state) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  for (const WaitingPtr& waiting : outbox_->held) {
+    if (!waiting->over && waiting->state == state) {
+      _drop_expired(waiting);
+      return;
+    }
   }
 }
 
@@ -588,6 +625,9 @@ BasicClient::BasicScheduledMessageTracker BasicClient::_place_on(
     _queued(number, state, conn.get());
     return state;
   }
+  if (deadline <= std::chrono::steady_clock::now()) {
+    return _give_up(raw, state, number, DropReason::NO_ROOM);  // no time to wait for room
+  }
   if (!backlog) {
     outbox_->backlogs.push_back(Backlog());
     backlog = &outbox_->backlogs.back();
@@ -607,6 +647,26 @@ BasicClient::BasicScheduledMessageTracker BasicClient::_place_on(
   ++outbox_->waiting;
   _wait_flushes(number, 1);
   _expire_at(waiting);
+  return state;
+}
+
+// A message with no time left to wait, which no connection takes now:
+// reported dropped for `reason` at once, its tracker, made here when
+// null, reading LOST. Nothing counts it as waiting.
+BasicClient::BasicScheduledMessageTracker BasicClient::_give_up(const std::shared_ptr<const RawMessage>& raw,
+                                                                BasicScheduledMessageTracker state,
+                                                                std::uint64_t number, DropReason reason) {
+  raw->mark_number(number);
+  report_drop(raw, reason);
+  if (!state) {
+    return std::make_shared<SendState>(SendState::LOST);
+  }
+  if (*state == SendState::QUEUED) {
+    *state = SendState::LOST;
+    if (state.use_count() > 1) {
+      tracked_message_done(state, false);  // somebody follows it
+    }
+  }
   return state;
 }
 

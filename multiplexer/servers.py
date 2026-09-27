@@ -22,6 +22,7 @@ from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedExc
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
+from multiplexer import mxclient
 from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, OperationTimedOut, parse_message
 
 
@@ -128,7 +129,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
         self.last_mxmsg: MultiplexerMessage | None = None
         self.last_connwrap: ConnectionWrapper | None = None
         self._start_time = time.time()
-        self._draining_since = None
+        self._draining_since = None  # time.monotonic() at start_draining()
         self._drain_seconds = 0.0
         self.drain_routing = drain_routing if drain_routing is not None else Routing(any=False, all=False)
 
@@ -149,7 +150,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """Tell every multiplexer the `drain_routing`, nothing new by the
         rules by default; keep serving what arrives until drained()."""
         if self._draining_since is None:
-            self._draining_since = time.time()
+            self._draining_since = time.monotonic()
             self.conn.set_routing(self.drain_routing)
 
     def drained(self) -> bool:
@@ -165,7 +166,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
         since = self._draining_since
         if since is None:
             return False
-        if time.time() - since >= self._drain_seconds:
+        # A negative drain_seconds is no cap, as math.inf, the confirmation
+        # alone ending the drain; 0 and NaN end it at once (wait_seconds).
+        if time.monotonic() - since >= mxclient.wait_seconds(self._drain_seconds):
             return True
         return nothing_more_arrives(self.drain_routing) and self.conn.routing_acknowledged()
 
@@ -218,21 +221,23 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """
         self.conn.bind_to_current_thread()
         self._drain_seconds = drain_seconds
+        # 0 and NaN arm no dump; a negative stall_seconds, or math.inf, one never due.
+        stall = mxclient.wait_seconds(stall_seconds) if stall_seconds is not None else 0.0
         stall_file = stall_file or sys.stderr
         try:
             self.connect()
             while self.working:
                 if self.draining and self.drained():
                     break
-                if stall_seconds is not None:
-                    faulthandler.dump_traceback_later(stall_seconds, file=stall_file)
+                if stall > 0:
+                    faulthandler.dump_traceback_later(stall, file=stall_file)
                 try:
                     self.loop_iter(timeout=poll)
                 except OperationTimedOut:
                     pass
                 finally:
                     self.periodic_task()
-                    if stall_seconds is not None:
+                    if stall > 0:
                         faulthandler.cancel_dump_traceback_later()
             # The drain is over. What arrives from now on is refused at once,
             # so that its sender retries elsewhere, and what was already on
@@ -257,7 +262,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
         and handle it; send_message()'s reply defaults hold while it is
         handled, and only then. Raises OperationTimedOut when the time
         passes."""
-        self.last_mxmsg, self.last_connwrap = self.conn.receive_message(*args, **kwargs)
+        # The plain read: a BACKEND_ERROR is a message like any other here,
+        # as in the C++ class, not the exception a query raises for it.
+        self.last_mxmsg, self.last_connwrap = mxclient.Client.receive_message(self.conn, *args, **kwargs)
         try:
             self.__handle_message()
         finally:
@@ -342,7 +349,12 @@ class BaseMultiplexerServer(MultiplexerPeer):
             # to go on.
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % e)
-            if not self._has_sent_response:
+            # A message that answers another, a reply or a report, gets no
+            # report: nobody waits for an answer to it, and two backends
+            # whose handlers raise on what they do not expect would answer
+            # each other's reports for good.
+            mxmsg = self.last_mxmsg
+            if not self._has_sent_response and not (mxmsg is not None and mxmsg.references):
                 try:
                     self.report_error(message=str(e))
                 except Exception as reporting:  # the requester waits out its timeout; the handler's exception decides
@@ -482,13 +494,16 @@ class MultiplexerServer(BaseMultiplexerServer):
 
     @log_call
     def process_pickle(self, data):
-        """Override: called with the unpickled payload of every request; the
-        return value, pickled, is the reply."""
+        """Override: called with the unpickled payload of every message; the
+        return value, pickled, is the reply, except to a message that answers
+        another (`references` set), which gets none."""
         raise NotImplementedError
 
     @log_call
     def handle_message(self, mxmsg):
-        """Unpickle the payload, hand it to process_pickle(), reply with its return value pickled."""
+        """Unpickle the payload, hand it to process_pickle(), reply with its
+        return value pickled, unless the message answers another: two
+        pickle servers would answer each other's replies for good."""
         try:
             data = self.parse_pickle(mxmsg)
         except (pickle.UnpicklingError, EOFError):
@@ -497,4 +512,8 @@ class MultiplexerServer(BaseMultiplexerServer):
                 file=sys.stderr,
             )
             raise
-        self.send_pickle(self.process_pickle(data))
+        result = self.process_pickle(data)
+        if mxmsg.references:
+            self.no_response()  # a reply or a report: nobody waits for an answer to it
+        else:
+            self.send_pickle(result)

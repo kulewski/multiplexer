@@ -279,6 +279,7 @@ cc_library(
     srcs = ["log_summary.cc"],
     hdrs = ["log_summary.h"],
     deps = [
+        "//lib:seconds",
         "//lib/logging",
         "@asio",
     ],
@@ -326,6 +327,7 @@ cc_library(
         ":multiplexer_cc_proto",
         "//lib:mutex",
         "//lib:random",
+        "//lib:seconds",
         "//lib:thread_checker",
         "//lib/logging",
         "@asio",
@@ -375,6 +377,34 @@ cc_test(
     name = "threaded_client_test",
     size = "small",
     srcs = ["threaded_client_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "negative_timeout_test",
+    size = "small",
+    srcs = ["negative_timeout_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "zero_nan_timeout_test",
+    size = "small",
+    srcs = ["zero_nan_timeout_test.cc"],
     data = ["//tests:testing.rules"],
     deps = [
         ":client",
@@ -449,6 +479,7 @@ cc_library(
         ":multiplexer_cc_constants",
         "//lib:fork",
         "//lib:mutex",
+        "//lib:seconds",
         "//lib:spanset",
         "//lib:timer",
         "//lib:triple",
@@ -466,6 +497,7 @@ cc_library(
     deps = [
         ":basic_client",
         ":multiplexer_cc_proto",
+        "//lib:seconds",
         "//lib:vector",
         "@asio",
     ],
@@ -485,6 +517,7 @@ cc_library(
         "//lib:fingerprint",
         "//lib:functors",
         "//lib:memory",
+        "//lib:seconds",
         "//lib/logging",
         "//multiplexer/io:connection",
         "//multiplexer/mxlog:cc_type_id_constants",
@@ -723,6 +756,33 @@ py_test(
 )
 
 py_test(
+    name = "whole_message_test",
+    size = "small",
+    srcs = ["whole_message_test.py"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "pickle_failures_test",
+    size = "small",
+    srcs = ["pickle_failures_test.py"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":servers",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "recording_read_test",
     size = "small",
     srcs = ["recording_read_test.py"],
@@ -777,6 +837,97 @@ py_test(
     deps = [
         ":multiplexer_constants",
         ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "zero_timeout_test",
+    size = "small",
+    srcs = ["zero_timeout_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+cc_test(
+    name = "flooded_client_test",
+    size = "small",
+    srcs = ["flooded_client_test.cc"],
+    deps = [
+        ":client",
+        ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+py_test(
+    name = "infinite_timeout_test",
+    size = "small",
+    srcs = ["infinite_timeout_test.py"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "negative_timeout_py_test",
+    size = "small",
+    srcs = ["negative_timeout_test.py"],
+    main = "negative_timeout_test.py",
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":recording",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "monotonic_clock_test",
+    size = "small",
+    srcs = ["monotonic_clock_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":servers",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "zero_nan_timeout_py_test",
+    size = "small",
+    srcs = ["zero_nan_timeout_test.py"],
+    main = "zero_nan_timeout_test.py",
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":recording",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
         "//multiplexer/testing",
     ],
 )
@@ -978,6 +1129,19 @@ py_test(
 )
 
 py_test(
+    name = "report_loop_test",
+    size = "medium",
+    srcs = ["report_loop_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":multiplexer_constants",
+        ":servers",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "send_callbacks_test",
     size = "medium",
     srcs = ["send_callbacks_test.py"],
@@ -997,10 +1161,12 @@ py_test(
     srcs = ["server_replies_test.py"],
     data = ["//tests:testing.rules"],
     deps = [
+        ":aio",
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
         ":servers",
+        ":threaded_client_py",
         "//multiplexer/testing",
     ],
 )
@@ -1093,6 +1259,7 @@ py_library(
     imports = [".."],
     visibility = ["//visibility:public"],
     deps = [
+        ":clients",
         ":multiplexer_constants",
         ":mxclient",
         ":protocolbuffers",

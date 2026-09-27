@@ -1,8 +1,9 @@
-"""The synchronous client's waits let the program's other threads run: a
-flush, flush_all() and a flushing send, waiting for room or for a
-connection, and a connect waiting for the multiplexer's welcome, release
-the GIL while the loop runs, where they held it for their whole timeout. Counted: how far a thread that counts every millisecond gets
-while each of them waits half a second.
+"""The synchronous client's waits let the program's other threads run:
+flush_all() and a flushing send, waiting for room or for a connection,
+and a connect waiting for the multiplexer's welcome, release the GIL
+while the loop runs, where they held it for their whole timeout.
+Counted: how far a thread that counts every millisecond gets while each
+of them waits half a second.
 """
 
 import threading
@@ -15,25 +16,15 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import past_the_queue
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
 EVENT = types.PYTHON_TEST_REQUEST
 CHUNK = b"x" * (16 * 1024)
-
-
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer, the largest the
-    kernel allows each, and twice the queue."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 2 * 1024
+FILLER_TIMEOUT = (
+    120  # seconds a message filling a connection may wait for room: none is given up on, however slow the fill
+)
 
 
 def counted_during(wait: Callable[[], object]) -> int:
@@ -68,19 +59,17 @@ class SyncWaitsTest(unittest.TestCase):
     """Each wait half a second, the other thread counting meanwhile."""
 
     def test_flushes_wait_without_the_gil(self) -> None:
-        """A flush of a message that waits for room, flush_all() and a
-        flushing send, against a multiplexer frozen with the connection
-        full: each times out after half a second, the other thread having
-        counted meanwhile."""
+        """flush_all() and a flushing send, against a multiplexer frozen
+        with the connection full: each times out after half a second, the
+        other thread having counted meanwhile."""
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
                 cluster.mx[0].pause()
                 try:
-                    for _ in range(frames_to_fill(len(CHUNK))):
-                        client.send_message(CHUNK, type=EVENT)
-                    waiting = client.schedule_one(client.new_message(message=b"waits", type=EVENT).SerializeToString())
-                    self.assertGreater(counted_during(lambda: client.flush(waiting, 0.5)), 20, "flush")
+                    for payload in past_the_queue(CHUNK):
+                        client.send_message(payload, type=EVENT, timeout=FILLER_TIMEOUT)
+                    client.send_message(b"waits", type=EVENT, timeout=FILLER_TIMEOUT)
                     self.assertGreater(counted_during(lambda: client.flush_all(0.5)), 20, "flush_all")
                     self.assertGreater(
                         counted_during(lambda: client.send_message(b"last", type=EVENT, flush=True, timeout=0.5)),

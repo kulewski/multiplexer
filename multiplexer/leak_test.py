@@ -142,15 +142,16 @@ class LeakTest(unittest.TestCase):
 
     def lane_calls(self, client) -> None:
         """One round of everything lanes and addressing add: typed and
-        addressed queries on a lane, either probe, a lane made and dropped
-        per call, the reply's connection preferred, a flushing send."""
+        addressed queries on a lane, an addressed one without, a lane made
+        and dropped per call, the reply's connection preferred, a flushing
+        send."""
         lane = client.lane()
         self.assertEqual(b"HELLO", client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=lane).message)
         reply, connection = client.query(
             b"hello", type=types.PYTHON_TEST_REQUEST, to=self.backend_id, multiplexer=lane, with_connection=True
         )
         self.assertEqual(b"HELLO", reply.message)
-        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=self.backend_id, probe=types.PING)
+        client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=self.backend_id)
         client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=client.lane(pinned=True))
         client.query(b"hello", type=types.PYTHON_TEST_REQUEST, multiplexer=connection)
         client.send_message(b"event", type=types.PYTHON_TEST_REQUEST, multiplexer=client.lane(), flush=True)

@@ -7,6 +7,7 @@
 #include "lib/exception.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h"
 #include "multiplexer/multiplexer.constants.h"
 
@@ -116,9 +117,12 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
     for (;;) {
       {
         mx::UniqueLock lock(wake_mutex_);
-        wake_.wait_for(lock, std::chrono::microseconds(static_cast<long>(poll * 1e6)));
+        if (!woken_) {
+          wake_.wait_for(lock, mx::from_seconds(poll));  // as long as it takes for a negative poll
+        }
+        woken_ = false;
       }
-      if (!working.load() || (draining() && drained()) || failure_) {
+      if (!working.load() || (draining() && drained()) || _failure()) {
         break;
       }
       periodic_task();
@@ -128,8 +132,8 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
     throw;
   }
   close();
-  if (failure_) {
-    std::rethrow_exception(failure_);
+  if (std::exception_ptr failure = _failure()) {
+    std::rethrow_exception(failure);
   }
 }
 
@@ -159,6 +163,14 @@ void BaseThreadedMultiplexerServer::close(float timeout) {
   for (std::thread& thread : threads) {
     thread.join();
   }
+  std::deque<RequestPtr> left;
+  {
+    mx::MutexLock lock(mutex_);
+    left.swap(queue_);  // no worker took them: those that failed left early
+  }
+  for (const RequestPtr& request : left) {
+    _refuse(*request);
+  }
   client_.shutdown(timeout);  // the last replies go out first
 }
 
@@ -171,6 +183,7 @@ void BaseThreadedMultiplexerServer::start_draining() {
   if (!draining_.exchange(true)) {
     client_.set_routing(options_.drain_routing);  // close()'s too; nothing on a client already shut down
     mx::MutexLock lock(wake_mutex_);
+    woken_ = true;
     wake_.notify_all();
   }
 }
@@ -183,7 +196,8 @@ bool BaseThreadedMultiplexerServer::drained() const {
     return true;  // nothing more is coming through a closed client
   }
   const std::chrono::steady_clock::time_point since(std::chrono::steady_clock::duration(draining_since_ticks_.load()));
-  if (std::chrono::steady_clock::now() - since >= std::chrono::microseconds(static_cast<long>(drain_seconds_ * 1e6))) {
+  // A negative drain_seconds is no cap, 0 and NaN none, as mx::from_seconds reads them.
+  if (std::chrono::steady_clock::now() - since >= mx::from_seconds(drain_seconds_)) {
     return true;
   }
   if (!nothing_more_arrives(options_.drain_routing) || pending() != 0) {
@@ -202,6 +216,7 @@ void BaseThreadedMultiplexerServer::stop() {
     return;  // a forked child's: nothing serves here, and the lock may be the parent's serving thread's
   }
   mx::MutexLock lock(wake_mutex_);
+  woken_ = true;
   wake_.notify_all();
 }
 
@@ -230,7 +245,10 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
   bool accepting;
   {
     mx::MutexLock lock(mutex_);
-    if (accepting_ && queue_.size() < options_.queue_size) {
+    // What a worker will take, an idle one's included, and queue_size more
+    // that wait for one: queue_ also holds what an idle worker is about to
+    // take, and busy_ counts only the requests taken.
+    if (accepting_ && queue_.size() + busy_ < options_.workers + options_.queue_size) {
       queue_.push_back(request);
       cond_.notify_one();
       return;
@@ -239,16 +257,26 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
     ++dropped_;
   }
   request->dropped_ = true;  // said below, not by the destructor
-  const std::string what = "request #" + repr(incoming.third->id()) + " of type " + repr(incoming.third->type());
   if (accepting) {
     // Counted with the client's own drop lines: at most about two a second.
     if (client_.drop_lines().first({BasicClient::REQUESTS_QUEUE_FULL, WARNING, 0, 0},
                                    [] { return "requests dropped: queue full"; })) {
-      MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " dropped: queue full"));
+      MX_LOG(WARNING, LogSummary::VERBOSITY,
+             CTX("BaseThreadedMultiplexerServer") TEXT("request #" + repr(incoming.third->id()) + " of type " +
+                                                       repr(incoming.third->type()) + " dropped: queue full"));
     }
     return;
   }
-  const MultiplexerMessage& msg = *incoming.third;
+  _refuse(*request);
+}
+
+// A request this server will not serve, as it leaves: refused with the
+// DELIVERY_ERROR a multiplexer sends for a peer that is gone, so that a
+// query retries elsewhere at once, or dropped when it answers another
+// message.
+void BaseThreadedMultiplexerServer::_refuse(Request& request) {
+  request.dropped_ = true;  // said here, not by the destructor
+  const MultiplexerMessage& msg = request.mxmsg();
   if (msg.references()) {
     // A message that answers another is dropped: nobody retries a reply, and
     // refusing one could start a loop, a peer whose handler raised on the
@@ -259,15 +287,17 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
                TEXT("reply #" + repr(msg.id()) + " of type " + repr(msg.type()) + " dropped: leaving"));
     return;
   }
-  MX_LOG(DEBUG, LOWVERBOSITY, CTX("BaseThreadedMultiplexerServer") TEXT(what + " refused: leaving"));
+  MX_LOG(DEBUG, LOWVERBOSITY,
+         CTX("BaseThreadedMultiplexerServer")
+             TEXT("request #" + repr(msg.id()) + " of type " + repr(msg.type()) + " refused: leaving"));
   // A rule reports delivery errors unless told not to, and so does this; a
   // sender that set the message's own flag to false hears nothing.
   const bool wanted = !msg.has_report_delivery_error() || msg.report_delivery_error();
   if (wanted && msg.type() > types::MAX_MULTIPLEXER_META_PACKET) {
     DeliveryError error;
-    error.set_packet_id(incoming.third->id());
+    error.set_packet_id(msg.id());
     error.add_failed_type(type_);
-    request->reply(error.SerializeAsString(), types::DELIVERY_ERROR);
+    request.reply(error.SerializeAsString(), types::DELIVERY_ERROR);
   }
 }
 
@@ -304,7 +334,11 @@ void BaseThreadedMultiplexerServer::_start_workers() {
 }
 
 // A worker: the next request through the handler, until told to leave and
-// the queue is empty.
+// the queue is empty. What gets past _handle(), an exception not derived
+// from std::exception out of the handler or one out of
+// on_handler_exception(), is not the worker's to swallow: it ends the
+// server, whose serve_forever() rethrows it, as BaseMultiplexerServer's
+// does, and the worker leaves.
 void BaseThreadedMultiplexerServer::_work() {
   for (;;) {
     RequestPtr request;
@@ -320,24 +354,35 @@ void BaseThreadedMultiplexerServer::_work() {
       queue_.pop_front();
       ++busy_;
     }
-    _handle(request);
+    bool failed = false;
+    try {
+      _handle(request);
+    } catch (...) {
+      _fail(std::current_exception());
+      failed = true;
+    }
     mx::MutexLock lock(mutex_);
     --busy_;
+    if (failed) {
+      return;
+    }
   }
 }
 
 // One request through handle_message, with the exception rules of
 // BaseMultiplexerServer: the requester hears BACKEND_ERROR unless a reply
-// went out, then on_handler_exception decides.
+// went out or the message answers another, then on_handler_exception
+// decides.
 void BaseThreadedMultiplexerServer::_handle(const RequestPtr& request) {
   try {
     handle_message(request);
   } catch (const std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY,
            CTX("BaseThreadedMultiplexerServer") TEXT(std::string("exception in handle_message: ") + error.what()));
-    if (!request->answered()) {
+    if (!request->answered() && !request->mxmsg().references()) {
       // As BaseMultiplexerServer: a report that fails leaves the requester
-      // to its timeout, and the handler's exception decides all the same.
+      // to its timeout, and the handler's exception decides all the same;
+      // a reply or a report gets none, nobody waiting for an answer to it.
       try {
         request->report_error(error.what());
       } catch (const std::exception& reporting) {
@@ -347,10 +392,26 @@ void BaseThreadedMultiplexerServer::_handle(const RequestPtr& request) {
       }
     }
     if (!on_handler_exception(error)) {
-      failure_ = std::current_exception();
-      stop();
+      _fail(std::current_exception());
     }
   }
+}
+
+// The first failure, which serve_forever() rethrows, and a stop.
+void BaseThreadedMultiplexerServer::_fail(std::exception_ptr failure) {
+  {
+    mx::MutexLock lock(mutex_);
+    if (!failure_) {
+      failure_ = failure;
+    }
+  }
+  stop();
+}
+
+// What serve_forever() rethrows, null while nothing failed.
+std::exception_ptr BaseThreadedMultiplexerServer::_failure() const {
+  mx::MutexLock lock(mutex_);
+  return failure_;
 }
 
 }  // namespace backend

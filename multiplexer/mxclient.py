@@ -12,6 +12,7 @@ never share objects.
 """
 
 import atexit
+import math
 import time
 import traceback
 from functools import wraps
@@ -23,6 +24,7 @@ import multiplexer._native as _mxclient
 from multiplexer._native import (
     CLOSE_FLUSH_SECONDS,
     DEFAULT_TIMEOUT,
+    MAX_SECONDS,
     ConnectionWrapper,
     DropReason,
     Lane,
@@ -30,7 +32,6 @@ from multiplexer._native import (
     NotConnected,
     OperationFailed,
     OperationTimedOut,
-    ScheduledMessageTracker,
     UsedAfterFork,
 )
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, MultiplexerMessage, Routing
@@ -51,7 +52,6 @@ __all__ = [
     "OperationFailed",
     "OperationTimedOut",
     "UsedAfterFork",
-    "ScheduledMessageTracker",
     "DEFAULT_TIMEOUT",
     "CLOSE_FLUSH_SECONDS",
     "TimeoutTicker",
@@ -109,6 +109,36 @@ def make_message(_type, **kwargs):
     return message
 
 
+def wait_seconds(seconds: float) -> float:
+    """`seconds` as a Python wait takes them, read as mx::from_seconds reads
+    every timeout in C++: at most MAX_SECONDS, math.inf too, since Python's
+    own waits refuse more; a negative one, no deadline either, MAX_SECONDS
+    too, where Python's waits end at once or refuse it; NaN, no time at
+    all, 0."""
+    if math.isnan(seconds):
+        return 0.0
+    if seconds < 0:
+        return MAX_SECONDS
+    return min(seconds, MAX_SECONDS)
+
+
+def stamped(mxmsg: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], int]) -> MultiplexerMessage:
+    """`mxmsg` as every send that takes a whole message sends it: itself
+    when it has an id and a sender, else a copy with an empty id made fresh
+    by `fresh_id` and an empty sender set to `instance_id`, as new_message()
+    and a reply fill them, since every receiver drops a message without an
+    id. The C++ clients frame it the same way (frame_stamped)."""
+    if mxmsg.id and getattr(mxmsg, "from"):
+        return mxmsg
+    filled = MultiplexerMessage()
+    filled.CopyFrom(mxmsg)
+    if not filled.id:
+        filled.id = fresh_id()
+    if not getattr(filled, "from"):
+        setattr(filled, "from", instance_id)  # a keyword; from_ only reads
+    return filled
+
+
 def dict_message(m, all_fields=False, recursive=False):
     """
     Operation reverse to make_message.
@@ -140,20 +170,24 @@ def parse_message(type, buffer):
 class TimeoutTicker(object):
     """One deadline shared by the steps of a call: calling it gives the seconds
     left, so each step's C++ timeout is what remains of the whole call's.
-    A negative timeout never expires."""
+    A negative timeout never expires; NaN is no time at all, as 0. On the
+    monotonic clock, as the C++ side's on steady_clock: a step of the wall
+    clock neither cuts nor stretches it."""
 
     __slots__ = ["_expires_at", "_timeout"]
 
     def __init__(self, timeout):
-        """`timeout` in seconds from now; negative never expires."""
+        """`timeout` in seconds from now; negative never expires, NaN is 0."""
         object.__init__(self)
+        if math.isnan(timeout):
+            timeout = 0.0
         self._timeout = timeout
-        self._expires_at = time.time() + timeout
+        self._expires_at = time.monotonic() + timeout
 
     def __call__(self):
         """Seconds left, never below 0; the negative timeout itself if it never expires."""
         if self._timeout >= 0:
-            return max(self._expires_at - time.time(), 0)
+            return max(self._expires_at - time.monotonic(), 0)
         else:
             return self._timeout
 
@@ -306,7 +340,6 @@ class Client(_mxclient.Client):
         type: int,
         timeout: float = ...,
         to: int = ...,
-        probe: int = ...,
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
         with_connection: Literal[False] = ...,
         *,
@@ -320,7 +353,6 @@ class Client(_mxclient.Client):
         type: int,
         timeout: float = ...,
         to: int = ...,
-        probe: int = ...,
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
         *,
         with_connection: Literal[True],
@@ -333,7 +365,6 @@ class Client(_mxclient.Client):
         type: int,
         timeout: float = DEFAULT_TIMEOUT,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: "int | Lane | ConnectionWrapper" = ONE,
         with_connection: bool = False,
         *,
@@ -352,13 +383,11 @@ class Client(_mxclient.Client):
         With `to`, the instance id of a peer, the request is addressed: only
         that peer ever gets it. If a multiplexer reports the peer is not
         behind it, or the connection dies under the wait, the peer is located
-        with a `probe` addressed to it on every connection, a
-        BACKEND_FOR_PACKET_SEARCH (which reaches the instance whatever its
-        routing, as every addressed message does) or a PING (answered as long
-        as the peer lives, by the server classes, ThreadedClient and
-        AsyncClient, never by a SyncClient), and the request goes again through
-        the connection that found it. A peer nobody has is OperationFailed; one
-        `timeout` covers the three stages.
+        with a PING addressed to it on every connection (answered as long as
+        the peer lives, by the server classes, ThreadedClient and AsyncClient
+        whatever their search policy, never by a SyncClient), and the request
+        goes again through the connection that found it. A peer nobody has is
+        OperationFailed; one `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() or a ConnectionWrapper: with
         a lane the request goes through the lane's connection and the lane
@@ -381,7 +410,7 @@ class Client(_mxclient.Client):
         previous, self.__on_received = self.__on_received, on_received
         try:
             if to:
-                response, connwrap = self.__query_addressed(message, type, timeout, to, probe, multiplexer)
+                response, connwrap = self.__query_addressed(message, type, timeout, to, multiplexer)
             else:
                 response, connwrap = self.__query_typed(message, type, timeout, multiplexer)
         finally:
@@ -464,14 +493,12 @@ class Client(_mxclient.Client):
         self.__adopt(lane, connwrap)
         return response, connwrap
 
-    def __query_addressed(self, message, type, timeout, to, probe, multiplexer):
+    def __query_addressed(self, message, type, timeout, to, multiplexer):
         """An addressed query, docs/query.md "An addressed query"; the same
         as Client::_query_addressed in client.cc. One deadline for the
-        three stages: the request, the probe that locates the addressee when
+        three stages: the request, the PING that locates the addressee when
         a multiplexer said it is not behind it or the connection died, the
         request again through the connection that found it."""
-        if probe not in (types.BACKEND_FOR_PACKET_SEARCH, types.PING):
-            raise ValueError("probe must be types.BACKEND_FOR_PACKET_SEARCH or types.PING")
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
@@ -489,16 +516,9 @@ class Client(_mxclient.Client):
             self.__adopt(lane, connwrap)
             return response, connwrap
 
-        # Locate: the probe addressed to the instance, with delivery errors
+        # Locate: a PING addressed to the instance, with delivery errors
         # requested, so that a multiplexer without the instance says so.
-        if probe == types.PING:
-            mxmsg = self.new_message(message=b"", type=types.PING, to=to, report_delivery_error=True)
-        else:
-            search = BackendForPacketSearch()
-            search.packet_type = type
-            mxmsg = self.new_message(
-                message=search, type=types.BACKEND_FOR_PACKET_SEARCH, to=to, report_delivery_error=True
-            )
+        mxmsg = self.new_message(message=b"", type=types.PING, to=to, report_delivery_error=True)
         pinned = lane is not None and lane.pinned
         response, connwrap = self.send_and_receive(
             mxmsg,
@@ -651,8 +671,9 @@ class Client(_mxclient.Client):
         """A skipped message that is a REQUEST_RECEIVED (notify_start())
         acknowledging the request of the query under way, or a retry of it:
         the query's on_received hears from which backend, and the query goes
-        on as before, whatever the callback does. ignore_ids holds the
-        probe's id, as nothing acknowledges a probe."""
+        on as before, whatever the callback does. ignore_ids holds the id
+        of the search or of the locating PING, as nothing acknowledges
+        either."""
         on_received = self.__on_received
         if (
             on_received is not None
@@ -710,9 +731,9 @@ class Client(_mxclient.Client):
     def send_message(self, message, **kwargs) -> int:
         """Send a message on one or more connections and return its id.
 
-        `message` is a MultiplexerMessage, or a payload (bytes, str, or a
-        protocol buffer message) wrapped into a new one built from the
-        remaining kwargs (`type`, `to`, `references`, `workflow`, ...).
+        `message` is a MultiplexerMessage, an empty id and from filled in,
+        or a payload (bytes, str, or a protocol buffer message) wrapped into
+        a new one built from the remaining kwargs (`type`, `to`, `references`, `workflow`, ...).
         Keyword-only options: `multiplexer` is Client.ONE (default),
         Client.ALL, a ConnectionWrapper (that connection while it is live;
         a reply goes back the way the request came) or a Lane from lane()
@@ -734,9 +755,7 @@ class Client(_mxclient.Client):
         once and `callback(written)` runs inside a later call that runs the
         loop, 1 once the message is written, the first copy for ALL, 0 once
         it was given up on or shutdown() came first. NotConnected at once
-        for a pinned lane whose connection is gone, and after shutdown(). For the tracker of a
-        queued message use schedule_one() directly; schedule_all() returns
-        how many connections took a copy.
+        for a pinned lane whose connection is gone, and after shutdown().
         """
         mxmsg_id, taken = self.__send_message(message, **kwargs)
         if not taken:
@@ -759,7 +778,7 @@ class Client(_mxclient.Client):
         if embed or not isinstance(message, MultiplexerMessage):
             mxmsg = self.new_message(message=message, **kwargs)
         else:
-            mxmsg = message
+            mxmsg = stamped(message, self.instance_id, self.random)
 
         # Serialized once here; the C++ side wraps the bytes in a frame and
         # queues that same frame on every connection chosen.
@@ -790,21 +809,16 @@ class Client(_mxclient.Client):
         if embed or not isinstance(message, MultiplexerMessage):
             mxmsg = self.new_message(message=message, **kwargs)
         else:
-            mxmsg = message
-        return (mxmsg.id, self.schedule_all(mxmsg.SerializeToString(), timeout))
-
-    def flush(self, tracker, timeout=DEFAULT_TIMEOUT):
-        """Run the loop until the message `tracker` follows is written or
-        dropped, or `timeout` seconds pass, when it may still be queued;
-        the tracker says which. The program's other threads go on meanwhile."""
-        super(Client, self).flush(tracker, timeout)
+            mxmsg = stamped(message, self.instance_id, self.random)
+        return (mxmsg.id, self._schedule_all(mxmsg.SerializeToString(), timeout))
 
     def flush_all(self, timeout=DEFAULT_TIMEOUT):
         """Run the loop until every message sent before the call has left its
         queue, written or dropped, what waits for room included; True when
         every one was written, False when one was dropped, which on_drop
-        names, or `timeout` seconds passed first. The program's other
-        threads go on meanwhile."""
+        names, or `timeout` seconds passed first, or, whatever the timeout,
+        at once with something held and nothing connected or on its way.
+        The program's other threads go on meanwhile."""
         return super(Client, self).flush_all(timeout)
 
     def read_message(self, *args, **kwargs):

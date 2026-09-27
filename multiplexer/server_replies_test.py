@@ -6,19 +6,24 @@ it ended serve_forever(); what periodic_task() sends is routed by its
 type, where it went to the last requester; the requester's
 send_and_receive() takes a payload, where it raised AttributeError; and
 the replies the server sends itself, an echo, a report, a pickle reply,
-are queued as in the C++ class, where each waited for its write.
+are queued as in the C++ class, where each waited for its write; and
+every client raises the one BackendError for a BACKEND_ERROR reply.
 """
 
+import asyncio
 import pickle
+import queue
 import threading
 import unittest
 
+from multiplexer.aio import AsyncClient
 from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.servers import BackendError, BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, FakePeer
 from multiplexer.testing import runfile
+from multiplexer.threaded_client import ThreadedClient
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
@@ -93,6 +98,29 @@ class ServerRepliesTest(unittest.TestCase):
                 self.assertEqual(1, len(served.backend.exceptions))
             finally:
                 client.shutdown()
+
+    def test_every_client_raises_the_one_backend_error(self) -> None:
+        """A BACKEND_ERROR reply is the same BackendError on every client,
+        the class multiplexer.clients names, where ThreadedClient and
+        AsyncClient raised one of their own, which an `except` for that
+        one missed."""
+        with Cluster(1, rules=RULES) as cluster, BackendThread(lambda: Backend(cluster.endpoints)):
+            with Client(cluster.endpoints, type=peers.WEBSITE) as client:
+                with self.assertRaises(BackendError):
+                    client.query(b"raise", REQUEST, timeout=10)
+            with ThreadedClient(cluster.endpoints, type=peers.TEST_ACTIVE_CLIENT) as threaded:
+                with self.assertRaises(BackendError):
+                    threaded.query(b"raise", REQUEST, timeout=10)
+                heard: queue.Queue = queue.Queue()
+                threaded.query(b"raise", REQUEST, timeout=10, callback=heard.put)
+                self.assertIsInstance(heard.get(timeout=10), BackendError)
+
+            async def ask() -> None:
+                async with AsyncClient(cluster.endpoints, peers.TEST_ACTIVE_CLIENT) as asynchronous:
+                    await asynchronous.query(b"raise", REQUEST, timeout=10)
+
+            with self.assertRaises(BackendError):
+                asyncio.run(ask())
 
     def test_an_error_text_utf8_cannot_carry_still_reaches_the_requester(self) -> None:
         """A handler's exception whose text holds a lone surrogate: the

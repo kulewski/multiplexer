@@ -64,9 +64,10 @@ Every consumer in a worker shares the worker's one client, so a backend
 sending an event reaches the worker, not the socket. The payload carries
 what identifies the socket, the session key above, and the subscription's
 predicate routes it. The predicate runs on the client's io thread for
-every event that arrives, before anything reaches the loop, so it stays a
-quick test like the one above, touching nothing of the loop's; an event
-it refuses costs the loop nothing. A socket held by another worker is
+every event of its type that arrives, before anything reaches the loop,
+holding the GIL the loop needs too, so it stays a quick test like the one
+above, touching nothing of the loop's; an event it refuses never reaches
+the loop. A socket held by another worker is
 reached the way
 Channels reaches it, through the channel layer, from a handler that
 forwards what it matched. Subscribe in `connect`, unsubscribe in
@@ -82,7 +83,8 @@ application's. `messages()`, the pull form, has a bounded queue that
 drops the oldest with a warning when nobody reads it. Size that queue for
 the burst you expect, and prefer `subscribe` with a predicate to a
 consumer that reads everything: the predicate runs on the io thread, and
-a message it refuses costs the loop nothing.
+a message it refuses never reaches the loop, though every predicate of the
+message's type runs, holding the GIL, for every message of that type.
 
 At shutdown, `await MX.aclose()` from an ASGI lifespan shutdown handler
 writes what was sent first, a second at most, then closes. A worker that

@@ -260,11 +260,9 @@ slowest acceptable answer pays no more than it would have accepted anyway.
 - The refusal is for what someone would retry. A message that answers
   another, one with `references` set, a reply or a `BACKEND_ERROR`, is
   dropped instead: nobody retries a reply, and refusing one could start a
-  loop. A peer whose handler raises on a message it does not expect, one
-  that takes every message for a request of its own, answers the refusal
-  with `BACKEND_ERROR`, which is a reply; refused in turn, it would bring
-  another `DELIVERY_ERROR`, and that another `BACKEND_ERROR`, back and
-  forth until the close ended.
+  loop. The library never answers such a message on its own, a refusal
+  included: a server class whose handler raises on one sends no report,
+  where two of them answered each other's reports for good.
 - A backend must tolerate a request twice, or make its work idempotent:
   every attempt is a new message with a new id, and a request the backend
   answered just before dying may be asked again of another one.

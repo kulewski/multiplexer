@@ -10,6 +10,7 @@
 #include "lib/assertion.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 
 namespace mx {
 
@@ -29,8 +30,7 @@ struct SimpleTimer {
    * expires immediately.
    */
   SimpleTimer(asio::io_service& io_service, float time)
-      : timer_(io_service, std::chrono::microseconds(static_cast<long>(time * 1e6))),
-        expiry_holder_(new bool(time == 0)) {
+      : timer_(io_service, mx::from_seconds(time)), expiry_holder_(new bool(time == 0)) {
     Assert(time >= 0);
     Assert(time == 0 || !expired());
     if (!expired()) {

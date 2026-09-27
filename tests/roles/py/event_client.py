@@ -28,17 +28,15 @@ def main() -> None:
         state = {}
         try:
             if args.no_flush:
-                # Queue only, through the lower-level calls that return the
-                # tracker, and report where the message stands right after.
-                raw = mxmsg.SerializeToString()
+                # Queue only, and report where the message stands right after,
+                # as its callback has heard: nothing yet while it waits.
+                heard: list[int] = []
+                multiplexer = clients.Client.ALL if args.all else clients.Client.ONE
+                client.send_message(mxmsg, multiplexer=multiplexer, callback=heard.append)
                 if args.all:
-                    state["connections"] = client.schedule_all(raw)
+                    state["connections"] = client.connections_count()
                 else:
-                    tracker = client.schedule_one(raw)
-                    if tracker:
-                        state.update(in_queue=tracker.in_queue(), is_sent=tracker.is_sent(), is_lost=tracker.is_lost())
-                    else:
-                        state["is_lost"] = True
+                    state.update(in_queue=not heard, is_sent=heard == [1], is_lost=heard == [0])
             else:
                 multiplexer = clients.Client.ALL if args.all else clients.Client.ONE
                 client.send_message(mxmsg, flush=True, multiplexer=multiplexer)

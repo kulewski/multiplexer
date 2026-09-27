@@ -133,7 +133,10 @@ class BaseThreadedMultiplexerServer {
   // woken, periodic_task(); then take no new message, let the workers
   // finish the queue, close the connections and return. The calling thread
   // only polls; the handlers run on the workers. Rethrows what a handler
-  // threw when on_handler_exception() returned false.
+  // threw when on_handler_exception() returned false, or what got past it,
+  // one not derived from std::exception or one on_handler_exception()
+  // threw, which the worker it escaped leaves on: a request queued behind
+  // it that no worker is left to take is refused, as one arriving then.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
   // Starts the workers and connects to every address, once;
   // serve_forever() calls it first, and a second call does nothing. Call
@@ -196,7 +199,7 @@ class BaseThreadedMultiplexerServer {
   // Called on the worker thread when handle_message() threw, after the
   // requester was sent BACKEND_ERROR, unless a reply had gone out or the
   // report failed. True (the default) keeps serving; false makes
-  // serve_forever() return and rethrow.
+  // serve_forever() return and rethrow, as one this throws does.
   virtual bool on_handler_exception(const std::exception&) { return true; }
   // Whether to answer a client's search for a backend; on the io thread,
   // so quick. False with decline_searches_when_full while every worker is
@@ -212,8 +215,11 @@ class BaseThreadedMultiplexerServer {
   void _check_not_inherited() const;
   void _forget_the_parents_threads();
   void _start_workers();
+  void _refuse(Request& request);
   void _work();
   void _handle(const RequestPtr& request);
+  void _fail(std::exception_ptr failure);
+  std::exception_ptr _failure() const;
 
   const Options options_;
   const MultiplexerAddresses addresses_;
@@ -236,7 +242,13 @@ class BaseThreadedMultiplexerServer {
   float drain_seconds_ = 0.0f;
   mx::Mutex wake_mutex_;
   std::condition_variable_any wake_;
-  std::exception_ptr failure_;
+  // serve_forever() was woken, by a drain or a stop: set with every
+  // notify and taken by the next wait, so that a wake while the loop was
+  // elsewhere, in periodic_task() say, ends that wait at once rather than
+  // being lost, which a poll with no deadline would never get over.
+  bool woken_ MX_GUARDED_BY(wake_mutex_) = false;
+  // What serve_forever() rethrows: the first a worker failed with.
+  std::exception_ptr failure_ MX_GUARDED_BY(mutex_);
   std::atomic<bool> connected_{false};
   // Held over a whole close(): a second one, serve_forever()'s or the
   // destructor's while another thread's joins the workers, waits for it.

@@ -168,6 +168,73 @@ TEST(ThreadedClient, OnMessageGetsWhatIsAddressedToIt) {
   EXPECT_EQ("for you", future.get().message());
 }
 
+// A whole message sent without an id or a sender gets both, through every
+// send that takes one, ThreadedClient's and SyncClient's, as new_message()
+// and a reply fill them: every receiver dropped it for its id 0. Ordered,
+// not timed: each sender's marker comes behind what it sent before.
+TEST(ThreadedClient, AWholeMessageSentWithoutIdOrSenderGetsBoth) {
+  InProcessMultiplexer mx;
+  std::mutex mutex;
+  std::condition_variable arrived;
+  std::vector<multiplexer::MultiplexerMessage> got;
+  ThreadedClient receiver(multiplexer::peers::PYTHON_TEST_SERVER, [&](const multiplexer::IncomingMessage& incoming) {
+    std::lock_guard<std::mutex> lock(mutex);
+    got.push_back(*incoming.third);
+    arrived.notify_all();
+  });
+  ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
+  ThreadedClient threaded(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, 5));
+  Peer sync(mx.port, multiplexer::peers::WEBSITE);
+  const auto bare = [&receiver](const std::string& payload) {
+    multiplexer::MultiplexerMessage msg;
+    msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+    msg.set_message(payload);
+    msg.set_to(receiver.instance_id());
+    return msg;
+  };
+  multiplexer::MultiplexerMessage marker = threaded.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "marker");
+  marker.set_to(receiver.instance_id());
+  threaded.send(bare("queued"));
+  ASSERT_EQ(1u, threaded.send(bare("flushed"), 5.0f));
+  threaded.send(marker);
+  sync.send(bare("sync"));
+  sync.send(sync.message(multiplexer::types::PYTHON_TEST_REQUEST, "marker", receiver.instance_id()));
+  std::unique_lock<std::mutex> lock(mutex);
+  ASSERT_TRUE(arrived.wait_for(lock, std::chrono::seconds(10), [&] {
+    return std::count_if(got.begin(), got.end(),
+                         [](const multiplexer::MultiplexerMessage& msg) { return msg.message() == "marker"; }) == 2;
+  }));
+  for (const std::string payload : {"queued", "flushed", "sync"}) {
+    const auto found = std::find_if(
+        got.begin(), got.end(), [&](const multiplexer::MultiplexerMessage& msg) { return msg.message() == payload; });
+    ASSERT_NE(got.end(), found) << payload << " never arrived";
+    EXPECT_NE(0u, found->id()) << payload;
+    EXPECT_EQ(payload == "sync" ? sync.client.instance_id() : threaded.instance_id(), found->from()) << payload;
+  }
+}
+
+// After shutdown() a synchronous client connects to nothing and places
+// nothing, as ThreadedClient refuses: connect() opened and registered a
+// connection every later send was refused on, schedule_one() and
+// schedule_all() placed messages on it, and it stayed registered until
+// the client was destroyed.
+TEST(SyncClient, NothingConnectsOrIsPlacedAfterShutdown) {
+  InProcessMultiplexer mx;
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  client.shutdown();
+  EXPECT_THROW(client.connect("127.0.0.1", mx.port, 5), multiplexer::Client::NotConnected);
+  EXPECT_THROW(client.async_connect("127.0.0.1", mx.port), multiplexer::Client::NotConnected);
+  multiplexer::MultiplexerMessage msg;
+  msg.set_id(client.random64());
+  msg.set_from(client.instance_id());
+  msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  msg.set_message("after");
+  EXPECT_FALSE(client.schedule_one(msg));
+  EXPECT_EQ(0u, client.schedule_all(msg));
+}
+
 // A backend built on the threaded client: answers every request handed to on_message.
 struct Answering {
   explicit Answering(unsigned short port)
@@ -510,9 +577,8 @@ TEST(ThreadedClient, ASearchIsNotEndedByAConnectionItDidNotGoThrough) {
 
 TEST(ThreadedClient, AddressedQueryReachesTheInstanceNamedOnly) {
   // Before the client: on an early exit, its shutdown still runs the
-  // queries' callbacks, which must find the promises alive.
+  // query's callback, which must find the promise alive.
   std::promise<ThreadedClient::Result> done;
-  std::promise<ThreadedClient::Result> again;
   InProcessMultiplexer mx;
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
@@ -531,14 +597,6 @@ TEST(ThreadedClient, AddressedQueryReachesTheInstanceNamedOnly) {
   EXPECT_EQ("FOR TWO", result.reply.third->message());
   EXPECT_EQ(second.client.instance_id(), result.reply.third->from());
   EXPECT_THROW(first.client.read_raw_message(0.3f), multiplexer::Client::OperationTimedOut) << "the other saw it";
-  // The PING probe, as an option, on a query that needs no locating.
-  client.query(
-      request, [&again](const ThreadedClient::Result& r) { again.set_value(r); }, 5, multiplexer::LanePtr(),
-      multiplexer::PROBE_PING);
-  serve_one(second);
-  std::future<ThreadedClient::Result> pinged = again.get_future();
-  ASSERT_EQ(std::future_status::ready, pinged.wait_for(std::chrono::seconds(10)));
-  EXPECT_EQ(ThreadedClient::REPLIED, pinged.get().outcome);
 }
 
 TEST(ThreadedClient, AddressedQueryToAGoneInstanceFailsAtOnce) {
@@ -554,24 +612,6 @@ TEST(ThreadedClient, AddressedQueryToAGoneInstanceFailsAtOnce) {
   EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3)) << "a delivery error, not a timeout";
   EXPECT_THROW(backend.client.read_raw_message(0.3f), multiplexer::Client::OperationTimedOut)
       << "an instance of the type got it";
-}
-
-TEST(ThreadedClient, ASearchAddressedToTheClientIsAnsweredWithAPing) {
-  InProcessMultiplexer mx;
-  std::atomic<int> handed_on(0);
-  ThreadedClient client(multiplexer::peers::WEBSITE,
-                        [&handed_on](const multiplexer::IncomingMessage&) { ++handed_on; });
-  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  Peer peer(mx.port, multiplexer::peers::WEBSITE);
-  multiplexer::BackendForPacketSearch search;
-  search.set_packet_type(multiplexer::types::PYTHON_TEST_REQUEST);
-  multiplexer::MultiplexerMessage probe =
-      peer.message(multiplexer::types::BACKEND_FOR_PACKET_SEARCH, search.SerializeAsString(), client.instance_id());
-  peer.send(probe);
-  multiplexer::IncomingMessage pong = peer.client.read_raw_message(5);
-  EXPECT_EQ(multiplexer::types::PING, pong.third->type());
-  EXPECT_EQ(probe.id(), pong.third->references());
-  EXPECT_EQ(0, handed_on);
 }
 
 TEST(ThreadedClient, ALaneKeepsAStreamOnOneConnectionAndAPinnedOneFails) {
@@ -2537,12 +2577,13 @@ TEST(ThreadedClient, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   EXPECT_EQ("bounce", answer->message());
 }
 
-// A search addressed to a ThreadedClient, an addressed query locating it,
-// is answered with a PING carrying the search back, as a PING is; one
-// whose echo would be over the limit gets BACKEND_ERROR saying so.
+// A search a ThreadedClient's search policy says yes to is answered with
+// a PING carrying the search back, as a PING is; one whose echo would be
+// over the limit gets BACKEND_ERROR saying so.
 TEST(ThreadedClient, ASearchIsAnsweredWithItsPayloadEchoed) {
   InProcessMultiplexer mx;
   ThreadedClient client(multiplexer::peers::WEBSITE);
+  client.set_search_policy([] { return true; });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   Peer peer(mx.port, multiplexer::peers::WEBSITE);
   multiplexer::MultiplexerMessage search =
@@ -2560,6 +2601,37 @@ TEST(ThreadedClient, ASearchIsAnsweredWithItsPayloadEchoed) {
   ASSERT_TRUE(answer) << "no answer to the big search";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
   EXPECT_NE(std::string::npos, answer->message().find("echo of a search")) << answer->message();
+}
+
+// A ThreadedClient without a search policy is no backend and answers no
+// search, not even one addressed to it, which it answered for the
+// addressed query's old probe, nor hands one to on_message; a PING it
+// answers. The search goes first, so that the PING's answer, sent after
+// whatever the search drew, ends the wait.
+TEST(ThreadedClient, WithoutASearchPolicyNoSearchIsAnswered) {
+  InProcessMultiplexer mx;
+  std::atomic<int> handed_on(0);
+  ThreadedClient client(multiplexer::peers::WEBSITE,
+                        [&handed_on](const multiplexer::IncomingMessage&) { ++handed_on; });
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  Peer peer(mx.port, multiplexer::peers::WEBSITE);
+  multiplexer::MultiplexerMessage search =
+      peer.message(multiplexer::types::BACKEND_FOR_PACKET_SEARCH, "", client.instance_id());
+  multiplexer::MultiplexerMessage ping = peer.message(multiplexer::types::PING, "after", client.instance_id());
+  peer.send(search);
+  peer.send(ping);
+  std::vector<std::uint64_t> answered;  // what each answer references, up to the PING's
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (std::chrono::steady_clock::now() < deadline && (answered.empty() || answered.back() != ping.id())) {
+    try {
+      answered.push_back(peer.client.receive_message(1).first->references());
+    } catch (const multiplexer::Client::OperationTimedOut&) {
+    }
+  }
+  ASSERT_FALSE(answered.empty()) << "no answer to the PING";
+  EXPECT_EQ(ping.id(), answered.back()) << "no answer to the PING";
+  EXPECT_EQ(0, std::count(answered.begin(), answered.end(), search.id())) << "the search was answered";
+  EXPECT_EQ(0, handed_on) << "the search handed to on_message";
 }
 
 // A delivery error that carries the original, for a message near the limit,

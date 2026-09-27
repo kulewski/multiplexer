@@ -116,6 +116,7 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
+        "//lib:seconds",
         "//lib/protobuf:stream",
         "//multiplexer:client",
         "//multiplexer:multiplexer_cc_proto",
@@ -131,6 +132,7 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
+        "//lib:seconds",
         "//multiplexer:client",
         "//multiplexer:multiplexer_cc_proto",
     ],

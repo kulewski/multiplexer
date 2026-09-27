@@ -83,7 +83,7 @@ thread, a backend included; `AsyncClient` for asyncio.
 | | `BaseMultiplexerServer` | `BaseThreadedMultiplexerServer` | `ThreadedClient` | `AsyncClient` | `SyncClient` |
 |---|---|---|---|---|---|
 | who runs the loop | the library, on the calling thread, in `serve_forever()` | the library, on its io thread; handlers on workers | the library, on its io thread | the library, on its io thread; handlers and streams on the asyncio loop | nobody between calls |
-| found by typed requests | yes: answers the backend search | yes | with a search policy (`search_policy`, `set_search_policy`); otherwise only a search addressed to it | no | no |
+| found by typed requests | yes: answers the backend search | yes | with a search policy (`search_policy`, `set_search_policy`) | no | no |
 | receives | requests routed by type, events, addressed messages | the same | requests and events routed to its type, addressed messages | the same, as handlers or streams | what `receive_message()` returns; while a query waits, everything but its reply is dropped |
 | handles | `handle_message()`, one at a time, reply by default | `handle_message(request)`, `workers` at a time, reply through the request | `on_message`, must return quickly | `subscribe()` handlers, `messages()` streams | nothing by itself: a loop of your own calls `receive_message()` |
 | a handler may block | no: nothing heartbeats meanwhile | yes, for as long as it needs | no: it runs on the io thread | no: it runs on the loop | |
@@ -97,10 +97,11 @@ type=..., to=request.from_, references=request.id)`. On its own it
 answers neither the backend search nor a `PING`, so a typed request
 reaches it only through the rules, at a query's first attempt or that
 attempt sent again after a lost connection, never through the search that
-follows a delivery error or a timeout, and an addressed query's probe
-never finds it. A backend that typed requests must find belongs on a
-server class or on a `ThreadedClient` given a search policy, and one
-reached only by `to` can be built on any of the other four.
+follows a delivery error or a timeout, and the `PING` that locates the
+addressee of an addressed query never finds it. A backend that typed
+requests must find belongs on a server class or on a `ThreadedClient`
+given a search policy, and one reached only by `to` can be built on any
+of the other four.
 
 [Using the Python library](api_python.md) and [the C++ library](api_cpp.md)
 describe each.

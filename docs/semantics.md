@@ -203,8 +203,12 @@ that changes.
 - **A multiplexer restarts while a synchronous client is idle.** The
   client's next call runs the loop before it picks a connection, so the
   connection that multiplexer closed is retired first and the message goes
-  through another, or waits for the reconnect; it is never written into
-  the closed socket, which would succeed and lose it.
+  through another, or waits for the reconnect, rather than into the closed
+  socket, which would succeed and lose it. The loop reads a queue's worth
+  of frames there at most (the incoming queue's size, 1024 by default), so
+  that a multiplexer sending faster than the client reads cannot hold the
+  call: a closure behind more unread frames than that is noticed by a later
+  call, and a message sent meanwhile may go into the closed socket.
 - **A peer closes one side of its connection.** When the other end of a
   connection stops sending, a half-close such as `shutdown(SHUT_WR)`, the
   multiplexer and the libraries end the connection at once and write
@@ -308,11 +312,20 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
 | `KEEPALIVE_PROBE_INTERVAL` | 10 s | between the TCP keepalive probes on the multiplexer's accepted connections, which start after the first interval above and close the connection after the second without an answer |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
-| `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client, or a `ThreadedClient` with no `on_message`, holds |
+| `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client holds; a `ThreadedClient` with no `on_message` drops what arrives on its own, with a warning |
 | `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |
 | `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
 | dedup window | 2048 ids | repeats the library recognizes |
+
+Every timeout and interval, in the libraries and the multiplexer, is
+seconds as a float, and is read as at most 10⁹ s, about 31.7 years: a
+larger one, `math.inf` and `sys.maxsize` too, waits as long as it takes.
+A negative timeout given to a client or server class sets no deadline
+either, exactly as `math.inf`. 0 and NaN are no time at all: a call
+given one waits for nothing, a message sent with one goes now or is
+dropped at once, and a drain with one is over as it begins
+([Python](api_python.md#timeouts), [C++](api_cpp.md#timeouts)).
 
 The silence intervals count whole frames: the clock restarts when a
 frame's header has arrived and when its body has, never in between, so a

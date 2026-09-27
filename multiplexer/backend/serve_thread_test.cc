@@ -4,12 +4,15 @@
 // what a BaseMultiplexerServer sends: a PING whose echo would be over
 // MAX_MESSAGE_SIZE answered with BACKEND_ERROR by a backend that goes on
 // serving, a reply that throws answered the same way, a reply naming its
-// multiplexer, what periodic_task() sends routed by its type, and the
-// acknowledgement of notify_start() as a query's on_received hears it.
+// multiplexer, what periodic_task() sends routed by its type, the
+// acknowledgement of notify_start() as a query's on_received hears it, and
+// the answer to the PING that locates it for an addressed query, which a
+// backend that declines searches sends too.
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -74,6 +77,34 @@ class SlowBackend : public BaseMultiplexerServer {
   }
 };
 
+// Once asked to leave, starts a drain that keeps a path open from
+// periodic_task(), and says whether drained() held right after, on the
+// serving thread.
+class OpenDrainBackend : public BaseMultiplexerServer {
+ public:
+  explicit OpenDrainBackend(const MultiplexerAddresses& addresses)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {
+    multiplexer::Routing routing = drain_routing();
+    routing.set_all(true);  // events kept: only the cap could end the drain
+    set_drain_routing(routing);
+  }
+  std::atomic<bool> serving{false};
+  std::atomic<bool> leave{false};
+  std::atomic<bool> checked{false};
+  std::atomic<bool> drained_at_once{false};
+
+ protected:
+  void handle_message(multiplexer::MultiplexerMessage&) override { no_response(); }
+  void periodic_task() override {
+    serving = true;
+    if (leave.load() && !draining()) {
+      start_draining();
+      drained_at_once = drained();
+      checked = true;
+    }
+  }
+};
+
 // Treats every handler exception as fatal, and counts them: serve_forever()
 // ends at the first.
 class StrictBackend : public BaseMultiplexerServer {
@@ -102,7 +133,9 @@ class StrictBackend : public BaseMultiplexerServer {
 // Answers requests as told, and sends a TEST_EVENT from periodic_task():
 // once before any request arrived, and once after each it answered.
 // NOTIFY_THEN_HOLD acknowledges a request and never answers it, a handler
-// still at work as far as the requester can tell.
+// still at work as far as the requester can tell. With
+// `declining_searches` it leaves every search unanswered, as a saturated
+// backend does.
 class ReplyingBackend : public BaseMultiplexerServer {
  public:
   enum Reply { ANSWER, ANSWER_EVERYWHERE, THROW, NOTIFY_THEN_ANSWER, NOTIFY_THEN_HOLD };
@@ -111,9 +144,12 @@ class ReplyingBackend : public BaseMultiplexerServer {
   std::atomic<bool> serving{false};
   std::atomic<bool> leave{false};
   std::atomic<int> exceptions{0};
+  std::atomic<bool> declining_searches{false};
   std::uint64_t instance_id() const { return conn->instance_id(); }
 
  protected:
+  // Declines every search while `declining_searches` is set.
+  bool should_respond_to_backend_for_packet_search() const override { return !declining_searches.load(); }
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
     if (reply_ == NOTIFY_THEN_ANSWER || reply_ == NOTIFY_THEN_HOLD) {
       notify_start();  // what a long handler does first
@@ -370,6 +406,90 @@ TEST(ServeThread, AQueryIgnoresTheBackendsAcknowledgement) {
   EXPECT_EQ("re: question", reply.third->message());
 }
 
+// Throws on every message but the marker, as a handler that parses every
+// payload does: sends `peer` an event at its first poll, and the marker
+// once its handler threw on a BACKEND_ERROR, behind any report of that.
+class RaisingBackend : public BaseMultiplexerServer {
+ public:
+  explicit RaisingBackend(const MultiplexerAddresses& addresses)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::uint64_t instance_id() const { return conn->instance_id(); }
+  std::atomic<std::uint64_t> peer{0};
+  std::atomic<bool> serving{false};
+  std::atomic<bool> leave{false};
+  std::atomic<int> reports{0};  // the BACKEND_ERRORs its handler got
+  std::atomic<bool> marked{false};
+
+ protected:
+  void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
+    if (mxmsg.type() == multiplexer::types::PYTHON_TEST_RESPONSE) {
+      marked = true;
+      no_response();
+      return;
+    }
+    raised_on_report_ = mxmsg.type() == multiplexer::types::BACKEND_ERROR;
+    if (raised_on_report_) {
+      ++reports;
+    }
+    throw std::runtime_error("unexpected type " + std::to_string(mxmsg.type()));
+  }
+  bool on_handler_exception(const std::exception&) override {
+    handled_report_ = handled_report_ || raised_on_report_;  // after the report, if any
+    return true;
+  }
+  void periodic_task() override {
+    serving = true;
+    const std::uint64_t to = peer.load();
+    if (to && !sent_event_) {
+      sent_event_ = true;
+      send_message(mx::util::kwargs::Kwargs()
+                       .set("message", std::string("unexpected"))
+                       .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_REQUEST))
+                       .set("to", to));
+    }
+    if (handled_report_ && !sent_marker_) {
+      sent_marker_ = true;
+      send_message(mx::util::kwargs::Kwargs()
+                       .set("message", std::string("marker"))
+                       .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE))
+                       .set("to", to));
+    }
+    if (leave.load()) {
+      working = false;
+    }
+  }
+
+ private:
+  bool raised_on_report_ = false, handled_report_ = false, sent_event_ = false, sent_marker_ = false;
+};
+
+// X sends Y an event, Y's handler throws and Y reports it to X with
+// BACKEND_ERROR, and X's handler throws on that report: X sends no report
+// back, where the two answered each other's reports for good. X's marker,
+// sent after it handled the report, reaches Y behind anything X sent.
+TEST(ServeThread, TwoBackendsAnswerNoReportWithAReport) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  RaisingBackend x(addresses), y(addresses);
+  std::thread y_thread([&y] { y.serve_forever(0.05f); });
+  std::thread x_thread([&x] { x.serve_forever(0.05f); });
+  for (int waited = 0; waited < 500 && !(x.serving.load() && y.serving.load()); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  x.peer = y.instance_id();
+  for (int waited = 0; waited < 1000 && !y.marked.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  x.leave = true;
+  y.leave = true;
+  x_thread.join();
+  y_thread.join();
+  EXPECT_TRUE(y.marked.load()) << "the marker never came";
+  EXPECT_EQ(1, x.reports.load()) << "X got Y's report, once";
+  EXPECT_EQ(0, y.reports.load()) << "X did not report on Y's report";
+}
+
 // A query's on_received hears the instance id of the backend that
 // acknowledged the request with notify_start(), once, before the reply:
 // on SyncClient on the caller's thread inside query(), on ThreadedClient
@@ -413,7 +533,7 @@ TEST(ServeThread, AQueryHearsWhichBackendAcknowledgedIt) {
   ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, 5));
   multiplexer::ThreadedClient::Result result =
       threaded.query(threaded.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "blocking"), 10,
-                     multiplexer::LanePtr(), multiplexer::PROBE_SEARCH, on_received);
+                     multiplexer::LanePtr(), on_received);
   ASSERT_EQ(multiplexer::ThreadedClient::REPLIED, result.outcome);
   tell("returned");
   threaded.query(
@@ -422,7 +542,7 @@ TEST(ServeThread, AQueryHearsWhichBackendAcknowledgedIt) {
         tell("answered");
         done.set_value(result);
       },
-      10, multiplexer::LanePtr(), multiplexer::PROBE_SEARCH, on_received);
+      10, multiplexer::LanePtr(), on_received);
   std::future<multiplexer::ThreadedClient::Result> answered = done.get_future();
   ASSERT_EQ(std::future_status::ready, answered.wait_for(std::chrono::seconds(10)));
   EXPECT_EQ("re: callback", answered.get().reply.third->message());
@@ -491,7 +611,6 @@ TEST(ServeThread, AThreadedQueryHearsEachBackendItsRetriesReached) {
   client.query(
       client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "question"),
       [&](const multiplexer::ThreadedClient::Result& result) { done.set_value(result); }, 10, multiplexer::LanePtr(),
-      multiplexer::PROBE_SEARCH,
       [&](std::uint64_t from) {
         std::lock_guard<std::mutex> hold(lock);
         heard.push_back(from);
@@ -509,6 +628,37 @@ TEST(ServeThread, AThreadedQueryHearsEachBackendItsRetriesReached) {
   EXPECT_EQ("re: question", result.reply.third->message());
   std::lock_guard<std::mutex> hold(lock);
   EXPECT_EQ((std::vector<std::uint64_t>{backends.holding.instance_id(), backends.answering.instance_id()}), heard);
+}
+
+// A backend that declines every search, as a saturated one does, behind
+// the second of two multiplexers, and a SyncClient on both: a typed query
+// sent through the first finds nobody, the search being declined; an
+// addressed one meets a delivery error there, locates the backend with a
+// PING, which it answers whatever its search policy, and is answered
+// through the second.
+TEST(ServeThread, AnAddressedQueryLocatesABackendThatDeclinesSearches) {
+  InProcessMultiplexer first;
+  InProcessMultiplexer second;
+  ReplyingBackend backend({{"127.0.0.1", second.port}}, ReplyingBackend::ANSWER);
+  backend.declining_searches = true;
+  Serving serving(backend);
+  ASSERT_TRUE(backend.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  multiplexer::ConnectionWrapper wrong = client.connect("127.0.0.1", first.port, 5);
+  ASSERT_TRUE(wrong);
+  multiplexer::ConnectionWrapper right = client.connect("127.0.0.1", second.port, 5);
+  ASSERT_TRUE(right);
+  EXPECT_THROW(
+      client.query("typed", multiplexer::types::PYTHON_TEST_REQUEST, 1.5f, std::make_shared<multiplexer::Lane>(wrong)),
+      multiplexer::Client::OperationTimedOut)
+      << "the search found it";
+  multiplexer::MultiplexerMessage request;
+  request.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  request.set_message("saturated");
+  request.set_to(backend.instance_id());
+  multiplexer::IncomingMessage reply = client.query(request, 5, std::make_shared<multiplexer::Lane>(wrong));
+  EXPECT_EQ("re: saturated", reply.third->message());
+  EXPECT_TRUE(reply.second.is_same_connection(right)) << "not through the second multiplexer";
 }
 
 // A reply may name the connections it goes through, `multiplexer` being
@@ -587,6 +737,48 @@ TEST(ServeThread, ADrainServesWhatWasAlreadyRead) {
   EXPECT_EQ(12, responses + refused) << "none vanished into a timeout";
   EXPECT_EQ(backend.handled.load(), responses) << "what the backend served was answered";
   EXPECT_GE(backend.handled.load(), 2);
+}
+
+// A drain with no cap, a negative drain_seconds as an infinite one, is
+// never over by time: with a path kept open only stop() ends it, where the
+// negative cap had passed as the drain began.
+TEST(ServeThread, ADrainWithNoCapIsNotOverByTime) {
+  InProcessMultiplexer mx;
+  OpenDrainBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}});
+  std::thread server([&backend] { backend.serve_forever(0.05f, -1.0f); });
+  for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(backend.serving.load());
+  backend.leave = true;
+  for (int waited = 0; waited < 500 && !backend.checked.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(backend.checked.load());
+  EXPECT_FALSE(backend.drained_at_once.load()) << "no cap";
+  backend.stop();  // the thread joined whatever was found: an ASSERT would leave it running
+  server.join();
+}
+
+// A drain with no time, a NaN drain_seconds as 0, is over as it begins,
+// whatever path it keeps open, where NaN, compared with what had passed,
+// was no cap at all.
+TEST(ServeThread, ADrainWithNoTimeIsOverAtOnce) {
+  InProcessMultiplexer mx;
+  OpenDrainBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}});
+  std::thread server([&backend] { backend.serve_forever(0.05f, std::nanf("")); });
+  for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(backend.serving.load());
+  backend.leave = true;
+  for (int waited = 0; waited < 500 && !backend.checked.load(); ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(backend.checked.load());
+  EXPECT_TRUE(backend.drained_at_once.load()) << "no time";
+  backend.stop();  // the thread joined whatever was found: an ASSERT would leave it running
+  server.join();
 }
 
 // stop() with requests read and not handled yet: the close refuses them,

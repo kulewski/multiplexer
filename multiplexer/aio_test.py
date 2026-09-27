@@ -1,8 +1,8 @@
 """AsyncClient against a real multiplexer and a scripted backend: every
 verb, the exceptions, concurrency, cancellation, subscriptions, what
-arrived before a reply handled before its await resumes, the queue, a
-multiplexer restart, the loop rule, a create() given up on, a fork, and
-the interpreter's exit;
+arrived before a reply handled before its await resumes, the queue and its
+end at close(), a multiplexer restart, the loop rule, a create() given up
+on, a fork, and the interpreter's exit;
 and sends as on every client, against a frozen multiplexer: the await
 returns once the io thread has the message, where it waited for the
 write, flush=True waits for the write, a callback hears how the message
@@ -241,6 +241,124 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         gc.collect()
         self.assertEqual([], complaints, "no 'Exception in callback', no unretrieved task exception")
 
+    async def test_a_message_costs_a_look_at_its_type_s_subscriptions_only(self):
+        """The io thread looks at the subscriptions of a message's type and
+        of every type, and no others: a hundred subscriptions of another
+        type cost a message nothing, where every subscription's type was
+        compared with every message's. Counted: the other type compares
+        itself only when asked. The handlers of a type's subscriptions and
+        of every type's still run in the order the subscriptions were made."""
+
+        class CountedType(int):
+            """A message type that counts how often it is compared."""
+
+            comparisons = 0
+
+            def __eq__(self, other: object) -> bool:
+                CountedType.comparisons += 1
+                return int.__eq__(self, other)
+
+            def __ne__(self, other: object) -> bool:
+                CountedType.comparisons += 1
+                return int.__ne__(self, other)
+
+            __hash__ = int.__hash__
+
+        other = CountedType(types.PYTHON_TEST_REQUEST)
+        unsubscribes = [self.client.subscribe(other, lambda mxmsg: None) for _ in range(100)]
+        order: list[str] = []
+        done = asyncio.Event()
+
+        def noted(name: str):
+            """A handler that notes `name`, and the end after the last."""
+
+            def handler(mxmsg) -> None:
+                order.append(name)
+                if name == "typed two":
+                    done.set()
+
+            return handler
+
+        self.client.subscribe(None, noted("every one"))
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, noted("typed one"))
+        self.client.subscribe(None, noted("every two"))
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, noted("typed two"))
+        CountedType.comparisons = 0
+        await asyncio.get_running_loop().run_in_executor(None, self.push, b"ordered", self.client.instance_id)
+        await asyncio.wait_for(done.wait(), 10)
+        self.assertEqual(["every one", "typed one", "every two", "typed two"], order)
+        self.assertEqual(0, CountedType.comparisons, "the other type's subscriptions were looked at")
+        for unsubscribe in unsubscribes:
+            unsubscribe()
+
+    async def test_ending_one_of_two_equal_subscriptions_leaves_the_other(self):
+        """The same handler subscribed twice is two subscriptions: ending the
+        first, twice even, leaves the second, which gets each message once,
+        where removal by equality ended one of the two on each call.
+        Ordered, not timed: both messages come from one sender, in order."""
+        loop = asyncio.get_running_loop()
+        heard: asyncio.Queue[bytes] = asyncio.Queue()
+
+        def handler(mxmsg) -> None:
+            heard.put_nowait(mxmsg.message)
+
+        first = self.client.subscribe(types.PYTHON_TEST_RESPONSE, handler)
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, handler)
+        first()
+        first()
+
+        def push_both() -> None:
+            """Both messages from one sender, so that they arrive in order."""
+            with TestClient(self.cluster, peers.WEBSITE) as sender:
+                sender.send(b"still", types.PYTHON_TEST_RESPONSE, to=self.client.instance_id)
+                sender.send(b"marker", types.PYTHON_TEST_RESPONSE, to=self.client.instance_id)
+
+        await loop.run_in_executor(None, push_both)
+        self.assertEqual(
+            [b"still", b"marker"], [await asyncio.wait_for(heard.get(), 30), await asyncio.wait_for(heard.get(), 30)]
+        )
+
+    async def test_an_unsubscribed_handler_misses_what_was_already_handed_over(self):
+        """Once unsubscribe() has returned, on the loop, its handler is not
+        called again, for a message the io thread had handed to the loop
+        already either, where the handlers were fixed at the hand-over.
+        Ordered, not timed: the loop, in the first message's delivery,
+        waits until a predicate on the io thread has seen the second one,
+        which by then took its subscriptions, and only then unsubscribes."""
+        loop = asyncio.get_running_loop()
+        second_taken = threading.Event()  # the io thread has fixed the second message's subscriptions
+        seen: list[bytes] = []
+        after: list[bytes] = []
+        done = asyncio.Event()
+
+        def watches(mxmsg) -> bool:
+            if mxmsg.message == b"two":
+                second_taken.set()
+            return False
+
+        def unsubscribes(mxmsg):
+            after.append(mxmsg.message)
+            if mxmsg.message == b"one":
+                self.assertTrue(second_taken.wait(10), "the second message never reached the io thread")
+                unsubscribe()
+            else:
+                done.set()
+
+        unsubscribe = self.client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: seen.append(mxmsg.message))
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, unsubscribes)
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: None, matching=watches)
+
+        def push_both() -> None:
+            """Both messages from one sender, so that they arrive in order."""
+            with TestClient(self.cluster, peers.WEBSITE) as sender:
+                sender.send(b"one", types.PYTHON_TEST_RESPONSE, to=self.client.instance_id)
+                sender.send(b"two", types.PYTHON_TEST_RESPONSE, to=self.client.instance_id)
+
+        await loop.run_in_executor(None, push_both)
+        await asyncio.wait_for(done.wait(), 10)
+        self.assertEqual([b"one", b"two"], after)
+        self.assertEqual([b"one"], seen, "the handler ran after unsubscribe() had returned")
+
     async def test_a_raising_predicate_takes_nothing_and_the_others_still_get_it(self):
         """A `matching` that raises counts as no match: the other
         subscriptions and messages() still get the message, where the
@@ -290,6 +408,145 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([b"3", b"4", b"5"], [m.message for m in kept])
         finally:
             await small.aclose()
+
+    async def test_messages_ends_once_the_client_is_closed(self):
+        """After close(), every reader of messages() gets what arrived
+        before it and then ends, its `async for` over, where each waited for
+        good; a stream asked for after close() ends at once. Two readers
+        share the queue: the one that meets the end puts it back for the
+        other."""
+        loop = asyncio.get_running_loop()
+        first, second = self.client.messages(), self.client.messages()
+        delivered = asyncio.Event()
+        self.client.subscribe(None, lambda mxmsg: delivered.set(), matching=lambda m: m.message == b"1")
+
+        async def read(stream) -> list[bytes]:
+            return [mxmsg.message async for mxmsg in stream]
+
+        readers = [asyncio.ensure_future(read(stream)) for stream in (first, second)]
+        await loop.run_in_executor(None, self.push_in_order, self.client.instance_id, b"0", b"1")
+        await asyncio.wait_for(delivered.wait(), 10)
+        await self.client.aclose()
+        read_by = await asyncio.wait_for(asyncio.gather(*readers), 10)
+        self.assertEqual([b"0", b"1"], sorted(read_by[0] + read_by[1]))
+        self.assertEqual([], await asyncio.wait_for(read(self.client.messages()), 10))
+
+    async def test_no_handler_is_called_once_close_was(self):
+        """A message handed to the loop before close() was called, and not
+        delivered yet, reaches no handler: the loop is held, on purpose,
+        until a predicate on the io thread has seen three messages, and
+        close() is called from the loop with their deliveries waiting.
+        Those ran after close() had returned, on the closed client."""
+        loop = asyncio.get_running_loop()
+        seen_all = threading.Event()  # the io thread took the third; its hand-over follows before its end
+        taken: list[bytes] = []
+        handled: list[bytes] = []
+
+        def takes(mxmsg) -> bool:
+            taken.append(mxmsg.message)
+            if len(taken) == 3:
+                seen_all.set()
+            return True
+
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: handled.append(mxmsg.message), takes)
+        pushing = loop.run_in_executor(None, self.push_in_order, self.client.instance_id, b"0", b"1", b"2")
+        self.assertTrue(seen_all.wait(10), "the three messages never reached the io thread")  # the loop held
+        self.client.close()  # joins the io thread: the three deliveries wait on the loop
+        await pushing
+        ran = loop.create_future()
+        loop.call_soon(ran.set_result, None)  # behind the deliveries queued before
+        await ran
+        self.assertEqual([], handled, "a handler ran after close()")
+
+    async def test_close_cancels_the_handlers_still_running(self):
+        """A coroutine handler still running once close() has returned is
+        cancelled on the loop, where it ran on, on a closed client, and was
+        destroyed pending if the loop ended first."""
+        loop = asyncio.get_running_loop()
+        started, ended = asyncio.Event(), asyncio.Event()
+        outcome: list[str] = []
+
+        async def never_ends(mxmsg) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                outcome.append("cancelled")
+                raise
+            finally:
+                ended.set()
+
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, never_ends)
+        await loop.run_in_executor(None, self.push, b"work", self.client.instance_id)
+        await asyncio.wait_for(started.wait(), 10)
+        self.client.close()
+        await asyncio.wait_for(ended.wait(), 10)
+        self.assertEqual(["cancelled"], outcome)
+
+    async def test_aclose_lets_running_handlers_end_and_sends_what_they_send(self):
+        """aclose() waits, within its timeout, for the coroutine handlers
+        still running, and what they send then is written before the
+        client closes: the handler sends once released, after aclose()
+        began, and the backend gets it. It was closed under them, their
+        sends failing with NotConnected."""
+        loop = asyncio.get_running_loop()
+        started, release = asyncio.Event(), asyncio.Event()
+        outcome: list[str] = []
+
+        async def sends_when_released(mxmsg) -> None:
+            started.set()
+            await release.wait()
+            await self.client.send_message(b"from the handler", type=types.PYTHON_TEST_REQUEST)
+            outcome.append("sent")
+
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, sends_when_released)
+        await loop.run_in_executor(None, self.push, b"work", self.client.instance_id)
+        await asyncio.wait_for(started.wait(), 10)
+        closing = asyncio.ensure_future(self.client.aclose(timeout=30))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        self.assertFalse(closing.done(), "aclose() did not wait for the handler")
+        release.set()
+        await asyncio.wait_for(closing, 60)
+        self.assertEqual(["sent"], outcome)
+        self.peer.wait_for(types.PYTHON_TEST_REQUEST, matching=lambda m: m.message == b"from the handler")
+
+    async def test_aclose_cancels_a_handler_still_running_at_its_timeout(self):
+        """A coroutine handler that does not end within aclose()'s timeout
+        is cancelled; one that awaits aclose() itself goes on."""
+        loop = asyncio.get_running_loop()
+        started, closer_done = asyncio.Event(), asyncio.Event()
+        outcome: list[str] = []
+
+        async def never_ends(mxmsg) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                outcome.append("cancelled")
+                raise
+
+        async def closes(mxmsg) -> None:
+            await started.wait()
+            await self.client.aclose(timeout=0.2)  # the other never ends: cancelled at the timeout
+            outcome.append("the closer went on")
+            closer_done.set()
+
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, never_ends, matching=lambda m: m.message == b"stuck")
+        self.client.subscribe(types.PYTHON_TEST_RESPONSE, closes, matching=lambda m: m.message == b"close")
+        await loop.run_in_executor(None, self.push_in_order, self.client.instance_id, b"stuck", b"close")
+        await asyncio.wait_for(closer_done.wait(), 10)
+        self.assertEqual(["cancelled", "the closer went on"], outcome)
+
+    async def test_a_queue_of_no_messages_is_refused(self):
+        """queue_size is 1 at least, before anything connects: 0, which is
+        no bound to asyncio.Queue, and less raise ValueError, from create()
+        too, where messages() then held every message for good."""
+        for size in (0, -1):
+            with self.assertRaises(ValueError):
+                AsyncClient(self.cluster.endpoints, peers.PYTHON_TEST_CLIENT, queue_size=size)
+            with self.assertRaises(ValueError):
+                await AsyncClient.create(self.cluster.endpoints, peers.PYTHON_TEST_CLIENT, queue_size=size)
 
     async def test_what_arrived_before_the_reply_is_handled_before_the_await_resumes(self):
         """A query awaited on the client's loop resumes after the handlers of

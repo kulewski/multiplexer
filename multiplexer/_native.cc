@@ -36,10 +36,10 @@ using Callable = pybind11::function;
 
 #include "lib/logging/logging.h"
 #include "lib/memory.h"
+#include "lib/seconds.h"
 #include "lib/type_utils.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/client.h"
-#include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/threaded_client.h"
 
 namespace multiplexer {
@@ -246,28 +246,6 @@ struct PythonClient : public Client {
         pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
   }
 
-  // `timeout` bounds how long a message waits for room on a full
-  // connection (see BasicClient); a null tracker means no connection is live.
-  ScheduledMessageTracker schedule_one(pybind11::bytes serialized, float timeout) {
-    std::string message(serialized);
-    return Client::schedule_one(&message, timeout);
-  }
-  // schedule_one that also reports the connection used, for the resend logic
-  // in mxclient.send_and_receive. `pinned`: the message belongs to a pinned
-  // lane and must not be handed to another connection if this one dies.
-  mxtyping::Tuple<ScheduledMessageTracker, ConnectionWrapper> schedule_one_used(pybind11::bytes serialized, bool pinned,
-                                                                                float timeout) {
-    basic_client_->check_not_orphaned();  // first: an inherited client's loop and sockets are the parent's
-    std::string message(serialized);
-    ConnectionWrapper used;
-    basic_client_->poll();  // as Client::schedule_one does
-    shared_ptr<const RawMessage> raw = _serialize(&message);
-    if (pinned) {
-      raw->mark_pinned();
-    }
-    ScheduledMessageTracker tracker(basic_client_->schedule_one(raw, &used, timeout));
-    return mxtyping::Tuple<ScheduledMessageTracker, ConnectionWrapper>(pybind11::make_tuple(tracker, used));
-  }
   bool wait_for_any_connection(float timeout) {
     basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
@@ -306,38 +284,14 @@ struct PythonClient : public Client {
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
         pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
   }
-  // Through `w`, or another connection once it is gone, which may wait
-  // for one to come up: without the GIL, as every wait here.
-  ScheduledMessageTracker schedule_one(pybind11::bytes serialized, ConnectionWrapper w, float timeout) {
-    std::string message(serialized);
-    GilRelease release;
-    return Client::schedule_one(&message, w, timeout);
-  }
-  // On `w` only, never another connection, as the C++ clients use a lane's,
-  // waiting there for room when it is full: null when it is gone; `pinned`
-  // as for schedule_one_used.
-  ScheduledMessageTracker schedule_on(pybind11::bytes serialized, ConnectionWrapper w, bool pinned, float timeout) {
-    basic_client_->check_not_orphaned();
-    std::string message(serialized);
-    basic_client_->poll();
-    shared_ptr<const RawMessage> raw = _serialize(&message);
-    if (pinned) {
-      raw->mark_pinned();
-    }
-    return ScheduledMessageTracker(basic_client_->schedule_on(raw, w, timeout));
-  }
-
+  // A copy on every live connection, for the library's own sends to ALL:
+  // how many connections took one.
   unsigned int schedule_all(pybind11::bytes serialized, float timeout) {
     std::string message(serialized);
     return Client::schedule_all(&message, timeout);
   }
-  // flush() and flush_all() run the loop without the GIL, as the reads do,
-  // so that the program's other threads go on while they wait.
-  void flush(ScheduledMessageTracker tracker, float timeout) {
-    basic_client_->check_not_orphaned();
-    GilRelease release;
-    Client::flush(tracker, timeout);
-  }
+  // flush_all() runs the loop without the GIL, as the reads do, so that
+  // the program's other threads go on while it waits.
   bool flush_all(float timeout) {
     basic_client_->check_not_orphaned();
     GilRelease release;
@@ -394,18 +348,6 @@ struct PythonClient : public Client {
     basic_client_->release_drop_observer();  // after the shutdown's own drops were told
   }
 };
-
-// The probe an addressed query locates its addressee with, as the Python
-// side names it: the message type it sends.
-static Probe probe_from_type(std::uint32_t type) {
-  if (type == types::PING) {
-    return PROBE_PING;
-  }
-  if (type == types::BACKEND_FOR_PACKET_SEARCH) {
-    return PROBE_SEARCH;
-  }
-  throw std::invalid_argument("probe must be types.BACKEND_FOR_PACKET_SEARCH or types.PING");
-}
 
 // The exception types, as Python classes, for the translator and for the
 // threaded client's callbacks.
@@ -471,7 +413,7 @@ struct PythonThreadedClient {
   // `answer` is a Python callable returning whether to answer a search
   // for a backend; runs on the io thread with the GIL. See
   // ThreadedClient::set_search_policy.
-  void set_search_policy(mxtyping::Callable<bool()> answer) {
+  void set_search_policy(mxtyping::Callable<pybind11::object()> answer) {  // read by its truth
     std::shared_ptr<pybind11::object> held(new pybind11::object(answer), [](pybind11::object* object) {
       CallbackSlot slot;
       if (!slot.ok) {
@@ -487,7 +429,9 @@ struct PythonThreadedClient {
       }
       pybind11::gil_scoped_acquire acquire;
       try {
-        return (*held)().cast<bool>();
+        // Python's truth: a non-empty list says yes, as `if` reads it, where
+        // a cast to bool refused it; a __bool__ that raises raises here.
+        return static_cast<bool>(pybind11::bool_((*held)()));
       } catch (pybind11::error_already_set& error) {
         error.restore();
         PyErr_Print();
@@ -569,8 +513,8 @@ struct PythonThreadedClient {
     client.send_serialized_and_notify(std::string(payload), all, timeout, python_callback<unsigned int, bool>(callback),
                                       lane_given.value_or(LanePtr()));
   }
-  // The request as a serialized MultiplexerMessage, `to` included; `probe`
-  // as a message type (see probe_from_type), `lane` a Lane or None.
+  // The request as a serialized MultiplexerMessage, `to` included; `lane`
+  // a Lane or None.
   static MultiplexerMessage parse(const std::string& serialized) {
     MultiplexerMessage msg;
     if (!msg.ParseFromString(serialized)) {
@@ -585,16 +529,14 @@ struct PythonThreadedClient {
     return on_received ? python_callback<std::uint64_t>(*on_received) : ReceivedCallback();
   }
   mxtyping::Tuple<pybind11::bytes, ConnectionWrapper> query(pybind11::bytes serialized, float timeout,
-                                                            std::uint32_t probe, std::optional<LanePtr> lane_given,
-                                                            OnReceived on_received) {
+                                                            std::optional<LanePtr> lane_given, OnReceived on_received) {
     LanePtr lane = lane_given.value_or(LanePtr());
     MultiplexerMessage msg = parse(std::string(serialized));
-    Probe how = probe_from_type(probe);
     ReceivedCallback received = received_for(on_received);
     ThreadedClient::Result result;
     {
       GilRelease release;
-      result = client.query(msg, timeout, lane, how, received);
+      result = client.query(msg, timeout, lane, received);
     }
     result.check();  // throws the C++ exception, translated below
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
@@ -604,10 +546,9 @@ struct PythonThreadedClient {
       pybind11::bytes serialized,
       mxtyping::Callable<void(std::optional<pybind11::bytes>, std::optional<ConnectionWrapper>, pybind11::object)>
           callback,
-      float timeout, std::uint32_t probe, std::optional<LanePtr> lane_given, OnReceived on_received) {
+      float timeout, std::optional<LanePtr> lane_given, OnReceived on_received) {
     LanePtr lane = lane_given.value_or(LanePtr());
     MultiplexerMessage msg = parse(std::string(serialized));
-    Probe how = probe_from_type(probe);
     std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function* function) {
       CallbackSlot slot;
       if (!slot.ok) {
@@ -637,7 +578,7 @@ struct PythonThreadedClient {
             PyErr_Print();
           }
         },
-        timeout, lane, how, received_for(on_received));
+        timeout, lane, received_for(on_received));
   }
   void shutdown(float timeout) {
     GilRelease release;
@@ -747,22 +688,16 @@ PYBIND11_MODULE(_native, module) {
     }
   });
 
-  typedef multiplexer::PythonClient::ScheduledMessageTracker ScheduledMessageTracker;
   pybind11::enum_<multiplexer::DropReason>(module, "DropReason",
                                            "Why a client gave up on a message the program sent; see the clients' "
                                            "on_drop and docs/semantics.md.")
-      .value("NO_ROOM", multiplexer::DropReason::NO_ROOM, "It waited for room on a full connection past its timeout.")
+      .value("NO_ROOM", multiplexer::DropReason::NO_ROOM,
+             "It waited for room on a full connection past its timeout, or, sent with no time to wait, found none.")
       .value("NO_CONNECTION", multiplexer::DropReason::NO_CONNECTION,
-             "It waited for a connection to come up past its timeout.")
+             "It waited for a connection to come up past its timeout, or, sent with no time to wait, found none live.")
       .value("CONNECTION_LOST", multiplexer::DropReason::CONNECTION_LOST,
              "Its connection ended and nothing else could take it: a pinned lane's, a copy for ALL.")
       .value("SHUT_DOWN", multiplexer::DropReason::SHUT_DOWN, "The client shut down before it went.");
-
-  pybind11::class_<ScheduledMessageTracker>(module, "ScheduledMessageTracker")
-      .def("__bool__", &ScheduledMessageTracker::operator bool)
-      .def("in_queue", &ScheduledMessageTracker::in_queue)
-      .def("is_sent", &ScheduledMessageTracker::is_sent)
-      .def("is_lost", &ScheduledMessageTracker::is_lost);
 
   pybind11::class_<multiplexer::ConnectionWrapper>(
       module, "ConnectionWrapper", "A connection to one multiplexer, held weakly: false once it is gone.")
@@ -841,29 +776,11 @@ PYBIND11_MODULE(_native, module) {
 
       .def("read_raw_message", &multiplexer::PythonClient::read_message, pybind11::arg("timeout"))
 
-      .def("schedule_one",
-           (ScheduledMessageTracker(multiplexer::PythonClient::*)(pybind11::bytes, float)) &
-               multiplexer::PythonClient::schedule_one,
-           pybind11::arg("serialized"), pybind11::arg("timeout") = multiplexer::DEFAULT_TIMEOUT)
-
-      .def("schedule_one",
-           (ScheduledMessageTracker(multiplexer::PythonClient::*)(pybind11::bytes, multiplexer::ConnectionWrapper,
-                                                                  float)) &
-               multiplexer::PythonClient::schedule_one,
-           pybind11::arg("serialized"), pybind11::arg("connection"), pybind11::arg("timeout"))
-
-      .def("schedule_all", &multiplexer::PythonClient::schedule_all, pybind11::arg("serialized"),
-           pybind11::arg("timeout") = multiplexer::DEFAULT_TIMEOUT)
-      .def("schedule_one_used", &multiplexer::PythonClient::schedule_one_used, pybind11::arg("serialized"),
-           pybind11::arg("pinned") = false, pybind11::arg("timeout") = multiplexer::DEFAULT_TIMEOUT)
-      .def("schedule_on", &multiplexer::PythonClient::schedule_on, pybind11::arg("serialized"),
-           pybind11::arg("connection"), pybind11::arg("pinned") = false,
+      .def("_schedule_all", &multiplexer::PythonClient::schedule_all, pybind11::arg("serialized"),
            pybind11::arg("timeout") = multiplexer::DEFAULT_TIMEOUT)
       .def("wait_for_any_connection", &multiplexer::PythonClient::wait_for_any_connection, pybind11::arg("timeout"))
       .def("read_raw_message_watching", &multiplexer::PythonClient::read_message_watching, pybind11::arg("timeout"),
            pybind11::arg("watch"))
-
-      .def("flush", &multiplexer::PythonClient::flush, pybind11::arg("tracker"), pybind11::arg("timeout"))
 
       .def("send", &multiplexer::PythonClient::send, pybind11::arg("serialized"), pybind11::arg("all"),
            pybind11::arg("lane"), pybind11::arg("timeout"), pybind11::arg("callback") = pybind11::none())
@@ -911,11 +828,10 @@ PYBIND11_MODULE(_native, module) {
            pybind11::arg("all"), pybind11::arg("timeout"), pybind11::arg("callback"),
            pybind11::arg("lane") = multiplexer::LanePtr())
       .def("query", &multiplexer::PythonThreadedClient::query, pybind11::arg("serialized"), pybind11::arg("timeout"),
-           pybind11::arg("probe"), pybind11::arg("lane") = multiplexer::LanePtr(),
-           pybind11::arg("on_received") = pybind11::none())
-      .def("query_with_callback", &multiplexer::PythonThreadedClient::query_with_callback, pybind11::arg("serialized"),
-           pybind11::arg("callback"), pybind11::arg("timeout"), pybind11::arg("probe"),
            pybind11::arg("lane") = multiplexer::LanePtr(), pybind11::arg("on_received") = pybind11::none())
+      .def("query_with_callback", &multiplexer::PythonThreadedClient::query_with_callback, pybind11::arg("serialized"),
+           pybind11::arg("callback"), pybind11::arg("timeout"), pybind11::arg("lane") = multiplexer::LanePtr(),
+           pybind11::arg("on_received") = pybind11::none())
       .def("shutdown", &multiplexer::PythonThreadedClient::shutdown,
            pybind11::arg("timeout") = multiplexer::CLOSE_FLUSH_SECONDS);
 
@@ -959,6 +875,7 @@ PYBIND11_MODULE(_native, module) {
   module.attr("CLOSE_FLUSH_SECONDS") = pybind11::float_(multiplexer::CLOSE_FLUSH_SECONDS);
   module.attr("MAX_MESSAGE_SIZE") = pybind11::int_(multiplexer::MAX_MESSAGE_SIZE);
   module.attr("HEARTBIT_INTERVAL") = pybind11::float_(multiplexer::HEARTBIT_INTERVAL);
+  module.attr("MAX_SECONDS") = pybind11::float_(mx::MAX_SECONDS);
   module.attr("CLOSE_READ_SECONDS") = pybind11::float_(multiplexer::CLOSE_READ_SECONDS);
   module.attr("NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL") =
       pybind11::float_(multiplexer::NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL);

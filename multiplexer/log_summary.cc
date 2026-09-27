@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "lib/repr.h"
+#include "lib/seconds.h"
 
 namespace multiplexer {
 
@@ -59,7 +60,7 @@ void LogSummary::State::arm() {
     return;
   }
   armed = true;
-  timer.expires_after(std::chrono::microseconds(static_cast<long>(INTERVAL * 1e6)));
+  timer.expires_after(mx::from_seconds(INTERVAL));
   timer.async_wait([weak = weak_from_this()](const asio::error_code& error) {
     std::shared_ptr<State> state = weak.lock();
     if (error == asio::error::operation_aborted || !state) {

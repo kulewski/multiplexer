@@ -176,12 +176,19 @@ cc_library(
 )
 
 cc_library(
+    name = "seconds",
+    hdrs = ["seconds.h"],
+    visibility = ["//:__subpackages__"],
+)
+
+cc_library(
     name = "timer",
     hdrs = ["timer.h"],
     visibility = ["//multiplexer:__pkg__"],
     deps = [
         ":assert",
         ":repr",
+        ":seconds",
         "//lib/logging",
         "@asio",
     ],

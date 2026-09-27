@@ -86,6 +86,7 @@ HEADERS := \
   lib/random.h \
   lib/release.h \
   lib/repr.h \
+  lib/seconds.h \
   lib/spanset.h \
   lib/thread_annotations.h \
   lib/thread_checker.h \
@@ -162,12 +163,15 @@ CC_TEST_SRCS := \
   multiplexer/backend/threaded_server_test.cc \
   multiplexer/client_names_test.cc \
   multiplexer/connect_by_name_test.cc \
+  multiplexer/flooded_client_test.cc \
   multiplexer/fork_test.cc \
   multiplexer/log_summary_test.cc \
+  multiplexer/negative_timeout_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/routing_index_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
+  multiplexer/zero_nan_timeout_test.cc \
 
 
 PY_TEST_FILES := \
@@ -183,18 +187,23 @@ PY_TEST_FILES := \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
   multiplexer/graceful_stop_test.py \
+  multiplexer/infinite_timeout_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/keepalive_test.py \
   multiplexer/leak_test.py \
   multiplexer/lifetime_test.py \
   multiplexer/log_reader_gone_test.py \
+  multiplexer/monotonic_clock_test.py \
   multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \
+  multiplexer/negative_timeout_test.py \
   multiplexer/no_connection_test.py \
   multiplexer/outage_test.py \
+  multiplexer/pickle_failures_test.py \
   multiplexer/pickle_test.py \
   multiplexer/query_acknowledged_test.py \
   multiplexer/recording_read_test.py \
+  multiplexer/report_loop_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
   multiplexer/serve_thread_test.py \
@@ -210,4 +219,7 @@ PY_TEST_FILES := \
   multiplexer/threaded_sends_test.py \
   multiplexer/threaded_server_test.py \
   multiplexer/unrouted_test.py \
+  multiplexer/whole_message_test.py \
+  multiplexer/zero_nan_timeout_test.py \
+  multiplexer/zero_timeout_test.py \
 

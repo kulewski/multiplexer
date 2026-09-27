@@ -50,10 +50,11 @@ class FrameBeingWrittenTest(unittest.TestCase):
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as backend:
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             mxmsg = client.new_message(message=b"last words", type=EVENT)
-            tracker = client.schedule_one(mxmsg.SerializeToString())
-            self.assertTrue(tracker.in_queue(), "its handler has not run yet")
+            heard: list[int] = []
+            client.send_message(mxmsg, callback=heard.append)
+            self.assertEqual([], heard, "its handler has not run yet")
             client.shutdown()
-            self.assertTrue(tracker.is_sent(), "written, not lost")
+            self.assertEqual([1], heard, "written, not lost")
             backend.wait_for(EVENT, matching=lambda received: received.id == mxmsg.id)
 
 

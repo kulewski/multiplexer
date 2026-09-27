@@ -11,8 +11,9 @@
 // first PING that answers, and repeat the request to that backend by
 // instance id. docs/query.md draws it. A request with `to` set is an
 // addressed query, _query_addressed: the same shape, except that the
-// middle stage locates that one instance rather than any backend of the
-// type, and the three stages share one timeout.
+// middle stage locates that one instance, with a PING addressed to it,
+// rather than any backend of the type, and the three stages share one
+// timeout.
 //
 // A Lane (basic_client.h) given to send or query keeps a stream of messages
 // on one connection, following a failover or, pinned, refusing one; a
@@ -220,7 +221,9 @@ class Client : public ExceptionDefinitions {
   }
 
   // Runs the loop until the tracked message is written or lost, or the
-  // timeout passes.
+  // timeout passes; at once, whatever the timeout, when no connection is
+  // live or coming (BasicClient::connection_live_or_coming), which leaves
+  // a held message held.
   void flush(ScheduledMessageTracker tracker, float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
 
@@ -230,24 +233,28 @@ class Client : public ExceptionDefinitions {
 
   void flush(ScheduledMessageTracker tracker, mx::SimpleTimer& timer) const {
     basic_client_->check_not_orphaned();
-    std::size_t n;
-    while (tracker && tracker.in_queue() && !timer.expired()) {
-      n = basic_client_->run_one();
-      Assert(n);
+    while (tracker && tracker.in_queue() && !timer.expired() && basic_client_->connection_live_or_coming()) {
+      if (basic_client_->run_one() == 0) {
+        break;  // nothing gives the loop work: nothing more can happen
+      }
     }
   }
 
   // Runs the loop until everything sent before the call is written or
   // given up on, what still waits for room included, or `timeout` passes;
   // true when every one of them was written, false when one was given up
-  // on (the drop observer says which) or the time ran out. See
-  // BasicClient::begin_flush().
+  // on (the drop observer says which) or the time ran out. False at once,
+  // whatever the timeout, when something waits and no connection is live
+  // or coming, as nothing could write it; where the loop then had no work,
+  // a wait with no deadline spun. See BasicClient::begin_flush().
   bool flush_all(float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
     BasicClient::FlushPtr flush = basic_client_->begin_flush();
-    while (!basic_client_->flushed(flush) && !timer->expired()) {
-      basic_client_->run_one();
+    while (!basic_client_->flushed(flush) && !timer->expired() && basic_client_->connection_live_or_coming()) {
+      if (basic_client_->run_one() == 0) {
+        break;  // nothing gives the loop work: nothing more can happen
+      }
     }
     basic_client_->end_flush(flush);
     return basic_client_->all_written(flush);
@@ -305,34 +312,33 @@ class Client : public ExceptionDefinitions {
   // type. Returns the reply as an IncomingMessage, whose `third` is the
   // parsed message and `second` the connection it came on. A typed request
   // gives each stage of the algorithm its own `timeout`; a request with
-  // `to` set is addressed and its stages share one, see _query. With a
+  // `to` set is addressed, its addressee located with a PING when the
+  // request did not reach it, and its stages share one, see _query. With a
   // lane, the request goes through the lane's connection and the lane
-  // adopts the connection the reply came through; `probe` is how an
-  // addressed query locates its addressee. `received`, when given, is told
-  // here, on the caller's thread while the query waits (so it must not
-  // read through this client), the instance id of each backend that
+  // adopts the connection the reply came through. `received`, when given,
+  // is told here, on the caller's thread while the query waits (so it must
+  // not read through this client), the instance id of each backend that
   // acknowledges an attempt with REQUEST_RECEIVED (notify_start()): once,
   // normally, or again when a retry reached a backend, the same or
   // another; nothing about the query changes for it.
   IncomingMessage query(const MultiplexerMessage& mxmsg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
-                        Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback()) {
+                        ReceivedCallback received = ReceivedCallback()) {
     basic_client_->check_not_orphaned();
-    return _query(mxmsg, timeout, lane, probe, received);
+    return _query(mxmsg, timeout, lane, received);
   }
   // Through `connection` while it is live, another when it is gone; a
   // pinned Lane seeded with the connection is the form that refuses any
   // other.
   IncomingMessage query(const MultiplexerMessage& mxmsg, const ConnectionWrapper& connection,
-                        float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH,
-                        ReceivedCallback received = ReceivedCallback()) {
-    return query(mxmsg, timeout, std::make_shared<Lane>(connection), probe, received);
+                        float timeout = DEFAULT_TIMEOUT, ReceivedCallback received = ReceivedCallback()) {
+    return query(mxmsg, timeout, std::make_shared<Lane>(connection), received);
   }
 
+  // The same, the request held by a shared_ptr.
   IncomingMessage query(shared_ptr<const MultiplexerMessage> mxmsg, float timeout = DEFAULT_TIMEOUT,
-                        LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH,
-                        ReceivedCallback received = ReceivedCallback()) {
+                        LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback()) {
     basic_client_->check_not_orphaned();
-    return _query(*mxmsg, timeout, lane, probe, received);
+    return _query(*mxmsg, timeout, lane, received);
   }
 
   IncomingMessage query(const std::string& message, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
@@ -344,7 +350,7 @@ class Client : public ExceptionDefinitions {
     mxmsg.set_from(instance_id());
     mxmsg.set_type(type);
     mxmsg.set_message(message);
-    return _query(mxmsg, timeout, lane, PROBE_SEARCH, received);
+    return _query(mxmsg, timeout, lane, received);
   }
 
   // Queues `msg` on every live connection, a full one's copy waiting for
@@ -368,9 +374,8 @@ class Client : public ExceptionDefinitions {
  protected:
   // The query algorithm and the send-and-receive it is built on live in
   // client.cc; see the comments there.
-  IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe,
-                         ReceivedCallback received);
-  IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe);
+  IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, ReceivedCallback received);
+  IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane);
   IncomingMessage _send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all = false,
                                     bool handle_delivery_errors = false,
                                     const std::vector<uint64_t>& also_accept = std::vector<uint64_t>(),
@@ -409,14 +414,14 @@ class Client : public ExceptionDefinitions {
   // connection is live or `lane` is a pinned one whose connection is gone,
   // OperationTimedOut otherwise.
   [[noreturn]] void _raise_for_nothing_written(const LanePtr& lane, bool lost);
-  MultiplexerMessage _probe_for(const MultiplexerMessage& query, Probe probe);
+  MultiplexerMessage _locator_for(const MultiplexerMessage& query);
   IncomingMessage _receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper* watch = NULL, bool* lost = NULL);
   /**
    * _serialize
    */
   shared_ptr<const RawMessage> _serialize(const MultiplexerMessage& msg) {
-    return shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
+    return frame_stamped(msg, instance_id(), [this] { return random64(); });
   }
   shared_ptr<const RawMessage> _serialize(std::string* serialized) {
     return shared_ptr<const RawMessage>(new RawMessage(serialized));

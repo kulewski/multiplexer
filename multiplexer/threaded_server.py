@@ -29,7 +29,7 @@ from typing import Any, Callable, TypeVar
 
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, NotConnected, parse_message
+from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, NotConnected, parse_message, wait_seconds
 from multiplexer.mxlog import DEBUG, ERROR, HIGHVERBOSITY, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
@@ -255,7 +255,7 @@ class BaseThreadedMultiplexerServer:
         self.decline_searches_when_full = decline_searches_when_full
         self.drain_routing = drain_routing if drain_routing is not None else Routing(any=False, all=False)
         self.working = True
-        self._draining_since: float | None = None
+        self._draining_since: float | None = None  # time.monotonic() at start_draining()
         self._drain_seconds = 0.0
         self._start_time = time.time()
         self._queue: collections.deque[Request] = collections.deque()
@@ -376,7 +376,7 @@ class BaseThreadedMultiplexerServer:
         """Tell every multiplexer the `drain_routing`, nothing new by the
         rules by default; keep serving what arrives until drained()."""
         if self._draining_since is None:
-            self._draining_since = time.time()
+            self._draining_since = time.monotonic()
             client = self._client
             if client is not None:
                 client.set_routing(self.drain_routing)  # close()'s too; nothing on a client already shut down
@@ -396,7 +396,9 @@ class BaseThreadedMultiplexerServer:
             return False
         if self._closed:
             return True  # nothing more is coming through a closed client
-        if time.time() - since >= self._drain_seconds:
+        # A negative drain_seconds is no cap, as math.inf, the confirmation
+        # alone ending the drain; 0 and NaN end it at once (wait_seconds).
+        if time.monotonic() - since >= wait_seconds(self._drain_seconds):
             return True
         client = self._client
         if client is None:
@@ -441,7 +443,7 @@ class BaseThreadedMultiplexerServer:
         try:
             self.connect()
             while True:
-                self._wake.wait(poll)
+                self._wake.wait(wait_seconds(poll))
                 self._wake.clear()
                 if not self.working or (self.draining and self.drained()) or self._failure is not None:
                     break  # checked after the wait: a close() meanwhile ends it before periodic_task()
@@ -539,7 +541,10 @@ class BaseThreadedMultiplexerServer:
         request = Request(self, mxmsg, connection)
         with self._cond:
             accepting = self._accepting
-            accepted = accepting and len(self._queue) < self.queue_size
+            # What a worker will take, an idle one's included, and queue_size
+            # more that wait for one: the queue also holds what an idle
+            # worker is about to take, and _busy counts only what was taken.
+            accepted = accepting and len(self._queue) + self._busy < self.workers + self.queue_size
             if accepted:
                 self._queue.append(request)
                 self._cond.notify()
@@ -611,7 +616,8 @@ class BaseThreadedMultiplexerServer:
         except Exception as exc:  # reported to the requester and to on_handler_exception()
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % exc)
-            if not request.answered:
+            # A reply or a report gets no report: nobody waits for an answer to it.
+            if not request.answered and not request.mxmsg.references:
                 try:
                     request.report_error(message=format_exception(exc, sys.exc_info()[2]))
                 except Exception as reporting:  # the requester waits out its timeout; the handler's exception decides
@@ -621,5 +627,6 @@ class BaseThreadedMultiplexerServer:
                         text=lambda: "could not report the exception to the requester: %r" % reporting,
                     )
             if not self.on_handler_exception(exc):
-                self._failure = exc
+                if self._failure is None:  # the first, as _work() keeps
+                    self._failure = exc
                 self.stop()

@@ -73,10 +73,9 @@ class ThreadedClientLanesTest(unittest.TestCase):
         self.cluster.__exit__(None, None, None)
 
     def test_only_the_addressee_gets_an_addressed_query(self):
-        """Blocking and callback forms, both probes; the other fake of the type sees nothing."""
+        """Blocking and callback forms; the other fake of the type sees nothing."""
         for index in range(6):
-            probe = types.PING if index % 2 else types.BACKEND_FOR_PACKET_SEARCH
-            reply = self.client.query(b"n%d" % index, REQUEST, to=self.peer.instance_id, probe=probe)
+            reply = self.client.query(b"n%d" % index, REQUEST, to=self.peer.instance_id)
             self.assertEqual((b"N%d" % index, self.peer.instance_id), (reply.message, reply.from_))
         results = []
         done = threading.Semaphore(0)
@@ -100,6 +99,32 @@ class ThreadedClientLanesTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual([], self.peer.received)
         self.assertEqual([], self.other.received)
+
+    def test_an_addressee_that_declines_searches_is_located(self):
+        """A backend that declines every search, as a saturated one does,
+        behind the second multiplexer only, and a lane on the first: the
+        addressed request meets a delivery error there, the client locates
+        the backend with a PING, which it answers whatever its search
+        policy, and the reply comes through the second."""
+        declining = FakePeer(
+            self.cluster, peers.PYTHON_TEST_SERVER, name="declining", endpoints=[self.cluster.mx[1].endpoint]
+        ).start()
+        declining.on(REQUEST, answer, RESPONSE)
+        declining.declining_searches = True
+        client = ThreadedClient([self.cluster.mx[0].endpoint], type=peers.PYTHON_TEST_CLIENT)
+        try:
+            lane = client.lane()
+            client.query(b"warm-up", REQUEST, multiplexer=lane)  # the lane takes the only connection, the first's
+            self.assertTrue(client.connect(self.cluster.mx[1].endpoint))
+            reply, connection = client.query(
+                b"saturated", REQUEST, to=declining.instance_id, multiplexer=lane, timeout=5, with_connection=True
+            )
+            self.assertEqual(b"SATURATED", reply.message)
+            self.assertIs(self.cluster.mx[1], self.cluster.multiplexer_at(connection.endpoint))
+            self.assertEqual([b"saturated"], [m.message for m in declining.messages(REQUEST)])
+        finally:
+            client.shutdown()
+            declining.stop()
 
     def test_a_multiplexer_dying_under_the_wait_costs_the_query_nothing(self):
         """The lane says which multiplexer carried the request; kill it while
@@ -298,9 +323,7 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
     async def test_addressed_queries_and_lanes(self):
         reply = await self.client.query(b"one", REQUEST, to=self.peer.instance_id)
         self.assertEqual((b"ONE", self.peer.instance_id), (reply.message, reply.from_))
-        reply, connection = await self.client.query(
-            b"two", REQUEST, to=self.peer.instance_id, probe=types.PING, with_connection=True
-        )
+        reply, connection = await self.client.query(b"two", REQUEST, to=self.peer.instance_id, with_connection=True)
         self.assertEqual(b"TWO", reply.message)
         self.assertIs(self.cluster.multiplexer_at(connection.endpoint), self.peer.via(self.peer.messages(REQUEST)[-1]))
         with self.assertRaises(OperationFailed):

@@ -1,10 +1,10 @@
 """Addressed queries, lanes and pinning through the synchronous client,
 against two real multiplexers and scripted peers: the addressee alone gets
 an addressed query, an instance that left is a failure and not a detour to
-another instance, a multiplexer dying under the wait costs the query
-nothing, a lane keeps a stream on one multiplexer and follows a failover,
-a pinned lane fails instead, and FakePeer.via() says which way each
-message came.
+another instance, an addressee that declines searches is located all the
+same, a multiplexer dying under the wait costs the query nothing, a lane
+keeps a stream on one multiplexer and follows a failover, a pinned lane
+fails instead, and FakePeer.via() says which way each message came.
 """
 
 import random
@@ -57,10 +57,9 @@ class AddressedQueryTest(unittest.TestCase):
 
     def test_only_the_addressee_gets_an_addressed_query(self):
         """Ten queries addressed to the second fake are answered by it; the
-        first, of the same type, never sees one; with either probe."""
+        first, of the same type, never sees one."""
         for index in range(10):
-            probe = types.PING if index % 2 else types.BACKEND_FOR_PACKET_SEARCH
-            reply = self.client.query(b"n%d" % index, REQUEST, to=self.second.instance_id, probe=probe)
+            reply = self.client.query(b"n%d" % index, REQUEST, to=self.second.instance_id)
             self.assertEqual(
                 (RESPONSE, b"N%d" % index, self.second.instance_id), (reply.type, reply.message, reply.from_)
             )
@@ -75,8 +74,6 @@ class AddressedQueryTest(unittest.TestCase):
         with self.assertRaises(OperationFailed):
             self.client.query(b"lost", REQUEST, to=gone, timeout=10)
         self.assertLess(time.monotonic() - started, 3, "a delivery error, not a timeout")
-        with self.assertRaises(OperationFailed):
-            self.client.query(b"lost", REQUEST, to=gone, timeout=10, probe=types.PING)
         self.assertEqual([], self.first.received)
         self.assertEqual([], self.second.received)
 
@@ -189,7 +186,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
     def test_the_asymmetric_moment_is_bridged_by_the_locate_phase(self):
         """The addressee is behind one multiplexer only while the client is
         on both: the request through the wrong one comes back as a delivery
-        error, the probe finds the right one, and the reply comes."""
+        error, the PING finds the right one, and the reply comes."""
         with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)
@@ -204,10 +201,12 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 client.shutdown()
                 peer.stop()
 
-    def test_a_declining_addressee_answers_a_ping_probe_only(self):
-        """A backend that declines the default probe, the fake here as a
-        saturated one would, makes the query time out; probe=PING reaches
-        it, for a request that must land even then."""
+    def test_an_addressee_that_declines_searches_is_located(self):
+        """A backend that declines every search, the fake here as a
+        saturated one would, behind one multiplexer only: a typed query
+        sent the other way, whose search it declines, cannot find it; an
+        addressed one locates it with a PING, which it answers whatever its
+        search policy, and gets the reply."""
         with Cluster(2, rules=RULES) as cluster:
             peer = FakePeer(cluster, peers.PYTHON_TEST_SERVER, endpoints=[cluster.mx[1].endpoint]).start()
             peer.on(REQUEST, answer, RESPONSE)
@@ -218,19 +217,12 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 wrong = client.client.connect(cluster.mx[0].endpoint)
                 peer.declining_searches = True
                 with self.assertRaises(OperationTimedOut):
-                    client.query(
-                        b"drained", REQUEST, to=peer.instance_id, multiplexer=client.lane(connection=wrong), timeout=1.5
-                    )
+                    client.query(b"typed", REQUEST, multiplexer=client.lane(connection=wrong), timeout=1.5)
                 reply = client.query(
-                    b"destroy",
-                    REQUEST,
-                    to=peer.instance_id,
-                    probe=types.PING,
-                    multiplexer=client.lane(connection=wrong),
-                    timeout=5,
+                    b"saturated", REQUEST, to=peer.instance_id, multiplexer=client.lane(connection=wrong), timeout=5
                 )
-                self.assertEqual(b"DESTROY", reply.message)
-                self.assertEqual([b"destroy"], [m.message for m in peer.messages(REQUEST)])
+                self.assertEqual(b"SATURATED", reply.message)
+                self.assertEqual([b"saturated"], [m.message for m in peer.messages(REQUEST)])
             finally:
                 client.shutdown()
                 peer.stop()

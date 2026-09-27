@@ -19,7 +19,7 @@ send_message() without flush, but not the blocking query() or a flushing
 send_message(), which raise RuntimeError there.
 
 A query with `to` is addressed: only that peer gets it, located again
-through a probe when a multiplexer no longer has it. `multiplexer=` on
+with a PING when a multiplexer no longer has it. `multiplexer=` on
 send_message() and query() takes a Lane from lane(), one connection for a
 stream of messages, pinned or following a failover, or a ConnectionWrapper
 a reply came through, preferred while it is live. docs/api_python.md,
@@ -31,6 +31,7 @@ from typing import Any, Callable, Literal, TypeVar, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
+from multiplexer.clients import BackendError  # re-exported: the one class every client raises for BACKEND_ERROR
 from multiplexer.mxclient import (
     CLOSE_FLUSH_SECONDS,
     ConnectionWrapper,
@@ -40,15 +41,12 @@ from multiplexer.mxclient import (
     OperationTimedOut,
     UsedAfterFork,
     make_message,
+    stamped,
 )
 from multiplexer.multiplexer_constants import types
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
 
 DEFAULT_TIMEOUT = _native.DEFAULT_TIMEOUT
-
-
-class BackendError(Exception):
-    """The backend answered with BACKEND_ERROR; the payload is its message."""
 
 
 Endpoint = tuple[str, int]
@@ -70,7 +68,7 @@ class ThreadedClient:
         on_message: Callable[..., None] | None = None,
         *,
         with_connection: bool = False,
-        search_policy: Callable[[], bool] | None = None,
+        search_policy: Callable[[], object] | None = None,
         on_drop: Callable[[int, DropReason], None] | None = None,
     ):
         """Start the io thread and connect to every (host, port) in `addresses`.
@@ -83,9 +81,10 @@ class ThreadedClient:
         `on_message(mxmsg, connection)`, the connection the message came on,
         for a reply that must go back the same way. `search_policy`, a
         function returning whether to answer a client's search for a
-        backend, lets requests routed by type find this client: what
-        multiplexer.threaded_server builds on; without it only a search
-        addressed to this instance is answered. `on_drop(message_id,
+        backend, read by its truth as `if` reads it, lets requests routed
+        by type find this client: what
+        multiplexer.threaded_server builds on; without it no search is
+        answered. `on_drop(message_id,
         reason)` runs on the io thread for every message the client gives
         up on, each copy of one sent to ALL, with a DropReason; `dropped`
         counts them. Like `on_message`, it is held until shutdown().
@@ -211,8 +210,8 @@ class ThreadedClient:
         **kwargs: Any,
     ) -> int:
         """Send an event and return its message id. `message` is a
-        MultiplexerMessage or a payload wrapped with the remaining kwargs,
-        such as type= and to=. It goes on one connection, or on every one
+        MultiplexerMessage, an empty id and from filled in, or a payload
+        wrapped with the remaining kwargs, such as type= and to=. It goes on one connection, or on every one
         with multiplexer=ALL, on a Lane's connection (the lane taking the
         connection chosen when it has none or lost its own, unless pinned),
         or on a ConnectionWrapper's while it is live and another after; the
@@ -278,7 +277,10 @@ class ThreadedClient:
         message built from the payload and `kwargs` unless it is one, a
         ConnectionWrapper as a lane that prefers it. NotConnected for a
         pinned lane whose connection is gone."""
-        mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
+        if isinstance(message, MultiplexerMessage):
+            mxmsg = stamped(message, self.instance_id, self.random)
+        else:
+            mxmsg = self.new_message(message=message, **kwargs)
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if lane is not None and lane.closed:
             raise NotConnected()
@@ -313,7 +315,6 @@ class ThreadedClient:
         timeout: float = ...,
         *,
         to: int = ...,
-        probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[False] = ...,
         on_received: Callable[[int], None] | None = ...,
@@ -327,7 +328,6 @@ class ThreadedClient:
         timeout: float = ...,
         *,
         to: int = ...,
-        probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[True],
         on_received: Callable[[int], None] | None = ...,
@@ -342,7 +342,6 @@ class ThreadedClient:
         *,
         callback: QueryCallback,
         to: int = ...,
-        probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: bool = ...,
         on_received: Callable[[int], None] | None = ...,
@@ -355,7 +354,6 @@ class ThreadedClient:
         timeout: float = DEFAULT_TIMEOUT,
         callback: QueryCallback | None = None,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
@@ -373,13 +371,11 @@ class ThreadedClient:
         With `to`, the instance id of a peer, the request is addressed: only
         that peer ever gets it; when a multiplexer reports it is not behind
         it, or the connection dies under the wait, the peer is located with
-        a `probe` addressed to it on every connection, a
-        BACKEND_FOR_PACKET_SEARCH (which reaches the instance whatever its
-        routing, as every addressed message does) or a PING (answered as long
-        as the peer lives, by the server classes, ThreadedClient and
-        AsyncClient, never by a SyncClient), and the request goes again through
-        the connection that found it. A peer nobody has is OperationFailed; one
-        `timeout` covers the three stages.
+        a PING addressed to it on every connection (answered as long as the
+        peer lives, by the server classes, ThreadedClient and AsyncClient
+        whatever their search policy, never by a SyncClient), and the request
+        goes again through the connection that found it. A peer nobody has is
+        OperationFailed; one `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() (the request goes through
         the lane's connection and the lane adopts the connection the reply
@@ -394,8 +390,6 @@ class ThreadedClient:
         or again when a retry reached a backend, the same or another.
         Nothing about the query changes for it; one that raises has its
         traceback printed."""
-        if probe not in (types.BACKEND_FOR_PACKET_SEARCH, types.PING):
-            raise ValueError("probe must be types.BACKEND_FOR_PACKET_SEARCH or types.PING")
         if multiplexer is ThreadedClient.ALL:
             raise ValueError("a query goes through one connection; multiplexer=ALL is for events")
         lane = multiplexer if isinstance(multiplexer, Lane) else None
@@ -406,7 +400,7 @@ class ThreadedClient:
             fields["to"] = to
         raw_request = self.new_message(**fields).SerializeToString()
         if callback is None:
-            raw, connection = self._native.query(raw_request, timeout, probe, lane, on_received)
+            raw, connection = self._native.query(raw_request, timeout, lane, on_received)
             reply = self._parse(raw)
             if reply.type == types.BACKEND_ERROR:
                 raise BackendError(reply.message)
@@ -424,7 +418,7 @@ class ThreadedClient:
             else:
                 callback((reply, connection) if with_connection else reply)
 
-        self._native.query_with_callback(raw_request, on_result, timeout, probe, lane, on_received)
+        self._native.query_with_callback(raw_request, on_result, timeout, lane, on_received)
         return None
 
     # The pickle convention: a payload that is a Python pickle, answered by a
@@ -451,14 +445,23 @@ class ThreadedClient:
     ) -> Any:
         """query() with `data` pickled as the payload. Without `callback`,
         returns the reply's payload unpickled; with one, the callback gets the
-        unpickled payload or the exception instance. The kwargs are query()'s:
-        `to`, `probe`, `multiplexer`, `on_received`."""
+        unpickled payload or the exception instance, what unpickling raised
+        included. The kwargs are query()'s: `to`, `multiplexer`,
+        `on_received`; `with_connection` raises TypeError, the result being
+        the payload alone."""
+        if "with_connection" in kwargs:
+            raise TypeError("query_pickle() returns the payload alone: no with_connection")
         if callback is None:
             return pickle.loads(self.query(pickle.dumps(data), type, timeout, **kwargs).message)
 
         def unpickle(result: MultiplexerMessage | Exception) -> None:
-            """Unpickle a reply, pass an exception through."""
-            callback(result if isinstance(result, Exception) else pickle.loads(result.message))
+            """Unpickle a reply, pass an exception through: the query's, or what unpickling raised."""
+            if not isinstance(result, Exception):
+                try:
+                    result = pickle.loads(result.message)
+                except Exception as error:  # a reply that is no pickle
+                    result = error
+            callback(result)
 
         self.query(pickle.dumps(data), type, timeout, callback=unpickle, **kwargs)
         return None

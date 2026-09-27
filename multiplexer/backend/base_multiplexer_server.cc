@@ -4,6 +4,8 @@
 
 #include <memory>
 
+#include "lib/seconds.h"
+
 namespace multiplexer {
 namespace backend {
 
@@ -103,7 +105,10 @@ bool BaseMultiplexerServer::drained() const {
   if (!draining_) {
     return false;
   }
-  return std::chrono::duration<float>(std::chrono::steady_clock::now() - draining_since_).count() >= drain_seconds_ ||
+  // A negative drain_seconds is no cap, as an infinite one, the drain
+  // ending on the confirmation alone; 0 and NaN end it at once: as
+  // mx::from_seconds reads them, and the threaded server too.
+  return std::chrono::steady_clock::now() - draining_since_ >= mx::from_seconds(drain_seconds_) ||
          (nothing_more_arrives(drain_routing_) && conn->routing_acknowledged());
 }
 
@@ -235,10 +240,13 @@ void BaseMultiplexerServer::__handle_message() {
     }
   } catch (std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception in handle_message: ") + error.what()));
-    if (!_has_sent_response) {
-      // Same as the Python BaseMultiplexerServer: tell the requester instead
-      // of leaving it to time out; a report that fails leaves it to its
-      // timeout, and the handler's exception decides all the same.
+    // Same as the Python BaseMultiplexerServer: tell the requester instead
+    // of leaving it to time out; a report that fails leaves it to its
+    // timeout, and the handler's exception decides all the same. A message
+    // that answers another, a reply or a report, gets no report: nobody
+    // waits for an answer to it, and two backends whose handlers throw on
+    // what they do not expect would answer each other's reports for good.
+    if (!_has_sent_response && !last_mxmsg->references()) {
       try {
         report_error(error.what());
       } catch (const std::exception& reporting) {

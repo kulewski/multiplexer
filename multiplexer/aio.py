@@ -27,8 +27,11 @@ the subscriptions and to messages(). The io thread never waits for the
 loop: it hands every one over, and what the loop has not reached yet
 waits in memory, as do the tasks of coroutine handlers, with no bound;
 keeping up is the program's to do, and `matching` sheds what it does not
-need before it costs the loop anything. messages() alone holds at most
-queue_size, dropping its oldest with a warning when nobody reads it.
+need before the loop sees it, though it runs on the io thread, holding the
+GIL the loop needs too, for every message of its subscription's type.
+messages() alone holds at most
+queue_size, dropping its oldest with a warning when nobody reads it; after
+close() it ends, once what arrived before is read.
 
 A query with `to` is addressed, and `multiplexer=` takes a Lane from
 lane() or a ConnectionWrapper, as on ThreadedClient.
@@ -36,14 +39,15 @@ lane() or a ConnectionWrapper, as on ThreadedClient.
 
 import asyncio
 import concurrent.futures
+import heapq
 import inspect
+import itertools
 import os
 import pickle
 import threading
 from typing import Any, Awaitable, Callable, Sequence
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
-from multiplexer.multiplexer_constants import types
 from multiplexer.mxclient import (
     CLOSE_FLUSH_SECONDS,
     ConnectionWrapper,
@@ -59,6 +63,29 @@ from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClien
 # coroutine function is scheduled as a task, a plain function is called.
 Handler = Callable[[MultiplexerMessage], Awaitable[None] | None]
 Matcher = Callable[[MultiplexerMessage], bool]
+
+
+class _Subscription:
+    """What subscribe() keeps: the type, the predicate, the handler, its
+    place among the subscriptions, the order its handler runs in, and
+    whether the subscription still holds, which a delivery checks on the
+    loop, so that once unsubscribe() has returned the handler is never
+    called again, for a message already handed to the loop either."""
+
+    __slots__ = ("type", "matching", "handler", "order", "active")
+
+    def __init__(self, type: int | None, matching: Matcher | None, handler: Handler, order: int):
+        self.type = type
+        self.matching = matching
+        self.handler = handler
+        self.order = order
+        self.active = True
+
+
+def _in_order(subscription: _Subscription) -> int:
+    """Where `subscription` comes among the subscriptions, for the merge of
+    a type's with every type's."""
+    return subscription.order
 
 
 class AsyncClient:
@@ -84,15 +111,35 @@ class AsyncClient:
         `timeout` for one that hangs; a program that must not block its
         loop at all uses `await AsyncClient.create(...)`. `queue_size` bounds
         what messages() holds for a slow reader, and only that: what waits
-        for the loop has no bound. `on_drop(message_id, reason)` runs on
-        the loop for every message the client gives up on, each copy of
-        one sent to ALL, with a DropReason; `dropped` counts them."""
+        for the loop has no bound. It is 1 at least, ValueError otherwise:
+        asyncio.Queue's 0 for no bound is not offered. `on_drop(message_id,
+        reason)` runs on the loop for every message the client gives up on,
+        each copy of one sent to ALL, with a DropReason; `dropped` counts
+        them."""
+        if queue_size < 1:
+            raise ValueError("queue_size is how many messages messages() holds, 1 at least: %r" % (queue_size,))
         self._loop = loop or asyncio.get_running_loop()
-        self._subscriptions: list[tuple[int | None, Matcher | None, Handler]] = []
-        self._queue: asyncio.Queue[MultiplexerMessage] | None = None
+        # The subscriptions by their type, None for every type, each type's in
+        # the order they were made: a snapshot the io thread reads as it is,
+        # replaced whole under the lock by subscribe() and unsubscribe(), so
+        # that a message costs a look at its type's subscriptions only, with
+        # no copy and no lock.
+        self._by_type: dict[int | None, tuple[_Subscription, ...]] = {}
+        self._orders = itertools.count()
+        # messages()'s queue, made at its first call. Unbounded to asyncio:
+        # _deliver keeps it to queue_size, so that the mark close() puts at
+        # its end, None, always fits.
+        self._queue: asyncio.Queue[MultiplexerMessage | None] | None = None
+        self._messages_ended = False  # on the loop: close() came, the mark is in the queue or will be at its making
         self._queue_size = queue_size
         self._dropped_since_warning = 0
-        self._lock = threading.Lock()  # the subscriptions, read on the io thread
+        # close() or aclose() was called: no handler is called again. Set on
+        # any thread, read by _deliver on the loop.
+        self._closing = False
+        # The tasks of coroutine handlers still running, on the loop: the
+        # loop holds a task only weakly, and close() ends them.
+        self._tasks: set[asyncio.Task] = set()
+        self._lock = threading.Lock()  # the writers of the subscriptions' snapshot
         self._on_drop = on_drop
         self._threaded = ThreadedClient(
             addresses,
@@ -148,6 +195,10 @@ class AsyncClient:
     def instance_id(self) -> int:
         """This peer's instance id, the `from` of everything it sends."""
         return self._threaded.instance_id
+
+    def new_message(self, **kwargs: Any) -> MultiplexerMessage:
+        """A MultiplexerMessage with id and from filled in, as ThreadedClient.new_message() makes it."""
+        return self._threaded.new_message(**kwargs)
 
     @property
     def dropped(self) -> int:
@@ -239,7 +290,6 @@ class AsyncClient:
         type: int,
         timeout: float = DEFAULT_TIMEOUT,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
@@ -248,9 +298,9 @@ class AsyncClient:
         as SyncClient: NotConnected, OperationTimedOut,
         OperationFailed, BackendError. Cancelling the await does not cancel
         the request: a backend may still receive it, its reply is dropped.
-        `to`, `probe`, `multiplexer` and `with_connection` are
-        ThreadedClient.query()'s: an addressed query, how it locates its
-        addressee, a lane or a connection to go through, and (reply,
+        `to`, `multiplexer` and `with_connection` are
+        ThreadedClient.query()'s: an addressed query, located with a PING
+        when it moved, a lane or a connection to go through, and (reply,
         connection) as the result. `on_received`, when given, is called on
         the loop, before the reply is, with the instance id of each backend
         that acknowledges the request (notify_start()), as in
@@ -262,7 +312,6 @@ class AsyncClient:
             timeout,
             callback=lambda result: self._settle(future, result),
             to=to,
-            probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
             on_received=None if on_received is None else self._before(future, on_received),
@@ -271,8 +320,11 @@ class AsyncClient:
 
     async def query_pickle(self, data: Any, type: int, timeout: float = DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
         """query() with `data` pickled as the payload; the reply's payload
-        unpickled. The kwargs are query()'s: `to`, `probe`, `multiplexer`,
-        `on_received`."""
+        unpickled. The kwargs are query()'s: `to`, `multiplexer`,
+        `on_received`; `with_connection` raises TypeError, the result being
+        the payload alone."""
+        if "with_connection" in kwargs:
+            raise TypeError("query_pickle() returns the payload alone: no with_connection")
         reply = await self.query(pickle.dumps(data), type, timeout, **kwargs)
         return pickle.loads(reply.message)
 
@@ -358,20 +410,30 @@ class AsyncClient:
         """Run `handler(mxmsg)` on the loop for every message of `type`
         (None for every type) for which `matching(mxmsg)` is true; a
         coroutine function runs as a task. Returns the function that ends
-        the subscription. In a forked child, on a client the parent made,
-        it raises UsedAfterFork, and the function it returned before the
-        fork does nothing: nothing is delivered there."""
-        self._threaded._check_not_orphaned()  # before the lock, which the parent's io thread takes for every message
-        entry = (type, matching, handler)
+        the subscription: once it has returned, on the loop, the handler is
+        not called again, for a message already handed to the loop either;
+        a coroutine already running goes on. In a forked child, on a client
+        the parent made, it raises UsedAfterFork, and the function it
+        returned before the fork does nothing: nothing is delivered there."""
+        self._threaded._check_not_orphaned()  # before the lock, which a thread of the parent may have held
         with self._lock:
-            self._subscriptions.append(entry)
+            entry = _Subscription(type, matching, handler, next(self._orders))
+            by_type = dict(self._by_type)
+            by_type[type] = by_type.get(type, ()) + (entry,)
+            self._by_type = by_type
 
         def unsubscribe() -> None:
             if self._threaded.orphaned():
-                return  # quietly, as in cleanup code, and never into a lock the parent's io thread may have held
+                return  # quietly, as in cleanup code, and never into a lock a thread of the parent may have held
+            entry.active = False  # a delivery already handed to the loop skips it
             with self._lock:
-                if entry in self._subscriptions:
-                    self._subscriptions.remove(entry)
+                kept = tuple(subscription for subscription in self._by_type.get(type, ()) if subscription is not entry)
+                by_type = dict(self._by_type)
+                if kept:
+                    by_type[type] = kept
+                else:
+                    by_type.pop(type, None)
+                self._by_type = by_type
 
         return unsubscribe
 
@@ -382,43 +444,54 @@ class AsyncClient:
         messages, each going to one of them; subscribe() gives a handler
         every message of a type, each handler its own copy. The queue
         exists from the first call on and holds `queue_size` messages: when
-        nobody reads, the oldest is dropped and a warning logged."""
+        nobody reads, the oldest is dropped and a warning logged. After
+        close() every reader gets what arrived before it and then ends, its
+        `async for` over; a stream asked for after close() ends at once."""
         self._threaded._check_not_orphaned()  # a stream nothing would ever feed, in a forked child
         self._check_loop()
         if self._queue is None:
-            self._queue = asyncio.Queue(self._queue_size)
+            self._queue = asyncio.Queue()
+            if self._messages_ended:
+                self._queue.put_nowait(None)
         return MessageStream(self._queue)
 
     def _on_message(self, mxmsg: MultiplexerMessage) -> None:
-        """The io thread: hand the message to the loop, cheaply. A
-        `matching` that raises takes it for none of its subscription's
-        handlers, logged as a handler that raises is."""
-        with self._lock:
-            subscriptions = list(self._subscriptions)
-        handlers: list[Handler] = []
-        for wanted, matching, handler in subscriptions:
-            if wanted is not None and wanted != mxmsg.type:
-                continue
-            if matching is not None:
+        """The io thread: hand the message to the loop, cheaply, looking at
+        the subscriptions of its type and of every type only, in the order
+        they were made. A `matching` that raises takes it for none of its
+        subscription's handlers, logged as a handler that raises is."""
+        by_type = self._by_type  # the snapshot: replaced whole, never changed
+        typed = by_type.get(mxmsg.type, ())
+        every = by_type.get(None, ())
+        subscriptions = heapq.merge(typed, every, key=_in_order) if typed and every else typed or every
+        chosen: list[_Subscription] = []
+        for subscription in subscriptions:
+            if subscription.matching is not None:
                 try:
-                    if not matching(mxmsg):
+                    if not subscription.matching(mxmsg):
                         continue
                 except Exception as error:  # one predicate's failure is not the others'
-                    self._subscription_failed("predicate", matching, mxmsg, error)
+                    self._subscription_failed("predicate", subscription.matching, mxmsg, error)
                     continue
-            handlers.append(handler)
-        if not handlers and self._queue is None:
+            chosen.append(subscription)
+        if not chosen and self._queue is None:
             return
         try:
-            self._loop.call_soon_threadsafe(self._deliver, mxmsg, handlers)
+            self._loop.call_soon_threadsafe(self._deliver, mxmsg, chosen)
         except RuntimeError:
             pass  # the loop is closed
 
-    def _deliver(self, mxmsg: MultiplexerMessage, handlers: list[Handler]) -> None:
-        """On the loop: run the handlers, feed the queue. A handler that
-        raises, now or later as a coroutine, is logged with the message's
-        type and sender, and the other handlers still run."""
-        for handler in handlers:
+    def _deliver(self, mxmsg: MultiplexerMessage, subscriptions: list[_Subscription]) -> None:
+        """On the loop: run the handlers of the subscriptions that still
+        hold, unless the client is closing, and feed the queue. A handler
+        that raises, now or later as a coroutine, is logged with the
+        message's type and sender, and the other handlers still run."""
+        for subscription in subscriptions:
+            if self._closing:
+                break  # close() came since the message was handed over
+            if not subscription.active:
+                continue  # unsubscribed since the message was handed over
+            handler = subscription.handler
             try:
                 result = handler(mxmsg)
             except Exception as error:  # one handler's failure is not the others'
@@ -426,9 +499,10 @@ class AsyncClient:
                 continue
             if inspect.isawaitable(result):
                 task = asyncio.ensure_future(result, loop=self._loop)
+                self._tasks.add(task)
                 task.add_done_callback(lambda done, handler=handler, mxmsg=mxmsg: self._task_done(done, handler, mxmsg))
         if self._queue is not None:
-            if self._queue.full():
+            if self._queue.qsize() >= self._queue_size:
                 self._queue.get_nowait()  # the oldest goes; the io thread must never wait for the loop
                 self._dropped_since_warning += 1
                 if self._dropped_since_warning == 1:
@@ -439,6 +513,7 @@ class AsyncClient:
 
     def _task_done(self, task: asyncio.Task, handler: Handler, mxmsg: MultiplexerMessage) -> None:
         """A coroutine handler finished: its exception, if any, is ours to report."""
+        self._tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()
@@ -464,12 +539,65 @@ class AsyncClient:
         then close the connections and stop the io thread, as
         ThreadedClient.shutdown(timeout) does; the client is done. Blocks
         for that and for a round trip to the multiplexers, which close their
-        side too, a second at most; fine at shutdown. Idempotent."""
+        side too, a second at most; fine at shutdown. Idempotent. From the
+        call on no subscription's handler is called, for a message handed
+        to the loop before either, and once it has returned the tasks of
+        coroutine handlers still running are cancelled on the loop, but for
+        the one that called it; aclose() gives them time first. Then
+        messages() ends, for every reader, once what arrived before is read."""
+        self._close(timeout, self._calling_task())
+
+    def _close(self, timeout: float, sparing: asyncio.Task | None) -> None:
+        """close(), the handler task `sparing`, the caller's, left running."""
+        self._closing = True
         self._threaded.shutdown(timeout)
+        if self._threaded.orphaned():
+            return  # a forked child: the loop and its wake-up pipe are the parent's
+        try:
+            # After the io thread's end: behind every message it handed to the loop.
+            self._loop.call_soon_threadsafe(self._ended, sparing)
+        except RuntimeError:
+            pass  # the loop is closed: nobody reads, nothing runs
+
+    def _calling_task(self) -> asyncio.Task | None:
+        """The task this call runs in, when it runs on the client's loop: a
+        coroutine handler that closes the client is not cancelled by it."""
+        try:
+            if asyncio.get_running_loop() is self._loop:
+                return asyncio.current_task()
+        except RuntimeError:
+            pass  # no loop runs on this thread
+        return None
+
+    def _ended(self, sparing: asyncio.Task | None) -> None:
+        """On the loop, once the client is closed: the handler tasks still
+        running are cancelled, but for `sparing`, and the mark that ends
+        messages() goes at the end of its queue, once."""
+        for task in list(self._tasks):
+            if task is not sparing:
+                task.cancel()
+        if self._messages_ended:
+            return
+        self._messages_ended = True
+        if self._queue is not None:
+            self._queue.put_nowait(None)
 
     async def aclose(self, timeout: float = CLOSE_FLUSH_SECONDS) -> None:
-        """close() in the default executor, so the loop does not wait for the join."""
-        await asyncio.get_running_loop().run_in_executor(None, self.close, timeout)
+        """close() in the default executor, so the loop does not wait for
+        the join, after the tasks of coroutine handlers still running had
+        `timeout` seconds to end, when awaited on the client's loop: what
+        they send goes out with the rest, and those still running then are
+        cancelled. No handler is called from the call on."""
+        self._closing = True
+        loop = asyncio.get_running_loop()
+        this = asyncio.current_task() if loop is self._loop else None  # a handler closing the client goes on
+        if loop is self._loop:
+            running = [task for task in self._tasks if task is not this]
+            if running:
+                _, late = await asyncio.wait(running, timeout=timeout)
+                for task in late:
+                    task.cancel()
+        await loop.run_in_executor(None, self._close, timeout, this)
 
     async def __aenter__(self) -> "AsyncClient":
         return self
@@ -487,16 +615,21 @@ class AsyncClient:
 
 
 class MessageStream:
-    """The async iterator messages() returns; `async for mxmsg in stream`."""
+    """The async iterator messages() returns; `async for mxmsg in stream`,
+    which ends once the client is closed and what arrived before is read."""
 
-    def __init__(self, queue: "asyncio.Queue[MultiplexerMessage]"):
+    def __init__(self, queue: "asyncio.Queue[MultiplexerMessage | None]"):
         self._queue = queue
 
     def __aiter__(self) -> "MessageStream":
         return self
 
     async def __anext__(self) -> MultiplexerMessage:
-        return await self._queue.get()
+        mxmsg = await self._queue.get()
+        if mxmsg is None:  # close()'s mark: put back for the other readers, which end too
+            self._queue.put_nowait(None)
+            raise StopAsyncIteration
+        return mxmsg
 
 
 class Holder:

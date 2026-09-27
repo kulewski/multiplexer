@@ -7,6 +7,7 @@
 #include <limits>
 #include <utility>
 
+#include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h"
 #include "multiplexer/multiplexer.constants.h"
 
@@ -105,12 +106,13 @@ void Client::shutdown(float timeout) {
     basic_client_->orphan_close_descriptors();
     return;
   }
-  if (timeout > 0 && !basic_client_->shuts_down()) {
+  if ((timeout > 0 || timeout < 0) && !basic_client_->shuts_down()) {
     // What was sent before is written first, and so is what the loop sent
     // meanwhile, a server's refusals of what it read: a flush again while
-    // anything newer was sent, `timeout` seconds in all.
-    const std::chrono::steady_clock::time_point deadline =
-        std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout * 1e6));
+    // anything newer was sent, `timeout` seconds in all, as long as it
+    // takes for a negative one, as mx::from_seconds reads it. 0 and NaN
+    // write nothing more.
+    const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout);
     for (;;) {
       const std::uint64_t sent = basic_client_->last_number();
       const float left = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
@@ -149,7 +151,7 @@ void adopt(const LanePtr& lane, const ConnectionWrapper& connection) {
 // The query algorithm; the Python Client.query in mxclient.py is the same
 // steps and the two must stay in agreement. A request with `to` set is an
 // addressed query, with stages of its own below.
-IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe,
+IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, LanePtr lane,
                                ReceivedCallback received) {
   // The query's on_received for its duration, where _receive meets the
   // acknowledgements; whatever was there before is back afterwards.
@@ -159,7 +161,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
     ~Holding() { slot = std::move(previous); }
   } holding{received_, std::exchange(received_, std::move(received))};
   if (query.to()) {
-    return _query_addressed(query, timeout, lane, probe);
+    return _query_addressed(query, timeout, lane);
   }
 
   std::unique_ptr<mx::SimpleTimer> timer;
@@ -184,7 +186,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   // of this type. The search is routed by the request type's own rule with
   // whom forced to ALL, so every live backend answers with a PING. Through
   // a pinned lane the one multiplexer behind it is asked instead.
-  MultiplexerMessage mxmsg = _probe_for(query, PROBE_SEARCH);
+  MultiplexerMessage mxmsg = _locator_for(query);
 
   timer = basic_client_->create_timer(timeout);
   const bool pinned = lane && lane->pinned();
@@ -229,15 +231,15 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
 // An addressed query, docs/query.md "An addressed query": the request with
 // its `to`, through the lane's connection or any; when the multiplexer
 // reports the instance is not behind it, or the connection dies under the
-// wait, a probe addressed to the instance on every connection (through a
+// wait, a PING addressed to the instance on every connection (through a
 // pinned lane, on its one connection) finds the multiplexer that has it;
 // then the request again through that connection. Only the addressee ever
 // gets the request: an instance that left is OperationFailed, never
 // another instance of its type. One `timeout` covers the three stages,
 // and a request that gets no answer at all within it is OperationTimedOut
-// without a probe, since a silent addressee is one the multiplexer still
-// has, and a probe would find the same one.
-IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane, Probe probe) {
+// without a PING, since a silent addressee is one the multiplexer still
+// has, and a PING would find the same one.
+IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane) {
   std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
   MultiplexerMessage request = query;
   if (!request.id()) {
@@ -256,9 +258,9 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
     return result;
   }
 
-  // Locate: the probe, addressed to the instance, with delivery errors
+  // Locate: a PING, addressed to the instance, with delivery errors
   // requested, so that a multiplexer without the instance says so.
-  MultiplexerMessage mxmsg = _probe_for(request, probe);
+  MultiplexerMessage mxmsg = _locator_for(request);
   const bool pinned = lane && lane->pinned();
   result = _send_and_receive(mxmsg, *timer, !pinned, !pinned, attempts, types::REQUEST_RECEIVED, mxmsg.id(),
                              ConnectionWrapper(), lane);
@@ -286,24 +288,23 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   return result;
 }
 
-// The message that locates who can take `query`: a search for a backend of
-// its type, addressed to its `to` when it has one, or a PING to that
-// instance.
-MultiplexerMessage Client::_probe_for(const MultiplexerMessage& query, Probe probe) {
+// The message that locates who can take `query`: when it has a `to`, a
+// PING addressed to that instance, with delivery errors requested, which
+// the server classes and ThreadedClient answer whatever their search
+// policy; else a search for a backend of its type.
+MultiplexerMessage Client::_locator_for(const MultiplexerMessage& query) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random64());
   mxmsg.set_from(instance_id());
-  if (probe == PROBE_PING) {
+  if (query.to()) {
     mxmsg.set_type(types::PING);
+    mxmsg.set_to(query.to());
+    mxmsg.set_report_delivery_error(true);
   } else {
     BackendForPacketSearch search;
     search.set_packet_type(query.type());
     mxmsg.set_type(types::BACKEND_FOR_PACKET_SEARCH);
     search.SerializeToString(mxmsg.mutable_message());
-  }
-  if (query.to()) {
-    mxmsg.set_to(query.to());
-    mxmsg.set_report_delivery_error(true);
   }
   return mxmsg;
 }
@@ -314,8 +315,8 @@ MultiplexerMessage Client::_probe_for(const MultiplexerMessage& query, Probe pro
 // connection is expected before giving up: that is how "every multiplexer
 // said no" is detected. Messages of ignore_type (REQUEST_RECEIVED) are
 // skipped, after the query's on_received hears of those that acknowledge
-// the request; ignore_id is the probe's, whose late answers are skipped
-// silently, and the rest are logged and dropped.
+// the request; ignore_id is the search's or the locating PING's, whose
+// late answers are skipped silently, and the rest are logged and dropped.
 IncomingMessage Client::_send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all,
                                           bool handle_delivery_errors, const std::vector<uint64_t>& also_accept,
                                           std::uint32_t ignore_type, std::uint64_t ignore_id,
@@ -389,8 +390,9 @@ IncomingMessage Client::_send_and_receive_one(MultiplexerMessage mxmsg, mx::Simp
 
 // Writes `mxmsg` to one connection and returns the one that wrote it,
 // within the deadline: see send(). A connection given outright, where a
-// probe was answered, is preferred for this message over the lane's, unless
-// the lane is pinned; the lane adopts the connection that wrote it.
+// search or a locating PING was answered, is preferred for this message
+// over the lane's, unless the lane is pinned; the lane adopts the
+// connection that wrote it.
 ConnectionWrapper Client::_send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer,
                                     ConnectionWrapper preferred, LanePtr lane) {
   return _send_one(_serialize(mxmsg), timer, preferred, lane);
@@ -449,6 +451,16 @@ unsigned int Client::_send_and_wait(std::shared_ptr<const RawMessage> raw, bool 
       return 0;
     }
     if (timer.expired()) {
+      return 0;
+    }
+    if (!basic_client_->connection_live_or_coming()) {
+      // No connection live or coming: nothing could write it, however long
+      // the call waited, where a wait with no deadline spun. Given up on
+      // now, as its message would be at the call's deadline.
+      for (const BasicScheduledMessageTracker& copy : copies) {
+        basic_client_->drop_held(copy);
+      }
+      *lost = true;
       return 0;
     }
     basic_client_->run_one();

@@ -35,6 +35,50 @@ used for another query on `SyncClient` gets a fresh
 saw among the last 2048 it received, and the query would wait out its
 first stage for nothing.
 
+## Timeouts
+
+Every timeout is seconds as a `float`, in every client and server class:
+on a connect, a receive, a query, a send, `flush()`, `flush_all()`,
+`shutdown()` and `close()`, `serve_forever()`'s `poll` and
+`drain_seconds`, and `ThreadedServerOptions::connect_timeout`. A negative
+one sets no deadline, exactly as an infinite one does: the call waits as
+long as it takes, and a message sent with it waits for a connection or
+for room as long as that takes. So `shutdown(-1)` and `close(-1)` write
+everything sent before them first, however long that takes; with a
+`poll` of -1 a `BaseMultiplexerServer` waits for a message before it
+calls `periodic_task()` or sees `working` cleared, and a
+`BaseThreadedMultiplexerServer` until a drain, `stop()` or `close()`
+wakes it; and a `drain_seconds` of -1 gives a drain no cap, so only the
+multiplexers' confirmation ends it, or a stop.
+
+0 and NaN mean "don't wait", in every class: a call does what it can at
+once and gives up, a receive taking what has arrived, a connect starting
+the attempt. A message sent or scheduled with one, by `queue()`,
+`schedule_*()`, `ThreadedClient::send_serialized()` and the like, is
+placed now on a connection with room, each copy for `ALL` likewise, and
+otherwise dropped and reported at once (`NO_ROOM`, or `NO_CONNECTION`
+with no connection live), never held: a `schedule_one()` tracker then
+reads `is_lost()`, and `schedule_all()` still counts the connection. A
+flushing send's message waits, as every flushing send's does, its call's
+deadline and `ROOM_GRACE_SECONDS` more, so that the call ends as a
+timeout first. So a flushing send given 0 reports its message not
+written, though a connection may write it a moment later: to send
+without waiting and learn how the message ended, use
+`queue(msg, timeout, lane, done)` or `ThreadedClient`'s
+`send(msg, lane, done)`. `shutdown(0)` and `close(0)` drop what is unwritten at
+once, a `drain_seconds` of 0 or NaN ends a drain as it begins, and a
+`poll` of 0 or NaN is a loop that never waits.
+
+On a `SyncClient` with nothing connected and nothing on its way, never
+connected, made with no address or shut down, a wait for a write gives
+up at once, whatever its timeout, as a receive throws `NotConnected`
+then: `flush_all()` returns false, `flush()` returns with the tracker
+reading `in_queue()`, and a flushing `send()` or a query throws
+`NotConnected`, the send's message dropped. A `ThreadedClient` waits on,
+as another thread may connect it meanwhile.
+[Defaults](semantics.md#defaults) says what infinity does, and the
+default of each.
+
 ## SyncClient
 
 ```cpp
@@ -69,7 +113,7 @@ client.shutdown();
   `wait_for_connection(wrapper, timeout)` waits for it. The wrapper's
   `target()` is the host and port given, `endpoint()` the address in use.
 - `query(payload, type, timeout = 10, lane = nullptr, received = nullptr)`
-  and `query(mxmsg, timeout, lane, probe, received)` send a request and
+  and `query(mxmsg, timeout, lane, received)` send a request and
   return an `IncomingMessage`, a
   triple whose `third` is a `shared_ptr<MultiplexerMessage>` with the
   reply and whose `second` is the connection it came on. The algorithm is
@@ -114,9 +158,7 @@ client.shutdown();
   nothing wrote it with no connection live, or through a pinned lane
   whose connection is gone, its message lost with it, and
   `OperationTimedOut` otherwise, as the Python clients raise; the C++
-  `ThreadedClient`'s flushing `send` returns 0 instead. A negative
-  `timeout` waits as long as the write takes, its message with no
-  deadline either.
+  `ThreadedClient`'s flushing `send` returns 0 instead.
   `send(mxmsg, connection, timeout)` prefers that connection.
 - `schedule_one(mxmsg, timeout)` queues an event on one connection and
   returns a `ScheduledMessageTracker`, null when no connection is live,
@@ -142,11 +184,11 @@ client.shutdown();
   the kernel then holds and the multiplexer may not have yet; and
   `is_lost()`, dropped: its connection ended before writing it, or it
   waited past its timeout.
-- `receive_message(timeout = -1)` waits for the next message and returns a
-  pair of the message and its connection; `-1` waits forever. It throws
-  `NotConnected` at once when nothing could arrive: no connection and none
-  on its way, on a client never connected, made with no address, or shut
-  down.
+- `receive_message(timeout = -1)` waits for the next message, with no
+  deadline by default, and returns a pair of the message and its
+  connection. It throws `NotConnected` at once when nothing could arrive:
+  no connection and none on its way, on a client never connected, made
+  with no address, or shut down.
 - `set_routing(const Routing&)` and `routing_acknowledged()`: which of a
   multiplexer's routing paths reach this peer, `any`, `all` and
   `last_resort`, told to every multiplexer and carried in every welcome
@@ -175,11 +217,13 @@ client.shutdown();
   and server class ends; then it runs the loop until every multiplexer
   has closed its side of the connection too, a round trip,
   `CLOSE_READ_SECONDS` at most, so that what was written arrives
-  ([semantics](semantics.md#failure-modes)).
+  ([semantics](semantics.md#failure-modes)). After it `connect()` and
+  `async_connect()` throw `NotConnected`, as `ThreadedClient::connect()`
+  does, and nothing is sent or placed.
 
-A message built by hand must carry `set_id(client.random64())` and
-`set_from(client.instance_id())`, or the receiving library drops it. The
-`query(payload, type)` overload does that for you.
+A message built by hand that has no id or sender gets them where it is
+sent: a fresh id, and the client's instance id as `from`. The receiving
+library drops a message without an id.
 
 ### Lanes, pinning and addressed queries
 
@@ -189,16 +233,17 @@ The same on `SyncClient` and `ThreadedClient`; the reasoning is in
 - **An addressed query** is a `query(mxmsg, ...)` whose message has
   `set_to(instance_id)`: only that instance ever gets it. When a
   multiplexer reports the instance is not behind it, or the connection
-  dies under the wait, the client probes for it on every connection and
-  repeats the request through the connection that found it; an instance
-  nobody has is `OperationFailed` (`FAILED`) at once; one `timeout`
-  covers the stages. The probe is `PROBE_SEARCH` by default, a
-  `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, which reaches it
-  whatever its routing, as every addressed message does, or `PROBE_PING`,
-  which the server classes and `ThreadedClient` all answer, so it also
-  finds a peer that serves no requests. The library sets `report_delivery_error` on the request. The old
-  behaviour of `SyncClient::query` with `to`, a search by type and the
-  request to whichever backend answered, is gone.
+  dies under the wait, the client locates it with a `PING` addressed to
+  it on every connection and repeats the request through the connection
+  that found it; an instance nobody has is `OperationFailed` (`FAILED`)
+  at once; one `timeout` covers the stages. The `PING` reaches the
+  instance whatever its routing, as every addressed message does, and the
+  server classes and `ThreadedClient` all answer it whatever their search
+  policy, so it finds a backend that declines searches as well as a peer
+  that serves no requests; `SyncClient` does not answer it. The library
+  sets `report_delivery_error` on the request. The old behaviour of
+  `SyncClient::query` with `to`, a search by type and the request to
+  whichever backend answered, is gone.
 - **A lane**, `multiplexer::Lane` in `multiplexer/basic_client.h`, held as
   `LanePtr` (a `std::shared_ptr<Lane>`), is a soft, late pin, or, made
   pinned, the hard one; it keeps a stream on one connection: `SyncClient`'s
@@ -298,10 +343,11 @@ connected, for backends that also act as clients.
 `serve_forever(poll = 1.0f, drain_seconds = 0.0f)` runs the loop:
 each iteration waits up to `poll` seconds for a message, handles it if one
 came, then calls the virtual `periodic_task()`, message or not, so anything
-checked there takes effect within one poll. It returns, with the
-connections closed, when the public `working` flag is cleared or a drain is
-over. `loop_iter(timeout)` does one step and throws
-`SyncClient::OperationTimedOut` after `timeout` seconds. The thread that calls
+checked there takes effect within one poll, unless `poll` sets no deadline
+([timeouts](#timeouts)). It returns, with the connections closed, when the
+public `working` flag is cleared or a drain is over. `loop_iter(timeout)`
+does one step and throws `SyncClient::OperationTimedOut` after `timeout`
+seconds. The thread that calls
 `serve_forever` becomes the backend's thread, whichever thread built it;
 in debug builds a later call from another thread fails an assertion. A
 program driving `loop_iter` itself from another thread calls
@@ -356,7 +402,11 @@ may rely on a signal like that; a Python process should not, see the
 [FAQ](faq.md).
 
 A handler that throws is reported to the requester with `BACKEND_ERROR`,
-then the virtual `on_handler_exception(const std::exception &)` decides:
+unless the message answers another, one with `references` set, a reply or
+someone's `BACKEND_ERROR`: nobody waits for an answer to it, and two
+backends whose handlers throw on what they do not expect would answer each
+other's reports for good. Then the virtual
+`on_handler_exception(const std::exception &)` decides:
 true, the default, keeps serving; false lets the exception propagate out
 of `serve_forever`.
 
@@ -475,8 +525,12 @@ Echo(addresses, options).serve_forever();
   `close()` in its own destructor. `pending()`, `dropped()`, `instance_id()`
   and `client()` for messages that are not replies. A handler that throws
   gets the requester `BACKEND_ERROR`, unless its reply went out, a reply
-  that threw being none, and a report that fails is logged; `false` from
+  that threw being none, or the message answers another, `references`
+  set, as for `BaseMultiplexerServer`, and a report that fails is logged; `false` from
   `on_handler_exception()` makes `serve_forever()` return and rethrow.
+  So does an exception out of `on_handler_exception()`, or one from a
+  handler not derived from `std::exception`: the worker leaves, and what
+  is still queued once no worker is left is refused, as during a close.
 
 ## ThreadedClient
 
@@ -506,7 +560,7 @@ client.shutdown();
   would have. The stages are `SyncClient`'s, but that a connection lost
   under the search or the direct request starts a typed query over from its
   first stage, the stage's deadline running on, so each such loss can add up
-  to two timeouts to the three. `query(msg, timeout, lane, probe)` takes the
+  to two timeouts to the three. `query(msg, timeout, lane)` takes the
   request as a whole, `to` included, and sets its id and from per attempt:
   the addressed form, and `query(msg, connection, ...)` prefers a
   connection, see [above](#lanes-pinning-and-addressed-queries). `received`,
@@ -567,7 +621,9 @@ client.shutdown();
   other on it, and an asyncio layer awaits
   the second. All are safe from callbacks. A message over `MAX_MESSAGE_SIZE`
   is refused where it is sent or queried, with `std::length_error`.
-  `new_message()` fills in id and from.
+  `new_message()` fills in id and from, and every send fills them in on a
+  whole message that left them empty: every receiver drops a message
+  without an id.
 - `flush_all(timeout)` waits until everything sent before the call has
   been written or given up on, what still waits for a connection or for
   room included, or `timeout` seconds, and returns, once the callbacks of
@@ -593,9 +649,9 @@ client.shutdown();
   streamlogs` says that no log receiver took its chunks. A late reply to a
   query that already ended, `REQUEST_RECEIVED` for an untracked query, a
   `PING`, which the client answers itself, and a
-  `BACKEND_FOR_PACKET_SEARCH`, answered with a `PING` when addressed to
-  this instance, answered by type too when a policy set with
-  `set_search_policy()` says yes, and dropped otherwise, never reach it.
+  `BACKEND_FOR_PACKET_SEARCH`, answered with a `PING` when a policy set
+  with `set_search_policy()` says yes and dropped otherwise, never reach
+  it.
   The late-reply rule binds the peers that send to this client: `references`
   means "this is the reply", and what references a query this client has
   seen answered (the last 1024) is dropped whatever its type, so a
@@ -657,8 +713,9 @@ DropReason reason)`, each copy of a message sent to `ALL` once. The
 reasons, `multiplexer::DropReason` in `multiplexer/basic_client.h`:
 
 - `NO_ROOM`: it waited for room on a full connection, its multiplexer not
-  reading, past its timeout.
-- `NO_CONNECTION`: it waited for a connection to come up past its timeout.
+  reading, past its timeout, or, sent with no time to wait, found none.
+- `NO_CONNECTION`: it waited for a connection to come up past its timeout,
+  or, sent with no time to wait, found none live.
 - `CONNECTION_LOST`: its connection ended and nothing else could take it: a
   pinned lane's, or a copy sent to `ALL`.
 - `SHUT_DOWN`: the client shut down before it went.

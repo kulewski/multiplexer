@@ -1,7 +1,8 @@
 """BaseThreadedMultiplexerServer against a real multiplexer: serial order
 with one worker, parallel handling with four, a reply from another thread
 later, the search answered while every worker is busy unless told to
-decline, a full queue dropping, a handler that raises, one whose
+decline, a full queue dropping, a queue of none still giving every worker
+a request, a handler that raises, one whose
 SystemExit, or an exception out of on_handler_exception(), ends
 serve_forever(), draining, and leaving. What a request's reply is, as in C++: a reply that raised is no
 answer, so the requester gets BACKEND_ERROR, where the request counted as
@@ -112,8 +113,9 @@ class Scripted(BaseThreadedMultiplexerServer):
 
 class Choking(BaseThreadedMultiplexerServer):
     """A peer whose handler takes every message for a request of its own
-    and raises on anything else, as one that parses every payload does:
-    a DELIVERY_ERROR it gets is answered with BACKEND_ERROR."""
+    and reports anything else with BACKEND_ERROR itself, a reply to it: a
+    DELIVERY_ERROR it gets is answered that way. (The library sends no
+    report of its own for a message that answers another.)"""
 
     multiplexer_client_type = peers.WEBSITE
 
@@ -124,7 +126,7 @@ class Choking(BaseThreadedMultiplexerServer):
     def handle_message(self, request: Request) -> None:
         if request.mxmsg.type == types.DELIVERY_ERROR:
             self.refusals += 1
-        raise ValueError("not a request of mine")
+        request.report_error("not a request of mine")
 
 
 class ThreadedServerTest(unittest.TestCase):
@@ -225,14 +227,34 @@ class ThreadedServerTest(unittest.TestCase):
         with TestClient(self.cluster, peers.WEBSITE) as client:
             lane = client.lane()
             client.send(b"block", REQUEST, multiplexer=lane)
-            wait_until(lambda: server.pending == 1, 10, "the worker busy")
+            # In the handler, not merely queued, so that the queue has its two
+            # places for the events: pending counts a request still queued too.
+            wait_until(lambda: server.handled == [b"block"], 10, "the worker in the handler")
             for index in range(5):
                 client.send(b"event-%d" % index, REQUEST, multiplexer=lane)
             # A flushing send only says the bytes left; the drops say the rest arrived.
             wait_until(lambda: server.pending == 3 and server.dropped == 3, 10, "two waiting, three dropped")
             server.release.set()
+            # The queue drained first, so that the marker finds a place in it.
+            wait_until(lambda: server.pending == 0, 10, "the events handled")
             self.assertEqual(b"MARKER", client.query(b"marker", REQUEST, multiplexer=lane).message)
         self.assertEqual([b"block", b"event-0", b"event-1", b"marker"], server.handled)
+
+    def test_a_queue_of_none_lets_every_worker_take_a_request(self):
+        # queue_size counts what waits for a worker, and a request an idle
+        # worker is about to take waits for none, where it was counted and
+        # queue_size=0 dropped every request.
+        _, server = self.serve(workers=2, queue_size=0)
+        with TestClient(self.cluster, peers.WEBSITE) as client:
+            client.send(b"block", REQUEST)
+            client.send(b"block", REQUEST)
+            wait_until(lambda: server.handled == [b"block", b"block"], 10, "both workers in their handlers")
+            client.send(b"event-dropped", REQUEST)
+            wait_until(lambda: server.dropped == 1, 10, "the third dropped")
+            server.release.set()
+            wait_until(lambda: server.pending == 0, 10, "both workers idle again")
+            self.assertEqual(b"MARKER", client.query(b"marker", REQUEST).message)
+        self.assertEqual([b"block", b"block", b"marker"], server.handled)
 
     def test_a_raising_handler_reports_backend_error_and_serves_on(self):
         served, server = self.serve()
@@ -385,9 +407,9 @@ class ThreadedServerTest(unittest.TestCase):
     def test_a_reply_arriving_while_leaving_is_dropped_not_refused(self):
         """A message that answers another, arriving while the server is
         leaving, is dropped: nobody retries a reply, and refusing one could
-        start a loop. The peer here raises on what it does not expect, so
-        the refusal of its event comes back to the server as a
-        BACKEND_ERROR, a reply; refused in turn, that would bring another
+        start a loop. The peer here answers what it does not expect with a
+        BACKEND_ERROR of its own, so the refusal of its event comes back to
+        the server as that reply; refused in turn, it would bring another
         DELIVERY_ERROR, and so on until the close ended."""
         _, server = self.serve()
         peer = BackendThread(lambda: Choking(self.cluster.endpoints)).start()

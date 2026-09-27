@@ -7,6 +7,7 @@ cc_library(
     deps = [
         "//lib:exception",
         "//lib:kwargs",
+        "//lib:seconds",
         "//multiplexer:client",
     ],
 )
@@ -21,6 +22,7 @@ cc_library(
     deps = [
         ":base_multiplexer_server",
         "//lib:mutex",
+        "//lib:seconds",
         "//lib/logging",
         "//multiplexer:multiplexer_cc_constants",
         "//multiplexer:threaded_client",

@@ -13,6 +13,7 @@
 
 #include "lib/protobuf/stream.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/Recording.pb.h"   /* generated */
 #include "multiplexer/client.h"
@@ -35,8 +36,7 @@ void request_stop(int) { stop_requested = 1; }
 
 // A point in time to wait until, in seconds left.
 struct Deadline {
-  explicit Deadline(float seconds)
-      : end(std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(seconds * 1e6))) {}
+  explicit Deadline(float seconds) : end(std::chrono::steady_clock::now() + mx::from_seconds(seconds)) {}
   float remaining() const {
     const float left = std::chrono::duration<float>(end - std::chrono::steady_clock::now()).count();
     return left > 0 ? left : 0;

@@ -2,7 +2,8 @@
 
 Against a real multiplexer started for the test: a message addressed to the
 client's instance id reaches on_message, a PING is answered by the client
-itself, and the blocking query() raises RuntimeError from a callback.
+itself, a search policy's answer is read by its truth, and the blocking
+query() raises RuntimeError from a callback.
 """
 
 import os
@@ -14,6 +15,7 @@ import time
 import unittest
 
 from multiplexer.clients import Client
+from multiplexer.Multiplexer_pb2 import BackendForPacketSearch
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.threaded_client import ThreadedClient
 
@@ -103,6 +105,24 @@ class ThreadedClientTest(unittest.TestCase):
         self.assertEqual(ping_id, pong.references)
         self.assertEqual(b"echo me", pong.message)
         self.assertEqual([], handed_on)
+        client.shutdown()
+        peer.shutdown()
+
+    def test_a_search_policy_is_read_by_its_truth(self) -> None:
+        """A search policy's answer is read as Python's `if` reads it: an
+        empty list declines a search, a non-empty one takes it, answered with
+        a PING, where a value that is not a bool failed to convert, logged on
+        every search, and declined it. Two searches, the first declined and
+        the second taken: the one PING references the second, and the
+        connection's order says none came for the first."""
+        answers: list[list[str]] = [[], ["work"]]
+        client = ThreadedClient([self.endpoint], type=peers.PYTHON_TEST_SERVER, search_policy=lambda: answers.pop(0))
+        peer = Client([self.endpoint], type=peers.WEBSITE)
+        search = BackendForPacketSearch(packet_type=types.PYTHON_TEST_REQUEST)
+        peer.send_message(search, type=types.BACKEND_FOR_PACKET_SEARCH, flush=True)
+        taken = peer.send_message(search, type=types.BACKEND_FOR_PACKET_SEARCH, flush=True)
+        pong = peer.read_message(timeout=10)
+        self.assertEqual((types.PING, taken), (pong.type, pong.references))
         client.shutdown()
         peer.shutdown()
 

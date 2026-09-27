@@ -17,6 +17,7 @@
 #ifndef MX_MULTIPLEXER_BASIC_CLIENT_H_
 #define MX_MULTIPLEXER_BASIC_CLIENT_H_
 
+#include <algorithm>
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
 #include <atomic>
@@ -58,6 +59,27 @@ struct BasicClientTraits {
 class BasicClient;
 class Client;
 
+// `msg` framed for a send, as every send that takes a whole message frames
+// it: as it is when it has an id and a sender, else a copy with an empty id
+// made fresh by `fresh_id` and an empty sender set to `instance_id`, as
+// new_message() and a reply fill them, since every receiver drops a message
+// without an id.
+template <typename FreshId>
+std::shared_ptr<const RawMessage> frame_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id,
+                                                FreshId fresh_id) {
+  if (msg.id() && msg.from()) {
+    return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
+  }
+  MultiplexerMessage stamped(msg);
+  if (!stamped.id()) {
+    stamped.set_id(fresh_id());
+  }
+  if (!stamped.from()) {
+    stamped.set_from(instance_id);
+  }
+  return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(stamped));
+}
+
 // A queued frame's fate: not written yet, written to the socket, or
 // dropped.
 enum class SendState : unsigned char { QUEUED, SENT, LOST };
@@ -65,8 +87,8 @@ enum class SendState : unsigned char { QUEUED, SENT, LOST };
 // Why a client gave up on a message the program sent, as its drop observer
 // and docs/semantics.md name it.
 enum class DropReason : unsigned char {
-  NO_ROOM,          // it waited for room on a full connection past its timeout
-  NO_CONNECTION,    // it waited for a connection to come up past its timeout
+  NO_ROOM,          // it waited for room on a full connection past its timeout, or had none to wait
+  NO_CONNECTION,    // it waited for a connection to come up past its timeout, or had none to wait
   CONNECTION_LOST,  // its connection ended and nothing else could take it: a pinned lane's, a copy for ALL
   SHUT_DOWN,        // the client shut down before it went
 };
@@ -343,14 +365,6 @@ class Lane {
 };
 typedef std::shared_ptr<Lane> LanePtr;
 
-// How an addressed query locates its addressee when the request did not
-// reach it: a BACKEND_FOR_PACKET_SEARCH addressed to the instance, which
-// reaches it whatever its Routing, as every addressed message does, or a
-// PING, which `BaseMultiplexerServer`, `BaseThreadedMultiplexerServer` and
-// `ThreadedClient` answer; the synchronous Client does not.
-// docs/query.md, "An addressed query".
-enum Probe { PROBE_SEARCH, PROBE_PING };
-
 // A query's on_received: told the instance id of the backend that
 // acknowledged one of the query's attempts with REQUEST_RECEIVED, what a
 // server's notify_start() sends. Nothing about the query changes for it.
@@ -434,6 +448,12 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   void shutdown();
   bool shuts_down() const { return shuts_down_; }
   bool closing();
+  // Whether a connection is live or could still come up: one registered,
+  // connecting or resolving, or a reconnect timer armed. False on a client
+  // never connected, made with no address, or shut down, where nothing
+  // held could ever be written: a wait for that would wait for nothing,
+  // spinning when nothing else gives the loop work.
+  bool connection_live_or_coming() const;
   // The messages the client's connections read after they began closing,
   // in shutdown() or after a failed write, and dropped: a request among
   // them gets no answer, its sender waits out its timeout. Every one is
@@ -624,17 +644,25 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     return io_service_.run_one();
   }
 
-  // Every handler that is ready, without waiting. A peer that closed its
-  // end while no call ran the loop is noticed here, and its connection
-  // retired, which is why the synchronous client calls this before it
-  // chooses a connection for a message: a write into a socket the other
-  // side has closed succeeds, and the message would be lost with no error.
+  // Every handler that is ready, without waiting, until it has read a
+  // queue's worth of frames (incoming_queue_max_size_): a frame read from a
+  // socket that holds more makes the next read ready at once, so a peer
+  // that writes faster than this client reads, whose socket never drains,
+  // would keep io_context::poll() going for good, the call never returning
+  // and the queue full and dropping. A peer that closed its end while no call
+  // ran the loop is noticed here, and its connection retired, which is why
+  // the synchronous client calls this before it chooses a connection for a
+  // message: a write into a socket the other side has closed succeeds, and
+  // the message would be lost with no error. A closure behind more unread
+  // frames than that is noticed by a later call.
   void poll() const {
     MX_DCHECK_RUN_ON(&owner_thread());
     if (io_service_.stopped()) {
       io_service_.reset();
     }
-    io_service_.poll();
+    const std::uint64_t until = frames_handled_ + std::max(1u, incoming_queue_max_size_);
+    while (frames_handled_ < until && io_service_.poll_one()) {
+    }
   }
 
   // Runs the loop until a message is queued or the timer expires. A socket
@@ -650,6 +678,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
       if (run_one() == 0) {
         MXTHROW(NotConnected());
       }
+    }
+    if (!has_incoming_messages()) {
+      poll();  // a last look, without waiting, at what has arrived: a zero timeout, expired at once, reads too
     }
     if (!has_incoming_messages()) {
       MXTHROW(OperationTimedOut());
@@ -743,6 +774,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // Lets go of every send still followed, calling no `done`: for a client
   // freed where nothing may call back, as release_drop_observer() is.
   void release_follows();
+  // Drops the message held for a connection whose tracker is `state`, when
+  // it is held, reported NO_CONNECTION as one out of time is: what a
+  // flushing send that gives up with nothing connected or coming does, so
+  // that its message does not go out after the send said NotConnected.
+  void drop_held(const BasicScheduledMessageTracker& state);
 
   // Runs the loop until some connection is registered or the timer expires:
   // this is where a synchronous client's reconnect timers get to fire when
@@ -768,6 +804,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
         return has_incoming_messages();  // no work at all: `watch` is gone, as nothing can arrive
       }
     }
+    if (!has_incoming_messages() && watch) {
+      poll();  // a last look, as in wait_for_incoming_message
+    }
     if (has_incoming_messages()) {
       return true;
     }
@@ -780,7 +819,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // Queues the frame on a preferred connection, the one a request arrived on
   // or a reply came from, while it lives; once it is gone, on another, as
   // any message is, waiting up to `timeout` for one to come back when none
-  // is live; with none by then, throws NotConnected. Never a connection of
+  // is live, as long as it takes for a negative one, not at all for 0 or
+  // NaN; with none by then, throws NotConnected. The message waits for
+  // room `timeout` at most, as every schedule does. Never a connection of
   // its own to the old one's address: the client already reconnects to
   // that multiplexer under the target it was given, a host name perhaps,
   // and a second connection to it would replace the first and be replaced
@@ -795,13 +836,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if ((conn = wrapper.lock()) && conn->living()) {
       // A connection closed by the peer while the loop did not run still
       // reads as living here; Client polls the loop before calling this.
-      return schedule_on(raw, wrapper, timeout > 0 ? timeout : DEFAULT_TIMEOUT);
+      return schedule_on(raw, wrapper, timeout);
     }
-    BasicScheduledMessageTracker tracker = schedule_one(raw);
-    if (!tracker && timeout > 0) {
+    BasicScheduledMessageTracker tracker = schedule_one(raw, NULL, timeout);
+    if (!tracker && (timeout > 0 || timeout < 0)) {
       std::unique_ptr<mx::SimpleTimer> timer = create_timer(timeout);
       if (wait_for_any_connection(*timer)) {
-        tracker = schedule_one(raw);
+        tracker = schedule_one(raw, NULL, timeout);
       }
     }
     if (!tracker) {
@@ -861,6 +902,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   unsigned int routing_version_ = 0;  // bumped by set_routing; 0 is the default routing
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
+  std::uint64_t frames_handled_ = 0;  // every frame handle_message() was given, owner thread; see poll()
   LogSummary drop_lines_;
   DropObserver drop_observer_;
   std::atomic<std::uint64_t> dropped_{0};
@@ -899,6 +941,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
                   std::vector<BasicScheduledMessageTracker>* trackers, ConnectionWrapper* used, bool* refused);
   WaitingPtr _hold(const std::shared_ptr<const RawMessage>& raw, BasicScheduledMessageTracker state,
                    std::uint64_t number, std::chrono::steady_clock::time_point deadline, bool all, const LanePtr& lane);
+  BasicScheduledMessageTracker _give_up(const std::shared_ptr<const RawMessage>& raw,
+                                        BasicScheduledMessageTracker state, std::uint64_t number, DropReason reason);
   bool _held_whole(const std::shared_ptr<const RawMessage>& raw) const;
   void _supersede(const BasicScheduledMessageTracker& state);
   void _place_held();

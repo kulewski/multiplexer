@@ -41,6 +41,7 @@
 #include "lib/functors.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "lib/thread_checker.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/defaults.h"
@@ -518,7 +519,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   template <typename WaitHandler>
   void _do_later(asio::steady_timer& timer, const float seconds, WaitHandler handler) {
     // timer.cancel();
-    timer.expires_after(std::chrono::microseconds(static_cast<long>(seconds * 1e6)));
+    timer.expires_after(mx::from_seconds(seconds));
     timer.async_wait(handler);
   }
 

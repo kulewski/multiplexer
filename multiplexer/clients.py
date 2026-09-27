@@ -67,7 +67,6 @@ class BasicClient(mxclient.Client):
         type: int,
         timeout: float = ...,
         to: int = ...,
-        probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[False] = ...,
         *,
@@ -81,7 +80,6 @@ class BasicClient(mxclient.Client):
         type: int,
         timeout: float = ...,
         to: int = ...,
-        probe: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
         *,
         with_connection: Literal[True],
@@ -95,7 +93,6 @@ class BasicClient(mxclient.Client):
         type: int,
         timeout: float = mxclient.DEFAULT_TIMEOUT,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = mxclient.Client.ONE,
         with_connection: bool = False,
         *,
@@ -104,11 +101,11 @@ class BasicClient(mxclient.Client):
         """Like mxclient.Client.query, but a BACKEND_ERROR reply raises BackendError."""
         if with_connection:
             reply, connection = super(BasicClient, self).query(
-                message, type, timeout, to, probe, multiplexer, with_connection=True, on_received=on_received
+                message, type, timeout, to, multiplexer, with_connection=True, on_received=on_received
             )
             self.__check_backend_error(reply)
             return reply, connection
-        reply = super(BasicClient, self).query(message, type, timeout, to, probe, multiplexer, on_received=on_received)
+        reply = super(BasicClient, self).query(message, type, timeout, to, multiplexer, on_received=on_received)
         self.__check_backend_error(reply)
         return reply
 
@@ -123,8 +120,11 @@ class BasicClient(mxclient.Client):
     # since unpickling runs code.
     def query_pickle(self, data: Any, type: int, timeout: float = mxclient.DEFAULT_TIMEOUT, **kwargs: Any) -> Any:
         """query() with `data` pickled as the payload; returns the reply's
-        payload unpickled. The kwargs are query()'s: `to`, `probe`,
-        `multiplexer`, `on_received`."""
+        payload unpickled. The kwargs are query()'s: `to`, `multiplexer`,
+        `on_received`; `with_connection` raises TypeError, the result being
+        the payload alone."""
+        if "with_connection" in kwargs:
+            raise TypeError("query_pickle() returns the payload alone: no with_connection")
         return pickle.loads(self.query(pickle.dumps(data), type, timeout, **kwargs).message)
 
     def send_pickle(self, data: Any, **kwargs: Any) -> int:

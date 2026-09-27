@@ -10,6 +10,7 @@
 #include <set>
 
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/client.h"
 #include "mxcontrol/task.h"
@@ -119,8 +120,7 @@ int RulesControlTask::run() {
   client.schedule_all(request);
 
   std::set<std::uint64_t> answered;
-  const std::chrono::steady_clock::time_point deadline =
-      std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<long>(timeout_ * 1e6));
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout_);
   while (answered.size() < expected) {
     const float remaining = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
     std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;

@@ -19,7 +19,6 @@ from typing import Any, Callable, Generic, Protocol, TypeVar
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.clients import Client, SyncClient  # Client: the name up to 2.3.1, importable here as before
 from multiplexer.mxclient import ConnectionWrapper, Lane
-from multiplexer.multiplexer_constants import types
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import Cluster, Mx, wait_until
 from multiplexer.threaded_client import ThreadedClient
@@ -344,13 +343,12 @@ class TestClient:
         type: int,
         timeout: float = 10,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = SyncClient.ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send `payload` as a request of `type` and return the reply; with
-        `to`, addressed to that instance, located with `probe` when it
+        `to`, addressed to that instance, located with a PING when it
         moved; through a Lane or a ConnectionWrapper as `multiplexer`;
         (reply, connection) with `with_connection`; `on_received(backend)`
         for each backend that acknowledged the request. SyncClient.query()
@@ -360,7 +358,6 @@ class TestClient:
             type=type,
             timeout=timeout,
             to=to,
-            probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
             on_received=on_received,
@@ -385,7 +382,7 @@ class ThreadedTestClient:
     """A client of `peer_type` shaped like a production peer built on
     ThreadedClient: an io thread of its own, an active peer type, replies
     matched to queries by id, a late reply to a query it has seen answered
-    dropped, a search addressed to it answered. What arrives on its own,
+    dropped, a PING answered. What arrives on its own,
     events and requests addressed to it, is kept: `received` in arrival
     order, messages(type, matching=None), wait_for(type, count=1,
     timeout=10, matching=None), via(mxmsg) and arrivals(type), as on
@@ -446,20 +443,18 @@ class ThreadedTestClient:
         type: int,
         timeout: float = 10,
         to: int = 0,
-        probe: int = types.BACKEND_FOR_PACKET_SEARCH,
         multiplexer: int | Lane | ConnectionWrapper = ThreadedClient.ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
     ) -> Any:
         """Send `payload` as a request of `type` and return the reply, or
-        raise as ThreadedClient.query() does; its `to`, `probe`,
-        `multiplexer`, `with_connection` and `on_received`."""
+        raise as ThreadedClient.query() does; its `to`, `multiplexer`,
+        `with_connection` and `on_received`."""
         return self.client.query(
             payload,
             type,
             timeout,
             to=to,
-            probe=probe,
             multiplexer=multiplexer,
             with_connection=with_connection,
             on_received=on_received,

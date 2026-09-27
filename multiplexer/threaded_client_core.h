@@ -75,14 +75,13 @@ class ThreadedClient::Core {
   Result query(const std::string& payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
                LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
-             LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+             LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
-               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+               ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
-             float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH,
-             ReceivedCallback received = ReceivedCallback());
+             float timeout = DEFAULT_TIMEOUT, ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
-               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+               ReceivedCallback received = ReceivedCallback());
   void shutdown(float timeout);
   bool orphaned() const { return basic_client_->orphaned(); }
   LogSummary& drop_lines() { return basic_client_->drop_lines(); }  // the io thread only
@@ -102,6 +101,8 @@ class ThreadedClient::Core {
   bool _writing_out_here();
   void _release_callbacks();
 
+  // A caller's whole message framed, its empty id and sender filled.
+  std::shared_ptr<const RawMessage> _stamped(const MultiplexerMessage& msg);
   // Sends; see "Sends" in the .cc.
   void _submit_send(std::shared_ptr<const RawMessage> raw, bool all, bool wait, float timeout, SendCallback done,
                     LanePtr lane, FlushedCallback flushed = FlushedCallback());

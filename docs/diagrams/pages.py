@@ -235,9 +235,9 @@ answers the search that follows the same way, so the client raises
             """
 A request with `to` set, the instance id of one peer, is an addressed query:
 only that peer ever gets it, never another instance of its type. It has the
-same three stages, with the middle one locating that instance instead of
-searching for any backend, and one `timeout` covering all three. The
-picture shows the moment that needs the middle stage: multiplexer 1 has
+same three stages, with the middle one locating that instance with a `PING`
+instead of searching for any backend, and one `timeout` covering all three.
+The picture shows the moment that needs the middle stage: multiplexer 1 has
 just restarted, the client is back on it, and the addressee is not yet.
 Two instances of the type exist; the request is for instance 2.
 """,
@@ -249,12 +249,12 @@ Two instances of the type exist; the request is for instance 2.
             edges=[
                 Edge("Q", "M1", "request, to: instance 2"),  # 0
                 Edge("M1", "Q", "DELIVERY_ERROR, failed_to"),  # 1
-                Edge("Q", "M1", "probe, to: instance 2"),  # 2
-                Edge("Q", "M2", "probe, to: instance 2"),  # 3
+                Edge("Q", "M1", "PING, to: instance 2"),  # 2
+                Edge("Q", "M2", "PING, to: instance 2"),  # 3
                 Edge("M1", "Q", "DELIVERY_ERROR"),  # 4
-                Edge("M2", "B2", "probe"),  # 5
-                Edge("B2", "M2", "PING"),  # 6
-                Edge("M2", "Q", "PING"),  # 7
+                Edge("M2", "B2", "PING"),  # 5
+                Edge("B2", "M2", "PING back"),  # 6
+                Edge("M2", "Q", "PING back"),  # 7
                 Edge("Q", "M2", "request again, to: instance 2"),  # 8
                 Edge("M2", "B2", "request"),  # 9
                 Edge("B2", "M2", "reply"),  # 10
@@ -282,23 +282,23 @@ Two instances of the type exist; the request is for instance 2.
                     ["M1"],
                 ),
                 Step(
-                    "The client probes for the instance on every connection",
-                    "The probe is a `BACKEND_FOR_PACKET_SEARCH` addressed to the instance, "
-                    "which reaches it whatever its routing, as every addressed message does, "
-                    "or with `probe=PING` a `PING`, which the server classes, `ThreadedClient` "
-                    "and `AsyncClient` all answer, echoing its payload, so it also finds a peer "
-                    "that serves no requests (`SyncClient` does not answer it). "
+                    "The client pings the instance on every connection",
+                    "A `PING` addressed to the instance, which reaches it whatever its routing, "
+                    "as every addressed message does. The server classes, `ThreadedClient` and "
+                    "`AsyncClient` all answer it, echoing its payload, whatever their search "
+                    "policy, so it finds a backend that declines searches, saturated say, as "
+                    "well as a peer that serves no requests (`SyncClient` does not answer it). "
                     "Delivery errors are requested, so a multiplexer without the "
                     "instance says so. The connection dying under the first stage leads here "
                     "too. A request that simply gets no answer within the timeout does not: "
-                    "a silent addressee is one the multiplexer still has, and a probe would "
+                    "a silent addressee is one the multiplexer still has, and a `PING` would "
                     "find the same one.",
                     [2, 3],
                     ["Q"],
                 ),
                 Step(
                     "One multiplexer says no, the other delivers",
-                    "Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the probe "
+                    "Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the `PING` "
                     "to instance 2. Every connection failing would end the query with "
                     "`OperationFailed`, at once: the instance is gone.",
                     [4, 5],
@@ -323,7 +323,7 @@ Two instances of the type exist; the request is for instance 2.
                     "Instance 2 answers",
                     "The reply ends the query. Nothing within the timeout is `OperationTimedOut`; "
                     "a `DELIVERY_ERROR` for the repeated request, the instance leaving between "
-                    "the probe and the request, is `OperationFailed`.",
+                    "the `PING` and the request, is `OperationFailed`.",
                     [10, 11],
                     ["B2"],
                 ),

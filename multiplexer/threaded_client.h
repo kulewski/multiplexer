@@ -12,8 +12,8 @@
 // Client::_query (request; search for a backend on every connection; the
 // request again to the backend found), each stage with its own deadline
 // timer. A request with `to` set is an addressed query, Client::_query_addressed
-// in shape: the middle stage locates that one instance, with a search or a
-// PING addressed to it, and the three stages share one deadline. A
+// in shape: the middle stage locates that one instance, with a PING
+// addressed to it, and the three stages share one deadline. A
 // connection dying under a query does not cost the query its timeout: the
 // request is sent again through another connection, or as soon as one
 // comes back, the way the synchronous Client does inside a call (a request
@@ -36,11 +36,10 @@
 // bounded number of them; so `references` means "this is the reply", and a
 // follow-up that is not the reply must not reference the request but be
 // addressed to the peer and correlated in the payload), REQUEST_RECEIVED
-// for an unknown id is dropped, a PING without references, or a
-// BACKEND_FOR_PACKET_SEARCH addressed to this instance, is answered with a
-// PING carrying its payload back (BACKEND_ERROR when that echo would be
-// over MAX_MESSAGE_SIZE), a search routed by type is dropped unless a
-// search policy is set (set_search_policy), and the rest, events,
+// for an unknown id is dropped, a PING without references is answered
+// with a PING carrying its payload back (BACKEND_ERROR when that echo
+// would be over MAX_MESSAGE_SIZE), a BACKEND_FOR_PACKET_SEARCH is dropped
+// unless a search policy is set (set_search_policy), and the rest, events,
 // requests addressed to this peer and the DELIVERY_ERRORs for messages
 // that were not queries, go to on_message, or are logged and dropped when
 // there is none. Nothing is ever queued for a reader that may
@@ -108,8 +107,7 @@ class ThreadedClient : public ExceptionDefinitions {
   // `answer()` returns true (on the io thread, so it must be quick) and
   // dropped otherwise, the way BaseThreadedMultiplexerServer declines when
   // saturated, with decline_searches_when_full. Without a policy, a
-  // ThreadedClient answers only a search addressed to it and drops the
-  // rest. Call before connecting.
+  // ThreadedClient answers no search. Call before connecting.
   typedef std::function<bool()> SearchPolicy;
   void set_search_policy(SearchPolicy answer);
   // Every message the program sent that the client gives up on, each copy
@@ -251,27 +249,27 @@ class ThreadedClient : public ExceptionDefinitions {
   // holds. The blocking form throws std::logic_error when called on the
   // io thread, that is from a callback, where it would deadlock. The
   // message forms take the request as a whole, `to` included, and set its
-  // id and from per attempt; `probe` is how an addressed query locates its
-  // addressee. With a lane the request goes through the lane's connection
-  // and the lane adopts the connection the reply came through, a pinned
-  // lane allowing no other; with a connection, through that one while it
-  // is live. `received`, when given, is told on the io thread the instance
-  // id of each backend that acknowledges an attempt with REQUEST_RECEIVED
-  // (notify_start()): once, normally, or again when a retry reached a
-  // backend, the same or another; nothing about the query changes for it.
+  // id and from per attempt; an addressed one locates its addressee with a
+  // PING addressed to it. With a lane the request goes through the lane's
+  // connection and the lane adopts the connection the reply came through, a
+  // pinned lane allowing no other; with a connection, through that one
+  // while it is live. `received`, when given, is told on the io thread the
+  // instance id of each backend that acknowledges an attempt with
+  // REQUEST_RECEIVED (notify_start()): once, normally, or again when a
+  // retry reached a backend, the same or another; nothing about the query
+  // changes for it.
   void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   Result query(const std::string& payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,
                LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, Callback callback, float timeout = DEFAULT_TIMEOUT,
-             LanePtr lane = LanePtr(), Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+             LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
-               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+               ReceivedCallback received = ReceivedCallback());
   void query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, Callback callback,
-             float timeout = DEFAULT_TIMEOUT, Probe probe = PROBE_SEARCH,
-             ReceivedCallback received = ReceivedCallback());
+             float timeout = DEFAULT_TIMEOUT, ReceivedCallback received = ReceivedCallback());
   Result query(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout = DEFAULT_TIMEOUT,
-               Probe probe = PROBE_SEARCH, ReceivedCallback received = ReceivedCallback());
+               ReceivedCallback received = ReceivedCallback());
 
   // Ends every in-flight query with SHUT_DOWN, writes what was sent before
   // the call, and what the io thread sends meanwhile, a server's refusal of

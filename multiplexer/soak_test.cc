@@ -89,8 +89,8 @@ void run_queries(ThreadedClient& client, int count) {
 }
 
 // The same through lanes and by address: typed queries on one lane,
-// addressed queries on it with either probe, a lane made and dropped per
-// query, a flushing send per query, and the reply's connection preferred.
+// addressed queries on it, a lane made and dropped per query, a flushing
+// send per query, and the reply's connection preferred.
 void run_lane_queries(ThreadedClient& client, std::uint64_t backend_id, int count) {
   multiplexer::LanePtr lane(new multiplexer::Lane());
   for (int index = 0; index < count; ++index) {
@@ -98,7 +98,7 @@ void run_lane_queries(ThreadedClient& client, std::uint64_t backend_id, int coun
     ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
     multiplexer::MultiplexerMessage request = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "hello");
     request.set_to(backend_id);
-    result = client.query(request, 10, lane, index % 2 ? multiplexer::PROBE_PING : multiplexer::PROBE_SEARCH);
+    result = client.query(request, 10, lane);
     ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
     ASSERT_EQ("HELLO", result.reply.third->message());
     multiplexer::LanePtr dropped(new multiplexer::Lane(index % 3 == 0));

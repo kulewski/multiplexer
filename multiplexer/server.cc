@@ -19,6 +19,7 @@
 #include "lib/logging/logging.h"
 #include "lib/memory.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/mxlog/type_id_constants.h" /* generated */
 
 namespace multiplexer {
@@ -73,7 +74,7 @@ void Server::stop(float drain_seconds, std::function<void()> stopped) {
            CTX("multiplexer.server") TEXT("stopping: " + repr(registered) +
                                           " connection(s) close once what is queued for them is written, within " +
                                           repr(drain_seconds) + " s"));
-    drain_timer_.expires_after(std::chrono::microseconds(static_cast<long>(drain_seconds * 1e6)));
+    drain_timer_.expires_after(mx::from_seconds(drain_seconds));
     drain_timer_.async_wait(
         [weak = weak_pointer(shared_from_this())](const asio::error_code& error) { _on_drain_deadline(weak, error); });
   } else {
@@ -228,7 +229,7 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
 }
 
 void Server::_accept_later() {
-  accept_timer_.expires_after(std::chrono::microseconds(static_cast<long>(ACCEPT_RETRY_SECONDS * 1e6)));
+  accept_timer_.expires_after(mx::from_seconds(ACCEPT_RETRY_SECONDS));
   accept_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
     pointer self = weak.lock();
     if (!error && self && self->acceptor_.is_open()) {
@@ -885,7 +886,7 @@ void Server::_arm_rules_check() {
   if (rules_check_interval_ <= 0 || rules_file_.empty()) {
     return;
   }
-  rules_timer_.expires_after(std::chrono::microseconds(static_cast<long>(rules_check_interval_ * 1e6)));
+  rules_timer_.expires_after(mx::from_seconds(rules_check_interval_));
   rules_timer_.async_wait(
       [weak = weak_pointer(shared_from_this())](const asio::error_code& error) { _on_rules_check(weak, error); });
 }

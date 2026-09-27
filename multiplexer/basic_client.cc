@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include "lib/fork.h"
 #include "lib/logging/logging.h"
@@ -57,6 +58,7 @@ void BasicClient::orphan_close_descriptors() {
 void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
                                  std::shared_ptr<MultiplexerMessage> mxmsg) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  ++frames_handled_;  // poll() reads a queue's worth at most
 
   // The multiplexer's answer to our PEER_CONTROL is this library's business.
   if (mxmsg->type() == PEER_STATUS) {
@@ -212,6 +214,24 @@ void BasicClient::shutdown() {
   drop_lines_.flush();
 }
 
+bool BasicClient::connection_live_or_coming() const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (shuts_down_) {
+    return false;
+  }
+  if (!reconnect_timers_.empty()) {
+    return true;  // a connection lost, to be tried again
+  }
+  for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
+       ++entry) {
+    Connection::pointer conn = entry->second.lock();
+    if (conn && !conn->shuts_down()) {
+      return true;  // registered, or resolving, connecting or in its handshake
+    }
+  }
+  return false;
+}
+
 bool BasicClient::closing() {
   MX_DCHECK_RUN_ON(&owner_thread());
   closing_.erase(std::remove_if(closing_.begin(), closing_.end(),
@@ -317,7 +337,12 @@ BasicClient::Connection::pointer BasicClient::_new_connection(const Target& targ
 }
 
 // An address given as such: no resolving, the connect starts at once.
+// After shutdown() nothing connects, as ThreadedClient::connect says: a
+// connection opened then would stay registered, every send refused on it.
 ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint& peer_endpoint) {
+  if (shuts_down_) {
+    MXTHROW(NotConnected());
+  }
   Connection::pointer conn = _new_connection(Target(peer_endpoint.address().to_string(), peer_endpoint.port()));
   conn->managers_private_data().candidates.assign(1, peer_endpoint);
   _try_next_candidate(conn);
@@ -326,8 +351,12 @@ ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint& peer
 
 // A host name, or an address in text: the name is resolved on this thread
 // first, every address it has tried in turn; the wrapper is returned at
-// once, unspecified until an address is in use.
+// once, unspecified until an address is in use. NotConnected after
+// shutdown(), as above.
 ConnectionWrapper BasicClient::async_connect(const std::string& host, std::uint16_t port) {
+  if (shuts_down_) {
+    MXTHROW(NotConnected());
+  }
   asio::error_code literal;
   asio::ip::address address = asio::ip::make_address(host, literal);
   if (!literal) {
@@ -410,7 +439,7 @@ bool BasicClient::wait_for_connection(ConnectionWrapper connwrap, float timeout)
   if (Connection::pointer conn = connwrap.lock()) {
     io_service_.reset();
     std::unique_ptr<SimpleTimer> timer = create_timer(timeout);
-    Assert(timeout == 0 || !timer->expired());
+    Assert(timeout == 0 || std::isnan(timeout) || !timer->expired());  // NaN is 0 to create_timer
     MX_LOG(DEBUG, CHATTERBOX,
            CTX("basicClient") TEXT("waiting for connection " + repr(conn.get()) + "on IO=" + repr(&io_service_)));
     while (!conn->shuts_down() && !conn->registered() && !timer->expired()) {
@@ -443,10 +472,14 @@ BasicClient::IncomingMessagesBuffer::value_type BasicClient::next_incoming_messa
   return next;
 }
 
-// A timer for one call's deadline; a negative timeout means never expires.
+// A timer for one call's deadline; a negative timeout means never expires,
+// and NaN, no time at all, is 0, as mx::from_seconds reads it.
 std::unique_ptr<mx::SimpleTimer> BasicClient::create_timer(float timeout) const {
   using mx::SimpleTimer;
   typedef std::unique_ptr<SimpleTimer> SimpleTimerPtr;
+  if (std::isnan(timeout)) {
+    timeout = 0;
+  }
   if (timeout >= 0) {
     return SimpleTimerPtr(new SimpleTimer(io_service_, timeout));
   }

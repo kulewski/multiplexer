@@ -6,6 +6,7 @@ cc_library(
     deps = [
         "//:protobuf_runtime",
         "//lib:functors",
+        "//lib:seconds",
         "//lib:thread_checker",
     ],
 )

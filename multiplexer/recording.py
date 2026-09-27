@@ -39,7 +39,7 @@ from typing import Any, Iterator
 from google.protobuf.message import DecodeError
 
 from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
-from multiplexer.mxclient import NotConnected, OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationTimedOut, wait_seconds
 
 
 from multiplexer.Recording_pb2 import (  # the reserved numbers, re-exported
@@ -258,18 +258,20 @@ def involves_peer(record: Record, peer_id: int) -> bool:
 def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **fields: Any) -> list[RecordingStatus]:
     """Send a RecordingControl with `action` and `fields` on every
     connection of `client` and return the statuses that came back within
-    `timeout`, one per multiplexer; fewer when one did not answer. Raises
-    NotConnected when the client has no connection."""
+    `timeout`, one per multiplexer; fewer when one did not answer. A
+    negative `timeout` waits as long as it takes, as math.inf does; 0 and
+    NaN wait for none, and read none. Raises NotConnected when the client
+    has no connection."""
     request = RecordingControl(action=action, **fields)
     mxmsg = client.new_message(message=request.SerializeToString(), type=RECORDING_CONTROL)
     # A copy on every live connection now, and one status expected from each;
     # with none live, nothing to wait for.
-    expected = client.schedule_all(mxmsg.SerializeToString(), timeout)
+    expected = client._schedule_all(mxmsg.SerializeToString(), timeout)
     if not expected:
         raise NotConnected()
     request_id = mxmsg.id
     statuses = []
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + wait_seconds(timeout)
     while len(statuses) < expected:
         remaining = deadline - time.monotonic()
         if remaining <= 0:

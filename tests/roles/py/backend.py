@@ -175,7 +175,7 @@ class Backend(Leaving, servers.BaseMultiplexerServer):
         if self.draining:
             if not self.acked and self.conn.routing_acknowledged():
                 self.acked = True
-                emit("acked", ms=(time.time() - self._draining_since) * 1000)
+                emit("acked", ms=(time.monotonic() - self._draining_since) * 1000)
             return
         if common.STOP.is_set() or (self.drain_file and os.path.exists(self.drain_file)):
             if not self.drain_seconds and not self.drain_min_handled:

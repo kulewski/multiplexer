@@ -349,14 +349,14 @@ class Mx:
         self.proc = subprocess.Popen(
             command, stdout=self._log, stderr=self._log, env=child_env(native=True), pass_fds=passed
         )
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while not os.path.exists(self.port_file):
             if self.proc.poll() is not None:
                 raise RuntimeError(
                     "mx%d exited with %d before listening:\n%s"
                     % (self.index, self.proc.returncode, tail(self.log_path))
                 )
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise RuntimeError("mx%d did not report its port within %ss" % (self.index, timeout))
             time.sleep(0.02)
         with open(self.port_file) as port_file:
@@ -599,7 +599,7 @@ class Cluster:
         """Block until at least `count` peers of `peer_type` (a peers.* value
         or its name) are registered on every multiplexer; raises
         TimeoutError naming what was missing."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while True:
             seen = [
                 sum(1 for _, name, number in multiplexer.connected_peers() if peer_type in (name, number))
@@ -607,7 +607,7 @@ class Cluster:
             ]
             if all(found >= count for found in seen):
                 return
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise TimeoutError(
                     "waited %ss for %d peer(s) of type %s on every multiplexer; saw %s"
                     % (timeout, count, peer_type, seen)
@@ -618,7 +618,7 @@ class Cluster:
         """Block until no peer of `peer_type` (a peers.* value or its name)
         is registered on any multiplexer: a backend that was stopped has
         been noticed. Raises TimeoutError naming how many were still there."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while True:
             seen = [
                 sum(1 for _, name, number in multiplexer.connected_peers() if peer_type in (name, number))
@@ -626,7 +626,7 @@ class Cluster:
             ]
             if not any(seen):
                 return
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise TimeoutError(
                     "waited %ss for every peer of type %s to be gone from every multiplexer; saw %s"
                     % (timeout, peer_type, seen)
@@ -791,11 +791,11 @@ class Role:
         lines may still be on their way through the pipe. Returns whatever
         there is, so an assertEqual on the length reports a shortfall or a
         surplus alike."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         with self._cond:
             while True:
                 found = [event for event in self.events if self._matches(event, name, match)]
-                remaining = deadline - time.time()
+                remaining = deadline - time.monotonic()
                 if len(found) >= count or self._eof or remaining <= 0:
                     return found
                 self._cond.wait(min(remaining, 0.5))
@@ -804,7 +804,7 @@ class Role:
         """Block until a `name` event with fields `match` has arrived and
         return it. Raises if the process exits first or `timeout` passes,
         with the last events and stderr in the message."""
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         with self._cond:
             while True:
                 for event in self.events:
@@ -815,7 +815,7 @@ class Role:
                         "%s exited with %s before %r %s; events=%r; stderr:\n%s"
                         % (self.name, self.proc.returncode, name, match, self.events[-5:], tail(self.stderr_path))
                     )
-                remaining = deadline - time.time()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
                         "%s: no %r %s within %ss; events=%r; stderr:\n%s"
@@ -941,10 +941,10 @@ def wait_for_total(roles: Iterable[Role], name: str, count: int, timeout: float 
     at least `count` have arrived or `timeout` passed: Role.wait_for_count
     for a count split between processes in an unknown way, such as queries
     over two backends."""
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     while True:
         total = sum(len(role.events_of(name, **match)) for role in roles)
-        if total >= count or time.time() > deadline:
+        if total >= count or time.monotonic() > deadline:
             return total
         time.sleep(0.02)
 
@@ -952,12 +952,12 @@ def wait_for_total(roles: Iterable[Role], name: str, count: int, timeout: float 
 def wait_until(predicate: Callable[[], Any], timeout: float, what: str, interval: float = 0.02) -> Any:
     """Poll `predicate` until it returns something true and return that;
     raise TimeoutError naming `what` after `timeout` seconds."""
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     while True:
         result = predicate()
         if result:
             return result
-        if time.time() > deadline:
+        if time.monotonic() > deadline:
             raise TimeoutError("waited %ss for %s" % (timeout, what))
         time.sleep(interval)
 
