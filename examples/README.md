@@ -5,10 +5,11 @@ with a README that runs it and a walkthrough that builds it from
 nothing, echo's apart, which runs it step by step. They are of two
 kinds. The building blocks are what a service needs and would otherwise
 get from Redis, an HTTP pool or a task queue: a replicated cache, a
-channel layer, a pool of model workers. The others show what a broker
-with this latency makes possible, starting with an audio room where
-every 10 ms frame is a request. Two small ones come first: the shape of
-a backend and a client in both languages, and an asyncio gateway.
+channel layer, a pool of model workers, an answer streamed token by
+token. The others show what a broker with this latency makes possible,
+starting with an audio room where every 10 ms frame is a request. Two
+small ones come first: the shape of a backend and a client in both
+languages, and an asyncio gateway.
 
 | example | what it shows | languages | built with | walkthrough |
 |---|---|---|---|---|
@@ -17,6 +18,7 @@ a backend and a client in both languages, and an asyncio gateway.
 | [cache](cache/) | a replicated cache as a Django cache backend: a write to every replica, a read from any; and a journal added by changing the rules under the running multiplexers | Python | pip | [walkthrough.md](cache/walkthrough.md) |
 | [channels](channels/) | a Django Channels channel layer on the multiplexer, Redis replaced by one setting | Python | pip | [walkthrough.md](channels/walkthrough.md) |
 | [inference](inference/) | a web app asking a pool of PyTorch workers, with a worker killed, a rolling restart and a multiplexer killed | Python | pip | [walkthrough.ipynb](inference/walkthrough.ipynb) |
+| [stream](stream/) | an answer that arrives token by token, as a language model's does: one request, its pieces addressed and numbered, one reply; a multiplexer killed under it and the lost pieces asked for again; the answer as Server-Sent Events | Python | pip | [walkthrough.md](stream/walkthrough.md) |
 | [audio](audio/) | an audio room: a query per 10 ms frame to a C++ worker, the answer heard by everyone in the room | Python, C++ | Bazel and pip | [walkthrough.md](audio/walkthrough.md) |
 
 Read them in that order. Every example is two pages of one shape. The
@@ -42,7 +44,7 @@ cd examples/echo
 bazel test //...
 ```
 
-The pip examples, cache, channels, inference and the audio gateway, are
+The pip examples, cache, channels, inference, stream and the audio gateway, are
 installed the way a Django project is: `mx-multiplexer` from PyPI, which
 brings the multiplexer, `mxcontrol`, with it, with a `requirements.txt`, a
 `test.py` on the harness and a `test.sh` that makes a virtual environment

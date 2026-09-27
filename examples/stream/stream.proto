@@ -1,0 +1,66 @@
+// The payloads of the streaming example. Compiled once with `protoc
+// --python_out=. --pyi_out=. stream.proto`; the generated stream_pb2.py is
+// committed next to it.
+syntax = "proto3";
+
+package stream;
+
+// GENERATE: what to answer and how many tokens. `stream_id` is the
+// requester's own number for the answer: the tokens carry it, so that two
+// answers to one process are told apart. The requester sends it again
+// when its connection died under the answer, addressed to the generator
+// of the answer once a token has named it: the generator joins it to the
+// answer under way, sends the tokens from `from_seq` on again, and the
+// rest, and the reply, the new request's way.
+message Prompt {
+  uint64 stream_id = 1;
+  string prompt = 2;
+  uint32 tokens = 3;
+  uint32 from_seq = 4;
+}
+
+// TOKEN: one piece of the answer, addressed to the requester while its
+// request waits: not a reply, so it references nothing; the stream it
+// belongs to and its number, from 1, so that a gap shows and order can be
+// restored.
+message Token {
+  uint64 stream_id = 1;
+  uint32 seq = 2;
+  string text = 3;
+  bool last = 4;
+}
+
+// GENERATED: the reply that ends the request, sent after the last token,
+// or `cancelled` after a CANCEL stopped the answer; `resent` counts the
+// tokens of the answer sent again, to a request that joined it or for a
+// RESUME.
+message Generated {
+  uint64 stream_id = 1;
+  uint32 tokens = 2;
+  double seconds = 3;
+  string worker = 4;
+  bool cancelled = 5;
+  uint32 resent = 6;
+}
+
+// RESUME: a requester that saw a gap asks the generator of the stream,
+// addressed, for the tokens from `from_seq` up to `until_seq` again, or
+// to the last it has when `until_seq` is 0; RESUMED answers with how many
+// it sent, after sending them.
+message Resume {
+  uint64 stream_id = 1;
+  uint32 from_seq = 2;
+  uint32 until_seq = 3;
+}
+
+message Resumed {
+  uint64 stream_id = 1;
+  uint32 resent = 2;
+  bool done = 3;
+}
+
+// CANCEL: an event addressed to a generator: stop the answer, whose
+// requester reads no more of it.
+message Cancel {
+  uint64 stream_id = 1;
+}
