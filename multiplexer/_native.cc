@@ -446,6 +446,11 @@ struct PythonThreadedClient {
     GilRelease release;
     return client.connect(host, port, timeout);
   }
+  // Waits for the io thread, which may need the GIL for a callback first.
+  bool disconnect(const std::string& host, std::uint16_t port) {
+    GilRelease release;
+    return client.disconnect(host, port);
+  }
   unsigned int connections_count() {
     GilRelease release;
     return client.connections_count();
@@ -745,6 +750,13 @@ PYBIND11_MODULE(_native, module) {
                multiplexer::PythonClient::connect,
            pybind11::arg("host"), pybind11::arg("port"), pybind11::arg("timeout"))
 
+      .def("disconnect_from",
+           (bool(multiplexer::PythonClient::*)(const std::string&, std::uint16_t)) &
+               multiplexer::PythonClient::disconnect,
+           pybind11::arg("host"), pybind11::arg("port"),
+           "Drop the multiplexer given to connect_to() with this host and port; see "
+           "multiplexer.mxclient.Client.disconnect.")
+
       .def("wait_for_connection", &multiplexer::PythonClient::wait_for_connection, pybind11::arg("connection"),
            pybind11::arg("timeout"))
       .def("connections_count", &multiplexer::PythonClient::connections_count)
@@ -770,6 +782,10 @@ PYBIND11_MODULE(_native, module) {
       .def("refuse_unread", &multiplexer::PythonClient::refuse_unread,
            "The messages read and not received yet, refused or dropped as refuse_arrivals() does: for a server "
            "that will not handle them, at its close.")
+      .def("dropped_while_closing", &multiplexer::PythonClient::dropped_while_closing,
+           "The messages the client's connections read after they began closing, which they could only drop, "
+           "each connection's logged as a WARNING when it ends; the protocol's own answers to what the client "
+           "sent are not counted. Kept after shutdown(): what a server's close dropped, as the C++ client's.")
       .def("shutdown", &multiplexer::PythonClient::shutdown,
            pybind11::arg("timeout") = multiplexer::CLOSE_FLUSH_SECONDS)
       .def("bind_to_current_thread", &multiplexer::PythonClient::bind_to_current_thread)
@@ -809,6 +825,9 @@ PYBIND11_MODULE(_native, module) {
       .def("random", [](multiplexer::PythonThreadedClient& client) { return client.client.random64(); })
       .def("connect", &multiplexer::PythonThreadedClient::connect, pybind11::arg("host"), pybind11::arg("port"),
            pybind11::arg("timeout"))
+      .def("disconnect", &multiplexer::PythonThreadedClient::disconnect, pybind11::arg("host"), pybind11::arg("port"),
+           "Drop the multiplexer given to connect() with this host and port; see "
+           "multiplexer.threaded_client.ThreadedClient.disconnect.")
       .def("connections_count", &multiplexer::PythonThreadedClient::connections_count)
       .def("set_routing_serialized", &multiplexer::PythonThreadedClient::set_routing_serialized,
            pybind11::arg("serialized"))

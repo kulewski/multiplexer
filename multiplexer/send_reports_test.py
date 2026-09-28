@@ -88,7 +88,7 @@ class HandedOverTest(unittest.TestCase):
                 question = client.new_message(message=b"question", type=REQUEST)
                 sent_ids: list[int] = []
                 try:
-                    reply, _ = client.send_and_receive(question, multiplexer=lane, sent_ids=sent_ids, timeout=30)
+                    reply, _ = client._send_and_receive(question, multiplexer=lane, sent_ids=sent_ids, timeout=30)
                 finally:
                     killer.wait()
                 self.assertEqual(len(sent_ids), 1, "sent once, not again under a new id")

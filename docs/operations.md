@@ -519,12 +519,20 @@ service name reaches every pod. A replica replaced mid-session comes back
 not recording, since the state lives in the process, and often under
 another address: `mxcontrol recording start --stay` keeps polling, looks
 the names up again at every poll and connects to each address that is new,
-and starts the session again on any replica that has never had one; a tap
-resubscribes the same way, as the
+and starts the session on any replica that is not recording, once each, so
+that a session of the run that ended at its cap or by a stop is not
+started again, while one a replica had before the run is no reason to
+leave it unrecorded; a tap resubscribes the same way, as the
 [remote_recording_new_address](../tests/scenarios/remote_recording_new_address/README.md)
-scenario checks. A connection to an address that no name resolves to any
-more stays, retried every 3 s as any lost connection is, and a name that
-does not resolve for a while takes no connection away. Read the files of a
+scenario checks. An address that no name resolves to any more is dropped
+once its connection is down, so that the reconnect, every 3 s, never
+reaches the multiplexer of another deployment that gets the address
+later, as pod addresses are reused; a name that does not resolve for a
+while takes nothing away. Both start with nothing reachable as well, a
+service with no pod ready yet say, and wait for the polls to find the
+replicas; their exit code says whether the end, the stop or the untap,
+reached every replica that needed it ([mxcontrol](mxcontrol.md#recording)).
+Read the files of a
 session together with `dump_recording FILE...` or
 `multiplexer.recording.read_many()`, which merge them by timestamp and tag
 each record with its multiplexer. Timestamps are each multiplexer's own

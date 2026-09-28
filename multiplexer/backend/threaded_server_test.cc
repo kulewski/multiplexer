@@ -13,8 +13,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <fstream>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -189,7 +191,8 @@ struct SelfStopping : Scripted {
 
 // serve_forever() of a server the test made, on a thread of its own: the
 // server stopped and the thread joined at the end of the scope, however
-// the test ends. A failure, from a handler, is the test's to look for.
+// the test ends. A failure, from a handler, is the test's to look for,
+// once `returned` says serve_forever() is over.
 struct ServingThread {
   ServingThread(BaseThreadedMultiplexerServer& server, float poll, float drain_seconds = 0.0f)
       : server(server), thread([this, poll, drain_seconds] {
@@ -198,6 +201,7 @@ struct ServingThread {
           } catch (...) {
             failure = std::current_exception();
           }
+          returned = true;
         }) {}
   ~ServingThread() {
     server.stop();
@@ -205,6 +209,7 @@ struct ServingThread {
   }
   BaseThreadedMultiplexerServer& server;
   std::exception_ptr failure;
+  std::atomic<bool> returned{false};
   std::thread thread;
 };
 
@@ -289,9 +294,14 @@ struct Requester {
   // `msg` sent as it is, and the type of the first message referencing it.
   std::uint32_t answer_to(const multiplexer::MultiplexerMessage& msg, float timeout) {
     client.flush(client.schedule_one(msg), 5);
+    return answer(msg.id(), timeout);
+  }
+  // The type of the first message referencing `id`, waiting up to
+  // `timeout` for each message; throws OperationTimedOut when none comes.
+  std::uint32_t answer(std::uint64_t id, float timeout) {
     for (;;) {
       multiplexer::IncomingMessage got = client.read_raw_message(timeout);
-      if (got.third->references() == msg.id()) {
+      if (got.third->references() == id) {
         return got.third->type();
       }
     }
@@ -310,6 +320,44 @@ bool eventually(Predicate predicate, float seconds = 10) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   return true;
+}
+
+// Holds a multiplexer's io thread, so that it reads nothing while the
+// sockets stay open: a multiplexer frozen, until release() or the end of
+// the scope.
+struct Freeze {
+  explicit Freeze(InProcessMultiplexer& mx) {
+    std::shared_future<void> gate = released.get_future().share();
+    std::promise<void> frozen;
+    mx.io_service.post([gate, &frozen] {
+      frozen.set_value();
+      gate.wait();
+    });
+    frozen.get_future().wait();
+  }
+  ~Freeze() { release(); }
+  void release() {
+    if (!done) {
+      done = true;
+      released.set_value();
+    }
+  }
+  std::promise<void> released;
+  bool done = false;
+};
+
+// More bytes than a frozen multiplexer's connection takes in: twice what
+// the two sockets may buffer, the largest the kernel allows each, within
+// what one message may carry.
+std::size_t bytes_to_fill() {
+  std::size_t buffers = 0;
+  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
+    std::ifstream limits(path);
+    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
+    limits >> least >> initial >> largest;
+    buffers += largest;
+  }
+  return std::min<std::size_t>(2 * buffers, multiplexer::MAX_MESSAGE_SIZE / 2);
 }
 
 }  // namespace
@@ -807,26 +855,48 @@ TEST(ThreadedServer, DrainingTakesTheBackendOutOfRoutingAndFinishesTheQueue) {
   EXPECT_EQ(0u, served.server.dropped());
 }
 
-// With a 10 s cap, the drain ends as soon as the multiplexer confirmed the
-// routing and the workers finished the queue: within a second, every
-// queued request handled and nothing refused.
+// The drain ends once the multiplexer confirmed the routing and the
+// workers finished the queue, not before: confirmed while "block" holds
+// the worker, it goes on turn after turn of the loop, and a request
+// addressed to the server, which the drain routing still delivers, is
+// queued behind and served, where the drain ended on the confirmation
+// alone and the close refused it. With no cap nothing else ends the
+// drain: serve_forever() returns once the queue is empty, every request
+// handled and nothing refused.
 TEST(ThreadedServer, ADrainEndsWhenConfirmedAndTheQueueIsEmpty) {
   InProcessMultiplexer mx;
-  Served served(mx.port, ThreadedServerOptions(), 10.0f);
+  Periodic server(mx.port);
+  ServingThread serving(server, 0.05f, -1.0f);  // no cap
+  ASSERT_TRUE(eventually([&server] { return server.client().connections_count() == 1; }));
   Requester requester(mx.port);
   requester.send("block");
   for (int index = 0; index < 3; ++index) {
     requester.send("event-" + std::to_string(index));
   }
-  ASSERT_TRUE(eventually([&] { return served.server.pending() == 4; }));
-  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-  served.server.start_draining();
-  served.server.release();
-  served.thread.join();
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(5)) << "on the confirmation, not the cap";
-  EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "event-2"}), served.server.snapshot());
-  EXPECT_EQ(0u, served.server.dropped());
-  EXPECT_FALSE(served.failure);
+  ASSERT_TRUE(eventually([&] { return server.pending() == 4; }));
+  server.start_draining();
+  ASSERT_TRUE(eventually([&] { return server.client().routing_acknowledged(); }));
+  // Two turns of the loop from here: drained() was asked at least once
+  // since the confirmation, and said no.
+  const int turns = server.calls.load();
+  EXPECT_TRUE(eventually([&] { return server.calls.load() >= turns + 2; }, 5))
+      << "the drain ended with the worker busy";
+  multiplexer::MultiplexerMessage addressed = requester.message("addressed", multiplexer::types::PYTHON_TEST_REQUEST);
+  addressed.set_to(server.instance_id());
+  requester.client.flush(requester.client.schedule_one(addressed), 5);
+  // Queued behind "block", or refused by a server that took its drain for over.
+  EXPECT_TRUE(eventually([&] { return server.pending() == 5 || server.dropped() != 0; }));
+  server.release();
+  std::uint32_t answer = 0;
+  try {
+    answer = requester.answer(addressed.id(), 10);
+  } catch (const multiplexer::Client::OperationTimedOut&) {
+  }
+  EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, answer) << "served, not refused";
+  EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "event-2", "addressed"}), server.snapshot());
+  EXPECT_EQ(0u, server.dropped());
+  ASSERT_TRUE(eventually([&] { return serving.returned.load(); })) << "the drain went on with the queue empty";
+  EXPECT_FALSE(serving.failure);
 }
 
 // With `all` kept on, work may keep arriving, so the drain runs to its cap.
@@ -941,8 +1011,14 @@ TEST(ThreadedServer, CloseFromAnotherThreadReturnsFromServeForever) {
   EXPECT_FALSE(served.failure) << "serve_forever() returned rather than threw";
 }
 
-// A reply sent just before close() reaches the requester: close() writes
-// what is queued, up to a second, before it shuts the sockets.
+// A reply still being written when close() begins reaches the requester:
+// close() writes out what was sent before it, `timeout` seconds at most,
+// and only then shuts the sockets. The multiplexer is frozen while the
+// reply, more than the two sockets between them hold, is sent and close()
+// begins, and reads again once the client's shutdown is under way: the
+// reply arrives after close() began, where a close that shut the sockets
+// at once cut it off. A short reply is written before close() gets there,
+// and passes either way.
 TEST(ThreadedServer, TheLastReplyIsWrittenBeforeTheClose) {
   InProcessMultiplexer mx;
   Served served(mx.port);
@@ -950,15 +1026,27 @@ TEST(ThreadedServer, TheLastReplyIsWrittenBeforeTheClose) {
   const multiplexer::MultiplexerMessage request = requester.message("later", multiplexer::types::PYTHON_TEST_REQUEST);
   requester.client.flush(requester.client.schedule_one(request), 5);
   ASSERT_TRUE(eventually([&] { return served.server.kept_request() != nullptr; }));
-  served.server.kept_request()->reply("at-the-last-moment", multiplexer::types::PYTHON_TEST_RESPONSE);
-  served.server.stop();  // close() follows at once
-  for (;;) {
-    multiplexer::IncomingMessage got = requester.client.read_raw_message(5);  // throws when nothing comes
-    if (got.third->references() == request.id()) {
-      EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, got.third->type());
-      break;
+  Freeze frozen(mx);
+  served.server.kept_request()->reply(std::string(bytes_to_fill(), 'r'), multiplexer::types::PYTHON_TEST_RESPONSE);
+  EXPECT_FALSE(served.server.client().flush_all(0)) << "the reply written at once: nothing left for close()";
+  std::thread closing([&served] { served.server.close(60); });  // a write-out deadline only a failure reaches
+  // The client's shutdown under way: its calls throw from then on.
+  EXPECT_TRUE(eventually([&served] {
+    try {
+      served.server.client().connections_count();
+      return false;
+    } catch (const ThreadedClient::NotConnected&) {
+      return true;
     }
+  })) << "close() never reached the client's shutdown";
+  frozen.release();
+  closing.join();
+  std::uint32_t answer = 0;
+  try {
+    answer = requester.answer(request.id(), 10);
+  } catch (const multiplexer::Client::OperationTimedOut&) {
   }
+  EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, answer) << "the reply cut off by the close";
 }
 
 TEST(ThreadedServer, NothingIsConnectedOrHandledBeforeServeForever) {

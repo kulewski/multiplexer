@@ -140,6 +140,18 @@ class ThreadedClient:
         under another address is found."""
         return self._native.connect(endpoint[0], endpoint[1], timeout)
 
+    def disconnect(self, endpoint: Endpoint) -> bool:
+        """Drop the multiplexer given to connect() or to the constructor as
+        `endpoint`, the same (host, port), an address in any spelling: no
+        reconnect to it any more, unless connect() is called again; a live
+        connection to it closed, what it had not written going to the
+        other connections or held, and queries through it sent again
+        elsewhere, as for a lost connection; a connect() waiting for it
+        returns False. Returns once the io thread has done it, whether the
+        client had it. Raises NotConnected after shutdown(), as connect()
+        does, and RuntimeError from a callback, on the io thread."""
+        return self._native.disconnect(endpoint[0], endpoint[1])
+
     def connections_count(self) -> int:
         """How many multiplexers are connected right now."""
         return self._native.connections_count()

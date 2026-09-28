@@ -123,9 +123,15 @@ cc_library(
 )
 
 # Visible to the tests: tests/fake_dns builds it with a lookup of its own.
+# The class in the header, the one-shot actions in recording_control.cc,
+# the ones that keep running in recording_loops.cc.
 cc_library(
     name = "recording_control",
-    srcs = ["recording_control.cc"],
+    srcs = [
+        "recording_control.cc",
+        "recording_control.h",
+        "recording_loops.cc",
+    ],
     visibility = ["//tests:__subpackages__"],
     deps = [
         ":every_address",

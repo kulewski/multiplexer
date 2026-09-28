@@ -82,9 +82,11 @@ per connection only, so a stream of events to one receiver can arrive out of
 order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
 keeps a stream on one connection, a soft and late pin: the first event
 through it pins it to the connection the library chose, and every later
-one follows. When that connection dies, the lane lets go and takes
-another, and the stream goes on from there, with a gap or a reorder at the
-failover and no other; a pinned lane, `lane(pinned=True)`, is the hard pin
+one follows. When that connection dies, the events it had not written
+move, in order, to one other connection, the lane follows them there, and
+the stream goes on from there, with a gap or a reorder at the failover and
+no other, one more for each further failover; a pinned lane,
+`lane(pinned=True)`, is the hard pin
 and refuses instead, raising `NotConnected`, for a stream that must not be
 split. A query through a lane leaves it on the connection
 the reply came through, so the events after a request follow the request.

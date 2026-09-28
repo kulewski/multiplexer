@@ -277,7 +277,7 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
         if remaining <= 0:
             break
         try:
-            mxmsg, _ = client.receive([request_id], ignore_types=(RECORDING_RECORD,), timeout=remaining)
+            mxmsg, _ = client._receive([request_id], ignore_types=(RECORDING_RECORD,), timeout=remaining)
         except OperationTimedOut:
             break
         if mxmsg.type != RECORDING_STATUS:

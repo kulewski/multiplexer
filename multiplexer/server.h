@@ -189,7 +189,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     Base::register_connection(conn, welcome);
   }
   void connection_closed(Connection* conn);
-  void handle_orphaned_outgoing_messages(Connection::MessagesBuffer& queue) {
+  void handle_orphaned_outgoing_messages(Connection*, Connection::MessagesBuffer& queue) {
     if (stopping_) {
       stop_dropped_queued_ += queue.size();
     }

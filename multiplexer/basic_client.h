@@ -25,8 +25,8 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -169,6 +169,7 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
     unsigned int routing_in_welcome = 0;
     unsigned int routing_acknowledged = 0;
     std::uint64_t routing_request_id = 0;
+    const BasicClient* owner = nullptr;  // the client that made it, which alone may place on it
     friend class BasicClient;
   };
 
@@ -227,8 +228,8 @@ class ConnectionWrapper {
 
  private:
   ConnectionWrapper(Connection::pointer conn, const BasicClientTraits::Target& target,
-                    const BasicClientTraits::Endpoint& endpoint)
-      : conn_(conn), target_(target), endpoint_(endpoint), generation_(mx::fork_generation()) {}
+                    const BasicClientTraits::Endpoint& endpoint, const BasicClient* owner)
+      : conn_(conn), target_(target), endpoint_(endpoint), generation_(mx::fork_generation()), owner_(owner) {}
   Connection::pointer lock() const { return conn_.lock(); }
 
  public:
@@ -240,6 +241,7 @@ class ConnectionWrapper {
     target_ = other.target_;
     endpoint_ = other.endpoint_;
     generation_ = other.generation_;
+    owner_ = other.owner_;
     return *this;
   }
   // What the connection was asked for, host and port, kept after it is gone.
@@ -253,6 +255,10 @@ class ConnectionWrapper {
   BasicClientTraits::Target target_;
   BasicClientTraits::Endpoint endpoint_;
   unsigned int generation_;  // mx::fork_generation() when it was made
+  // The client whose connection it names, null for an empty wrapper: no
+  // other client places on it (BasicClient::check_ours), and nothing but
+  // the pointer is read, from any thread.
+  const BasicClient* owner_ = nullptr;
 
   friend class BasicClient;
   friend class Client;
@@ -265,7 +271,8 @@ class ConnectionWrapper {
 // lane goes through the lane's connection while it is live. Empty until
 // first use, when it pins itself to the connection the library chose; a
 // lane that is not pinned lets go at a failover, the library writing the
-// new connection into it, and adopts the connection a query's reply came
+// new connection into it, the one that took what the dead one had not
+// written (BasicClient::_handed_to), and adopts the connection a query's reply came
 // through, so the messages after a query follow the query. A pinned lane
 // is its first connection for good: once that connection is gone, every
 // send and query through the lane fails with NotConnected until the
@@ -289,11 +296,19 @@ class Lane {
   // as old as the connection, and learns its live flag at its first use
   // (watch()).
   explicit Lane(const ConnectionWrapper& connection, bool pinned = false)
-      : connection_(connection), pinned_(pinned), holds_(true), generation_(connection.generation_) {}
+      : connection_(connection),
+        pinned_(pinned),
+        holds_(true),
+        generation_(connection.generation_),
+        owner_(connection.owner_) {}
   Lane(const Lane&) = delete;
   Lane& operator=(const Lane&) = delete;
 
   bool pinned() const { return pinned_; }
+  // The client whose connection the lane took first, or was seeded with,
+  // null before: the lane is that client's (BasicClient::check_ours). One
+  // load, no lock, from any thread.
+  const BasicClient* owner() const { return owner_.load(std::memory_order_acquire); }
   // The connection held; empty until the first message went through.
   ConnectionWrapper connection() const {
     _check_made_here();
@@ -362,6 +377,7 @@ class Lane {
   const bool pinned_;
   bool holds_ MX_GUARDED_BY(mutex_) = false;
   const unsigned int generation_;  // mx::fork_generation() when it, or its seed, was made
+  std::atomic<const BasicClient*> owner_{nullptr};
 };
 typedef std::shared_ptr<Lane> LanePtr;
 
@@ -438,7 +454,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // name that does not resolve counts as an attempt that failed. A
   // connection that fails or drops is retried from connection_destroyed
   // after AUTO_RECONNECT_TIME, whenever the loop runs, resolving the name
-  // again each time, so a multiplexer that moved is found at the next try.
+  // again each time, so a multiplexer that moved is found at the next try,
+  // until disconnect() drops the target.
   // Closes every connection, the polite way (Connection::close_gracefully):
   // each goes on reading what its multiplexer still sends, while the loop
   // runs, until that multiplexer's end or CLOSE_READ_SECONDS, so that what
@@ -454,6 +471,12 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // held could ever be written: a wait for that would wait for nothing,
   // spinning when nothing else gives the loop work.
   bool connection_live_or_coming() const;
+  // How many reconnects are armed, a timer each: none once shutdown()
+  // returned, which cancels them and takes them out. For tests.
+  std::size_t reconnects_pending() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return reconnect_timers_.size();
+  }
   // The messages the client's connections read after they began closing,
   // in shutdown() or after a failed write, and dropped: a request among
   // them gets no answer, its sender waits out its timeout. Every one is
@@ -476,6 +499,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // numbers the child has reused since.
   bool orphaned() const;
   void check_not_orphaned() const;
+  // Throws std::invalid_argument for a connection of another client, or a
+  // lane that took one: placed here, a message would be written by this
+  // client's thread on the other client's connection, and the events of
+  // its write would go to the other client. From any thread, a pointer
+  // compare; an empty wrapper and a lane that took no connection pass.
+  void check_ours(const ConnectionWrapper& connection) const;
+  void check_ours(const LanePtr& lane) const;
   void orphan_close_descriptors();
   // Makes the calling thread the owner of this client and of every
   // connection it has, live or still connecting. For a client built on one
@@ -487,7 +517,21 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   bool wait_for_connection(ConnectionWrapper connwrap, float timeout) const;     // run the loop until registered
   ConnectionWrapper connect(const Endpoint& peer_endpoint, float timeout);       // async_connect + wait
   ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout);
-  void connection_destroyed(Connection* conn);  // a connection ended; schedule the reconnect
+  // Drops the target async_connect() was given with this host and port, an
+  // address in text matched as asio writes it, so that two spellings of
+  // one address are one target: its reconnect timer stops, and nothing
+  // connects to it again unless async_connect() is called again. A
+  // connection to it on its way is abandoned; a live one is closed the
+  // polite way, as shutdown() closes each (Connection::close_gracefully),
+  // which hands what it had not written to the other connections, or has
+  // it held, by the rules for a lost connection's, and what it wrote still
+  // arrives. True when the client had the target: a connection to it, live
+  // or on its way, or a reconnect armed. Throws NotConnected after
+  // shutdown(), as async_connect() does.
+  bool disconnect(const std::string& host, std::uint16_t port);
+  bool disconnect(const Endpoint& peer_endpoint);
+  // A connection ended; a reconnect is armed while its target is the client's.
+  void connection_destroyed(Connection* conn);
   // A connection has ended for good: the messages it read after it began
   // closing, which it could only drop, are added up and logged.
   void connection_closed(Connection* conn);
@@ -831,6 +875,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if (wrapper.inherited()) {
       MXTHROW(UsedAfterFork());  // the parent's connection; see ConnectionWrapper
     }
+    check_ours(wrapper);
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::pointer conn;
     if ((conn = wrapper.lock()) && conn->living()) {
@@ -859,9 +904,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
   // A connection that shuts down offers what it had not written here, even
   // nothing (the frame it was writing is not offered: its write says what
-  // became of it): each message goes to another live connection, round
-  // robin, waiting there when it is full, and leaves the buffer; after them
-  // goes what waited in the dead connection's backlog. A message pinned to
+  // became of it): every message goes to one other live connection,
+  // chosen once for `conn`, waiting there when it is full, and leaves the
+  // buffer; after them goes what waited in the dead connection's backlog,
+  // to the same connection, so that a stream's unwritten tail moves whole
+  // and in order, and a lane that held `conn` follows it there. A message pinned to
   // its connection (RawMessage::pinned, a pinned lane's) is never handed
   // over, nor is a copy of an ALL send while another connection lives,
   // which has its own: left in the buffer, it is reported dropped here
@@ -869,19 +916,29 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // With no connection live the rest is held for the next one, an ALL
   // send once, whole, DEFAULT_TIMEOUT from then; at shutdown everything is
   // left.
-  void handle_orphaned_outgoing_messages(Connection::MessagesBuffer& outgoing_messages);
+  void handle_orphaned_outgoing_messages(Connection* conn, Connection::MessagesBuffer& outgoing_messages);
 
   mx::Random64::result_type random64() { return random_(); }         // a message id
   std::uint32_t inline client_type() const { return client_type_; }  // this peer's type
 
  private:
   typedef std::map<Target, Connection::weak_pointer> ConnectionByTarget;
+  typedef std::map<TimerPointer, Target> ReconnectTimers;
 
   // The wrapper of a connection, from what it stores.
   static ConnectionWrapper _wrap(const Connection::pointer& conn) {
     return ConnectionWrapper(conn, conn->managers_private_data().target,
-                             conn->managers_private_data().expected_endpoint);
+                             conn->managers_private_data().expected_endpoint, conn->managers_private_data().owner);
   }
+  // The target async_connect() makes of an address: as asio writes it.
+  static Target _target(const Endpoint& peer_endpoint) {
+    return Target(peer_endpoint.address().to_string(), peer_endpoint.port());
+  }
+  // The target of `host` and `port`: an address in text as asio writes it,
+  // a name as given.
+  static Target _target(const std::string& host, std::uint16_t port);
+  // disconnect(), once the target is known.
+  bool _disconnect(const Target& target);
   // A new connection for `target`, in the map, replacing an earlier one.
   Connection::pointer _new_connection(const Target& target);
   // Resolves the connection's target, then connects; on the io thread.
@@ -907,9 +964,12 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   DropObserver drop_observer_;
   std::atomic<std::uint64_t> dropped_{0};
 
+  // The targets the client has: those with a connection, live or on its
+  // way, and those with a reconnect armed, by a lost connection, which
+  // shutdown() cancels, as disconnect() does its target's.
   ConnectionByTarget connection_by_target_;
-  std::set<TimerPointer> reconnect_timers_;        // armed by lost connections; shutdown() cancels them
-  std::vector<Connection::weak_pointer> closing_;  // closed by shutdown(), still reading to their end
+  ReconnectTimers reconnect_timers_;
+  std::vector<Connection::weak_pointer> closing_;  // closed by shutdown() or disconnect(), reading to their end
   std::uint64_t dropped_while_closing_ = 0;        // see dropped_while_closing()
   const unsigned int fork_generation_at_creation_;
   std::atomic<bool> orphan_descriptors_closed_{false};
@@ -931,6 +991,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   struct Backlog;
   Backlog* _backlog(const Connection* conn);
   Connection::pointer _choose_connection();
+  Connection::pointer _successor(Connection* dead);
+  Connection::pointer _handed_to(const ConnectionWrapper& gone);
   BasicScheduledMessageTracker _place_on(const Connection::pointer& conn, std::shared_ptr<const RawMessage> raw,
                                          BasicScheduledMessageTracker state, std::uint64_t number,
                                          std::chrono::steady_clock::time_point deadline, bool copy, LanePtr lane);
@@ -955,7 +1017,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   void _end_follow(const FollowPtr& follow, unsigned int written);
   void _lose(const WaitingPtr& waiting);
   void _displace(Connection* conn);
-  void _replace_displaced();
+  void _replace_displaced(const Connection::pointer& conn);
   void _expire_at(const WaitingPtr& waiting);
   void _arm_expiry();
   void _expire();

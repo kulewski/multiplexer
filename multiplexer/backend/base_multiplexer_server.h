@@ -77,7 +77,8 @@ class BaseMultiplexerServer {
   virtual ~BaseMultiplexerServer();
 
   // One step: wait up to `timeout` seconds for a message and handle it.
-  // Throws Client::OperationTimedOut when the time passes.
+  // Throws Client::OperationTimedOut when the time passes; serve_forever()
+  // takes the same two steps.
   virtual void loop_iter(float timeout = DEFAULT_READ_TIMEOUT);
 
   // Connects to every address given to the constructor, once;
@@ -206,6 +207,13 @@ class BaseMultiplexerServer {
   void _echo(const char* what);
   // Ends the reply defaults once a message has been handled.
   void _forget_request();
+  // The two steps of loop_iter(): wait up to `timeout` seconds for a
+  // message and keep it as the one to handle, false when the time passed;
+  // then handle it, the reply defaults holding only meanwhile.
+  // serve_forever() calls them apart, so that only the wait running out is
+  // its poll's timeout.
+  bool _receive_one(float timeout);
+  void _handle_received();
 
  public:
   std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly

@@ -7,12 +7,15 @@
 // multiplexer, what periodic_task() sends routed by its type, the
 // acknowledgement of notify_start() as a query's on_received hears it, and
 // the answer to the PING that locates it for an addressed query, which a
-// backend that declines searches sends too.
+// backend that declines searches sends too. And a handler's own
+// OperationTimedOut ends serve_forever() when on_handler_exception() says
+// so, as any exception does.
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -51,18 +54,88 @@ class CountingBackend : public BaseMultiplexerServer {
   }
 };
 
-// Answers every request after a pause, so that the rest queue up; drains
-// when `leave` is set.
+// The counts a flood's sender and the SlowBackend it floods keep against
+// each other, so that the sender is ahead by construction, whatever the
+// speed of either thread: the backend handles a request only once the
+// sender has sent at least twice as many as it had handled, and four
+// more, and the sender sends only while it is fewer than eight beyond
+// that, so that what comes back to it stays far below what a client holds
+// unread. The flood is over once the backend has left or the sender gave
+// up, which ends every wait; each wait also has a bound only a failure
+// reaches.
+class Flood {
+ public:
+  // The backend, before it handles a request, having handled `handled`.
+  void wait_to_handle(int handled) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    handled_ = handled;
+    changed_.notify_all();  // room for the sender
+    changed_.wait_for(lock, std::chrono::seconds(30), [&] { return sent_ >= 2 * handled + 4 || over_; });
+  }
+  // The sender, before it sends one more: false once the flood is over
+  // or `until` passed.
+  bool wait_to_send(std::chrono::steady_clock::time_point until) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    changed_.wait_until(lock, until, [&] { return sent_ < 2 * handled_ + 8 || over_; });
+    return !over_ && std::chrono::steady_clock::now() < until;
+  }
+  // The sender sent one more.
+  void sent_one() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++sent_;
+    changed_.notify_all();
+  }
+  // The flood is over: `left` when the backend left, else the sender gave up.
+  void end(bool left) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    over_ = true;
+    left_ = left_ || left;
+    changed_.notify_all();
+  }
+  // Whether the backend left while the sender was still at it.
+  bool left() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return left_;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  int sent_ = 0;
+  int handled_ = 0;
+  bool over_ = false;
+  bool left_ = false;
+};
+
+// Answers every request after a pause, so that the rest queue up; with a
+// `flood`, only once the flood's sender is far enough ahead (Flood). Given
+// `drain_after`, it starts its own drain, from periodic_task(), once it has
+// handled that many requests: a count, not another thread's timing. With
+// `drain_ends_with_waiting`, its drain is over, besides the default's cap,
+// only when requests are read and waiting, so that the drain ends with
+// something for what follows the loop to serve, by construction. Notes
+// the moment its drain ended: how many requests it had handled by then,
+// and whether more were read and waiting.
 class SlowBackend : public BaseMultiplexerServer {
  public:
-  explicit SlowBackend(const MultiplexerAddresses& addresses)
-      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  explicit SlowBackend(const MultiplexerAddresses& addresses, int drain_after = -1,
+                       bool drain_ends_with_waiting = false)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER),
+        drain_after_(drain_after),
+        drain_ends_with_waiting_(drain_ends_with_waiting),
+        instance_id_(conn->instance_id()) {}
   std::atomic<int> handled{0};
-  std::atomic<bool> leave{false};
-  std::atomic<bool> serving{false};  // connected and looping: the first periodic_task() ran
+  std::atomic<bool> serving{false};                   // connected and looping: the first periodic_task() ran
+  mutable std::atomic<int> handled_when_drained{-1};  // -1 until the drain ended
+  mutable std::atomic<bool> waiting_when_drained{false};
+  Flood* flood = nullptr;                                     // set before serving
+  std::uint64_t instance_id() const { return instance_id_; }  // the `from` of its refusals, after close() too
 
  protected:
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
+    if (flood) {
+      flood->wait_to_handle(handled.load());
+    }
     ++handled;
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     send_message(mx::util::kwargs::Kwargs()
@@ -71,10 +144,26 @@ class SlowBackend : public BaseMultiplexerServer {
   }
   void periodic_task() override {
     serving = true;
-    if (leave.load() && !draining()) {
+    if (drain_after_ >= 0 && !draining() && handled.load() >= drain_after_) {
       start_draining();
     }
   }
+  // The default, with requests read and waiting too when asked for, noting
+  // the moment it first holds, when serve_forever() leaves its loop with
+  // what was read still to serve.
+  bool drained() const override {
+    const bool over = BaseMultiplexerServer::drained() && (!drain_ends_with_waiting_ || conn->has_incoming_messages());
+    if (over && handled_when_drained.load() < 0) {
+      handled_when_drained = handled.load();
+      waiting_when_drained = conn->has_incoming_messages();
+    }
+    return over;
+  }
+
+ private:
+  const int drain_after_;  // -1: no drain of its own
+  const bool drain_ends_with_waiting_;
+  const std::uint64_t instance_id_;
 };
 
 // Once asked to leave, starts a drain that keeps a path open from
@@ -678,24 +767,36 @@ TEST(ServeThread, AReplyMayNameItsMultiplexer) {
   EXPECT_EQ("re: question", answer->message());
 }
 
-// A draining BaseMultiplexerServer serves what it had already read: the
-// requests the synchronous client pulled off the socket while a reply was
-// being sent are handled before the connections close. Every request sent is
-// therefore either answered or, routed after the multiplexer applied the
-// drain routing, refused by the multiplexer with a delivery error: none
-// vanishes into a timeout.
-TEST(ServeThread, ADrainServesWhatWasAlreadyRead) {
+namespace {
+
+// How a drain_twelve() went: how long the backend took to leave, from the
+// first request, the moment its drain ended, and what it refused itself.
+struct TwelveDrained {
+  std::chrono::steady_clock::duration took;
+  bool waiting;       // requests read and not handled when the drain ended
+  bool served_after;  // requests handled after the drain ended
+  int refused_by_backend;
+};
+
+// Twelve requests at once to a SlowBackend that starts its drain once it
+// has handled two, the drain capped at `drain_seconds` and, with
+// `drain_ends_with_waiting`, over only with requests read and waiting.
+// Every request has one outcome: a response from the backend, or a
+// delivery error, the backend's or the multiplexer's, told apart by their
+// `from`; none vanishes into a timeout, and what the backend served was
+// answered.
+TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
   InProcessMultiplexer mx;
-  MultiplexerAddresses addresses;
-  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
-  SlowBackend backend(addresses);
-  std::thread server([&backend] { backend.serve_forever(0.05f, 10.0f); });
+  SlowBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}}, 2, drain_ends_with_waiting);
+  std::future<void> served =
+      std::async(std::launch::async, [&backend, drain_seconds] { backend.serve_forever(0.05f, drain_seconds); });
   for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));  // registered before anything is sent
   }
-  ASSERT_TRUE(backend.serving.load());
+  EXPECT_TRUE(backend.serving.load());
   multiplexer::Client client(multiplexer::peers::WEBSITE);
-  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  EXPECT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   std::set<std::uint64_t> sent;
   for (int index = 0; index < 12; ++index) {
     multiplexer::MultiplexerMessage msg;
@@ -706,37 +807,64 @@ TEST(ServeThread, ADrainServesWhatWasAlreadyRead) {
     sent.insert(msg.id());
     client.flush(client.schedule_one(msg), 5);
   }
-  for (int waited = 0; waited < 500 && backend.handled.load() < 2; ++waited) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (served.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
+    ADD_FAILURE() << "the drain never ended";
+    backend.stop();
   }
-  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-  backend.leave = true;
-  server.join();
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(5)) << "on the confirmation, not the cap";
-  // Every request has an outcome: a response from the backend, or a
-  // delivery error from the multiplexer for one routed after the drain.
+  served.get();
+  const std::chrono::steady_clock::duration took = std::chrono::steady_clock::now() - started;
   int responses = 0;
-  int refused = 0;
+  int refused_by_backend = 0;
+  int refused_by_multiplexer = 0;
   const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (responses + refused < 12 && std::chrono::steady_clock::now() < deadline) {
+  while (!sent.empty() && std::chrono::steady_clock::now() < deadline) {
     try {
       std::pair<std::shared_ptr<multiplexer::MultiplexerMessage>, multiplexer::ConnectionWrapper> got =
           client.receive_message(0.5f);
-      if (!sent.count(got.first->references())) {
+      if (!sent.erase(got.first->references())) {
         continue;
       }
-      sent.erase(got.first->references());
-      if (got.first->type() == multiplexer::types::DELIVERY_ERROR) {
-        ++refused;
-      } else {
+      if (got.first->type() != multiplexer::types::DELIVERY_ERROR) {
         ++responses;
+      } else if (got.first->from() == backend.instance_id()) {
+        ++refused_by_backend;
+      } else {
+        ++refused_by_multiplexer;
       }
     } catch (const multiplexer::Client::OperationTimedOut&) {
     }
   }
-  EXPECT_EQ(12, responses + refused) << "none vanished into a timeout";
+  EXPECT_EQ(12, responses + refused_by_backend + refused_by_multiplexer) << "none vanished into a timeout";
   EXPECT_EQ(backend.handled.load(), responses) << "what the backend served was answered";
-  EXPECT_GE(backend.handled.load(), 2);
+  return TwelveDrained{took, backend.waiting_when_drained.load(),
+                       backend.handled.load() > backend.handled_when_drained.load(), refused_by_backend};
+}
+
+}  // namespace
+
+// A draining BaseMultiplexerServer serves what it had already read: the
+// requests the synchronous client pulled off the socket while a reply was
+// being sent are handled before the connections close (drain_twelve). The
+// drain routing turns every path off, so the drain ends on the
+// multiplexer's confirmation, which comes behind every request routed to
+// the backend and counts only once those read are handled: well within
+// the cap, nothing left waiting, and nothing the backend had read refused
+// by it, where the close refused what the loop had not handled.
+TEST(ServeThread, ADrainServesWhatWasAlreadyRead) {
+  const TwelveDrained drained = drain_twelve(10.0f, false);
+  EXPECT_LT(drained.took, std::chrono::seconds(5)) << "on the confirmation, not the cap";
+  EXPECT_FALSE(drained.waiting) << "the confirmation counted with requests waiting";
+  EXPECT_EQ(0, drained.refused_by_backend) << "the backend refused what it had read when the drain ended";
+}
+
+// A drain on its cap, 0.2 s, that the backend says is over only with
+// requests read and waiting, so that they are waiting when it ends by
+// construction: it serves them after the drain ended, the loop gone,
+// where the close refused them.
+TEST(ServeThread, ADrainOnItsCapServesWhatWasAlreadyRead) {
+  const TwelveDrained drained = drain_twelve(0.2f, true);
+  ASSERT_TRUE(drained.waiting) << "nothing waiting when the drain ended";
+  EXPECT_TRUE(drained.served_after) << "what it had read when the drain ended was refused, not served";
 }
 
 // A drain with no cap, a negative drain_seconds as an infinite one, is
@@ -834,27 +962,31 @@ TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
 }
 
 // A lone backend that drains keeping its last-resort path open, under a
-// flood twice as fast as it serves: it leaves at the end of its drain,
-// having handled what it had read by then and refused what arrived later,
-// where every reply's turn of the loop read more, handled in turn, so that
-// it never left. Every request the flood sent has one outcome: a response;
-// a delivery error, the backend's or, once it is gone, the multiplexer's;
-// or, for one the multiplexer routed to the backend, still its last
-// resort, in the moment it closed, a drop the backend counts and logs.
+// flood that stays ahead of it by count (Flood), whatever the speed of
+// either thread: it leaves at the end of its drain, having handled what it
+// had read by then and refused what arrived later, where every reply's
+// turn of the loop read more, handled in turn, so that it never left. The
+// backend starts its drain once it has handled two, and says it is over,
+// at its cap, only with requests read and waiting, so that there are some
+// when it ends by construction: they are served after the loop, where the
+// close refused them. Every request the flood sent has one outcome: a
+// response; a delivery error, the backend's or, once it is gone, the
+// multiplexer's; or, for one the multiplexer routed to the backend, still
+// its last resort, in the moment it closed, a drop the backend counts and
+// logs, which no answer follows.
 TEST(ServeThread, ADrainUnderAFloodEnds) {
   InProcessMultiplexer mx;
-  MultiplexerAddresses addresses;
-  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
-  SlowBackend backend(addresses);
+  SlowBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}}, 2, true);
+  Flood flood;
+  backend.flood = &flood;
   multiplexer::Routing last_resort;
   last_resort.set_any(false);
   last_resort.set_all(false);
   last_resort.set_last_resort(true);
   backend.set_drain_routing(last_resort);
-  std::atomic<bool> returned(false);
-  std::thread server([&backend, &returned] {
+  std::thread server([&backend, &flood] {
     backend.serve_forever(0.05f, 0.3f);
-    returned = true;
+    flood.end(true);  // the backend left: the sender stops
   });
   for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));  // registered before anything is sent
@@ -864,7 +996,7 @@ TEST(ServeThread, ADrainUnderAFloodEnds) {
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   std::set<std::uint64_t> sent;
   const std::chrono::steady_clock::time_point flood_until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-  while (!returned.load() && std::chrono::steady_clock::now() < flood_until) {  // until the backend has left
+  while (flood.wait_to_send(flood_until)) {  // as fast as the lockstep lets it, until the backend has left
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
     msg.set_from(client.instance_id());
@@ -872,19 +1004,24 @@ TEST(ServeThread, ADrainUnderAFloodEnds) {
     msg.set_message("f" + std::to_string(sent.size()));
     sent.insert(msg.id());
     client.flush(client.schedule_one(msg), 5);
-    if (backend.handled.load() >= 2) {
-      backend.leave = true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    flood.sent_one();
   }
-  const bool left_under_the_flood = returned.load();
+  const bool left_under_the_flood = flood.left();
+  flood.end(false);  // the sender stopped: whatever waits for it stops waiting
+  if (!left_under_the_flood) {
+    backend.stop();  // the thread is joined whatever was found
+  }
   server.join();
   EXPECT_TRUE(left_under_the_flood) << "serve_forever() went on under the flood";
+  ASSERT_TRUE(backend.waiting_when_drained.load()) << "nothing waiting when the drain ended";
+  // Counted, not waited out: the answers come until only the drops are
+  // left, which get none.
   const std::size_t count = sent.size();
+  const std::size_t dropped = backend.dropped_while_closing();
   std::size_t responses = 0;
   std::size_t refused = 0;
   const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (!sent.empty() && std::chrono::steady_clock::now() < deadline) {
+  while (sent.size() > dropped && std::chrono::steady_clock::now() < deadline) {
     try {
       std::pair<std::shared_ptr<multiplexer::MultiplexerMessage>, multiplexer::ConnectionWrapper> got =
           client.receive_message(0.5f);
@@ -899,10 +1036,16 @@ TEST(ServeThread, ADrainUnderAFloodEnds) {
     } catch (const multiplexer::Client::OperationTimedOut&) {
     }
   }
-  EXPECT_EQ(count, responses + refused + backend.dropped_while_closing())
+  EXPECT_EQ(count, responses + refused + dropped)
       << "none vanished into a timeout unless the backend counted it dropped at its close";
   EXPECT_EQ(static_cast<std::size_t>(backend.handled.load()), responses) << "what the backend served was answered";
-  EXPECT_GT(refused, 0u) << "the flood outran it";
+  EXPECT_GT(backend.handled.load(), backend.handled_when_drained.load())
+      << "what it had read when the drain ended was refused, not served";
+  // The backend handled each request only once more than twice as many as
+  // it had handled were sent, so more of the flood was refused or dropped
+  // than served, by construction; which of the two is not, a request that
+  // reaches the backend as it closes being dropped.
+  EXPECT_GT(refused + dropped, static_cast<std::size_t>(backend.handled.load())) << "the flood outran it";
 }
 
 TEST(ServeThread, BuiltOnOneThreadServedFromAnother) {
@@ -946,4 +1089,46 @@ TEST(ServeThread, NothingIsConnectedBeforeServeForever) {
   std::thread server([&backend] { backend.serve_forever(0.1f); });  // connects nothing more
   server.join();
   EXPECT_EQ(3, backend.iterations);
+}
+
+namespace {
+
+// Throws an OperationTimedOut of its own from its handler, as one whose
+// own query timed out does, and asks to stop on what its handler throws.
+class TimingOutBackend : public BaseMultiplexerServer {
+ public:
+  explicit TimingOutBackend(const MultiplexerAddresses& addresses)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::atomic<int> iterations{0};
+
+ protected:
+  void handle_message(multiplexer::MultiplexerMessage&) override { throw multiplexer::Client::OperationTimedOut(); }
+  bool on_handler_exception(const std::exception&) override { return false; }
+  void periodic_task() override { ++iterations; }
+};
+
+}  // namespace
+
+// A handler's own OperationTimedOut goes by on_handler_exception() as any
+// exception does: returning false ends serve_forever(), which throws it,
+// where serve_forever() took it for its poll's timeout and served on. The
+// poll's own timeouts still only end an iteration.
+TEST(ServeThread, AHandlersOwnTimeoutEndsServeForeverWhenAskedTo) {
+  InProcessMultiplexer mx;
+  TimingOutBackend backend({{"127.0.0.1", mx.port}});
+  backend.connect();
+  std::future<void> served = std::async(std::launch::async, [&backend] { backend.serve_forever(0.05f); });
+  for (int waited = 0; waited < 1000 && backend.iterations.load() < 2; ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_GE(backend.iterations.load(), 2) << "polls that ran out ended the loop";
+  multiplexer::ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  client.query("request", multiplexer::types::PYTHON_TEST_REQUEST, 5);  // answered with the BACKEND_ERROR report
+  const bool ended = served.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+  if (!ended) {
+    backend.stop();  // it served on
+  }
+  EXPECT_TRUE(ended) << "the handler's OperationTimedOut did not end serve_forever()";
+  EXPECT_THROW(served.get(), multiplexer::Client::OperationTimedOut);
 }

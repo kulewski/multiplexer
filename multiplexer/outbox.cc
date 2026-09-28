@@ -16,12 +16,14 @@
 // only where a connection takes it now, and is dropped and reported at
 // once otherwise (_give_up): it never enters a backlog or the held.
 //
-// A connection that dies hands its queue to the others, and after it what
+// A connection that dies hands its queue to another, and after it what
 // waited in its backlog: a pinned message is lost, which is what the pin
 // means; an ALL send's copy is dropped, the other connections having
-// theirs; the rest goes to another connection, whose room it waits for in
-// turn. With no other connection live, the rest is held for one, and an
-// ALL send is held once, whole, its other copies superseded.
+// theirs; the rest goes, in order, to one other connection, chosen once,
+// whose room it waits for in turn, and a lane that held the dead
+// connection follows it there (_handed_to). With no other connection
+// live, the rest is held for one, and an ALL send is held once, whole, its
+// other copies superseded.
 //
 // Both clients share it. The threaded client's io thread and the
 // synchronous client's calls run the same loop, so what waits moves as soon
@@ -188,7 +190,13 @@ BasicClient::BasicScheduledMessageTracker BasicClient::schedule_one(std::shared_
                                                                     ConnectionWrapper* used, float timeout,
                                                                     std::uint64_t number, LanePtr lane) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  Connection::pointer conn = _choose_connection();
+  Connection::pointer conn;
+  if (lane && !outbox_->handovers.empty() && lane->holds_connection()) {
+    conn = _handed_to(lane->connection());  // its connection died: after the messages it had not written
+  }
+  if (!conn) {
+    conn = _choose_connection();
+  }
   if (!conn) {
     return BasicScheduledMessageTracker();
   }
@@ -205,6 +213,7 @@ BasicClient::BasicScheduledMessageTracker BasicClient::schedule_on(std::shared_p
   if (wrapper.inherited()) {
     MXTHROW(UsedAfterFork());  // the parent's connection; see ConnectionWrapper
   }
+  check_ours(wrapper);
   MX_DCHECK_RUN_ON(&owner_thread());
   Connection::pointer conn = wrapper.lock();
   if (shuts_down_ || !conn || !conn->living()) {
@@ -251,6 +260,7 @@ unsigned int BasicClient::schedule_all(std::shared_ptr<const RawMessage> raw, st
 bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
                        std::uint64_t number, std::vector<BasicScheduledMessageTracker>* trackers,
                        ConnectionWrapper* used, SendCallback done) {
+  check_ours(lane);  // the caller's thread, for the synchronous client; ThreadedClient checked before posting
   MX_DCHECK_RUN_ON(&owner_thread());
   if (shuts_down_) {
     return false;
@@ -444,11 +454,12 @@ bool BasicClient::_place_now(const std::shared_ptr<const RawMessage>& raw, bool 
     }
     return placed;
   }
+  Connection::pointer conn;
   if (lane && lane->holds_connection()) {
     ConnectionWrapper held = lane->connection();
-    Connection::pointer conn = held.lock();
-    if (conn && conn->living()) {
-      BasicScheduledMessageTracker placed = _place_on(conn, raw, state, number, deadline, false, lane);
+    Connection::pointer own = held.lock();
+    if (own && own->living()) {
+      BasicScheduledMessageTracker placed = _place_on(own, raw, state, number, deadline, false, lane);
       if (trackers) {
         trackers->push_back(placed);
       }
@@ -461,8 +472,11 @@ bool BasicClient::_place_now(const std::shared_ptr<const RawMessage>& raw, bool 
       *refused = true;
       return false;
     }
+    conn = _handed_to(held);  // after the messages it had not written
   }
-  Connection::pointer conn = _choose_connection();
+  if (!conn) {
+    conn = _choose_connection();
+  }
   if (!conn) {
     return false;
   }
@@ -603,6 +617,61 @@ BasicClient::Connection::pointer BasicClient::_choose_connection() {
     }
   }
   return least;
+}
+
+// The connection that takes what `dead` had not written: chosen at its
+// first handover and kept, while it lives, for the frame a write still
+// held, handed over after the rest; remembered for `dead`'s target, for
+// the lanes that held `dead` (_handed_to). Null when none is live.
+BasicClient::Connection::pointer BasicClient::_successor(Connection* dead) {
+  const Target& target = dead->managers_private_data().target;
+  std::vector<Outbox::Handover>& handovers = outbox_->handovers;
+  std::vector<Outbox::Handover>::iterator entry = std::find_if(
+      handovers.begin(), handovers.end(), [&target](const Outbox::Handover& each) { return each.target == target; });
+  if (entry != handovers.end() && entry->from == dead) {
+    Connection::pointer conn = entry->to.lock();
+    if (conn && conn->living()) {
+      return conn;
+    }
+  }
+  Connection::pointer conn = _choose_connection();
+  if (!conn) {
+    return conn;
+  }
+  if (entry == handovers.end()) {
+    entry = handovers.insert(handovers.end(), Outbox::Handover());
+    entry->target = target;
+  }
+  entry->from = dead;
+  entry->to = conn;
+  entry->to_target = conn->managers_private_data().target;
+  return conn;
+}
+
+// Where the messages of `gone`, a lane's connection, went once it died:
+// the connection that took what it had not written, or, that one dead
+// too, the one that took over from it, and so on, while it lives. Null
+// while `gone` lives, and when nothing is recorded or live.
+BasicClient::Connection::pointer BasicClient::_handed_to(const ConnectionWrapper& gone) {
+  Connection::pointer own = gone.lock();
+  if (own && own->living()) {
+    return Connection::pointer();
+  }
+  const std::vector<Outbox::Handover>& handovers = outbox_->handovers;
+  const Target* target = &gone.target();
+  for (std::size_t hops = 0; hops < handovers.size(); ++hops) {  // the bound ends a cycle of failovers too
+    std::vector<Outbox::Handover>::const_iterator entry = std::find_if(
+        handovers.begin(), handovers.end(), [target](const Outbox::Handover& each) { return each.target == *target; });
+    if (entry == handovers.end()) {
+      break;
+    }
+    Connection::pointer conn = entry->to.lock();
+    if (conn && conn->living()) {
+      return conn;
+    }
+    target = &entry->to_target;
+  }
+  return Connection::pointer();
 }
 
 // Into `conn`'s queue when it has room and nothing waits for it, else into
@@ -759,8 +828,13 @@ void BasicClient::_displace(Connection* conn) {
                           outbox_->backlogs.end());
 }
 
-void BasicClient::handle_orphaned_outgoing_messages(Connection::MessagesBuffer& outgoing_messages) {
+void BasicClient::handle_orphaned_outgoing_messages(Connection* dead, Connection::MessagesBuffer& outgoing_messages) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  // One connection for all of it, the queue and then the backlog, so that
+  // a stream's unwritten tail moves whole and in order; chosen only when
+  // there is something to move.
+  const Connection::pointer conn =
+      outgoing_messages.empty() && outbox_->displaced.empty() ? Connection::pointer() : _successor(dead);
   Connection::MessagesBuffer left;  // what the connection reports lost
   for (Connection::MessagesBuffer::value_type& message : outgoing_messages) {
     const std::shared_ptr<const RawMessage>& raw = message.second;
@@ -768,7 +842,6 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection::MessagesBuffer& 
       left.push_back(message);  // lost with its connection, which is what the pin means; or nothing goes now
       continue;
     }
-    Connection::pointer conn = _choose_connection();
     BasicScheduledMessageTracker state = message.first.lock();
     if (raw->for_all()) {
       if (conn) {
@@ -795,7 +868,7 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection::MessagesBuffer& 
   for (const Connection::MessagesBuffer::value_type& message : outgoing_messages) {
     report_drop(message.second, shuts_down_ ? DropReason::SHUT_DOWN : DropReason::CONNECTION_LOST);
   }
-  _replace_displaced();
+  _replace_displaced(conn);
 }
 
 // A message somebody follows went to `conn` from a dead connection, or
@@ -841,11 +914,12 @@ ConnectionWrapper BasicClient::followed(const BasicScheduledMessageTracker& stat
   return last;
 }
 
-// What waited for a dead connection goes to another, the lane it went
-// through, if any, adopting that one, or, with none live, is held for the
-// next; a pinned message is lost, and so is a copy of an ALL send while
-// another connection lives, else the message is held once, whole.
-void BasicClient::_replace_displaced() {
+// What waited for a dead connection goes to `conn`, the one its queue went
+// to, the lane it went through, if any, adopting that one, or, with none
+// live, is held for the next; a pinned message is lost, and so is a copy
+// of an ALL send while another connection lives, else the message is held
+// once, whole.
+void BasicClient::_replace_displaced(const Connection::pointer& conn) {
   std::deque<WaitingPtr> displaced;
   displaced.swap(outbox_->displaced);
   for (const WaitingPtr& waiting : displaced) {
@@ -856,7 +930,6 @@ void BasicClient::_replace_displaced() {
       _lose(waiting);
       continue;
     }
-    Connection::pointer conn = _choose_connection();
     if (waiting->copy) {
       if (conn) {
         _lose(waiting);  // the other connections have their copies

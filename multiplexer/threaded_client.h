@@ -82,7 +82,8 @@ class ThreadedClient : public ExceptionDefinitions {
  public:
   // How a query ended. REPLIED: `reply` holds the answer. TIMED_OUT: a stage
   // ran out of time. FAILED: every multiplexer reported no backend of the
-  // type, or the backend found could not be reached. NOT_CONNECTED: no live
+  // type, or the backend found is gone and no other took the request, or
+  // the addressee is gone. NOT_CONNECTED: no live
   // connection to send through. SHUT_DOWN: shutdown() ran first.
   enum Outcome { REPLIED, TIMED_OUT, FAILED, NOT_CONNECTED, SHUT_DOWN };
   struct Result {
@@ -153,6 +154,15 @@ class ThreadedClient : public ExceptionDefinitions {
   // final: the io thread keeps reconnecting every AUTO_RECONNECT_TIME
   // seconds on its own. Not from the io thread.
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  // Drops the multiplexer connect() was given with this host and port, as
+  // SyncClient::disconnect() does, on the io thread: no reconnect to it
+  // any more, unless connect() is called again; a live connection to it
+  // closed, what it had not written going to the other connections or
+  // held, and queries through it sent again elsewhere, as for a lost
+  // connection; a connect() waiting for it returns false. Returns once
+  // done, whether the client had it. Throws NotConnected after shutdown(),
+  // as connect() does. Not from the io thread.
+  bool disconnect(const std::string& host, std::uint16_t port);
   unsigned int connections_count();
   // How many message ids the client watches for an answer: those of the
   // queries in flight, every attempt's and every search's. Zero once every

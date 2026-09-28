@@ -99,6 +99,19 @@ struct BasicClient::Outbox {
   // has doubled since the last time.
   std::vector<std::pair<std::weak_ptr<SendState>, ConnectionWrapper>> moved;
   std::size_t moved_compact_at = 64;
+  // Where the last dead connection to each target handed what it had not
+  // written (_successor), one entry per target: a lane that still holds a
+  // dead connection follows its messages there, and on, through every
+  // failover since, by the target of the connection that took them
+  // (_handed_to). `from` names the dead connection while its handovers
+  // last, the frame a write still held coming after the rest.
+  struct Handover {
+    Target target;
+    const Connection* from = nullptr;
+    Connection::weak_pointer to;
+    Target to_target;
+  };
+  std::vector<Handover> handovers;
   // The sends followed, by the state of each copy; the events about their
   // copies, written or given up on, wait for the one pass per loop turn
   // that handles them (_process_follows), outside the connection's

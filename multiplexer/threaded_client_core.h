@@ -49,6 +49,7 @@ class ThreadedClient::Core {
   std::uint32_t peer_type() const { return peer_type_; }
   std::uint64_t random64();  // thread-safe
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  bool disconnect(const std::string& host, std::uint16_t port);
   unsigned int connections_count();
   std::size_t watched_ids();
   std::uint64_t retries();

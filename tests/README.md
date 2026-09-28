@@ -57,9 +57,11 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   `recording` command with the names under `.test` looked up in FILE,
   which a scenario rewrites to move a name to another address; the binary
   defines `getaddrinfo()` itself, so this needs no root and no change to
-  the host. Multiplexers on `127.0.0.2`, `127.0.0.3` and so on give a name
-  several addresses on one machine. The `remote_recording_new_address`
-  scenario uses both.
+  the host. Each such lookup is a line in FILE.lookups: a command that
+  looks its names up at every poll counts its polls there, which bounds a
+  wait by polls rather than by time. Multiplexers on `127.0.0.2`,
+  `127.0.0.3` and so on give a name several addresses on one machine. The
+  `remote_recording_new_address` scenario uses both.
 - A drain in a unit test: `BackendThread(factory, drain_seconds=...)` is the
   cap of a drain the test starts with the backend's `start_draining()`.
 - The rules file under running multiplexers: a scenario gives `Cluster` a

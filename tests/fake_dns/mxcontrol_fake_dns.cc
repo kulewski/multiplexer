@@ -6,7 +6,10 @@
 // starting a comment, and is read again at every lookup, as the C library
 // reads /etc/hosts; a .test name has every address listed for it, in the
 // file's order, and none when none is, or there is no file. Every other
-// name, and every address, goes to the system resolver.
+// name, and every address, goes to the system resolver. Every lookup of a
+// .test name appends a line, the name, to FILE.lookups: a command that
+// looks its names up at every poll counts its polls there, which a
+// scenario bounds a wait by.
 //
 // The lookup is replaced at link time: this binary defines getaddrinfo(),
 // which asio's resolver calls, and reaches the C library's own through
@@ -73,15 +76,24 @@ std::vector<std::string> listed_addresses(const std::string& name) {
   return addresses;
 }
 
+// Appends `name` to FILE.lookups, one write, so that the lines of the
+// two threads that look names up never mix.
+void count_lookup(const std::string& name) {
+  std::ofstream lookups(std::string(hosts_file) + ".lookups", std::ios::app);
+  lookups << name + "\n";
+}
+
 }  // namespace
 
 // What asio's resolver calls: a .test name's addresses from FILE, each with
-// the service and hints asked for, anything else from the C library.
+// the service and hints asked for, the lookup counted, anything else from
+// the C library.
 extern "C" int getaddrinfo(const char* node, const char* service, const struct addrinfo* hints,
                            struct addrinfo** result) {
   if (!node || !hosts_file || !under_test_domain(node)) {
     return system_lookup()(node, service, hints, result);
   }
+  count_lookup(node);
   struct addrinfo numeric = {};
   if (hints) {
     numeric = *hints;

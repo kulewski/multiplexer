@@ -320,9 +320,9 @@ class ConnectionsManager {
     return connections.end();
   }
 
-  // Hook: a connection shut down with unsent messages; the client re-queues them.
+  // Hook: `conn` shut down with unsent messages; the client re-queues them.
   template <typename MessagesBuffer>
-  void inline handle_orphaned_outgoing_messages(MessagesBuffer&) {}
+  void inline handle_orphaned_outgoing_messages(Connection*, MessagesBuffer&) {}
 
  public:
   /* The rules file. The multiplexer reads the real one at start; first client

@@ -158,9 +158,11 @@ class ForkTest(unittest.TestCase):
                 "sync.query": "UsedAfterFork",
                 "sync.send_message": "UsedAfterFork",
                 "sync.connect": "UsedAfterFork",
+                "sync.disconnect": "UsedAfterFork",
                 "threaded.query": "UsedAfterFork",
                 "threaded.send_message": "UsedAfterFork",
                 "threaded.connect": "UsedAfterFork",
+                "threaded.disconnect": "UsedAfterFork",
                 "dropped": "ok",
                 "fresh": "OperationFailed",
             },
@@ -194,11 +196,16 @@ class ForkTest(unittest.TestCase):
                 report.append("%s: %s" % (name, type(error).__name__))
 
         try:
+            host, port = os.environ["MX_FORK_TEST_ENDPOINT"].rsplit(":", 1)
+            # The parent's multiplexer: dropped here, the connection the
+            # parent checks after would be closed.
+            parents = (host, int(port))
             attempt("sync.query", lambda sync=sync: sync.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1))
             attempt(
                 "sync.send_message", lambda sync=sync: sync.send_message(message=b"x", type=types.PYTHON_TEST_REQUEST)
             )
             attempt("sync.connect", lambda sync=sync: sync.connect(("127.0.0.1", 1)))
+            attempt("sync.disconnect", lambda sync=sync: sync.disconnect(parents))
             attempt(
                 "threaded.query",
                 lambda threaded=threaded: threaded.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1),
@@ -208,10 +215,10 @@ class ForkTest(unittest.TestCase):
                 lambda threaded=threaded: threaded.send_message(b"x", type=types.PYTHON_TEST_REQUEST),
             )
             attempt("threaded.connect", lambda threaded=threaded: threaded.connect(("127.0.0.1", 1), 0.1))
+            attempt("threaded.disconnect", lambda threaded=threaded: threaded.disconnect(parents))
             del sync, threaded  # the orphan teardown: must neither hang nor hurt the parent
             report.append("dropped: ok")
-            host, port = os.environ["MX_FORK_TEST_ENDPOINT"].rsplit(":", 1)
-            fresh = ThreadedClient([(host, int(port))], type=peers.WEBSITE)
+            fresh = ThreadedClient([parents], type=peers.WEBSITE)
             try:
                 fresh.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=5)
                 report.append("fresh: returned")

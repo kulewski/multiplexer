@@ -970,7 +970,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
                        [&to_raw](const typename MessagesBuffer::value_type& entry) { return to_raw(entry)->own(); }),
         entries.end());
     if (ManagerPointer owner = manager.lock()) {
-      owner->handle_orphaned_outgoing_messages(entries);
+      owner->handle_orphaned_outgoing_messages(this, entries);
     }
     if (entries.empty()) {
       return;

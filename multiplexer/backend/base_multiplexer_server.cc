@@ -24,9 +24,25 @@ BaseMultiplexerServer::BaseMultiplexerServer(multiplexer::Client* conn_, PeerTyp
 BaseMultiplexerServer::~BaseMultiplexerServer() {}
 
 void BaseMultiplexerServer::loop_iter(float timeout) {
-  std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received = conn->receive_message(timeout);
+  if (!_receive_one(timeout)) {
+    MXTHROW(Client::OperationTimedOut());
+  }
+  _handle_received();
+}
+
+bool BaseMultiplexerServer::_receive_one(float timeout) {
+  std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received;
+  try {
+    received = conn->receive_message(timeout);
+  } catch (Client::OperationTimedOut&) {
+    return false;
+  }
   last_mxmsg = received.first;
   last_connwrap = received.second;
+  return true;
+}
+
+void BaseMultiplexerServer::_handle_received() {
   try {
     __handle_message();
   } catch (...) {
@@ -62,9 +78,11 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
       if (draining_ && drained()) {
         break;
       }
-      try {
-        loop_iter(poll);
-      } catch (Client::OperationTimedOut&) {
+      // Only the wait running out is the poll's timeout: what the handler
+      // throws, an OperationTimedOut of its own included, goes by
+      // on_handler_exception().
+      if (_receive_one(poll)) {
+        _handle_received();
       }
       periodic_task();
     }
@@ -77,12 +95,8 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
     // steady load the drain never ended.
     if (draining_ && working) {
       conn->refuse_arrivals();
-      while (working && conn->has_incoming_messages()) {
-        try {
-          loop_iter(0);
-        } catch (Client::OperationTimedOut&) {
-          break;
-        }
+      while (working && conn->has_incoming_messages() && _receive_one(0)) {
+        _handle_received();
       }
     }
   } catch (...) {

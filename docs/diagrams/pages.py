@@ -152,10 +152,13 @@ recovery like this one costs about one timeout on top of the normal round trip.
                 Step(
                     "The client repeats the request directly",
                     "The same request goes out again as a new message, with a new `id`, "
-                    "`to` set to backend 2's id, and through the connection the first `PING` "
-                    "arrived on. Direct addressing bypasses the rules, so this cannot land on "
-                    "some other backend. The client accepts a reply to either id, so a late "
-                    "reply from backend 1 would still count.",
+                    "`to` set to backend 2's id, a delivery error asked for, and through the "
+                    "connection the first `PING` arrived on. Direct addressing bypasses the "
+                    "rules, so this cannot land on some other backend. The client accepts a "
+                    "reply to either id, so a late reply from backend 1 would still count. "
+                    "Were backend 2 gone by now, the multiplexer would answer with "
+                    "`DELIVERY_ERROR`: the query fails at once when nobody took the first "
+                    "request, and otherwise waits out the stage for that late reply.",
                     [10, 11],
                     ["Q"],
                 ),
@@ -409,9 +412,11 @@ per connection only, so a stream of events to one receiver can arrive out of
 order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
 keeps a stream on one connection, a soft and late pin: the first event
 through it pins it to the connection the library chose, and every later
-one follows. When that connection dies, the lane lets go and takes
-another, and the stream goes on from there, with a gap or a reorder at the
-failover and no other; a pinned lane, `lane(pinned=True)`, is the hard pin
+one follows. When that connection dies, the events it had not written
+move, in order, to one other connection, the lane follows them there, and
+the stream goes on from there, with a gap or a reorder at the failover and
+no other, one more for each further failover; a pinned lane,
+`lane(pinned=True)`, is the hard pin
 and refuses instead, raising `NotConnected`, for a stream that must not be
 split. A query through a lane leaves it on the connection
 the reply came through, so the events after a request follow the request.

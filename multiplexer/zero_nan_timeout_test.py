@@ -89,10 +89,10 @@ class CountedReads:
         """As the client's."""
         return self.client._schedule_all(serialized, timeout)
 
-    def receive(self, *args: Any, **kwargs: Any) -> Any:
+    def _receive(self, *args: Any, **kwargs: Any) -> Any:
         """As the client's, counted."""
         self.reads += 1
-        return self.client.receive(*args, **kwargs)
+        return self.client._receive(*args, **kwargs)
 
 
 class ZeroOrNanTimeoutTest(unittest.TestCase):

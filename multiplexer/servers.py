@@ -234,9 +234,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
                 if stall > 0:
                     faulthandler.dump_traceback_later(stall, file=stall_file)
                 try:
-                    self.loop_iter(timeout=poll)
-                except OperationTimedOut:
-                    pass
+                    # Only the wait running out is the poll's timeout: what the
+                    # handler raises, an OperationTimedOut of its own included,
+                    # goes by on_handler_exception().
+                    if self.__receive_one(timeout=poll):
+                        self.__handle_received()
                 finally:
                     self.periodic_task()
                     if stall > 0:
@@ -252,10 +254,9 @@ class BaseMultiplexerServer(MultiplexerPeer):
             if self.draining and self.working:
                 self.conn.refuse_arrivals()
                 while self.working and self.conn.has_incoming_messages():
-                    try:
-                        self.loop_iter(timeout=0)
-                    except OperationTimedOut:
+                    if not self.__receive_one(timeout=0):
                         break
+                    self.__handle_received()
         finally:
             self.close()
 
@@ -263,10 +264,27 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """Wait for one message (up to `timeout` seconds, forever by default)
         and handle it; send_message()'s reply defaults hold while it is
         handled, and only then. Raises OperationTimedOut when the time
-        passes."""
+        passes; serve_forever() takes the same two steps."""
+        if not self.__receive_one(*args, **kwargs):
+            raise OperationTimedOut()
+        self.__handle_received()
+
+    def __receive_one(self, *args, **kwargs) -> bool:
+        """Wait for one message, as loop_iter() does, and keep it as the one
+        to handle: False when the time passed. serve_forever() calls this and
+        __handle_received() apart, so that only the wait running out is its
+        poll's timeout."""
         # The plain read: a BACKEND_ERROR is a message like any other here,
         # as in the C++ class, not the exception a query raises for it.
-        self.last_mxmsg, self.last_connwrap = mxclient.Client.receive_message(self.conn, *args, **kwargs)
+        try:
+            self.last_mxmsg, self.last_connwrap = mxclient.Client.receive_message(self.conn, *args, **kwargs)
+        except OperationTimedOut:
+            return False
+        return True
+
+    def __handle_received(self):
+        """Handle the message __receive_one() kept, by the exception rules;
+        the reply defaults hold only meanwhile."""
         try:
             self.__handle_message()
         finally:

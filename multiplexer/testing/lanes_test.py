@@ -153,7 +153,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 client.shutdown()
 
     def test_a_resend_leaves_the_callers_message_as_it_was(self):
-        """send_and_receive() sends a message whose connection died again,
+        """_send_and_receive() sends a message whose connection died again,
         with a new id; a MultiplexerMessage the caller passed in keeps its
         own, since the caller may still hold it, to send again or to log."""
 
@@ -175,7 +175,7 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 killer = threading.Timer(0.3, victim.kill)
                 killer.start()
                 sent_ids = []
-                reply, _ = client.client.send_and_receive(mxmsg, multiplexer=lane, timeout=5, sent_ids=sent_ids)
+                reply, _ = client.client._send_and_receive(mxmsg, multiplexer=lane, timeout=5, sent_ids=sent_ids)
                 killer.join()
                 self.assertEqual(b"HELD", reply.message)
                 self.assertEqual(2, len(sent_ids), "sent again once its multiplexer died")

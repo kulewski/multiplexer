@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <stdexcept>
 
 #include "lib/fork.h"
 #include "lib/logging/logging.h"
@@ -40,18 +41,27 @@ void BasicClient::check_not_orphaned() const {
   }
 }
 
+// The connections of the targets and those still closing, which
+// disconnect() leaves on a client that goes on; nothing allocated, as
+// nothing that could wait on a lock a parent thread held.
 void BasicClient::orphan_close_descriptors() {
   if (orphan_descriptors_closed_.exchange(true)) {
     return;
   }
-  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
-       ++entry) {
-    if (Connection::pointer conn = entry->second.lock()) {
+  auto close_descriptor = [](const Connection::weak_pointer& connection) {
+    if (Connection::pointer conn = connection.lock()) {
       int fd = conn->socket().native_handle();
       if (fd >= 0) {
         ::close(fd);
       }
     }
+  };
+  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
+       ++entry) {
+    close_descriptor(entry->second);
+  }
+  for (const Connection::weak_pointer& closing : closing_) {
+    close_descriptor(closing);
   }
 }
 
@@ -196,10 +206,13 @@ void BasicClient::shutdown() {
              TEXT("shutdown: " + repr(connection_by_target_.size()) + " target(s), " + repr(connection_by_id_.size()) +
                   " registered, " + repr(reconnect_timers_.size()) + " reconnect(s) pending"));
   // A reconnect armed by a connection lost before this call would open a
-  // connection nobody closes, and keep the loop running until it fired.
-  for (const TimerPointer& timer : reconnect_timers_) {
-    timer->cancel();
+  // connection nobody closes, and keep the loop running until it fired:
+  // each is cancelled and taken out, so that one whose handler is queued
+  // already finds itself gone, as after disconnect().
+  for (const ReconnectTimers::value_type& reconnect : reconnect_timers_) {
+    reconnect.first->cancel();
   }
+  reconnect_timers_.clear();
   for (ConnectionByTarget::iterator next = connection_by_target_.begin(), entry;
        next != connection_by_target_.end() && (entry = next++, true);) {
     if (Connection::pointer conn = entry->second.lock()) {
@@ -254,42 +267,52 @@ void BasicClient::connection_closed(Connection* conn) {
 }
 
 // Called from Connection::shutdown for any reason: the multiplexer closed,
-// the connect failed, the name did not resolve, or shutdown() here. Unless
-// the client itself is shutting down, a timer is armed to connect to the
-// same target again, resolving it afresh. The timer fires only while some
-// call runs the loop, so a passive client reconnects during its next call
-// at the earliest.
+// the connect failed, the name did not resolve, or shutdown() or
+// disconnect() here. Unless the client itself is shutting down, a timer is
+// armed to connect to the same target again, resolving it afresh, while
+// the target is the client's: the connection was its target's, which
+// disconnect() takes out of the map before it closes the connection. The
+// timer fires only while some call runs the loop, so a passive client
+// reconnects during its next call at the earliest.
 void BasicClient::connection_destroyed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
   _displace(conn);  // what waited for it goes to another after its queue, in handle_orphaned_outgoing_messages
   const Target target = conn->managers_private_data().target;
-  Connection::pointer c;
+  Connection::pointer target_connection;
+  bool still_wanted = false;  // the connection was its target's: the client still has the target
   ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
-  if (target_entry != connection_by_target_.end() && (c = target_entry->second.lock()) && c.get() == conn) {
+  if (target_entry != connection_by_target_.end() && (target_connection = target_entry->second.lock()) &&
+      target_connection.get() == conn) {
     connection_by_target_.erase(target_entry);
+    still_wanted = true;
   }
 
-  if (!shuts_down_) {
+  if (!shuts_down_ && still_wanted) {
     // auto reconnect after AUTO_RECONNECT_TIME seconds; armed before the
     // observer runs, so that nothing the observer does can skip it
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
                                    target.first + ":" + repr(target.second)));
     TimerPointer timer(new Timer(io_service_, std::chrono::seconds(AUTO_RECONNECT_TIME)));
-    reconnect_timers_.insert(timer);
+    reconnect_timers_.emplace(timer, target);
     timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code& error) {
       self->reconnect_after_timeout(timer, target, error);
     });
   }
   if (connection_observer_) {
     connection_observer_(
-        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint), false);
+        ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint, this), false);
   }
 }
 
 void BasicClient::reconnect_after_timeout(TimerPointer timer, Target target, const asio::error_code& error) {
-  reconnect_timers_.erase(timer);
+  if (!reconnect_timers_.erase(timer)) {
+    // disconnect() dropped the target and took the timer out, cancelling
+    // it, which comes too late for a timer that had fired already, its
+    // handler queued: no reconnect either way.
+    return;
+  }
   if (shuts_down_) {
     // Cancelled by shutdown(), or armed just before it and fired after: a
     // connection opened now would outlive the shutdown, keep a threaded
@@ -332,6 +355,7 @@ BasicClient::Connection::pointer BasicClient::_new_connection(const Target& targ
 #endif
   Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
   new_connection->managers_private_data().target = target;
+  new_connection->managers_private_data().owner = this;
   connection_by_target_.insert(std::make_pair(target, new_connection));
   return new_connection;
 }
@@ -343,7 +367,7 @@ ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint& peer
   if (shuts_down_) {
     MXTHROW(NotConnected());
   }
-  Connection::pointer conn = _new_connection(Target(peer_endpoint.address().to_string(), peer_endpoint.port()));
+  Connection::pointer conn = _new_connection(_target(peer_endpoint));
   conn->managers_private_data().candidates.assign(1, peer_endpoint);
   _try_next_candidate(conn);
   return _wrap(conn);
@@ -365,6 +389,50 @@ ConnectionWrapper BasicClient::async_connect(const std::string& host, std::uint1
   Connection::pointer conn = _new_connection(Target(host, port));
   _resolve_and_start(conn);
   return _wrap(conn);
+}
+
+BasicClient::Target BasicClient::_target(const std::string& host, std::uint16_t port) {
+  asio::error_code literal;
+  asio::ip::address address = asio::ip::make_address(host, literal);
+  return literal ? Target(host, port) : _target(Endpoint(address, port));
+}
+
+bool BasicClient::disconnect(const std::string& host, std::uint16_t port) { return _disconnect(_target(host, port)); }
+
+bool BasicClient::disconnect(const Endpoint& peer_endpoint) { return _disconnect(_target(peer_endpoint)); }
+
+// The target leaves the map before its connection is closed, so that the
+// connection's end arms no reconnect (connection_destroyed); a reconnect
+// armed already is taken out and cancelled.
+bool BasicClient::_disconnect(const Target& target) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (shuts_down_) {
+    MXTHROW(NotConnected());
+  }
+  bool had = false;
+  for (ReconnectTimers::iterator next = reconnect_timers_.begin(), reconnect;
+       next != reconnect_timers_.end() && (reconnect = next++, true);) {
+    if (reconnect->second == target) {
+      reconnect->first->cancel();
+      reconnect_timers_.erase(reconnect);
+      had = true;
+    }
+  }
+  Connection::pointer conn;
+  ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
+  if (target_entry != connection_by_target_.end()) {
+    conn = target_entry->second.lock();
+    connection_by_target_.erase(target_entry);
+    had = true;
+  }
+  if (had) {
+    MX_LOG(INFO, MEDIUMVERBOSITY,
+           CTX("BasicClient") TEXT("disconnecting from " + target.first + ":" + repr(target.second)));
+  }
+  if (conn && conn->close_gracefully(CLOSE_READ_SECONDS)) {
+    closing_.push_back(conn);  // reads to its end while the loop runs, which a shutdown waits for
+  }
+  return had;
 }
 
 void BasicClient::_resolve_and_start(Connection::pointer conn) {
@@ -420,11 +488,17 @@ void BasicClient::_try_next_candidate(Connection::pointer conn) {
       [self = this->shared_from_this(), conn](const asio::error_code& error) { self->_connected(conn, error); });
 }
 
+// Those still closing too, whose handlers run on the new owner's calls.
 void BasicClient::bind_to_current_thread() {
   bind_owner_to_current_thread();
   for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
        ++entry) {
     if (Connection::pointer conn = entry->second.lock()) {
+      conn->bind_io_thread_to_current();
+    }
+  }
+  for (const Connection::weak_pointer& closing : closing_) {
+    if (Connection::pointer conn = closing.lock()) {
       conn->bind_io_thread_to_current();
     }
   }
@@ -490,6 +564,19 @@ std::unique_ptr<mx::SimpleTimer> BasicClient::create_timer(float timeout) const 
   return ptr;
 }
 
+void BasicClient::check_ours(const ConnectionWrapper& connection) const {
+  if (connection.owner_ && connection.owner_ != this) {
+    throw std::invalid_argument("a connection of another client: a connection or lane belongs to its client");
+  }
+}
+
+void BasicClient::check_ours(const LanePtr& lane) const {
+  const BasicClient* owner = lane ? lane->owner() : nullptr;
+  if (owner && owner != this) {
+    throw std::invalid_argument("a lane of another client: a connection or lane belongs to its client");
+  }
+}
+
 // Takes `connection`, and its live flag, on the client's thread, where a
 // reference to the connection may be taken and dropped.
 void Lane::adopt(const ConnectionWrapper& connection) {
@@ -504,6 +591,7 @@ void Lane::adopt(const ConnectionWrapper& connection) {
   }
   connection_ = connection;
   holds_ = true;
+  owner_.store(connection.owner_, std::memory_order_release);
   living_ = conn ? conn->living_flag() : std::shared_ptr<const std::atomic<bool>>();
   watched_.store(static_cast<bool>(living_), std::memory_order_release);
 }

@@ -132,11 +132,11 @@ class BasicClient(mxclient.Client):
         return self.send_message(pickle.dumps(data), **kwargs)
 
     @log_call
-    def send_and_receive(self, *args, **kwargs):
-        """Like mxclient.Client.send_and_receive, skipping REQUEST_RECEIVED
+    def _send_and_receive(self, *args, **kwargs):
+        """Like mxclient.Client._send_and_receive, skipping REQUEST_RECEIVED
         notifications as well as the `ignore_types` given."""
         kwargs["ignore_types"] = tuple(kwargs.get("ignore_types", ())) + (types.REQUEST_RECEIVED,)
-        return super(BasicClient, self).send_and_receive(*args, **kwargs)
+        return super(BasicClient, self)._send_and_receive(*args, **kwargs)
 
 
 _SyncClientT = TypeVar("_SyncClientT", bound="SyncClient")

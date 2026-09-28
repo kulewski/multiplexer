@@ -24,9 +24,12 @@ that changes.
 - **Order holds per connection only.** Two messages from one peer through
   one multiplexer reach a backend in the order they were sent. Through two
   multiplexers there is no order. A lane keeps a stream on one connection
-  while that connection lives, so the stream is in order; at a failover
-  the lane moves and there is a gap or a reorder, once, unless the lane
-  is pinned, in which case the stream ends with `NotConnected` instead.
+  while that connection lives, so the stream is in order. When that
+  connection dies, what it had not written moves, in order, to one other
+  connection, and the lane follows it there, so the stream has one gap or
+  reorder at the failover and is in order after it; each further failover,
+  another multiplexer failing under the stream, makes one more. A pinned
+  lane ends the stream with `NotConnected` instead.
   A stream sent through every connection keeps its order too, since the
   receiving library passes on the first copy of each message: every
   copy of a message follows the copy of the one before on its own
@@ -115,8 +118,9 @@ that changes.
   them twice and the caller sees nothing. A reply that was to go back
   through the dead connection goes through another live one, or the first to
   come up, so it can reach the caller through another multiplexer than its
-  request took. What a client's connection to it had not written goes
-  through another live connection, or, with none live, waits for the next:
+  request took. What a client's connection to it had not written goes, in
+  order, through one other live connection, or, with none live, waits for
+  the next:
   what still waited for room within its own timeout, what was queued
   `DEFAULT_TIMEOUT` from then, so that it rides through a restart however
   long ago it was sent; a pinned lane's messages are dropped, and so are the
@@ -140,7 +144,14 @@ that changes.
   another address, a rescheduled pod for example, is found at the next
   reconnect, within about 3 s of the name changing. A name that does not
   resolve yet is not an error: `connect()` returns without a connection,
-  as for a port that refuses, and the library keeps trying every 3 s.
+  as for a port that refuses, and the library keeps trying every 3 s. A
+  program that keeps its own list of multiplexers, addresses it learns
+  elsewhere, connects to a new one with `connect()` and lets one that left
+  the list go with `disconnect()`, on every client class, which stops its
+  reconnect and closes a live connection, what it had not written going
+  to another as a lost connection's does: tried for good, an address
+  nobody serves any more can one day be another deployment's
+  multiplexer's, as pod addresses are reused.
 - **The only multiplexer dies.** There is no other connection. A threaded
   client sends its in-flight requests again as soon as it is reconnected; a
   synchronous client waits for the reconnect inside its current call and

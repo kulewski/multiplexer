@@ -26,8 +26,11 @@ struct ThreadedClient::Core::InFlight {
   // WAITING: no connection was live when the request had to be (re)sent; it
   // goes out as soon as one registers, the deadline still running. SEARCH
   // is the locate phase of an addressed query too: the PING addressed to
-  // the instance out, the answers counted the same way.
-  enum Stage { REQUEST, SEARCH, DIRECT, WAITING } stage = REQUEST;
+  // the instance out, the answers counted the same way. LATE: a typed
+  // query's direct request drew a delivery error, the backend that
+  // answered the search gone, while a backend took the request: only a late
+  // reply to an earlier attempt can answer, until the stage's deadline.
+  enum Stage { REQUEST, SEARCH, DIRECT, WAITING, LATE } stage = REQUEST;
   ConnectionWrapper sent_via;    // REQUEST and DIRECT: the connection used
   MultiplexerMessage prototype;  // the request; id and from set per attempt
   float timeout = 0;
@@ -39,6 +42,10 @@ struct ThreadedClient::Core::InFlight {
   // The request and direct ids of attempts sent again since, tracked still
   // for a late reply; empty unless a connection was lost under the query.
   std::vector<std::uint64_t> earlier_ids;
+  // Whether a backend may have an attempt and answer it late: set when the
+  // request's stage runs out, or an attempt's connection is lost, and not
+  // when the request draws a delivery error, nobody taking it.
+  bool taken = false;
   // During SEARCH: the connections the search went through that have not
   // answered it yet, with a delivery error or by going down. Only these
   // count: another connection ending, a failed connect for instance, says
@@ -138,6 +145,7 @@ std::uint64_t ThreadedClient::random64() { return core_->random64(); }
 bool ThreadedClient::connect(const std::string& host, std::uint16_t port, float timeout) {
   return core_->connect(host, port, timeout);
 }
+bool ThreadedClient::disconnect(const std::string& host, std::uint16_t port) { return core_->disconnect(host, port); }
 unsigned int ThreadedClient::connections_count() { return core_->connections_count(); }
 std::size_t ThreadedClient::watched_ids() { return core_->watched_ids(); }
 std::uint64_t ThreadedClient::retries() { return core_->retries(); }
@@ -475,6 +483,15 @@ void ThreadedClient::Core::set_drop_observer(DropObserver observer) {
 
 std::uint64_t ThreadedClient::Core::dropped() { return basic_client_->dropped(); }
 
+// BasicClient's, on the io thread; the connection observer hears of the
+// connection it closes as of one lost (_on_connection).
+bool ThreadedClient::Core::disconnect(const std::string& host, std::uint16_t port) {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->disconnect(host, port);
+  });
+}
+
 unsigned int ThreadedClient::Core::connections_count() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -721,6 +738,7 @@ void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, b
   basic_client_->check_not_orphaned();
   if (lane) {
     lane->check_not_inherited();  // here, not on the io thread, where it would throw into nobody
+    basic_client_->check_ours(lane);
   }
   PendingSendPtr pending(new PendingSend());
   pending->raw = std::move(raw);
@@ -983,6 +1001,7 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
   basic_client_->check_not_orphaned();
   if (lane) {
     lane->check_not_inherited();
+    basic_client_->check_ours(lane);  // here, not on the io thread
   }
   InFlightPtr in_flight(new InFlight());
   in_flight->prototype = msg;
@@ -1308,6 +1327,7 @@ void ThreadedClient::Core::_on_connection(const ConnectionWrapper& connection, b
         }
         break;
       case InFlight::WAITING:
+      case InFlight::LATE:
         break;
     }
   }
@@ -1319,6 +1339,7 @@ void ThreadedClient::Core::_on_connection(const ConnectionWrapper& connection, b
 // behind another multiplexer now; through a pinned lane there is nothing
 // else to try.
 void ThreadedClient::Core::_lost(InFlightPtr in_flight) {
+  in_flight->taken = true;  // the attempt may have reached a backend before the connection went
   if (in_flight->pinned()) {
     _finish(in_flight, NOT_CONNECTED, NULL);
     return;
@@ -1458,11 +1479,19 @@ void ThreadedClient::Core::_advance(InFlightPtr in_flight, const IncomingMessage
 
     case InFlight::DIRECT:
       if (!to_a_search && msg.references() == in_flight->direct_id) {
-        _finish(in_flight, FAILED, NULL);  // the backend that answered the search is gone
+        // The backend that answered the search is gone. A backend that took
+        // the request may still answer it, and the stage waits on for that;
+        // with none, nothing can answer any more.
+        if (in_flight->addressed() || !in_flight->taken) {
+          _finish(in_flight, FAILED, NULL);
+        } else {
+          in_flight->stage = InFlight::LATE;
+        }
       }
       return;  // a later PING from another backend, a stale delivery error
 
     case InFlight::WAITING:
+    case InFlight::LATE:
       return;
   }
 }
@@ -1534,6 +1563,7 @@ void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage&
   MultiplexerMessage request = in_flight->prototype;
   request.set_id(random64());
   request.set_to(ping.third->from());
+  request.set_report_delivery_error(true);  // a backend gone since its PING says so
   if (in_flight->direct_id) {
     in_flight->earlier_ids.push_back(in_flight->direct_id);  // tracked still, as a request's
   }
@@ -1584,6 +1614,7 @@ void ThreadedClient::Core::_on_deadline(InFlightPtr in_flight, unsigned int gene
     return;
   }
   if (in_flight->stage == InFlight::REQUEST) {
+    in_flight->taken = true;  // no answer in time: a backend may have the request
     _search(in_flight);
   } else if (in_flight->stage == InFlight::WAITING) {
     _finish(in_flight, NOT_CONNECTED, NULL);

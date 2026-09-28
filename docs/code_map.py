@@ -119,6 +119,11 @@ INDEX = [
         "`Connection::close_gracefully`; `BasicClient::shutdown`",
     ),
     ("Reconnecting after a connection drops", "multiplexer/basic_client.cc", "`BasicClient::connection_destroyed`"),
+    (
+        "Dropping a multiplexer a client was given: no reconnect, the connection closed",
+        "multiplexer/basic_client.cc",
+        "`BasicClient::_disconnect`; `disconnect()` on every client class",
+    ),
     ("Dropping duplicate messages by id", "multiplexer/basic_client.cc", "`BasicClient::handle_message`"),
     (
         "What a backend does with a search or a PING",
@@ -155,9 +160,9 @@ INDEX = [
     ),
     ("Registering an mxcontrol subcommand", "mxcontrol/tasks_holder.h", "`REGISTER_MXCONTROL_SUBCOMMAND`"),
     (
-        "mxcontrol reaching every replica behind a name, and one back under a new address",
+        "mxcontrol reaching every replica behind a name, one back under a new address, and letting an old one go",
         "mxcontrol/every_address.h",
-        "`EveryAddress::connect`, `refresh`; `tests/fake_dns` moves a name in a test",
+        "`EveryAddress::connect`, `refresh`, `drop_gone`; `tests/fake_dns` moves a name in a test",
     ),
     (
         "Log entries and the binary log stream",

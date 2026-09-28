@@ -117,6 +117,9 @@ the time and their peer types are ordinary ones.
   within `timeout` seconds, the client asks every connection for a backend of
   the right type and repeats the request to the first one that answers. Each
   stage gets its own `timeout`, so a call can take up to three times that.
+  When the backend that answered is gone by the repeat, the query fails at
+  once if nobody took the request, and otherwise waits out the stage for a
+  late reply from the backend that did.
   Raises `OperationFailed` when no backend can be found, `OperationTimedOut`
   when a stage runs out of time, `NotConnected` when there is no live
   connection, and `BackendError` when the backend answered with
@@ -143,8 +146,9 @@ the time and their peer types are ordinary ones.
   connection live, is held until one comes up, in order, `timeout` seconds
   at most each way; it is written inside the call on an idle connection,
   otherwise as a later call runs the loop, the only time a `SyncClient` runs
-  it. A connection that dies with the message unwritten hands it to another,
-  or has it held for the next; a copy for `ALL` is held too when no
+  it. A connection that dies with the message unwritten hands it, with
+  the rest it had not written, in order, to one other, or has it held for
+  the next; a copy for `ALL` is held too when no
   connection is live, and dropped while one is, so a flushing send to `ALL`
   whose copies all went with their connections raises `NotConnected`, even
   with a connection that came up since. One the client gives up on is
@@ -171,10 +175,10 @@ the time and their peer types are ordinary ones.
   gone, and after `shutdown()`. Extra keyword arguments become message
   fields, such as `to=` or `workflow=`. Nothing comes back for an event; a
   `DELIVERY_ERROR`, if you asked for one, arrives on the next call that
-  reads, `read_message()` say. A `query()` or `send_and_receive()` that
-  waits meanwhile reads it too: every message that is not the reply it waits
-  for goes to `handle_drop(mxmsg, connection)`, which logs it and drops it,
-  unless a subclass overrides it to keep such messages. To learn how a
+  reads, `read_message()` say. A `query()` that waits meanwhile reads it
+  too: every message that is not the reply it waits for goes to
+  `handle_drop(mxmsg, connection)`, which logs it and drops it, unless a
+  subclass overrides it to keep such messages. To learn how a
   message ended without waiting for it, pass `callback=`: not called yet
   means still on its way.
 - `event(message, type=...)`: `send_message` through every connection.
@@ -204,6 +208,27 @@ the time and their peer types are ordinary ones.
   that its sender retries elsewhere, and a reply is dropped; what was read
   before stays to be received. The second refuses what was read and not
   received yet.
+- `dropped_while_closing()`: the messages the client's connections read
+  after they began closing, which they could only drop, each connection's
+  logged as a `WARNING` when it ends; the protocol's own answers to what
+  the client sent are not counted. Kept after `shutdown()`, so that a
+  server's close says what it dropped, as in C++.
+- `connect((host, port), timeout=10)` connects to one more multiplexer as
+  the constructor does and returns its `ConnectionWrapper`, live or not:
+  the library goes on trying. `disconnect((host, port))` drops one given
+  to the constructor or `connect()`, the same pair, an address in any
+  spelling: its reconnect stops, and nothing connects to it again unless
+  `connect()` is called again. A live connection to it is closed the
+  polite way, as `shutdown()` closes each: what it had not written goes, in
+  order, to one other connection, or is held for the next, as a lost connection's
+  does ([semantics](semantics.md#failure-modes)), and what it wrote still
+  arrives. It returns at once whether the client had that multiplexer, a
+  connection to it or a reconnect armed, and raises `NotConnected` after
+  `shutdown()` and `UsedAfterFork` in a forked child, as `connect()` does.
+  It is for a program that keeps its own list of multiplexers, when one
+  leaves the list: the library would retry an address nobody serves any
+  more for good, every 3 s, until another deployment's multiplexer gets
+  that address, as pod addresses are reused, and the client joins it.
 - `instance_id`, `connections_count()`, `orphaned()`, as on
   `ThreadedClient`, `shutdown(timeout=1)`.
   `shutdown()` first writes what was sent before it, running the loop as
@@ -213,8 +238,8 @@ the time and their peer types are ordinary ones.
   class ends this way. It returns once every multiplexer has closed its
   side of the connection too, a round trip, a second at most, so that
   what was written arrives ([semantics](semantics.md#failure-modes));
-  after it the object is done: `connect()` raises `NotConnected`, as on
-  `ThreadedClient`, and nothing is sent.
+  after it the object is done: `connect()` and `disconnect()` raise
+  `NotConnected`, as on `ThreadedClient`, and nothing is sent.
   `with SyncClient(...) as client:` shuts it down at the end of the block
   ([lifetimes](#lifetimes)).
 
@@ -281,9 +306,11 @@ message, which pins it to the connection the library chose; every later
 one follows, so a stream of events arrives in order, and a query
 through the lane leaves it on the connection the reply came through, so
 the events after a request follow the request, and a message its full
-connection cannot take waits there for room. When the connection dies
-the lane lets go and takes another, with a gap or a reorder at the
-failover and no other; a sequencer on the receiving side is for that.
+connection cannot take waits there for room. When the connection dies,
+what it had not written moves, in order, to one other connection, and
+the lane follows it there: a gap or a reorder at the failover and no
+other, one more for each further failover; a sequencer on the receiving
+side is for that.
 `lane(pinned=True)` is the hard pin: once its connection is gone, every
 send and query through it raises `NotConnected`, and `lane.closed` says
 so, until the caller makes a new lane; a flushing send through it that
@@ -293,7 +320,9 @@ moment the connection stops being live, from any thread. A
 `ThreadedClient` or `AsyncClient` send looks at it on the calling thread,
 and the io thread places the message a moment later: one whose
 connection dies in between is dropped and reported (`CONNECTION_LOST`, a
-callback hearing 0) rather than refused. A pinned lane is the
+callback hearing 0) rather than refused. A lane, once it took a
+connection, and a `ConnectionWrapper` belong to the client they came
+from: given to another client, a send or a query raises `ValueError`. A pinned lane is the
 guarantee that everything through it went through one multiplexer, down
 to the messages a dying connection had not written yet, which are
 reported lost rather than handed to another connection, as a message
@@ -454,7 +483,9 @@ answers such a message on its own; a handler may. A reply that raised did not go
 the requester waiting out its timeout, and `on_handler_exception(exc)` is
 called all the same. It returns `True` by default and the backend keeps serving; return
 `False` and the original exception propagates out of `serve_forever()`, for
-backends that would rather be restarted than continue. So does an exception
+backends that would rather be restarted than continue, an
+`OperationTimedOut` of the handler's own too: only `poll` running out is
+the loop's timeout. So does an exception
 `on_handler_exception()` raises, and a `BaseException` that is not an
 `Exception`, a handler's `SystemExit` say, which none of this catches. `close(timeout=1)`
 ends the connections as `SyncClient.shutdown(timeout)` does, what is still
@@ -722,6 +753,17 @@ on](#messages-the-library-gives-up-on).
   `send_pickle(data, ...)`: the pickle convention, as on `SyncClient`; with a
   callback, it gets the unpickled reply or the exception, what unpickling
   raised included.
+- `connect((host, port), timeout=10)` connects to one more multiplexer and
+  waits for the handshake: `True` once registered, `False` as soon as it
+  failed, or at `timeout`, the io thread trying again every 3 s on its
+  own. `disconnect((host, port))` drops one given to the constructor or
+  `connect()`, as `SyncClient.disconnect()` does, on the io thread, and
+  returns once it is done, whether the client had it:
+  `connections_count()` is down by then, a query through the connection
+  closed goes again through another, as for a lost connection, and a
+  `connect()` still waiting for that multiplexer returns `False`. Neither
+  from a callback, where they raise `RuntimeError`; after `shutdown()`
+  they raise `NotConnected`.
 - `on_message(mxmsg)`, given at construction, runs on the io thread with
   every message that is not a reply to a query: events and requests
   addressed to this peer, and a `DELIVERY_ERROR` for a message that was
@@ -808,6 +850,10 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   program that must receive again makes a new client on a running loop.
 - `new_message(**fields)` builds a `MultiplexerMessage` with `id` and
   `from` filled in, as on `ThreadedClient`.
+- `disconnect((host, port))` drops a multiplexer given to the
+  constructor, as `ThreadedClient.disconnect()` does, blocking the loop
+  for the round trip to the io thread, as `connections_count()` does;
+  `NotConnected` after `close()`.
 - `await query(message, type, timeout=10, to=0, multiplexer=ONE, with_connection=False, on_received=None)`
   returns the reply and raises the same exceptions as `SyncClient`:
   `NotConnected`, `OperationTimedOut`, `OperationFailed`,
@@ -1037,7 +1083,7 @@ block, before it exits.
 its io thread does not exist in the child, its locks may have been held at
 the fork by threads that do not exist there either, and its sockets are
 shared with the parent. Every call on it that would send, receive,
-connect, wait or take one of its locks raises `UsedAfterFork`, a
+connect, disconnect, wait or take one of its locks raises `UsedAfterFork`, a
 `NotConnected`, first, and so does every use of a lane or a connection
 from before the fork, even by a client made in the child, as do the
 getters of the connections' state, `connections_count()`,
@@ -1317,19 +1363,15 @@ recording.stop(controller)
 ## Lower level
 
 `multiplexer.mxclient.Client` is what `clients.SyncClient` wraps; it adds nothing
-you need but exposes `send_and_receive()` for one request without the search,
-`receive()` to wait for replies to given ids, `flush_all(timeout)` to push
-out everything sent before the call, what waits for room included, and
-`new_message(**fields)` to build a
-`MultiplexerMessage` with id and sender filled in.
+you need but exposes `flush_all(timeout)` to push out everything sent
+before the call, what waits for room included, and
+`new_message(**fields)` to build a `MultiplexerMessage` with id and
+sender filled in.
 
-`send_and_receive()` through one connection sends a request again when its
-connection dies under the wait, through another connection and with a
-fresh id, as every client does; with `multiplexer=ALL` it puts one copy on
-every live connection and sends no other. A `MultiplexerMessage` you pass is
-never changed: the resend is a copy, and your message's id is only the first
-attempt's. Pass `sent_ids=[]` to learn every id it went out under; the
-reply's `references` names the attempt it answers. Anything else about the
-request that must find its way back, a follow-up or a progress report, is
-best matched in the payload, since ids belong to attempts (the follow-up
-rule in [Delivery](semantics.md#delivery)).
+A query sends its request again when the connection dies under the wait,
+through another connection and with a fresh id, as every client does; a
+`MultiplexerMessage` you pass is never changed, the resend being a copy,
+and the reply's `references` names the attempt it answers. Anything else
+about the request that must find its way back, a follow-up or a progress
+report, is best matched in the payload, since ids belong to attempts (the
+follow-up rule in [Delivery](semantics.md#delivery)).

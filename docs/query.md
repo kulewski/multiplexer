@@ -304,7 +304,7 @@ graph LR
 
 ### 6. The client repeats the request directly
 
-The same request goes out again as a new message, with a new `id`, `to` set to backend 2's id, and through the connection the first `PING` arrived on. Direct addressing bypasses the rules, so this cannot land on some other backend. The client accepts a reply to either id, so a late reply from backend 1 would still count.
+The same request goes out again as a new message, with a new `id`, `to` set to backend 2's id, a delivery error asked for, and through the connection the first `PING` arrived on. Direct addressing bypasses the rules, so this cannot land on some other backend. The client accepts a reply to either id, so a late reply from backend 1 would still count. Were backend 2 gone by now, the multiplexer would answer with `DELIVERY_ERROR`: the query fails at once when nobody took the first request, and otherwise waits out the stage for that late reply.
 
 ```mermaid
 graph LR

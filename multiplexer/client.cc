@@ -170,6 +170,9 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   // Every id the request goes out under, the first and each resend after a
   // lost connection: a reply to any of them answers the query.
   std::vector<uint64_t> attempts;
+  // Whether a backend may have the request and answer it late: false only
+  // when its one attempt drew a delivery error, nobody taking it.
+  bool taken = true;
 
   try {
     timer = basic_client_->create_timer(timeout);
@@ -179,6 +182,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
       adopt(lane, result.second);
       return result;
     }
+    taken = attempts.size() > 1;  // an attempt that went with its connection may have reached a backend
   } catch (OperationTimedOut&) {
   }
 
@@ -208,7 +212,8 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   }
 
   // Repeat the request to the backend that answered first, by instance id
-  // and through the connection its PING came on. A late reply to an earlier
+  // and through the connection its PING came on, asking for a delivery
+  // error, which says that backend is gone. A late reply to an earlier
   // attempt is accepted too; a late PING from another backend is ignored
   // (ignore_id).
   MultiplexerMessage direct_query;
@@ -217,12 +222,23 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   direct_query.set_to(result.third->from());
   direct_query.set_type(query.type());
   direct_query.set_message(query.message());
+  direct_query.set_report_delivery_error(true);
 
   timer = basic_client_->create_timer(timeout);
   result = _send_and_receive(direct_query, *timer, false, false, attempts, types::REQUEST_RECEIVED, mxmsg.id(),
                              result.second, lane);
   if (result.third->type() == types::DELIVERY_ERROR) {
-    MXTHROW(OperationFailed());
+    if (!taken) {
+      // Nobody took the request, and the backend that answered the search
+      // is gone: nothing can answer any more.
+      MXTHROW(OperationFailed());
+    }
+    // The backend that answered the search is gone, but one took the
+    // request and may still answer it: the stage waits on for that reply.
+    result = _receive(*timer, attempts, types::REQUEST_RECEIVED, mxmsg.id(), nullptr, nullptr);
+    if (result.third->type() == types::DELIVERY_ERROR) {
+      MXTHROW(OperationFailed());
+    }
   }
   adopt(lane, result.second);
   return result;

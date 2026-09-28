@@ -1,7 +1,9 @@
 """Addressed queries, lanes and pinning through ThreadedClient and
 AsyncClient, against two real multiplexers and scripted peers: the same
 promises multiplexer/testing/lanes_test.py checks for the synchronous
-client, through the io thread and through the event loop.
+client, through the io thread and through the event loop. And what a
+dying connection had not written, which goes, in order, to one other
+multiplexer, the lane following it, for the synchronous client too.
 """
 
 import asyncio
@@ -11,6 +13,7 @@ import time
 import unittest
 
 from multiplexer.aio import AsyncClient
+from multiplexer.clients import SyncClient
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed
 from multiplexer.testing import Cluster, FakePeer
@@ -388,40 +391,127 @@ class AsyncClientLanesTest(unittest.IsolatedAsyncioTestCase):
 
 
 class OrphanedMessagesTest(unittest.TestCase):
-    """A connection that dies with frames it had not written yet hands each
-    of them to one other connection, round robin, not a copy to every one:
-    with ANY routing, a copy per multiplexer is a request handled twice."""
+    """A connection that dies with frames it had not written yet hands all
+    of them, in order, to one other connection, and the lane they went
+    through follows them there, through a second failover too: not a copy
+    to every connection, which with ANY routing is a request handled
+    twice, nor each to the next connection round robin, which spread a
+    stream's unwritten tail over every multiplexer left, the lane's next
+    message going to yet another one."""
 
-    def test_each_unwritten_message_goes_to_one_other_multiplexer(self):
+    def test_the_unwritten_messages_go_to_one_other_multiplexer_and_the_lane_follows(self):
         with Cluster(3, rules=RULES) as cluster:
             client = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
             try:
-                lane = None
-                for _ in range(6):  # a new lane takes the next connection, round robin, until one is mx[0]'s
-                    candidate = client.lane()
-                    client.send_message(b"warm-up", type=REQUEST, multiplexer=candidate, flush=True)
-                    if cluster.multiplexer_at(candidate.connection.endpoint) is cluster.mx[0]:
-                        lane = candidate
-                        break
-                assert lane is not None, "no lane on mx[0] in six tries"
-                behind = [
+                self._hand_over(cluster, client, lambda: None)
+            finally:
+                client.shutdown()
+
+    def test_the_synchronous_client_hands_them_over_the_same_way(self):
+        """The synchronous client notices the dead connection inside a call:
+        flush_all() runs the loop until the handed-over messages are out."""
+        with Cluster(3, rules=RULES) as cluster:
+            with SyncClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT) as client:
+                self._hand_over(cluster, client, lambda: client.flush_all(timeout=20))
+
+    def test_a_lane_follows_its_messages_through_a_second_failover(self):
+        """The lane's messages go from mx[0] to another multiplexer, S, the
+        lane sending nothing meanwhile; then S dies with another lane's
+        messages unwritten, which go on to a third, T. The first lane's
+        next message follows them through both failovers, to T, where it
+        found S dead and took the next connection round robin."""
+        with Cluster(4, rules=RULES) as cluster:
+            client = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
+            fakes = []
+            try:
+                lane = self._lane_on(cluster, client, cluster.mx[0])
+                fakes = [
                     FakePeer(
                         cluster, peers.PYTHON_TEST_SERVER, name="behind-%d" % index, endpoints=[mx.endpoint]
                     ).start()
-                    for index, mx in ((1, cluster.mx[1]), (2, cluster.mx[2]))
+                    for index, mx in enumerate(cluster.mx[1:], 1)
                 ]
-                cluster.mx[0].pause()  # frames queue up behind a socket nobody reads
-                chunk = b"x" * (128 * 1024)
-                for index in range(300):
-                    client.send_message(b"%d:" % index + chunk, type=REQUEST, multiplexer=lane)
-                cluster.mx[0].kill()
-                arrived = self._settled(behind)
-                self.assertGreater(len(arrived[0] | arrived[1]), 100, "the unwritten messages were handed over")
-                self.assertEqual(set(), arrived[0] & arrived[1], "no message reached both multiplexers")
-                for fake in behind:
-                    fake.stop()
+                self._strand(cluster, client, lane, cluster.mx[0], b"first")
+                takers = self._takers(fakes, b"first")
+                self.assertEqual(1, len(takers), "the first lane's messages went to one multiplexer")
+                taker = cluster.mx[1 + takers[0]]
+                other = self._lane_on(cluster, client, taker)
+                self._strand(cluster, client, other, taker, b"second")
+                takers = self._takers(fakes, b"second")
+                self.assertEqual(1, len(takers), "the second lane's messages went to one multiplexer")
+                client.send_message(b"after", type=REQUEST, multiplexer=lane, flush=True)
+                self.assertIs(
+                    cluster.mx[1 + takers[0]],
+                    cluster.multiplexer_at(lane.connection.endpoint),
+                    "the first lane followed its messages through both failovers",
+                )
             finally:
+                for fake in fakes:
+                    fake.stop()
                 client.shutdown()
+
+    def _hand_over(self, cluster, client, run_loop):
+        """A lane on mx[0] with 300 messages unwritten behind a frozen
+        multiplexer, mx[0] killed: they reach one of the two others, in
+        order, and so does the lane's next message. `run_loop` lets the
+        client notice the dead connection."""
+        lane = self._lane_on(cluster, client, cluster.mx[0])
+        behind = [
+            FakePeer(cluster, peers.PYTHON_TEST_SERVER, name="behind-%d" % index, endpoints=[mx.endpoint]).start()
+            for index, mx in ((1, cluster.mx[1]), (2, cluster.mx[2]))
+        ]
+        try:
+            self._strand(cluster, client, lane, cluster.mx[0], b"tail")
+            run_loop()
+            arrived = self._settled(behind)
+            self.assertGreater(len(arrived[0] | arrived[1]), 100, "the unwritten messages were handed over")
+            self.assertEqual(set(), arrived[0] & arrived[1], "no message reached both multiplexers")
+            self.assertIn(0, [len(ids) for ids in arrived], "every one went to one multiplexer")
+            taker = behind[0] if arrived[0] else behind[1]
+            client.send_message(b"after", type=REQUEST, multiplexer=lane, flush=True)
+            self.assertIs(
+                cluster.mx[1] if taker is behind[0] else cluster.mx[2],
+                cluster.multiplexer_at(lane.connection.endpoint),
+                "the lane followed its messages",
+            )
+            self._settled(behind)
+            payloads = [mxmsg.message for mxmsg in taker.messages(REQUEST)]
+            self.assertEqual(b"after", payloads[-1], "the lane's next message came after them, there")
+            numbers = [int(payload[len(b"tail:") :].split(b":", 1)[0]) for payload in payloads[:-1]]
+            self.assertEqual(sorted(numbers), numbers, "in the order sent")
+        finally:
+            for fake in behind:
+                fake.stop()
+
+    @staticmethod
+    def _lane_on(cluster, client, mx):
+        """A lane whose connection is `mx`'s: a new lane takes the next
+        connection, round robin, so one of a few tries is."""
+        for _ in range(2 * len(cluster.mx)):
+            lane = client.lane()
+            client.send_message(b"warm-up", type=REQUEST, multiplexer=lane, flush=True)
+            if cluster.multiplexer_at(lane.connection.endpoint) is mx:
+                return lane
+        raise AssertionError("no lane on the multiplexer in %d tries" % (2 * len(cluster.mx)))
+
+    @staticmethod
+    def _strand(cluster, client, lane, mx, label):
+        """300 messages through `lane`, `label:<n>:` and 128 KiB each, left
+        unwritten behind `mx`, frozen, which is then killed."""
+        mx.pause()  # frames queue up behind a socket nobody reads
+        chunk = b"x" * (128 * 1024)
+        for index in range(300):
+            client.send_message(label + b":%d:" % index + chunk, type=REQUEST, multiplexer=lane)
+        mx.kill()
+
+    def _takers(self, fakes, label):
+        """The indices of the fakes that received messages labelled `label`, once settled."""
+        self._settled(fakes)
+        return [
+            index
+            for index, fake in enumerate(fakes)
+            if fake.messages(REQUEST, lambda mxmsg: mxmsg.message.startswith(label + b":"))
+        ]
 
     @staticmethod
     def _settled(fakes, quiet=1.0, timeout=15):

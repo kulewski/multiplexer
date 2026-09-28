@@ -112,6 +112,23 @@ client.shutdown();
   library runs. `async_connect(host, port)` returns at once;
   `wait_for_connection(wrapper, timeout)` waits for it. The wrapper's
   `target()` is the host and port given, `endpoint()` the address in use.
+  `connect(endpoint, timeout)` and `async_connect(endpoint)` take an
+  `asio::ip::tcp::endpoint`.
+- `disconnect(host, port)`, or `disconnect(endpoint)`, drops a
+  multiplexer given to `connect()` or `async_connect()`, the same host and
+  port, an address in any spelling: its reconnect stops, and nothing
+  connects to it again unless `connect()` is called again. A connection to
+  it on its way is abandoned; a live one is closed the polite way, as
+  `shutdown()` closes each: what it had not written goes, in order, to one
+  other connection, or is held for the next, as a lost connection's does
+  ([semantics](semantics.md#failure-modes)), and what it wrote still
+  arrives. It returns at once whether the client had that multiplexer, a
+  connection to it or a reconnect armed, and throws `NotConnected` after
+  `shutdown()` and `UsedAfterFork` in a forked child, as `connect()` does.
+  It is for a program that keeps its own list of multiplexers, when one
+  leaves the list: the library would retry an address nobody serves any
+  more for good, every 3 s, until another deployment's multiplexer gets
+  that address, as pod addresses are reused, and the client joins it.
 - `query(payload, type, timeout = 10, lane = nullptr, received = nullptr)`
   and `query(mxmsg, timeout, lane, received)` send a request and
   return an `IncomingMessage`, a
@@ -121,7 +138,10 @@ client.shutdown();
   then a search on all of them, then the request again to the backend
   found, each stage with its own `timeout`. A message with `to` set is an
   addressed query, with one `timeout` for its stages, see
-  [below](#lanes-pinning-and-addressed-queries). Throws
+  [below](#lanes-pinning-and-addressed-queries). When the backend a search
+  found is gone by the direct request, the query fails at once if nobody
+  took the request, and otherwise waits out the stage for a late reply
+  from the backend that did. Throws
   `SyncClient::OperationFailed` when no backend can be found,
   `SyncClient::OperationTimedOut` when a stage runs out of time,
   `SyncClient::NotConnected` when no connection is live. All three derive from
@@ -137,7 +157,8 @@ client.shutdown();
   waits for room on a full connection, or, with no connection live, is held
   until one comes up, `timeout` seconds at most each way, and is written as
   a later call runs the loop. A connection that dies with it unwritten hands
-  it to another, or has it held for the next; a `queue_all` copy is held too
+  it, with the rest it had not written, in order, to one other, or has it
+  held for the next; a `queue_all` copy is held too
   when no connection is live, and dropped while one is. One the client gives
   up on is reported ([Messages the library gives up
   on](#messages-the-library-gives-up-on)). `done`, when given, hears how the
@@ -217,9 +238,9 @@ client.shutdown();
   and server class ends; then it runs the loop until every multiplexer
   has closed its side of the connection too, a round trip,
   `CLOSE_READ_SECONDS` at most, so that what was written arrives
-  ([semantics](semantics.md#failure-modes)). After it `connect()` and
-  `async_connect()` throw `NotConnected`, as `ThreadedClient::connect()`
-  does, and nothing is sent or placed.
+  ([semantics](semantics.md#failure-modes)). After it `connect()`,
+  `async_connect()` and `disconnect()` throw `NotConnected`, as
+  `ThreadedClient::connect()` does, and nothing is sent or placed.
 
 A message built by hand that has no id or sender gets them where it is
 sent: a fresh id, and the client's instance id as `from`. The receiving
@@ -254,7 +275,9 @@ The same on `SyncClient` and `ThreadedClient`; the reasoning is in
   on the connection the reply came through. While the lane's connection
   lives, a message it has no room for waits there for room, so the stream
   keeps its order. A lane that is not pinned takes another connection when
-  its own dies. `Lane(true)` is pinned: once it is `closed()` the lane
+  its own dies: the one that took, in order, what the dead one had not
+  written, through every failover since, so the stream has one gap or
+  reorder per failover. `Lane(true)` is pinned: once it is `closed()` the lane
   refuses: `SyncClient::send` and `ThreadedClient`'s `send(msg, lane)` throw
   `NotConnected`, `queue()` returns a null tracker, a flushing
   `ThreadedClient` `send` returns 0, and `query` ends `NOT_CONNECTED`
@@ -268,6 +291,9 @@ The same on `SyncClient` and `ThreadedClient`; the reasoning is in
   `holds_connection()`, `connected()`, `closed()`, `pinned()` read it. A
   lane holds its connection weakly and the library keeps no registry, so it
   lives as long as your `LanePtr`; a query in flight holds it until it ends.
+  A lane, once it took a connection, and a `ConnectionWrapper` belong to the
+  client they came from: given to another client, a send, a queue or a
+  query throws `std::invalid_argument` on the calling thread.
   Safe to share with the io thread.
 - **A connection**, given to `send(msg, connection, timeout)`, which
   flushes on both, to `ThreadedClient`'s queueing `send(msg,
@@ -408,7 +434,8 @@ backends whose handlers throw on what they do not expect would answer each
 other's reports for good. Then the virtual
 `on_handler_exception(const std::exception &)` decides:
 true, the default, keeps serving; false lets the exception propagate out
-of `serve_forever`.
+of `serve_forever`, an `OperationTimedOut` of the handler's own too: only
+`poll` running out is the loop's timeout.
 
 `no_response()` marks a message as needing no reply; `notify_start()` sends
 `REQUEST_RECEIVED` to the requester at once, which a query's `received`
@@ -555,7 +582,8 @@ client.shutdown();
 
 - `query(payload, type, timeout, lane, received)` blocks and returns a
   `Result`: `outcome` is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend
-  anywhere, or the addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and
+  anywhere, the backend a search found gone with nobody holding the
+  request, or the addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and
   `check()` returns the reply or throws the exception `SyncClient::query`
   would have. The stages are `SyncClient`'s, but that a connection lost
   under the search or the direct request starts a typed query over from its
@@ -624,6 +652,17 @@ client.shutdown();
   `new_message()` fills in id and from, and every send fills them in on a
   whole message that left them empty: every receiver drops a message
   without an id.
+- `connect(host, port, timeout)` connects as `SyncClient::connect()` does
+  and waits for the handshake: true once the connection is registered,
+  false as soon as it failed, or at `timeout`, the io thread trying again
+  every 3 s on its own. `disconnect(host, port)` drops the multiplexer as
+  `SyncClient::disconnect()` does, on the io thread, and returns once it
+  is done, whether the client had it: `connections_count()` is down by
+  then, a query through the connection closed is sent again through
+  another, as for a lost connection, and a `connect()` still waiting for
+  that multiplexer returns false. Neither from callbacks, where they throw
+  `std::logic_error` rather than deadlock; after `shutdown()` they throw
+  `NotConnected`.
 - `flush_all(timeout)` waits until everything sent before the call has
   been written or given up on, what still waits for a connection or for
   room included, or `timeout` seconds, and returns, once the callbacks of
@@ -755,13 +794,14 @@ or a fatal signal, loses what the client had not written.
 **Fork.** A client inherited by a forked child is an orphan there: its io
 thread does not exist in the child, its locks may have been held at the
 fork by threads that do not exist there either, and its sockets are shared
-with the parent. Every call that would send, receive, connect, wait or
-take one of its locks throws `UsedAfterFork`, a `NotConnected`, first, and
-so does every use of a `Lane` made before the fork, or seeded with a
-`ConnectionWrapper` from before it, and every send through such a wrapper,
-even by a client made in the child, as do the getters of the
-connections' state, `connections_count()`, `has_incoming_messages()` and
-`routing_acknowledged()`, which would answer with the parent's;
+with the parent. Every call that would send, receive, connect,
+disconnect, wait or take one of its locks throws `UsedAfterFork`, a
+`NotConnected`, first, and so does every use of a `Lane` made before the
+fork, or seeded with a `ConnectionWrapper` from before it, and every send
+through such a wrapper, even by a client made in the child, as do the
+getters of the connections' state, `connections_count()`,
+`has_incoming_messages()` and `routing_acknowledged()`, which would answer
+with the parent's;
 `orphaned()` tells without throwing. `shutdown()` and the destructor close
 the child's copies of the descriptors, once, with `close(2)`, and leak the
 rest on purpose, so nothing sends a goodbye or a `shutdown(2)` on the

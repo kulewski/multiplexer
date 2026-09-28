@@ -175,6 +175,18 @@ int child_checks(std::unique_ptr<Client>& sync, std::unique_ptr<ThreadedClient>&
     return 4;
   } catch (ThreadedClient::UsedAfterFork&) {
   }
+  // The parent's multiplexer: dropped here, the connections the parent
+  // checks after would be closed.
+  try {
+    sync->disconnect("127.0.0.1", port);
+    return 7;
+  } catch (Client::UsedAfterFork&) {
+  }
+  try {
+    threaded->disconnect("127.0.0.1", port);
+    return 8;
+  } catch (ThreadedClient::UsedAfterFork&) {
+  }
   sync.reset();      // the orphan teardown: must not hang
   threaded.reset();  // nor this one
   ThreadedClient fresh(multiplexer::peers::WEBSITE);
@@ -237,6 +249,8 @@ int inherited_calls_raise(Client& sync, ThreadedClient& threaded, const multiple
                                          [&] { fresh_sync.schedule_one(message, connection); },
                                          [&] { fresh_sync.send(message, connection, 1); },
                                          [&] { fresh_sync.query(message, connection, 1); },
+                                         [&] { threaded.disconnect("127.0.0.1", port); },
+                                         [&] { sync.disconnect("127.0.0.1", port); },
                                      },
                                      1);
 }

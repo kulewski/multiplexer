@@ -4,7 +4,8 @@ reply counted as sent before it was; a report of a handler's exception
 that fails leaves the loop serving and on_handler_exception() told, where
 it ended serve_forever(); what periodic_task() sends is routed by its
 type, where it went to the last requester; the requester's
-send_and_receive() takes a payload, where it raised AttributeError; and
+_send_and_receive(), a query's step, takes a payload, where it raised
+AttributeError; and
 the replies the server sends itself, an echo, a report, a pickle reply,
 are queued as in the C++ class, where each waited for its write; and
 every client raises the one BackendError for a BACKEND_ERROR reply.
@@ -199,7 +200,7 @@ class ServerRepliesTest(unittest.TestCase):
         with Cluster(1, rules=RULES) as cluster, BackendThread(lambda: Backend(cluster.endpoints)):
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
-                reply, _ = client.send_and_receive(b"answer", type=REQUEST, timeout=5)
+                reply, _ = client._send_and_receive(b"answer", type=REQUEST, timeout=5)
                 self.assertEqual(b"answer", reply.message)
             finally:
                 client.shutdown()

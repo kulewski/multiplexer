@@ -129,6 +129,21 @@ class Client : public ExceptionDefinitions {
     MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
     return basic_client_->connect(host, port, timeout);
   }
+  // Drops the multiplexer given to connect() or async_connect() with this
+  // host and port, or this address: no reconnect to it any more, unless
+  // connect() is called again, and a live connection to it closed, what
+  // it had not written handed to the other connections or held, as a lost
+  // connection's is. Returns at once, whether the client had it; throws
+  // NotConnected after shutdown(), as connect() does. See
+  // BasicClient::disconnect.
+  bool disconnect(const std::string& host, std::uint16_t port) {
+    basic_client_->check_not_orphaned();
+    return basic_client_->disconnect(host, port);
+  }
+  bool disconnect(const asio::ip::tcp::endpoint& peer_endpoint) {
+    basic_client_->check_not_orphaned();
+    return basic_client_->disconnect(peer_endpoint);
+  }
   // How host names become addresses; for tests. See BasicClient::Resolver.
   void set_resolver(BasicClient::Resolver resolver) { basic_client_->set_resolver(resolver); }
 
@@ -169,6 +184,8 @@ class Client : public ExceptionDefinitions {
     return basic_client_->connections_count(true);
   }
   std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }  // our `from`
+  // See BasicClient::reconnects_pending(); for tests.
+  std::size_t reconnects_pending() const { return basic_client_->reconnects_pending(); }
   // See BasicClient::dropped_while_closing().
   std::uint64_t dropped_while_closing() const { return basic_client_->dropped_while_closing(); }
   std::uint32_t inline client_type() const { return basic_client_->client_type(); }  // our peer type

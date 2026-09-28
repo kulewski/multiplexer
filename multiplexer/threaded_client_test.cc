@@ -791,7 +791,12 @@ TEST(ThreadedClient, AQueryReleasesItsLaneWhenItEnds) {
 
 // A connection lost seconds before shutdown() arms a reconnect timer; the
 // timer firing after the shutdown must not open a connection that nobody
-// closes, which kept the io thread alive and the peer registered.
+// closes, which kept the io thread alive, the peer registered and
+// shutdown() waiting for good: it returns, a hang failing at the test's
+// own timeout rather than at a bound on how long it took. That shutdown()
+// takes every reconnect out is ShutdownTakesOutTheReconnectArmed below,
+// on the synchronous client, whose loop runs only inside its calls; both
+// clients' BasicClient does it.
 TEST(ThreadedClient, ShutdownRightAfterALostConnectionReturns) {
   InProcessMultiplexer first;
   std::unique_ptr<InProcessMultiplexer> second(new InProcessMultiplexer());
@@ -806,15 +811,26 @@ TEST(ThreadedClient, ShutdownRightAfterALostConnectionReturns) {
   }
   ASSERT_EQ(1u, client.connections_count());
   second.reset(new InProcessMultiplexer(lost_port));  // back on the same port, so the reconnect would succeed
-  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   client.shutdown();
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2)) << "shutdown waited for the io thread";
-  // No connection arrives at the multiplexer that came back: the timer was
-  // cancelled by the shutdown. The count is read on the server's own thread.
-  std::this_thread::sleep_for(std::chrono::seconds(4));
-  std::promise<unsigned int> peers;
-  second->io_service.post([&] { peers.set_value(second->server->connections_count(true)); });
-  EXPECT_EQ(0u, peers.get_future().get()) << "a reconnect after shutdown";
+}
+
+// A target whose connection failed has a reconnect armed, its timer 3 s
+// away; shutdown() cancels it and takes it out, so that nothing is left to
+// open a connection after the shutdown, or to keep a threaded client's io
+// thread waiting for it to fire. Counted, not timed: the synchronous
+// client's loop runs only inside its calls, so the reconnect cannot fire
+// before the count.
+TEST(SyncClient, ShutdownTakesOutTheReconnectArmed) {
+  unsigned short gone_port = 0;
+  {
+    InProcessMultiplexer gone;
+    gone_port = gone.port;
+  }
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  EXPECT_FALSE(client.wait_for_connection(client.connect("127.0.0.1", gone_port, 5), 0)) << "refused";
+  ASSERT_EQ(1u, client.reconnects_pending()) << "no reconnect armed";
+  client.shutdown();
+  EXPECT_EQ(0u, client.reconnects_pending()) << "shutdown() left a reconnect armed";
 }
 
 // A flushing send ends when its frame is written: a hundred in a row each
@@ -2149,7 +2165,178 @@ class SearchStage {
   std::future<bool> searched_;
 };
 
+// A multiplexer of the test's own for a typed query's last stage: it
+// answers the request with a delivery error, nobody taking it, or, when
+// `taken`, keeps it, as a backend busy with it would; answers the search
+// with a PING from a backend it no longer has; answers the direct request
+// to that backend with a delivery error when the request asks for one, as
+// a multiplexer that lost the backend does, and drops it otherwise; and,
+// `taken`, then sends the reply to the first request, late.
+class DirectStage {
+ public:
+  explicit DirectStage(bool taken) : taken_(taken) {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof address;
+    if (::bind(listener_, reinterpret_cast<sockaddr*>(&address), length) != 0 || ::listen(listener_, 1) != 0 ||
+        ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+      ::close(listener_);
+      throw std::runtime_error("no socket to listen on");
+    }
+    port = ntohs(address.sin_port);
+    scripted_ = std::async(std::launch::async, [this] { return _script(); });
+  }
+  ~DirectStage() {
+    ::shutdown(listener_, SHUT_RDWR);  // an accept still waiting returns
+    if (scripted_.valid()) {
+      scripted_.wait();
+    }
+    if (fd_ >= 0) {
+      ::close(fd_);
+    }
+    ::close(listener_);
+  }
+
+  // Waits for the script to end: whether the direct request asked for a
+  // delivery error.
+  bool asked() { return scripted_.get(); }
+
+  unsigned short port = 0;
+
+ private:
+  static const std::uint64_t kId = 0x6d78;      // this multiplexer
+  static const std::uint64_t kGone = 0x60e;     // the backend that answered the search, gone since
+  static const std::uint64_t kBackend = 0xbac;  // the backend that took the request
+
+  int _write(const multiplexer::MultiplexerMessage& msg) {
+    return write_frame(fd_, *std::unique_ptr<multiplexer::RawMessage>(multiplexer::RawMessage::FromMessage(msg)));
+  }
+
+  // The client's next message of `type` addressed `to` (0 for none) into
+  // `msg`, the rest skipped: false when none came.
+  bool _next(std::uint32_t type, std::uint64_t to, multiplexer::MultiplexerMessage* msg) {
+    for (;;) {
+      multiplexer::RawMessage frame;
+      if (read_frame(fd_, &frame) || !msg->ParseFromString(frame.get_message())) {
+        return false;
+      }
+      if (msg->type() == type && msg->to() == to) {
+        return true;
+      }
+    }
+  }
+
+  // A message of `type` from `from` to the client, answering `references`.
+  multiplexer::MultiplexerMessage _answer(std::uint32_t type, std::uint64_t from, std::uint64_t references) {
+    multiplexer::MultiplexerMessage msg;
+    msg.set_id(++ids_);
+    msg.set_from(from);
+    msg.set_to(client_);
+    msg.set_type(type);
+    msg.set_references(references);
+    msg.set_message("late");
+    return msg;
+  }
+
+  bool _script() {
+    fd_ = ::accept(listener_, nullptr, nullptr);
+    if (fd_ < 0) {
+      return false;
+    }
+    timeval patience = {30, 0};  // a step that never comes fails the test rather than hangs it
+    ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof patience);
+    multiplexer::RawMessage welcome;  // the client's
+    if (read_frame(fd_, &welcome) ||
+        write_frame(fd_, *multiplexer::impl::create_welcome_message(multiplexer::peers::MULTIPLEXER, kId))) {
+      return false;
+    }
+    multiplexer::MultiplexerMessage request, search, direct;
+    if (!_next(multiplexer::types::PYTHON_TEST_REQUEST, 0, &request)) {
+      return false;
+    }
+    client_ = request.from();
+    if (!taken_ && _write(_answer(multiplexer::types::DELIVERY_ERROR, kId, request.id()))) {
+      return false;
+    }
+    if (!_next(multiplexer::types::BACKEND_FOR_PACKET_SEARCH, 0, &search) ||
+        _write(_answer(multiplexer::types::PING, kGone, search.id())) ||
+        !_next(multiplexer::types::PYTHON_TEST_REQUEST, kGone, &direct)) {
+      return false;
+    }
+    if (direct.report_delivery_error() && _write(_answer(multiplexer::types::DELIVERY_ERROR, kId, direct.id()))) {
+      return false;
+    }
+    if (taken_ && _write(_answer(multiplexer::types::PYTHON_TEST_RESPONSE, kBackend, request.id()))) {
+      return false;
+    }
+    return direct.report_delivery_error();
+  }
+
+  const bool taken_;
+  int listener_;
+  int fd_ = -1;
+  std::uint64_t client_ = 0;
+  std::uint64_t ids_ = kId;
+  std::future<bool> scripted_;
+};
+
+// A typed query's request, for the synchronous client.
+multiplexer::MultiplexerMessage request_of(multiplexer::Client& client) {
+  multiplexer::MultiplexerMessage msg;
+  msg.set_id(client.random64());
+  msg.set_from(client.instance_id());
+  msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  msg.set_message("request");
+  return msg;
+}
+
 }  // namespace
+
+// A typed query's direct request asks for a delivery error, so that the
+// backend that answered the search, gone since, is noticed: with nobody
+// having taken the request, the query fails at once, where the request,
+// asking for none, was dropped unsaid and the stage ran out its timeout.
+TEST(Client, ADirectRequestToAGoneBackendFailsWhenNobodyTookTheRequest) {
+  DirectStage multiplexer(/*taken=*/false);
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.wait_for_connection(client.connect("127.0.0.1", multiplexer.port, 5), 0));
+  EXPECT_THROW(client.query(request_of(client), 5), multiplexer::Client::OperationFailed);
+  EXPECT_TRUE(multiplexer.asked()) << "the direct request asked for no delivery error";
+}
+
+// With a backend holding the request, a gone backend's delivery error
+// ends nothing: the stage waits on, and the late reply to the first
+// request answers the query.
+TEST(Client, ADirectRequestToAGoneBackendWaitsForTheRequestABackendTook) {
+  DirectStage multiplexer(/*taken=*/true);
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.wait_for_connection(client.connect("127.0.0.1", multiplexer.port, 5), 0));
+  multiplexer::IncomingMessage reply = client.query(request_of(client), 1);
+  EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, reply.third->type());
+  EXPECT_EQ("late", reply.third->message());
+  EXPECT_TRUE(multiplexer.asked()) << "the direct request asked for no delivery error";
+}
+
+// The same in the threaded client, whose stages are its own.
+TEST(ThreadedClient, ADirectRequestToAGoneBackendFailsWhenNobodyTookTheRequest) {
+  DirectStage multiplexer(/*taken=*/false);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", multiplexer.port, 5));
+  EXPECT_EQ(ThreadedClient::FAILED, client.query("request", multiplexer::types::PYTHON_TEST_REQUEST, 5).outcome);
+  EXPECT_TRUE(multiplexer.asked()) << "the direct request asked for no delivery error";
+}
+
+TEST(ThreadedClient, ADirectRequestToAGoneBackendWaitsForTheRequestABackendTook) {
+  DirectStage multiplexer(/*taken=*/true);
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", multiplexer.port, 5));
+  ThreadedClient::Result result = client.query("request", multiplexer::types::PYTHON_TEST_REQUEST, 1);
+  ASSERT_EQ(ThreadedClient::REPLIED, result.outcome);
+  EXPECT_EQ("late", result.reply.third->message());
+  EXPECT_TRUE(multiplexer.asked()) << "the direct request asked for no delivery error";
+}
 
 // A peer type above 16 bits was cut to its low 16 by the one function
 // every client is made through, BasicClient::Create: this one was

@@ -208,6 +208,13 @@ class AsyncClient:
         """Live connections right now; the io thread keeps it current."""
         return self._threaded.connections_count()
 
+    def disconnect(self, endpoint: Endpoint) -> bool:
+        """Drop the multiplexer given to the constructor as `endpoint`, the
+        same (host, port); see ThreadedClient.disconnect, whose wait for
+        the io thread blocks the loop briefly. Whether the client had it;
+        NotConnected after close()."""
+        return self._threaded.disconnect(endpoint)
+
     def set_routing(self, routing: Routing) -> None:
         """Which of a multiplexer's routing paths reach this peer; see
         ThreadedClient.set_routing. Does not block."""

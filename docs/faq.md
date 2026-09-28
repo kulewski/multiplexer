@@ -44,8 +44,10 @@ draws the stages.
 **Can I keep a stream of messages in order?**
 Through one connection, yes: `multiplexer=client.lane()` sends everything
 through the connection the first message took, and a query through the
-lane leaves it where the reply came from. Across a failover there is one
-gap or reorder, or, with `lane(pinned=True)`, a `NotConnected` instead.
+lane leaves it where the reply came from. Each failover makes one gap or
+reorder, what the dead connection had not written moving, in order, to
+the connection the lane then takes, or, with `lane(pinned=True)`, a
+`NotConnected` instead.
 [Sending an event](events.md#through-a-lane-a-stream-in-order) shows it.
 
 **Can a backend receive the same request twice?**

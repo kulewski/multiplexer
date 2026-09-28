@@ -416,6 +416,47 @@ cc_test(
 )
 
 cc_test(
+    name = "disconnect_test",
+    size = "small",
+    srcs = ["disconnect_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "foreign_lane_test",
+    size = "small",
+    srcs = ["foreign_lane_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+py_test(
+    name = "foreign_lane_py_test",
+    size = "small",
+    srcs = ["foreign_lane_test.py"],
+    main = "foreign_lane_test.py",
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+cc_test(
     name = "connect_by_name_test",
     size = "small",
     srcs = ["connect_by_name_test.cc"],
@@ -703,6 +744,7 @@ py_test(
     srcs = ["threaded_lanes_test.py"],
     deps = [
         ":aio",
+        ":clients",
         ":multiplexer_constants",
         ":threaded_client_py",
         "//multiplexer/testing",
@@ -762,6 +804,29 @@ py_test(
     deps = [
         ":clients",
         ":mxclient",
+        ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "direct_request_test",
+    size = "small",
+    srcs = ["direct_request_test.py"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "handler_timeout_test",
+    size = "small",
+    srcs = ["handler_timeout_test.py"],
+    deps = [
+        ":multiplexer_constants",
         ":servers",
         "//multiplexer/testing",
     ],
@@ -951,6 +1016,21 @@ py_test(
         ":servers",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "disconnect_py_test",
+    size = "small",
+    srcs = ["disconnect_test.py"],
+    main = "disconnect_test.py",
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
         "//multiplexer/testing",
     ],
 )

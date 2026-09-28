@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, MultiplexerMessage, Routing
+from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
@@ -33,10 +34,9 @@ REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
 
 
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer, the largest the
-    kernel allows each, and twice the queue."""
+def socket_buffers() -> int:
+    """What the two sockets of a connection may buffer, the largest the
+    kernel allows each."""
     buffers = 0
     for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
         try:
@@ -44,7 +44,29 @@ def frames_to_fill(size: int) -> int:
                 buffers += int(limits.read().split()[2])
         except (OSError, IndexError, ValueError):
             buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 2 * 1024
+    return buffers
+
+
+def frames_to_fill(size: int) -> int:
+    """How many messages of `size` bytes a frozen multiplexer's connection
+    cannot take: twice what the two sockets may buffer and twice the queue."""
+    return 2 * socket_buffers() // size + 2 * 1024
+
+
+def bytes_to_fill() -> int:
+    """More bytes than a frozen multiplexer's connection takes in: twice
+    what the two sockets may buffer, within what one message may carry."""
+    return min(2 * socket_buffers(), MAX_MESSAGE_SIZE // 2)
+
+
+def shutting_down(client: ThreadedClient) -> bool:
+    """Whether `client`'s shutdown() has begun: its calls raise
+    NotConnected from then on."""
+    try:
+        client.connections_count()
+    except NotConnected:
+        return True
+    return False
 
 
 class Scripted(BaseThreadedMultiplexerServer):
@@ -55,7 +77,8 @@ class Scripted(BaseThreadedMultiplexerServer):
     raises, "fail to reply" replies with a field that does not exist,
     "whole" replies with a MultiplexerMessage built without `to` and
     `references`, "shut down and raise" shuts the client down and raises,
-    "event" gets no reply, anything else is upper-cased."""
+    "event" gets no reply, anything else is upper-cased. `turns` counts
+    the turns of the serving loop, the calls of periodic_task()."""
 
     multiplexer_client_type = peers.PYTHON_TEST_SERVER
 
@@ -68,6 +91,7 @@ class Scripted(BaseThreadedMultiplexerServer):
         self.keep_serving_after_error = True
         self.raise_from_on_handler_exception = False
         self.exceptions: list[Exception] = []
+        self.turns = 0
 
     def handle_message(self, request: Request) -> None:
         payload = request.mxmsg.message
@@ -109,6 +133,10 @@ class Scripted(BaseThreadedMultiplexerServer):
         if self.raise_from_on_handler_exception:
             raise RuntimeError("from on_handler_exception")
         return self.keep_serving_after_error
+
+    def periodic_task(self) -> None:
+        """Counts a turn of the serving loop."""
+        self.turns += 1
 
 
 class Choking(BaseThreadedMultiplexerServer):
@@ -194,7 +222,9 @@ class ThreadedServerTest(unittest.TestCase):
         query = BackendForPacketSearch()
         query.packet_type = REQUEST
         message = client.new_message(message=query, type=types.BACKEND_FOR_PACKET_SEARCH)
-        return client.send_and_receive(message, multiplexer=Client.ALL, handle_delivery_errors=True, timeout=timeout)[0]
+        return client._send_and_receive(message, multiplexer=Client.ALL, handle_delivery_errors=True, timeout=timeout)[
+            0
+        ]
 
     def test_the_search_is_answered_while_every_worker_is_busy(self):
         _, server = self.serve()
@@ -287,7 +317,7 @@ class ThreadedServerTest(unittest.TestCase):
             releasing = threading.Thread(target=release_once_queued)
             releasing.start()
             message = client.client.new_message(message=b"after", type=REQUEST)
-            reply = client.client.send_and_receive(message, timeout=5)[0]
+            reply = client.client._send_and_receive(message, timeout=5)[0]
             releasing.join()
             self.assertEqual(types.DELIVERY_ERROR, reply.type, "refused, not left waiting")
             self.assertEqual(message.id, reply.references)
@@ -352,7 +382,7 @@ class ThreadedServerTest(unittest.TestCase):
             server.start_draining()
             wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed the drain routing")
             message = client.client.new_message(message=b"late", type=REQUEST)
-            reply = client.client.send_and_receive(message, timeout=5)[0]
+            reply = client.client._send_and_receive(message, timeout=5)[0]
             self.assertEqual(types.DELIVERY_ERROR, reply.type, "nobody takes it by the rules")
             self.assertEqual([peers.PYTHON_TEST_SERVER], list(DeliveryError.FromString(reply.message).failed_type))
             self.assertEqual(types.DELIVERY_ERROR, self.search(client.client, 5.0).type, "the search is not forwarded")
@@ -377,7 +407,7 @@ class ThreadedServerTest(unittest.TestCase):
             closing.start()
             wait_until(lambda: server.draining, 10, "close() under way")
             message = client.client.new_message(message=b"late", type=REQUEST)
-            reply = client.client.send_and_receive(message, timeout=5)[0]
+            reply = client.client._send_and_receive(message, timeout=5)[0]
             self.assertEqual(types.DELIVERY_ERROR, reply.type, "refused, not dropped")
             self.assertEqual(message.id, reply.references)
             self.assertEqual(message.id, DeliveryError.FromString(reply.message).packet_id)
@@ -452,32 +482,67 @@ class ThreadedServerTest(unittest.TestCase):
         self.assertEqual([b"first", b"third", b"fourth"], server.handled)
 
     def test_the_last_reply_is_written_before_the_close(self):
-        """A reply sent just before close() reaches the requester: close()
-        writes what is queued, up to a second, before it shuts the sockets."""
-        served, server = self.serve()
+        """A reply still being written when close() begins reaches the
+        requester: close() writes out what was sent before it, `timeout`
+        seconds at most, and only then shuts the sockets. The multiplexer is
+        frozen while the reply, more than the two sockets between them hold,
+        is sent and close() begins, and runs again once the client's
+        shutdown is under way: the reply arrives after close() began, where
+        a close that shut the sockets at once cut it off. A short reply is
+        written before close() gets there, and passes either way."""
+        _, server = self.serve()
         with TestClient(self.cluster, peers.WEBSITE) as client:
-            client.send(b"later", REQUEST)
+            request = client.send(b"later", REQUEST)
             wait_until(lambda: server.kept, 10, "the request kept for a later answer")
-            server.kept[0].reply(b"at-the-last-moment", type=RESPONSE)
-            served.stop()  # close() follows at once
-            self.assertEqual(b"at-the-last-moment", client.receive(timeout=5).message)
+            threaded = server.client  # the server's until close() is done
+            payload = b"r" * bytes_to_fill()
+            closing = threading.Thread(target=server.close, args=(60,))  # a write-out deadline only a failure reaches
+            multiplexer = self.cluster.mx[0]
+            multiplexer.pause()
+            try:
+                server.kept[0].reply(payload, type=RESPONSE)
+                self.assertFalse(threaded.flush_all(0), "the reply written at once: nothing left for close()")
+                closing.start()
+                wait_until(lambda: shutting_down(threaded), 10, "close() at the client's shutdown")
+            finally:
+                multiplexer.resume()
+                if closing.is_alive():
+                    closing.join()
+            try:
+                reply = client.receive(timeout=10)
+            except OperationTimedOut:
+                self.fail("the reply cut off by the close")
+            self.assertEqual((request, RESPONSE, len(payload)), (reply.references, reply.type, len(reply.message)))
 
     def test_a_drain_ends_when_confirmed_and_the_queue_is_empty(self):
-        """With a 10 s cap, the drain ends as soon as the multiplexer confirmed
-        the routing and the workers finished the queue: within a second,
-        with every queued request handled and nothing refused."""
-        served, server = self.serve(drain_seconds=10)
+        """The drain ends once the multiplexer confirmed the routing and the
+        workers finished the queue, not before: confirmed while "block"
+        holds the worker, it goes on turn after turn of the loop, and a
+        request addressed to the server, which the drain routing still
+        delivers, is queued behind and served, where the drain ended on the
+        confirmation alone and the close refused it. With no cap nothing
+        else ends the drain: serve_forever() returns once the queue is
+        empty, every request handled and nothing refused."""
+        served, server = self.serve(drain_seconds=-1)  # no cap
         with TestClient(self.cluster, peers.WEBSITE) as client:
             client.send(b"block", REQUEST)
             for index in range(3):
                 client.send(b"event-%d" % index, REQUEST)
             wait_until(lambda: server.pending == 4, 10, "the worker busy and three waiting")
-            started = time.time()
             server.start_draining()
+            wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed the drain routing")
+            # Two turns of the loop from here: drained() was asked at least
+            # once since the confirmation, and said no.
+            turns = server.turns
+            wait_until(lambda: server.turns >= turns + 2, 5, "the drain going on with the worker busy")
+            addressed = client.send(b"addressed", REQUEST, to=server.instance_id)
+            # Queued behind "block", or refused by a server that took its drain for over.
+            wait_until(lambda: server.pending == 5 or server.dropped, 10, "the addressed request queued")
             server.release.set()
-            wait_until(lambda: not served.running, 10, "serve_forever() returned")
-            self.assertLess(time.time() - started, 5, "on the confirmation and the empty queue, not the cap")
-        self.assertEqual([b"block", b"event-0", b"event-1", b"event-2"], server.handled)
+            reply = client.receive(timeout=10)
+            self.assertEqual((addressed, RESPONSE), (reply.references, reply.type), "served, not refused")
+            wait_until(lambda: not served.running, 10, "serve_forever() returned with the queue empty")
+        self.assertEqual([b"block", b"event-0", b"event-1", b"event-2", b"addressed"], server.handled)
         self.assertEqual(0, server.dropped)
         self.assertIsNone(served.error)
 

@@ -5,8 +5,8 @@ A session kept by `mxcontrol recording start --stay` follows a replica through a
 Recording state lives in the multiplexer process, so a replica replaced
 mid-session comes back not recording. With `--stay` the command keeps its
 connections, asks every multiplexer for its status every couple of seconds,
-starts a session on any that has never had one, and stops every session
-when it is interrupted.
+starts a session on any that is not recording and has had none from it,
+and stops every session when it is interrupted.
 
 ## What happens
 

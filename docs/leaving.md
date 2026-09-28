@@ -155,7 +155,9 @@ request to a backend that dies, it gets no answer, and its sender waits
 out its timeout and searches. It is not lost unsaid: the backend's log
 has a `WARNING`, `N message(s) from multiplexer M arrived after the
 connection began closing, and were dropped`, and every client and server
-class counts them (in C++, `dropped_while_closing()`).
+class counts them; `dropped_while_closing()` says how many on the
+`SyncClient` in both languages and on the C++ `BaseMultiplexerServer`,
+after the close too.
 
 The finishing has no time bound of its own: what was taken before the
 line is served, however long its handlers run. What was taken is bounded

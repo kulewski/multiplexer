@@ -39,6 +39,7 @@ MXCONTROL_SRCS := \
   mxcontrol/main.cc \
   mxcontrol/receive_logs.cc \
   mxcontrol/recording_control.cc \
+  mxcontrol/recording_loops.cc \
   mxcontrol/rules_control.cc \
   mxcontrol/start_multiplexer_server.cc \
   mxcontrol/stream_logs.cc \
@@ -114,6 +115,7 @@ HEADERS := \
   mxcontrol/driver.h \
   mxcontrol/every_address.h \
   mxcontrol/help.h \
+  mxcontrol/recording_control.h \
   mxcontrol/start_multiplexer_server.h \
   mxcontrol/task.h \
   mxcontrol/tasks_holder.h \
@@ -165,7 +167,9 @@ CC_TEST_SRCS := \
   multiplexer/backend/threaded_server_test.cc \
   multiplexer/client_names_test.cc \
   multiplexer/connect_by_name_test.cc \
+  multiplexer/disconnect_test.cc \
   multiplexer/flooded_client_test.cc \
+  multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
@@ -182,14 +186,18 @@ PY_TEST_FILES := \
   multiplexer/all_types_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_by_name_test.py \
+  multiplexer/direct_request_test.py \
+  multiplexer/disconnect_test.py \
   multiplexer/drop_lines_test.py \
   multiplexer/drop_reports_test.py \
   multiplexer/end_calls_test.py \
   multiplexer/forced_frames_test.py \
+  multiplexer/foreign_lane_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
   multiplexer/full_connection_test.py \
   multiplexer/graceful_stop_test.py \
+  multiplexer/handler_timeout_test.py \
   multiplexer/infinite_timeout_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/keepalive_test.py \
