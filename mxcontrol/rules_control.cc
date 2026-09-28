@@ -13,6 +13,7 @@
 #include "lib/seconds.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/client.h"
+#include "mxcontrol/every_address.h"
 #include "mxcontrol/task.h"
 #include "mxcontrol/tasks_holder.h"
 
@@ -98,7 +99,7 @@ int RulesControlTask::run() {
     return 2;
   }
   Client client(io_service(), multiplexer::RULES_CONTROLLER);
-  const unsigned int reached = _connect_to_every_address(client, multiplexers_, timeout_);
+  const unsigned int reached = EveryAddress(client, io_service(), multiplexers_).connect(timeout_);
   const unsigned int expected = client.connections_count();
   if (!expected) {
     std::cerr << "no multiplexer reachable\n";

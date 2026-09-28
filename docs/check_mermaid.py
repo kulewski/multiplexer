@@ -12,7 +12,6 @@ Usage: check_mermaid.py [--fast]     exits 1 on any failure
 """
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +19,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {".git", ".cache", "external", "compdb"}
+SKIP_DIRS = {".git", ".cache", "external", "compdb", ".tools"}
 
 
 def markdown_files() -> list[str]:
@@ -92,7 +91,7 @@ def main(argv: list[str]) -> int:
     command = None if fast_only else renderer()
     if command:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            for (path, line, _), message in zip(blocks, pool.map(lambda b: render(command, b[2]), blocks)):
+            for (path, line, _), message in zip(blocks, pool.map(lambda b: render(command, b[2]), blocks), strict=True):
                 if message:
                     failures.append("%s:%d: %s" % (os.path.relpath(path, ROOT), line, message))
     elif not fast_only:

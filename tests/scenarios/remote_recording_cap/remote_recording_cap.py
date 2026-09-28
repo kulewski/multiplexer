@@ -25,7 +25,7 @@ class RemoteRecordingCap(unittest.TestCase):
             try:
                 (started,) = recording.start(controller, "capped", max_bytes=3000)
                 self.assertTrue(started.recording)
-                sender = spawn(
+                spawn(  # kept by the harness, which ends it
                     "event_client",
                     cfg.lang("event_client"),
                     mx=cluster.addresses,

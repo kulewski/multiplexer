@@ -155,6 +155,11 @@ INDEX = [
     ),
     ("Registering an mxcontrol subcommand", "mxcontrol/tasks_holder.h", "`REGISTER_MXCONTROL_SUBCOMMAND`"),
     (
+        "mxcontrol reaching every replica behind a name, and one back under a new address",
+        "mxcontrol/every_address.h",
+        "`EveryAddress::connect`, `refresh`; `tests/fake_dns` moves a name in a test",
+    ),
+    (
         "Log entries and the binary log stream",
         "lib/logging/logging.h",
         "`MX_LOG`; `lib/protobuf/stream.h` for the stream",
@@ -171,7 +176,8 @@ INDEX = [
     (
         "The rules file put in use again without a restart: a check timer, SIGHUP, a peer's request",
         "multiplexer/server.cc",
-        "`Server::load_rules`; `mxcontrol/start_multiplexer_server.cc` for the signal, `mxcontrol/rules_control.cc` asks",
+        "`Server::load_rules`, the shortest check interval in `Server::rules_check_interval_refused`; "
+        "`mxcontrol/start_multiplexer_server.cc` for the signal, `mxcontrol/rules_control.cc` asks",
     ),
     (
         "Thread-safety annotations and the wrong-thread check",
@@ -182,7 +188,7 @@ INDEX = [
     ("Consuming this repository as `@mx`", "bazel/deps.bzl", "`mx_dependencies`, `mx_setup` in `bazel/setup.bzl`"),
 ]
 
-SKIP_DIRS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "__pycache__", ".cache", "compdb", "build"}
+SKIP_DIRS = {".git", "bazel-bin", "bazel-out", "bazel-testlogs", "__pycache__", ".cache", "compdb", "build", ".tools"}
 SKIP_FILES = {"compile_commands.json", "external"}
 
 
@@ -207,7 +213,6 @@ def header_comment(path: str) -> str:
     with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as f:
         text = f.read()
     ext = os.path.splitext(path)[1]
-    name = os.path.basename(path)
     if ext in (".py", ".bzl"):
         m = re.match(r'\s*(?:#![^\n]*\n)?\s*(?:#[^\n]*\n\s*)*"""(.*?)"""', text, re.S)
         if m:

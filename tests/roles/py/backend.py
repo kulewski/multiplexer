@@ -42,9 +42,6 @@ class Leaving:
 
     def acknowledged(self) -> bool:
         """Whether every multiplexer has the drain routing in effect."""
-        raise NotImplementedError()
-
-    def acknowledged(self) -> bool:
         return self.conn.routing_acknowledged()
 
     def drained(self):

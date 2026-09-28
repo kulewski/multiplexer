@@ -34,7 +34,7 @@ import tempfile
 import threading
 import time
 import unittest
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, ClassVar, Iterable
 
 from google.protobuf import text_format
 
@@ -690,7 +690,7 @@ class Role:
     process's last events and stderr when the role dies.
     """
 
-    _all: list["Role"] = []
+    _all: ClassVar[list["Role"]] = []
     _counter = 0
 
     def __init__(self, role: str, lang: str, argv: list[str], name: str | None = None, drain_file: bool | None = None):
@@ -1023,5 +1023,8 @@ def main() -> None:
 
 # The in-process peers, re-exported so that a test imports everything from
 # multiplexer.testing; fakes.py needs Cluster and wait_until, defined above.
-from multiplexer.testing.fakes import BackendThread, FakePeer, TestClient, ThreadedTestClient
-from multiplexer.testing.raw_peer import RawPeer
+from multiplexer.testing.fakes import BackendThread as BackendThread
+from multiplexer.testing.fakes import FakePeer as FakePeer
+from multiplexer.testing.fakes import TestClient as TestClient
+from multiplexer.testing.fakes import ThreadedTestClient as ThreadedTestClient
+from multiplexer.testing.raw_peer import RawPeer as RawPeer

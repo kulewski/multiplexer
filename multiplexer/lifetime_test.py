@@ -76,12 +76,12 @@ class LifetimeTest(unittest.TestCase):
         seen = {}
         for name, (make, count) in classes.items():
             with make() as made:
-                inside = connections(lambda: count(made))
-            after = connections(lambda: count(made))
+                inside = connections(lambda count=count: count(made))
+            after = connections(lambda count=count: count(made))
             with self.assertRaises(ValueError):
                 with make() as raised:
                     raise ValueError("the block's own")
-            seen[name] = (inside, after, connections(lambda: count(raised)))
+            seen[name] = (inside, after, connections(lambda count=count: count(raised)))
         self.assertEqual(
             {
                 "ThreadedClient": (1, "NotConnected", "NotConnected"),

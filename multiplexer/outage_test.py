@@ -100,7 +100,7 @@ class HeldTest(unittest.TestCase):
                         self.assertTrue(client.flush_all(15), "written once a connection came up")
                         self.assertEqual(0, client.dropped)
                         if name == "SyncClient":
-                            receiver.wait_for(EVENT, matching=lambda received: received.id == held)
+                            receiver.wait_for(EVENT, matching=lambda received, held=held: received.id == held)
                     finally:
                         client.shutdown()
 

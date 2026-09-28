@@ -12,8 +12,12 @@ import unittest
 
 from multiplexer import testing
 from multiplexer.testing import *  # the harness API, one import for scenarios
-from multiplexer.testing import Config, Mx, Role, mx_runfile, output_dir, runfile  # re-exported
-from tests import testing_constants as constants  # re-exported: peers, types
+from multiplexer.testing import Config
+from multiplexer.testing import Mx as Mx, Role as Role  # re-exported
+from multiplexer.testing import mx_runfile as mx_runfile, output_dir as output_dir, runfile as runfile  # re-exported
+from tests import testing_constants
+
+constants = testing_constants  # re-exported: peers, types
 
 CONFIG: Config | None = None
 

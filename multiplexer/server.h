@@ -101,12 +101,20 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   enum class RulesLoad { LOADED, UNCHANGED, FAILED };
   void set_rules_file(const std::string& path) { rules_file_ = path; }
   RulesLoad load_rules(std::string* error);
-  // How often start() then checks the file, in seconds; 0 never. The
-  // check puts a changed file in use once two checks in a row have read
-  // the same new bytes, so a file caught in the middle of being written
-  // is never applied; load_rules(), an operator's explicit ask, applies
-  // at once.
-  void set_rules_check_interval(float seconds) { rules_check_interval_ = seconds; }
+  // How often start() then checks the file, in seconds; 0, a negative
+  // interval or NaN never. The check puts a changed file in use once two
+  // checks in a row have read the same new bytes, so a file caught in the
+  // middle of being written is never applied; load_rules(), an operator's
+  // explicit ask, applies at once. A positive interval below
+  // MIN_RULES_CHECK_INTERVAL, which would read the file over and over on
+  // the io thread, is refused with std::invalid_argument, the interval
+  // set before kept.
+  void set_rules_check_interval(float seconds);
+  static constexpr float MIN_RULES_CHECK_INTERVAL = 0.01;
+  // Why `seconds` cannot be the rules check interval, or empty when it
+  // can: the one check, which set_rules_check_interval() and
+  // run_multiplexer's --rules-check-interval apply.
+  static std::string rules_check_interval_refused(float seconds);
   // Whether stop() has run: the acceptor is closed and nothing re-arms.
   bool stopped() const { return stopping_; }
   // The CRC-32 of the rules in use, as the generated constants carry it.
@@ -132,7 +140,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // written first, and returns true; false with `error` set when a session
   // is open or the file cannot be opened. `label` names the session in the
   // header and the status; `max_bytes` and `max_seconds` close it on their
-  // own, 0 means never.
+  // own, 0 means never. While it is open, its buffer goes to the file
+  // every RECORDING_FLUSH_INTERVAL.
   bool start_recording(const std::string& path, const std::string& label, unsigned int payload_limit,
                        std::uint64_t max_bytes, unsigned int max_seconds, std::string* error);
   // Closes the file session, if one is open, noting `reason` for the status.
@@ -199,12 +208,19 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     return peer_type > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE && Base::accept_peer_type(peer_type);
   }
 
+  // The two controllers, which call in when they have something to ask:
+  // passive whatever a rules file that names their types says, when they
+  // register and at every reload.
+  static bool controller(std::uint32_t peer_type) {
+    return peer_type == RECORDING_CONTROLLER || peer_type == RULES_CONTROLLER;
+  }
+
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
   // and note the arrival for the recording and the peers file, with the
   // routing its welcome carried when that turns anything off. A
-  // controller is passive: it calls in when it has something to ask.
+  // controller is passive (controller()).
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
-    if (new_connection->peer_type() == RECORDING_CONTROLLER || new_connection->peer_type() == RULES_CONTROLLER) {
+    if (controller(new_connection->peer_type())) {
       new_connection->set_is_passive(true);
     }
     new_connection->start_rest();
@@ -212,14 +228,14 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     if (restricted(new_connection->routing())) {
       _emit_peer_routing(*new_connection);
     }
-    _write_peers_file();
+    _peers_changed();
   }
 
   // A registered peer's connection ended; a tap it held ends with it.
   void connection_unregistered(Connection* conn) {
     _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
     _untap(conn);
-    _write_peers_file(conn);
+    _peers_changed();
   }
 
  private:
@@ -366,6 +382,15 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // referencing the message being handled.
   void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload);
   static void _on_session_deadline(weak_pointer server, const asio::error_code& error);
+  // While a file session is open, what its buffer holds goes to the file
+  // every RECORDING_FLUSH_INTERVAL, on the io thread that writes the
+  // records: the file is at most about that much behind, and a multiplexer
+  // that dies loses at most about that much. Never per record, which would
+  // be a system call each. start_recording() arms the timer and
+  // stop_recording() cancels it: nothing ticks without a session.
+  static constexpr std::chrono::seconds RECORDING_FLUSH_INTERVAL{1};
+  void _arm_recording_flush();
+  static void _on_recording_flush(weak_pointer server, const asio::error_code& error);
 
   // RULES_CONTROL from a peer: reload if asked, answer RULES_STATUS.
   void _handle_rules_control(MessageMetaHandler& meta_handler);
@@ -388,9 +413,16 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   static void _on_rules_check(weak_pointer server, const asio::error_code& error);
   void _check_rules_file();
 
-  // The peers file, if configured; `leaving` is excluded, since it is
-  // written before the indexes drop it.
-  void _write_peers_file(Connection* leaving = NULL);
+  // The peers file follows the connections at most PEERS_FILE_INTERVAL
+  // behind: a change arms one write, at once when the last was longer ago,
+  // and the write covers every arrival and departure until it runs, N at
+  // once in a reconnect storm or a stop(), where each rewrote the whole
+  // file, O(N^2) on the io thread. A stop that ends writes what is pending
+  // itself.
+  static constexpr std::chrono::milliseconds PEERS_FILE_INTERVAL{10};
+  void _peers_changed();
+  // The peers file, if configured: every living registered peer.
+  void _write_peers_file();
   // A peer type's name for the peers file: from the rules, or the reserved name.
   std::string _peer_name(std::uint32_t peer_type) const;
 
@@ -413,8 +445,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   std::unique_ptr<Recorder> recorder_;
   Session session_;
   asio::steady_timer session_timer_;
+  asio::steady_timer flush_timer_;  // the session's flush, armed while it is open
   Taps taps_;
   std::string peers_file_;
+  bool peers_write_pending_ = false;  // a write of the peers file is armed on peers_timer_
+  std::chrono::steady_clock::time_point peers_written_at_;
+  asio::steady_timer peers_timer_;
 
   // Every connection accepted and not yet ended, registered or not, for
   // stop(); keyed by address, which connection_closed() erases.

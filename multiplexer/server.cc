@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <vector>
 
 #include "lib/exception.h"
@@ -34,6 +35,8 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
       io_service_(io_service),
       rules_timer_(io_service),
       session_timer_(io_service),
+      flush_timer_(io_service),
+      peers_timer_(io_service),
       accept_timer_(io_service),
       drain_timer_(io_service),
       drops_(io_service, "multiplexer.server") {}
@@ -145,6 +148,11 @@ void Server::_stop_if_done() {
   MX_LOG(stop_dropped_queued_ || stop_dropped_read_ ? WARNING : INFO, LOWVERBOSITY,
          CTX("multiplexer.server") TEXT(line));
   drops_.flush();
+  if (peers_write_pending_) {
+    asio::error_code ignored;
+    peers_timer_.cancel(ignored);
+    _write_peers_file();  // the departures, before the loop may end
+  }
   // After the peers left, so their departures are in the file; the
   // session's deadline timer would otherwise keep the loop alive.
   stop_recording("the multiplexer stopped");
@@ -583,6 +591,9 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
   if (!scheduled) {
     const unsigned int level = rule.delivery_error_is_error() ? ERROR : WARNING;
     const Unrouted why = _unrouted(rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY);
+    if (rule.peer_type() == peers::ALL_TYPES && why == NONE_PRESENT) {
+      return 0;  // nobody connected to tell: no failure for ALL_TYPES (see below)
+    }
     if (const std::string* line =
             drops_.first({why, level, rule.peer_type(), 0}, [&] { return _unrouted_text(why, rule.peer_type()); })) {
       MX_LOG(level, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
@@ -663,7 +674,10 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
   }
   AssertMsg(scheduled != (unsigned int)-1, "unhandled Whom type " + mx::repr(rule.whom()));
 
-  if (!scheduled) {
+  // A rule for ALL_TYPES reaches whoever is connected, a notice such as a
+  // shutdown's: a type with nobody to take it is no failure, so it is
+  // neither reported nor recorded, whatever the rule's flag says.
+  if (!scheduled && rule.peer_type() != peers::ALL_TYPES) {
     if (rule.report_delivery_error()) {
       meta_handler.failed(rule, peer_type);
     }
@@ -741,11 +755,30 @@ unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsLi
 
 // The peers file: written whole to a temporary name, then renamed, so a
 // reader never sees a partial file. One line per registered peer.
-void Server::_write_peers_file(Connection* leaving) {
+void Server::_peers_changed() {
+  if (peers_file_.empty() || peers_write_pending_) {
+    return;
+  }
+  peers_write_pending_ = true;
+  const std::chrono::steady_clock::duration since = std::chrono::steady_clock::now() - peers_written_at_;
+  peers_timer_.expires_after(since >= PEERS_FILE_INTERVAL ? std::chrono::steady_clock::duration::zero()
+                                                          : PEERS_FILE_INTERVAL - since);
+  peers_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
+    pointer self = weak.lock();
+    if (!error && self && self->peers_write_pending_) {
+      self->_write_peers_file();
+    }
+  });
+}
+
+void Server::_write_peers_file() {
+  peers_write_pending_ = false;
+  peers_written_at_ = std::chrono::steady_clock::now();
   if (peers_file_.empty()) {
     return;
   }
   const std::string tmp = peers_file_ + ".tmp";
+  unsigned int written = 0;
   {
     std::ofstream out(tmp.c_str(), std::ios::out | std::ios::trunc);
     if (!out.good()) {
@@ -754,16 +787,19 @@ void Server::_write_peers_file(Connection* leaving) {
     }
     for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
       Connection::pointer connection = entry->second.lock();
-      if (!connection || connection.get() == leaving || !connection->living()) {
+      if (!connection || !connection->living()) {
         continue;
       }
       out << connection->peer_id() << " " << _peer_name(connection->peer_type()) << " " << connection->peer_type()
           << "\n";
+      ++written;
     }
   }
   if (std::rename(tmp.c_str(), peers_file_.c_str()) != 0) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT("cannot rename peers file to " + peers_file_));
+    return;
   }
+  MX_LOG(DEBUG, HIGHVERBOSITY, CTX("multiplexer.server") TEXT("peers file written: " + repr(written) + " peer(s)"));
 }
 
 std::string Server::_peer_name(std::uint32_t peer_type) const {
@@ -834,9 +870,10 @@ Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string
   rules_failed_fingerprint_.clear();
 
   // The connected peers follow the new file: a type's passive flag and
-  // queue size are applied again. A peer whose type the file no longer
-  // names stays connected, since dropping it would turn an edit into an
-  // outage; the log counts them.
+  // queue size are applied again, a controller kept passive as when it
+  // registered. A peer whose type the file no longer names stays
+  // connected, since dropping it would turn an edit into an outage; the
+  // log counts them.
   unsigned int kept = 0;
   for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
     Connection::pointer connection = entry->second.lock();
@@ -845,7 +882,7 @@ Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string
     }
     const MultiplexerPeerDescription* peer = config_.peer_description(connection->peer_type());
     if (peer) {
-      connection->set_is_passive(peer->is_passive());
+      connection->set_is_passive(peer->is_passive() || controller(connection->peer_type()));
       connection->set_outgoing_queue_max_size(peer->queue_size());
     } else if (connection->peer_type() > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE) {
       ++kept;
@@ -867,6 +904,7 @@ Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string
                           config_.peer_by_type().size());
     _emit(record);
   }
+  _peers_changed();  // the peers file names each peer's type as these rules do
   return RulesLoad::LOADED;
 }
 
@@ -882,8 +920,28 @@ Server::RulesLoad Server::_rules_failed(const std::string& why, std::string* err
   return RulesLoad::FAILED;
 }
 
+void Server::set_rules_check_interval(float seconds) {
+  const std::string refused = rules_check_interval_refused(seconds);
+  if (!refused.empty()) {
+    throw std::invalid_argument(refused);
+  }
+  rules_check_interval_ = seconds;
+}
+
+// Below the floor, mx::from_seconds truncating what is under a
+// microsecond to 0, the timer would expire as soon as it is armed and the
+// check run again and again, the io thread doing nothing else.
+std::string Server::rules_check_interval_refused(float seconds) {
+  if (seconds > 0 && seconds < MIN_RULES_CHECK_INTERVAL) {
+    return repr(seconds) + " s is below the shortest rules check interval, " + repr(MIN_RULES_CHECK_INTERVAL) +
+           " s; 0 turns the checks off";
+  }
+  return "";
+}
+
+// No check for 0, a negative interval or NaN: off.
 void Server::_arm_rules_check() {
-  if (rules_check_interval_ <= 0 || rules_file_.empty()) {
+  if (!(rules_check_interval_ > 0) || rules_file_.empty()) {
     return;
   }
   rules_timer_.expires_after(mx::from_seconds(rules_check_interval_));
@@ -1031,6 +1089,7 @@ bool Server::start_recording(const std::string& path, const std::string& label, 
       _on_session_deadline(weak, error);
     });
   }
+  _arm_recording_flush();
   MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("recording to " + path));
   return true;
 }
@@ -1045,6 +1104,7 @@ void Server::stop_recording(const std::string& reason) {
   session_.stopped = reason;
   recorder_.reset();
   session_timer_.cancel();
+  flush_timer_.cancel();
   MX_LOG(INFO, LOWVERBOSITY,
          CTX("multiplexer.server") TEXT("recording to " + session_.path + " closed: " + reason + " (" +
                                         repr(session_.records) + " records, " + repr(session_.bytes) + " bytes)"));
@@ -1057,6 +1117,33 @@ void Server::_on_session_deadline(weak_pointer server, const asio::error_code& e
   if (pointer self = server.lock()) {
     self->stop_recording("max_seconds reached");
   }
+}
+
+// The next tick, RECORDING_FLUSH_INTERVAL from now; a wait still pending
+// is cancelled, so only one ever is.
+void Server::_arm_recording_flush() {
+  flush_timer_.expires_after(RECORDING_FLUSH_INTERVAL);
+  flush_timer_.async_wait(
+      [weak = weak_pointer(shared_from_this())](const asio::error_code& error) { _on_recording_flush(weak, error); });
+}
+
+// A tick: the buffer to the file, then the next tick. A flush that fails
+// ends the session, as a record's write that fails does.
+void Server::_on_recording_flush(weak_pointer server, const asio::error_code& error) {
+  if (error) {
+    return;  // cancelled: the session ended
+  }
+  pointer self = server.lock();
+  if (!self || !self->recorder_) {
+    return;  // the session ended after the timer had expired: no next tick
+  }
+  MX_DCHECK_RUN_ON(&self->owner_thread());
+  self->recorder_->flush();
+  if (!self->recorder_->ok()) {
+    self->stop_recording("write failed");
+    return;
+  }
+  self->_arm_recording_flush();
 }
 
 void Server::_emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type) {

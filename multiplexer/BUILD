@@ -450,6 +450,18 @@ cc_test(
 )
 
 cc_test(
+    name = "rules_check_interval_test",
+    size = "small",
+    srcs = ["rules_check_interval_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":server",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "soak_test",
     size = "small",
     srcs = ["soak_test.cc"],
@@ -751,6 +763,17 @@ py_test(
         ":clients",
         ":mxclient",
         ":servers",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "peers_file_test",
+    size = "small",
+    srcs = ["peers_file_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
         "//multiplexer/testing",
     ],
 )

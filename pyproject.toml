@@ -2,6 +2,28 @@
 line-length = 120
 target-version = ["py311"]
 
+# Linting: ./format.sh --check runs ruff, pinned there, with the rules that
+# find bugs rather than style, which black decides: Pyflakes (F), bugbear
+# (B), pylint's errors (PLE), an asyncio task nobody keeps (RUF006), a
+# mutable class attribute every instance shares (RUF012) and a noqa that
+# suppresses nothing (RUF100). The names a star import brings are pyright's
+# to check, which it does. Generated files are left out: the protocol
+# buffer modules and the examples' constants.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["*_pb2.py", "examples/*/multiplexer_constants.py"]
+
+[tool.ruff.lint]
+select = ["F", "B", "PLE", "RUF006", "RUF012", "RUF100"]
+# Star imports' names are pyright's; getattr()/setattr() with a constant
+# name is style, and how `from`, a keyword, is reached.
+ignore = ["F403", "F405", "B009", "B010"]
+
+[tool.ruff.lint.pyflakes]
+# Imported for what importing it does: MultiplexerMessage.from_.
+allowed-unused-imports = ["multiplexer.protocolbuffers"]
+
 # Type checking: Pylance in VS Code and `npx pyright` in check.sh read this.
 # The generated modules, protocol buffers, constants and the native
 # extension, have stubs in bazel-bin after a build, hence the stubPath.

@@ -53,8 +53,6 @@ from multiplexer.mxclient import (
     ConnectionWrapper,
     DropReason,
     Lane,
-    NotConnected,
-    OperationTimedOut,
 )
 from multiplexer.mxlog import WARNING, LOWVERBOSITY, log
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient

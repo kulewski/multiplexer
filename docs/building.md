@@ -131,14 +131,18 @@ examples, the sanitizer and analysis configurations. Those are Bazel's.
 
 ## Development tools
 
-Only for working on the repository, never for building it: `clang-format-18`,
-`black`, `buildifier` and `python3-yaml` for `./format.sh`; `clang-18` for
-the thread-safety analysis build (`--config=clang`); mermaid-cli and
-pyright, both through `npx`, for the diagram check and the type check;
-Docker for [docker/check.sh](../docker/check.sh). The type check reads the
-stubs of the generated modules from `bazel-bin` (`stubPath` in
-`pyproject.toml`), where the build writes them next to the modules, and
-the stub of the native extension from `bazel build
+Only for working on the repository, never for building it. The Python
+ones, black, ruff, pyright and PyYAML, are pinned in
+[requirements-dev.txt](../requirements-dev.txt), and `./format.sh` and
+`./check.sh` install them into `.tools/venv` the first time they run and
+whenever that file changes, with `python3-venv` and the network. The rest
+come from the system: `clang-format-18` and `buildifier` for
+`./format.sh`; `clang-18` for the thread-safety analysis build
+(`--config=clang`); Node, whose `npx` runs mermaid-cli for the diagram check
+and on which pyright runs; Docker for [docker/check.sh](../docker/check.sh).
+The type check reads the stubs of the generated modules from `bazel-bin`
+(`stubPath` in `pyproject.toml`), where the build writes them next to the
+modules, and the stub of the native extension from `bazel build
 //multiplexer:_native_pyi`, which Bazel makes with pybind11-stubgen fetched
 as a wheel; Pylance in VS Code reads the same configuration, so a fresh
 checkout type-checks after one build. `make` writes the same stubs into

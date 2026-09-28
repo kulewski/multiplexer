@@ -19,6 +19,10 @@ namespace mxcontrol {
 class StartMultiplexerServer : public Task {
  public:
   virtual int run();
+  // The options, refused as a malformed line, with the usage, when the
+  // rules check interval is one the server refuses
+  // (Server::rules_check_interval_refused).
+  virtual void parse_options(std::vector<std::string>& args);
   virtual std::string short_description() const { return "run a multiplexer"; }
   virtual std::string short_synopsis(const std::string& commandname) {
     return "<" + commandname + "-options> [--address] address:port";
@@ -29,7 +33,8 @@ class StartMultiplexerServer : public Task {
     options.add("rules", &rules_file_, "multiplexer.rules", "file from which routing rules will be read");
     options.add("rules-check-interval", &rules_check_interval_, 2.0,
                 "seconds between checks of the rules file for a change, which is then put in use "
-                "without a restart; 0 never checks (SIGHUP and `mxcontrol rules reload` still do)");
+                "without a restart, 0.01 at least; 0 never checks (SIGHUP and `mxcontrol rules reload` "
+                "still do)");
     options.add("address,M", &host_port_, "0.0.0.0:1980", "local address to listen on").positional("address");
     options.add("port-file", &port_file_,
                 "once listening, write the bound address as host:port to this file "

@@ -128,8 +128,10 @@ drain.join()
 with open("multiplexer.rules", "a") as rules:
     rules.write(OWN_TYPES)
 run(COMMAND, "generate_constants", "multiplexer.rules", "--python", "smoke_constants.py")
+# The constants were just written into the working directory, which is not
+# on the path of a script run from elsewhere.
 sys.path.insert(0, os.getcwd())
-from smoke_constants import peers, types  # noqa: E402
+from smoke_constants import peers, types
 
 expected = os.path.realpath(shutil.which(os.environ.get("MXCONTROL") or BINARY) or "")
 with (

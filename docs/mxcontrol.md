@@ -42,10 +42,10 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | Option | Default | Effect |
 |---|---|---|
 | `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md), read at start and again whenever it changes |
-| `--rules-check-interval S` | 2 | seconds between reads of the rules file; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
+| `--rules-check-interval S` | 2 | seconds between reads of the rules file, 0.01 at least, a shorter one refused as a malformed command line; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
 | `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on; `HOST` alone keeps port 1980 |
 | `--port-file PATH` | none | after binding, write `host:port` to this file, atomically |
-| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, rewritten atomically on every change |
+| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, rewritten atomically after a change, at most once every 10 ms |
 | `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording) |
 | `--record-payload-bytes N` | 0 (whole payloads) | keep only the first N bytes of each recorded payload |
 | `--recording-dir DIR` | off | let peers start and stop recording sessions over the protocol, written under `DIR`; see [recording on demand](operations.md#recording-on-demand-over-the-protocol) |
@@ -166,7 +166,7 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 | `--payload-bytes N` | `start`, `tap`: keep only the first N bytes of each payload; 0 keeps all |
 | `--max-bytes N` | `start`: close the session at this size; default 1 GiB, 0 for no cap |
 | `--max-seconds N` | `start`: close the session after this long |
-| `--stay` | `start`: keep running, start the session again on any multiplexer that comes back without one, and stop every session on SIGINT or SIGTERM |
+| `--stay` | `start`: keep running, start the session again on any multiplexer that comes back without one, under its old address or a new one of its name, and stop every session on SIGINT or SIGTERM |
 | `--out FILE` | `tap`: append the records to this file instead of stdout |
 | `--timeout S` | seconds to wait for connections and answers; default 5 |
 
@@ -177,6 +177,14 @@ the taps. The exit code is 0 when every `-M` reached a multiplexer and
 every multiplexer answered without an error. `tap` writes the records as a stream in the recording's own format,
 readable by `dump_recording`, and its status lines to stderr; SIGINT
 untaps and exits.
+
+`start --stay` and `tap` look the `-M` names up again every couple of
+seconds and connect to each address that is new, so a replica that comes
+back under another address, a rescheduled pod behind a headless service
+say, is started or tapped too; stderr names each new address. A connection
+to an address that no name resolves to any more stays, retried every 3 s
+as any lost connection is, and a name that does not resolve for a while,
+said once on stderr, takes no connection away.
 
 ```
 mxcontrol recording start -M mx-0.mx.svc:1980 -M mx-1.mx.svc:1980 --label checkout-bug

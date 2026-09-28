@@ -12,7 +12,7 @@ import unittest
 
 from multiplexer.aio import AsyncClient
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationFailed
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.testing import runfile

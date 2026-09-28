@@ -7,8 +7,10 @@ query used to wait forever. What waits for room, and that nothing polls,
 threaded_client_test.cc checks by counting."""
 
 import asyncio
+import contextlib
 import time
 import unittest
+from typing import Iterator
 
 from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.aio import AsyncClient
@@ -16,6 +18,7 @@ from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.testing import Cluster
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import fill_frames
 from multiplexer.threaded_client import ThreadedClient
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
@@ -45,10 +48,9 @@ class FlushingSendTest(unittest.TestCase):
             client = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
             try:
                 cluster.mx[1].pause()
-                chunk = b"x" * (256 * 1024)
                 started = time.monotonic()
-                for index in range(60):  # 15 MB: more than the frozen one's socket takes
-                    client.send_message(chunk, type=EVENT, multiplexer=ThreadedClient.ALL, flush=True, timeout=30)
+                for payload in fill_frames():  # more than the frozen one's sockets take
+                    client.send_message(payload, type=EVENT, multiplexer=ThreadedClient.ALL, flush=True, timeout=30)
                 self.assertLess(time.monotonic() - started, 30, "no send waited for its timeout")
             finally:
                 cluster.mx[1].resume()
@@ -59,36 +61,51 @@ class TooLargeTest(unittest.TestCase):
     """A message over MAX_MESSAGE_SIZE, refused where it is sent."""
 
     too_large = b"x" * (MAX_MESSAGE_SIZE + 1)
+    # The timeout every call is given. A call that waited for it before
+    # refusing took all of it; one refused at the call takes a small part
+    # of it on any machine, building and measuring the message included,
+    # so half of it tells the two apart where a bound of its own, in
+    # seconds, would time the machine.
+    timeout = 120.0
+
+    @contextlib.contextmanager
+    def refused_at_the_call(self) -> Iterator[None]:
+        """The block, one call given `timeout`, raises ValueError in less
+        than half of it."""
+        started = time.monotonic()
+        with self.assertRaises(ValueError):
+            yield
+        self.assertLess(time.monotonic() - started, self.timeout / 2, "at the call, not after its timeout")
 
     def test_every_client_refuses_it_at_the_call(self):
+        """Each client's queries and sends, flushing or not, raise
+        ValueError, each before half its timeout is over."""
         with Cluster(1, rules=RULES) as cluster:
             threaded = ThreadedClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
             synchronous = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
-                started = time.monotonic()
-                with self.assertRaises(ValueError):
-                    threaded.query(self.too_large, EVENT, timeout=5)
-                with self.assertRaises(ValueError):
-                    threaded.send_message(self.too_large, type=EVENT)
-                with self.assertRaises(ValueError):
-                    threaded.send_message(self.too_large, type=EVENT, flush=True)
-                with self.assertRaises(ValueError):
-                    synchronous.send_message(self.too_large, type=EVENT)
-                with self.assertRaises(ValueError):
-                    synchronous.query(self.too_large, EVENT, timeout=5)
+                with self.refused_at_the_call():
+                    threaded.query(self.too_large, EVENT, timeout=self.timeout)
+                with self.refused_at_the_call():
+                    threaded.send_message(self.too_large, type=EVENT, timeout=self.timeout)
+                with self.refused_at_the_call():
+                    threaded.send_message(self.too_large, type=EVENT, flush=True, timeout=self.timeout)
+                with self.refused_at_the_call():
+                    synchronous.send_message(self.too_large, type=EVENT, timeout=self.timeout)
+                with self.refused_at_the_call():
+                    synchronous.query(self.too_large, EVENT, timeout=self.timeout)
 
                 async def through_asyncio() -> None:
                     client = AsyncClient(cluster.endpoints, type=peers.PYTHON_TEST_CLIENT)
                     try:
-                        with self.assertRaises(ValueError):
-                            await client.query(self.too_large, EVENT, timeout=5)
-                        with self.assertRaises(ValueError):
-                            await client.send_message(self.too_large, type=EVENT)
+                        with self.refused_at_the_call():
+                            await client.query(self.too_large, EVENT, timeout=self.timeout)
+                        with self.refused_at_the_call():
+                            await client.send_message(self.too_large, type=EVENT, timeout=self.timeout)
                     finally:
                         await client.aclose()
 
                 asyncio.run(through_asyncio())
-                self.assertLess(time.monotonic() - started, 5, "at the call, not after a timeout")
             finally:
                 threaded.shutdown()
                 synchronous.shutdown()

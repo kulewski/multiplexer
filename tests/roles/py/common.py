@@ -8,13 +8,15 @@ from typing import Any
 
 from google.protobuf import text_format
 
-from multiplexer import clients  # re-exported for roles
-from multiplexer import servers  # re-exported for roles
-from multiplexer import threaded_client  # re-exported for roles
-from multiplexer import threaded_server  # re-exported for roles
+from multiplexer import clients as clients  # re-exported for roles
+from multiplexer import servers as servers  # re-exported for roles
+from multiplexer import threaded_client as threaded_client  # re-exported for roles
+from multiplexer import threaded_server as threaded_server  # re-exported for roles
 from multiplexer import events_pb2
 from multiplexer.Multiplexer_pb2 import Routing
-from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut  # re-exported for roles
+from multiplexer.mxclient import NotConnected as NotConnected  # re-exported for roles
+from multiplexer.mxclient import OperationFailed as OperationFailed  # re-exported for roles
+from multiplexer.mxclient import OperationTimedOut as OperationTimedOut  # re-exported for roles
 
 STOP = threading.Event()
 

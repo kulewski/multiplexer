@@ -15,6 +15,18 @@ cc_library(
     ],
 )
 
+# The connections to every replica behind the -M names, for recording and
+# rules.
+cc_library(
+    name = "every_address",
+    srcs = ["every_address.cc"],
+    hdrs = ["every_address.h"],
+    deps = [
+        "//multiplexer:client",
+        "@asio",
+    ],
+)
+
 cc_library(
     name = "tasks_holder",
     srcs = ["tasks_holder.cc"],
@@ -110,10 +122,13 @@ cc_library(
     alwayslink = 1,
 )
 
+# Visible to the tests: tests/fake_dns builds it with a lookup of its own.
 cc_library(
     name = "recording_control",
     srcs = ["recording_control.cc"],
+    visibility = ["//tests:__subpackages__"],
     deps = [
+        ":every_address",
         ":task",
         ":tasks_holder",
         "//lib:seconds",
@@ -130,6 +145,7 @@ cc_library(
     name = "rules_control",
     srcs = ["rules_control.cc"],
     deps = [
+        ":every_address",
         ":task",
         ":tasks_holder",
         "//lib:seconds",
@@ -195,6 +211,17 @@ py_test(
     data = [
         ":mxcontrol",
         "//:multiplexer.rules",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
+    name = "rules_check_interval_test",
+    size = "small",
+    srcs = ["rules_check_interval_test.py"],
+    data = [
+        ":mxcontrol",
         "//tests:testing.rules",
     ],
     deps = ["//multiplexer/testing"],

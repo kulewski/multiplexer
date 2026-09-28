@@ -10,7 +10,7 @@ import time
 import unittest
 
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.testing import BackendThread, Cluster, wait_until
+from multiplexer.testing import BackendThread, Cluster
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request
 from multiplexer.testing import runfile

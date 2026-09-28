@@ -131,10 +131,16 @@ the whole file and swaps it in: from then on a message type added to the
 file is routed, a peer type added is accepted at its next connection
 attempt, a rule edited routes the next message its way, and the peers
 already connected take their type's new `queue_size` and `is_passive`,
-while an active peer gone silent is still dropped 90 s after its last
-frame, reloads or not. The second
+a controller (`RECORDING_CONTROLLER`, `RULES_CONTROLLER`) staying passive
+as when it registered, while an active peer gone silent is still dropped
+90 s after its last frame, reloads or not. The second
 check is what keeps a file caught in the middle of being written from
-ever being applied; it costs one more interval. A file that is missing,
+ever being applied; it costs one more interval. The shortest interval is
+0.01 s: a shorter one is refused at the command line, since the io
+thread, the one that routes, would do little but read the file; a program
+that embeds the C++ `Server` has the same refusal from
+`set_rules_check_interval()`, a `std::invalid_argument`, and turns the
+checks off there with 0, a negative interval or NaN. A file that is missing,
 empty, without a peer type, that does not parse, that repeats a number or
 a name, or that names a peer that does not exist, changes nothing:
 the rules in use stay, the log says why once, and `mxcontrol rules
@@ -391,8 +397,10 @@ library, which makes a liveness check possible from any client.
 
 `run_multiplexer --peers-file PATH` keeps a file with one line per connected
 peer, `<instance id> <peer type name> <peer type>`, rewritten atomically
-(written next to it, then renamed) on every registration and departure. A
-shell reads it; so does `Mx.connected_peers()` in the test infrastructure,
+(written next to it, then renamed) after a registration or a departure:
+at once, unless it was written less than 10 ms before, and then once
+when those 10 ms are up, for every change meanwhile, so that peers
+arriving or leaving by the thousand cost a few writes. A shell reads it; so does `Mx.connected_peers()` in the test infrastructure,
 and `Cluster.wait_for_peer()` waits on it. It is empty while nobody is
 connected, and is left behind as it was when the multiplexer exits.
 
@@ -417,10 +425,10 @@ constants were generated from. A file a session is still writing, or one
 a multiplexer that died left, can end partway through a record: both
 readers give every whole record and then say so, `dump_recording` with
 exit status 1, `recording.read()` by raising `TruncatedRecording`. A
-`RoutedMessage` says whether it was
-`DELIVERED` or why not: `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`,
-`QUEUE_FULL`, or `NOT_ACCEPTED` for a peer whose routing turned the path
-off ([how a backend leaves](leaving.md)). A `PeerEvent` marks a peer
+`RoutedMessage` says whether it was `DELIVERED` or why not:
+`NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`, `QUEUE_FULL`, or
+`NOT_ACCEPTED` for a peer whose routing turned the path off ([how a
+backend leaves](leaving.md)). A `PeerEvent` marks a peer
 arriving, leaving, or changing its routing. A rules file put in use while
 the session is open ([changing the rules](#changing-the-rules)) leaves a
 `rules` record with the new fingerprint, from which the numbers are the
@@ -432,12 +440,25 @@ not know as something it does, a `NOT_ACCEPTED` route as `DELIVERED` say.
 Recording costs one serialization and one buffered write per message and
 grows by the payloads. The file is opened, written and closed on the
 multiplexer's io thread, the one that routes, with blocking calls, and a
-full buffer waits for the disk there: record to local storage, since a slow
-or stalled file system, a network mount gone quiet say, holds up routing,
-heartbeats and signals while it waits. `--record-payload-bytes N` keeps only
-the first N bytes of each (`truncated` is set), which is enough to see what
-happened and keeps a long recording small. Use it for a session, not
-forever: there is no rotation.
+full buffer, or the flush once a second, waits for the disk there: record
+to local storage, since a slow or stalled file system, a network mount gone
+quiet say, holds up routing, heartbeats and signals while it waits.
+`--record-payload-bytes N` keeps only the first N bytes of each
+(`truncated` is set), which is enough to see what happened and keeps a long
+recording small. Use it for a session, not forever: there is no rotation.
+
+The records reach the file through that buffer, written out when it fills
+and once a second while the session is open, never once per record. The
+file is at most about a second behind what was routed, so it can be read
+while it is being recorded, and the `bytes` a `RECORDING_STATUS` reports
+include what the buffer still holds. A multiplexer that dies, crashed or
+killed, loses at most about the last second's records, the ones still in
+its buffer. A machine that dies, a kernel panic or a power cut, also loses
+what the operating system had not yet written to the disk: nothing calls
+`fsync`, not even when the file closes. A file read while it is being
+recorded, or left by a crash, can end in a record cut short, since a full
+buffer is written out as it stands, not between records; the readers stop
+there and say so, as above.
 
 ### Recording on demand, over the protocol
 
@@ -495,10 +516,16 @@ limit cuts it.
 connects to each: `mxcontrol recording` takes `-M host:port` repeatedly and
 resolves a host name to every address it has, so a headless Kubernetes
 service name reaches every pod. A replica replaced mid-session comes back
-not recording, since the state lives in the process: `mxcontrol recording
-start --stay` keeps polling and starts the session again on any replica
-that has never had one; a tap resubscribes the same way. Read the files of
-a session together with `dump_recording FILE...` or
+not recording, since the state lives in the process, and often under
+another address: `mxcontrol recording start --stay` keeps polling, looks
+the names up again at every poll and connects to each address that is new,
+and starts the session again on any replica that has never had one; a tap
+resubscribes the same way, as the
+[remote_recording_new_address](../tests/scenarios/remote_recording_new_address/README.md)
+scenario checks. A connection to an address that no name resolves to any
+more stays, retried every 3 s as any lost connection is, and a name that
+does not resolve for a while takes no connection away. Read the files of a
+session together with `dump_recording FILE...` or
 `multiplexer.recording.read_many()`, which merge them by timestamp and tag
 each record with its multiplexer. Timestamps are each multiplexer's own
 clock, so order within a replica is exact and order between replicas is as

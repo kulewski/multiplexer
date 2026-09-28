@@ -32,6 +32,7 @@ LIB_SRCS := \
 MXCONTROL_SRCS := \
   mxcontrol/driver.cc \
   mxcontrol/dump_recording.cc \
+  mxcontrol/every_address.cc \
   mxcontrol/generate_constants.cc \
   mxcontrol/generate_rules.cc \
   mxcontrol/help.cc \
@@ -111,6 +112,7 @@ HEADERS := \
   multiplexer/threaded_client.h \
   multiplexer/threaded_client_core.h \
   mxcontrol/driver.h \
+  mxcontrol/every_address.h \
   mxcontrol/help.h \
   mxcontrol/start_multiplexer_server.h \
   mxcontrol/task.h \
@@ -169,6 +171,7 @@ CC_TEST_SRCS := \
   multiplexer/negative_timeout_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/routing_index_test.cc \
+  multiplexer/rules_check_interval_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
   multiplexer/zero_nan_timeout_test.cc \
@@ -199,6 +202,7 @@ PY_TEST_FILES := \
   multiplexer/negative_timeout_test.py \
   multiplexer/no_connection_test.py \
   multiplexer/outage_test.py \
+  multiplexer/peers_file_test.py \
   multiplexer/pickle_failures_test.py \
   multiplexer/pickle_test.py \
   multiplexer/query_acknowledged_test.py \

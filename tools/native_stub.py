@@ -17,6 +17,9 @@ def main(extension: str, out: str) -> int:
         package = os.path.join(scratch, "multiplexer")
         os.makedirs(package)
         shutil.copy(extension, os.path.join(package, "_native.so"))
+        # The generator imports the module by name: first on the path, the
+        # scratch tree makes the copy multiplexer._native, ahead of any
+        # installed package of that name.
         sys.path.insert(0, scratch)
         pybind11_stubgen.main(["multiplexer._native", "-o", os.path.join(scratch, "out")])
         shutil.copy(os.path.join(scratch, "out", "multiplexer", "_native.pyi"), out)

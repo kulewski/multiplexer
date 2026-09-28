@@ -15,8 +15,7 @@ import atexit
 import math
 import time
 import traceback
-from functools import wraps
-from typing import Any, Callable, Literal, overload
+from typing import Any, Callable, ClassVar, Literal, overload
 
 import google.protobuf.message
 
@@ -321,7 +320,7 @@ class Client(_mxclient.Client):
     def event(self, *args, **kwargs):
         """send message through all active MX connections (arguments same as
         for send_message)"""
-        return self.send_message(multiplexer=Client.ALL, *args, **kwargs)
+        return self.send_message(*args, multiplexer=Client.ALL, **kwargs)
 
     def lane(self, pinned: bool = False, connection: "ConnectionWrapper | None" = None) -> Lane:
         """A Lane: one connection for a stream of messages, given as
@@ -562,8 +561,8 @@ class Client(_mxclient.Client):
     def send_and_receive(
         self,
         message,
-        accept_ids=[],
-        ignore_ids=[],
+        accept_ids=(),
+        ignore_ids=(),
         timeout=DEFAULT_TIMEOUT,
         handle_delivery_errors=False,
         ignore_types=(),
@@ -605,7 +604,7 @@ class Client(_mxclient.Client):
                 raise NotConnected()
             id, tracker = self.__schedule_all(message, timeout_ticker(), **kwargs)
 
-        accept_ids = [id] + accept_ids
+        accept_ids = [id, *accept_ids]
         while timeout_ticker.permit():
             mxmsg, connwrap = self.receive(
                 accept_ids=accept_ids,
@@ -640,7 +639,7 @@ class Client(_mxclient.Client):
             if sent_ids is not None:
                 sent_ids.append(mxmsg.id)
             preferred = None
-            accept_ids = [mxmsg.id] + accept_ids
+            accept_ids = [mxmsg.id, *accept_ids]
             while timeout_ticker.permit():
                 got = self.read_raw_message_watching(timeout_ticker(), used)
                 if got is None:
@@ -695,7 +694,7 @@ class Client(_mxclient.Client):
     def receive(
         self,
         accept_ids,
-        ignore_ids=[],
+        ignore_ids=(),
         ignore_types=(),
         timeout=DEFAULT_TIMEOUT,
         timeout_ticker=None,
@@ -830,7 +829,7 @@ class Client(_mxclient.Client):
         """returns random uint64"""
         return super(Client, self).random()
 
-    message_defaults = {}
+    message_defaults: ClassVar[dict[str, Any]] = {}
 
     def new_message(self, **kwargs):
         """creates new MultiplexerMessage with some predefined values"""

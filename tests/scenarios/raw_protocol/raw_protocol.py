@@ -18,7 +18,6 @@ class RawProtocol(unittest.TestCase):
     """Checks that a peer speaking the wire format directly, without the client library."""
 
     def test_handshake_framing_and_payload_integrity(self):
-        cfg = harness.CONFIG
         with Cluster(1) as cluster:
             event_backend = spawn("event_backend", "py", mx=cluster.addresses, type=C.peers.TEST_EVENT_BACKEND, until=2)
             event_backend.wait_for("connected", connections=1)

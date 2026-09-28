@@ -615,7 +615,7 @@ class BaseThreadedMultiplexerServer:
             self.handle_message(request)
         except Exception as exc:  # reported to the requester and to on_handler_exception()
             traceback.print_exc()
-            log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % exc)
+            log(ERROR, LOWVERBOSITY, text=lambda exc=exc: "exception in handle_message: %r" % exc)
             # A reply or a report gets no report: nobody waits for an answer to it.
             if not request.answered and not request.mxmsg.references:
                 try:
@@ -624,7 +624,8 @@ class BaseThreadedMultiplexerServer:
                     log(
                         ERROR,
                         LOWVERBOSITY,
-                        text=lambda: "could not report the exception to the requester: %r" % reporting,
+                        text=lambda reporting=reporting: "could not report the exception to the requester: %r"
+                        % reporting,
                     )
             if not self.on_handler_exception(exc):
                 if self._failure is None:  # the first, as _work() keeps

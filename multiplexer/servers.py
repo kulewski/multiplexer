@@ -18,7 +18,9 @@ import time
 import traceback
 from typing import TypeVar
 
-from multiplexer.clients import BackendError, BasicClient, MultiplexerRelatedException  # re-exported
+from multiplexer.clients import BasicClient
+from multiplexer.clients import BackendError as BackendError  # re-exported
+from multiplexer.clients import MultiplexerRelatedException as MultiplexerRelatedException  # re-exported
 from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
@@ -348,7 +350,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
             # of leaving it to time out, then ask on_handler_exception() whether
             # to go on.
             traceback.print_exc()
-            log(ERROR, LOWVERBOSITY, text=lambda: "exception in handle_message: %r" % e)
+            log(ERROR, LOWVERBOSITY, text=lambda e=e: "exception in handle_message: %r" % e)
             # A message that answers another, a reply or a report, gets no
             # report: nobody waits for an answer to it, and two backends
             # whose handlers raise on what they do not expect would answer
@@ -361,7 +363,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     log(
                         ERROR,
                         LOWVERBOSITY,
-                        text=lambda: "could not report the exception to the requester: %r" % reporting,
+                        text=lambda reporting=reporting: "could not report the exception to the requester: %r"
+                        % reporting,
                     )
             if not self.on_handler_exception(e):
                 raise

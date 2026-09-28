@@ -626,6 +626,21 @@ mx_integration_test(
 )
 
 mx_integration_test(
+    name = "recording_live_file_py_py",
+    size = "medium",  # a wait of 60 s that fails says so, before a small test's timeout
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    roles = {
+        "backend": "py",
+        "client": "py",
+    },
+    scenario = "recording_live_file/recording_live_file.py",
+)
+
+mx_integration_test(
     name = "remote_recording_stay_test",
     size = "medium",
     extra_deps = [
@@ -633,4 +648,17 @@ mx_integration_test(
         "//multiplexer:recording",
     ],
     scenario = "remote_recording_stay/remote_recording_stay.py",
+)
+
+# The name given to mxcontrol moves to another address: the scenario
+# rewrites a hosts file that the test build of mxcontrol reads.
+mx_integration_test(
+    name = "remote_recording_new_address_test",
+    size = "medium",
+    data = ["//tests/fake_dns:mxcontrol_fake_dns"],
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+    ],
+    scenario = "remote_recording_new_address/remote_recording_new_address.py",
 )

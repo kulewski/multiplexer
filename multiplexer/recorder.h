@@ -1,11 +1,12 @@
 // Recording: the Record messages (Recording.proto) a multiplexer produces,
 // and the Recorder that writes them to a file through a buffered stream.
 // It runs on the io thread, with blocking calls: the open, every write, the
-// flush when the buffer fills, and the close, so a slow or stalled file
-// system holds up routing while it lasts; record to local storage. A write
-// error switches the file off and is logged once; the multiplexer keeps
-// serving. The server (server.h) owns one Recorder per file session and
-// streams the same records to the peers that tapped in.
+// flush when the buffer fills or the server asks, and the close, so a slow
+// or stalled file system holds up routing while it lasts; record to local
+// storage. A write error switches the file off and is logged once; the
+// multiplexer keeps serving. The server (server.h) owns one Recorder per
+// file session, flushes it once a second while it is open, and streams the
+// same records to the peers that tapped in.
 #ifndef MX_MULTIPLEXER_RECORDER_H_
 #define MX_MULTIPLEXER_RECORDER_H_
 
@@ -67,6 +68,8 @@ class Recorder {
 
   const std::string& path() const { return path_; }
   unsigned int payload_limit() const { return payload_limit_; }
+  // The file's size with what the buffer still holds, which reaches the
+  // file at the next flush.
   std::uint64_t bytes() const { return bytes_; }
   std::uint64_t records() const { return records_; }
 
@@ -75,9 +78,14 @@ class Recorder {
   // Any other record, already stamped with the time, its payload cut to
   // the limit.
   void write(const Record& record);
+  // What the buffer holds goes to the file now; a buffer that holds
+  // nothing costs no system call. A failure switches the file off, as a
+  // write's does.
+  void flush();
 
  private:
   void _write(const Record& record);
+  void _fail();
 
   const std::string path_;
   std::ofstream out_;

@@ -17,7 +17,8 @@ import time
 from typing import Any, Callable, Generic, Protocol, TypeVar
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.clients import Client, SyncClient  # Client: the name up to 2.3.1, importable here as before
+from multiplexer.clients import Client as Client  # the name up to 2.3.1, importable here as before
+from multiplexer.clients import SyncClient
 from multiplexer.mxclient import ConnectionWrapper, Lane
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import Cluster, Mx, wait_until
@@ -249,7 +250,9 @@ class FakePeer:
             for endpoint in self.endpoints:
                 multiplexer = self.cluster.multiplexer_at(endpoint)
                 wait_until(
-                    lambda: any(number == self.peer_type for _, _, number in multiplexer.connected_peers()),
+                    lambda multiplexer=multiplexer: any(
+                        number == self.peer_type for _, _, number in multiplexer.connected_peers()
+                    ),
                     timeout,
                     "%s registered on multiplexer %d" % (self.name, multiplexer.index),
                 )

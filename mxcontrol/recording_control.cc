@@ -2,7 +2,9 @@
 // multiplexers, or tap in and receive every record live, over the protocol
 // itself (RecordingControl in Recording.proto). Connects to every
 // --multiplexer as a RECORDING_CONTROLLER, resolving a host name to all its
-// addresses, so one command reaches every replica behind a name. See
+// addresses, so one command reaches every replica behind a name; --stay and
+// tap resolve the names again at every poll, so they reach a replica that
+// comes back under a new address too (every_address.h). See
 // docs/operations.md.
 #include <chrono>
 #include <csignal>
@@ -17,6 +19,7 @@
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/Recording.pb.h"   /* generated */
 #include "multiplexer/client.h"
+#include "mxcontrol/every_address.h"
 #include "mxcontrol/task.h"
 #include "mxcontrol/tasks_holder.h"
 
@@ -46,7 +49,9 @@ struct Deadline {
 };
 
 // How often the stay and tap loops ask every multiplexer for its status,
-// which is how a restarted replica is noticed and started or tapped again.
+// which is how a restarted replica is noticed and started or tapped again,
+// and resolve the names again, which is how one that came back under a new
+// address is connected to first.
 const float POLL_SECONDS = 2.0;
 
 // One status as a line: which multiplexer, what it is doing, and the error
@@ -93,7 +98,8 @@ class RecordingControlTask : public Task {
         << "  tap     receive every record as it happens and write them to --out (default stdout)\n"
         << "A host name resolves to all its addresses, one connection each. --stay keeps\n"
         << "start running, restarting the session on replicas that come back, until SIGINT,\n"
-        << "which then stops every session.\n\n"
+        << "which then stops every session. --stay and tap look the names up again every\n"
+        << "couple of seconds and connect to each new address: a replica back under another.\n\n"
         << _options();
   }
 
@@ -122,8 +128,8 @@ class RecordingControlTask : public Task {
   // Sends `control` everywhere and collects one status per connection,
   // printing each; returns false if any was an error or missing.
   bool _control(Client& client, const RecordingControl& control, bool with_tap = false);
-  int _stay(Client& client);
-  int _tap(Client& client);
+  int _stay(Client& client, EveryAddress& addresses);
+  int _tap(Client& client, EveryAddress& addresses);
 
   std::string action_;
   std::vector<std::string> multiplexers_;
@@ -215,7 +221,8 @@ int RecordingControlTask::run() {
     return 2;
   }
   Client client(io_service(), peer_type_);
-  const unsigned int reached = _connect_to_every_address(client, multiplexers_, timeout_);
+  EveryAddress addresses(client, io_service(), multiplexers_);
+  const unsigned int reached = addresses.connect(timeout_);
   if (!client.connections_count()) {
     std::cerr << "no multiplexer reachable, or none accepting a recording controller (--recording-dir, --allow-tap)\n";
     return 1;
@@ -238,7 +245,7 @@ int RecordingControlTask::run() {
     if (!stay_) {
       return ok ? 0 : 1;
     }
-    return _stay(client);
+    return _stay(client, addresses);
   }
   if (action_ == "stop") {
     control.set_action(RecordingControl::STOP);
@@ -248,13 +255,15 @@ int RecordingControlTask::run() {
     control.set_action(RecordingControl::STATUS);
     return _control(client, control, true) && !unreachable_ ? 0 : 1;
   }
-  return _tap(client);
+  return _tap(client, addresses);
 }
 
 // Until SIGINT or SIGTERM: ask every multiplexer for its status every
 // POLL_SECONDS, start a session on any that has never had one (a replica
-// that restarted), then stop every session on the way out.
-int RecordingControlTask::_stay(Client& client) {
+// that restarted), then stop every session on the way out. Each poll also
+// connects to the addresses the names resolve to now, which the next one
+// asks.
+int RecordingControlTask::_stay(Client& client, EveryAddress& addresses) {
   std::signal(SIGINT, request_stop);
   std::signal(SIGTERM, request_stop);
   RecordingControl start;
@@ -269,6 +278,7 @@ int RecordingControlTask::_stay(Client& client) {
   status_request.set_action(RecordingControl::STATUS);
   while (!stop_requested) {
     Deadline timer(POLL_SECONDS);
+    addresses.refresh();
     _send(client, status_request);
     while (!stop_requested && !timer.expired()) {
       std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
@@ -303,8 +313,10 @@ int RecordingControlTask::_stay(Client& client) {
 // Until SIGINT or SIGTERM: every RECORDING_RECORD that arrives goes to the
 // output as a Record; every POLL_SECONDS a status request finds the
 // multiplexers not streaming to us (a replica that restarted) and taps
-// them again. Statuses go to stderr, the records are the output.
-int RecordingControlTask::_tap(Client& client) {
+// them again, the addresses the names resolve to now included, connected
+// to at the start of the round. Statuses go to stderr, the records are the
+// output.
+int RecordingControlTask::_tap(Client& client, EveryAddress& addresses) {
   std::ofstream file;
   std::ostream* out = &std::cout;
   if (!out_.empty()) {
@@ -328,6 +340,7 @@ int RecordingControlTask::_tap(Client& client) {
   _send(client, tap);
   while (!stop_requested) {
     Deadline timer(POLL_SECONDS);
+    addresses.refresh();
     while (!stop_requested && !timer.expired()) {
       std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
       try {

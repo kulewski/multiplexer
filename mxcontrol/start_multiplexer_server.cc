@@ -82,6 +82,14 @@ void reload_on_signal(multiplexer::Server::pointer server, asio::signal_set& sig
 
 }  // namespace
 
+void StartMultiplexerServer::parse_options(std::vector<std::string>& args) {
+  Task::parse_options(args);
+  const std::string refused = multiplexer::Server::rules_check_interval_refused(rules_check_interval_);
+  if (!refused.empty()) {
+    throw mx::options::Error("--rules-check-interval: " + refused);
+  }
+}
+
 int StartMultiplexerServer::run() {
   using mx::repr;
   using std::string;

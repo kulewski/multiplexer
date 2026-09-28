@@ -130,7 +130,7 @@ class SendCallbackTest(unittest.TestCase):
                     try:
                         second = Heard()
 
-                        def send_second(written: int) -> None:
+                        def send_second(written: int, client: Any = client, second: Heard = second) -> None:
                             client.send_message(b"second", type=EVENT, callback=second)
 
                         client.send_message(b"first", type=EVENT, callback=send_second)

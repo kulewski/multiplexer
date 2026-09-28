@@ -5,7 +5,6 @@ Each case sends bytes that used to crash the server or bypass the handshake,
 then proves the server is still serving by completing a fresh handshake.
 """
 
-import time
 import unittest
 
 from tests import harness

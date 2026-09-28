@@ -53,6 +53,13 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   (one shared `recording_dir`, `recording_files()`), and `mxcontrol(*args)`
   runs the tool to completion; the `remote_recording*` and `recording_tap`
   scenarios use both.
+- `fake_dns/`: `mxcontrol_fake_dns --hosts FILE ...`, mxcontrol's
+  `recording` command with the names under `.test` looked up in FILE,
+  which a scenario rewrites to move a name to another address; the binary
+  defines `getaddrinfo()` itself, so this needs no root and no change to
+  the host. Multiplexers on `127.0.0.2`, `127.0.0.3` and so on give a name
+  several addresses on one machine. The `remote_recording_new_address`
+  scenario uses both.
 - A drain in a unit test: `BackendThread(factory, drain_seconds=...)` is the
   cap of a drain the test starts with the backend's `start_draining()`.
 - The rules file under running multiplexers: a scenario gives `Cluster` a

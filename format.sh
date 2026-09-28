@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Formats every source file in the repository:
-#   Python  -> black  (settings in pyproject.toml: 120 columns, py311)
+#   Python  -> black  (settings in pyproject.toml: 120 columns, py311); in
+#              --check, ruff too (its rules in pyproject.toml); both at the
+#              versions requirements-dev.txt pins, from .tools/venv
+#              (tools/dev_tools.sh)
 #   C++     -> clang-format-18 (settings in .clang-format: Google, 120 columns, braces everywhere)
 #   Bazel   -> buildifier (BUILD, WORKSPACE, *.bzl)
 #   YAML    -> parsed with PyYAML in --check (the workflow files), no rewriting
@@ -19,8 +22,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 check=0
 [[ "${1:-}" == "--check" ]] && check=1
 
-# Source files only: skip Bazel's output symlinks, make's build/ and anything generated.
-prune=(-path ./bazel-\* -prune -o -path ./build -prune -o)
+source tools/dev_tools.sh
+
+# Source files only: skip Bazel's output symlinks, make's build/, the tools and anything generated.
+prune=(-path ./bazel-\* -prune -o -path ./build -prune -o -path ./.tools -prune -o)
 mapfile -t py < <(find . "${prune[@]}" -name '*.py' -print | sort)
 mapfile -t cc < <(find . "${prune[@]}" \( -name '*.h' -o -name '*.cc' \) -print | sort)
 mapfile -t bzl < <(find . "${prune[@]}" \( -name BUILD -o -name WORKSPACE -o -name '*.bzl' \) -print | sort)
@@ -33,11 +38,12 @@ if (( check )); then
   python3 docs/code_map.py --check || status=1
   python3 make/generate_sources.py --check || status=1
   python3 docs/check_mermaid.py --fast > /dev/null || { python3 docs/check_mermaid.py --fast; status=1; }
-  black --check --quiet "${py[@]}" || status=1
+  "$DEV_TOOLS/black" --check --quiet "${py[@]}" || status=1
+  "$DEV_TOOLS/ruff" check --quiet --force-exclude "${py[@]}" || status=1
   clang-format-18 --dry-run --Werror "${cc[@]}" || status=1
   buildifier -mode=check "${bzl[@]}" || status=1
   # Every YAML file parses: a workflow with a syntax slip fails on GitHub before any job starts.
-  python3 -c 'import sys, yaml
+  "$DEV_TOOLS/python" -c 'import sys, yaml
 for path in sys.argv[1:]:
     with open(path) as f:
         yaml.safe_load(f)' "${yml[@]}" || status=1
@@ -52,7 +58,7 @@ else
   python3 docs/diagrams/generate.py
   python3 docs/code_map.py
   python3 make/generate_sources.py
-  black --quiet "${py[@]}"
+  "$DEV_TOOLS/black" --quiet "${py[@]}"
   clang-format-18 -i "${cc[@]}"
   buildifier "${bzl[@]}"
   echo "format: ${#py[@]} Python, ${#cc[@]} C++ and ${#bzl[@]} Bazel files formatted"

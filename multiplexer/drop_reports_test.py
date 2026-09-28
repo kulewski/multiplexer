@@ -79,7 +79,7 @@ class DropReportsTest(unittest.TestCase):
                 with Cluster(1, rules=RULES) as cluster:
                     if name == "AsyncClient":
 
-                        async def flushes() -> tuple[bool, bool, float]:
+                        async def flushes(drops: Drops = drops) -> tuple[bool, bool, float]:
                             client = AsyncClient(cluster.endpoints, peers.TEST_ACTIVE_CLIENT, on_drop=drops)
                             try:
                                 await client.send_message(b"written", type=EVENT)
@@ -105,7 +105,9 @@ class DropReportsTest(unittest.TestCase):
                             written = client.flush_all(10)
                             cluster.mx[0].stop()
                             if name == "ThreadedClient":
-                                wait_until(lambda: client.connections_count() == 0, 30, "the connection gone")
+                                wait_until(
+                                    lambda client=client: client.connections_count() == 0, 30, "the connection gone"
+                                )
                             client.send_message(b"held", type=EVENT, timeout=0.3)
                             started = time.monotonic()
                             held = client.flush_all(30)

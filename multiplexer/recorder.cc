@@ -145,15 +145,30 @@ void Recorder::write(const Record& record) {
   }
 }
 
-// One record, or the first failure: log it once and stop writing.
+void Recorder::flush() {
+  if (failed_) {
+    return;
+  }
+  out_.flush();
+  if (!out_.good()) {
+    _fail();
+  }
+}
+
+// One record, or the first failure.
 void Recorder::_write(const Record& record) {
   if (!stream_.write(record) || !out_.good()) {
-    failed_ = true;
-    MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.recorder") TEXT("write failed; recording stopped"));
+    _fail();
     return;
   }
   bytes_ = static_cast<std::uint64_t>(out_.tellp());
   records_ += 1;
+}
+
+// The first failure: log it once and stop writing.
+void Recorder::_fail() {
+  failed_ = true;
+  MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.recorder") TEXT("write failed; recording stopped"));
 }
 
 }  // namespace multiplexer

@@ -15,6 +15,7 @@
 # process is the Python interpreter.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+source tools/dev_tools.sh  # black, ruff and pyright, as requirements-dev.txt pins them
 
 if [[ "${1:-}" == "--leaks" ]]; then
   # libstdc++ is preloaded with the sanitizer so that it can intercept
@@ -41,5 +42,5 @@ bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:th
 # from the configuration that holds them. This leaves it where an editor
 # expects it too.
 bazel build //... //multiplexer:_native_pyi
-npx --yes pyright@1.1.414               # through npx, as the Mermaid check runs its tool
+"$DEV_TOOLS/pyright"
 echo "check: everything passed"

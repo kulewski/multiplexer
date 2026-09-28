@@ -194,12 +194,20 @@ class ForkTest(unittest.TestCase):
                 report.append("%s: %s" % (name, type(error).__name__))
 
         try:
-            attempt("sync.query", lambda: sync.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1))
-            attempt("sync.send_message", lambda: sync.send_message(message=b"x", type=types.PYTHON_TEST_REQUEST))
-            attempt("sync.connect", lambda: sync.connect(("127.0.0.1", 1)))
-            attempt("threaded.query", lambda: threaded.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1))
-            attempt("threaded.send_message", lambda: threaded.send_message(b"x", type=types.PYTHON_TEST_REQUEST))
-            attempt("threaded.connect", lambda: threaded.connect(("127.0.0.1", 1), 0.1))
+            attempt("sync.query", lambda sync=sync: sync.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1))
+            attempt(
+                "sync.send_message", lambda sync=sync: sync.send_message(message=b"x", type=types.PYTHON_TEST_REQUEST)
+            )
+            attempt("sync.connect", lambda sync=sync: sync.connect(("127.0.0.1", 1)))
+            attempt(
+                "threaded.query",
+                lambda threaded=threaded: threaded.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=1),
+            )
+            attempt(
+                "threaded.send_message",
+                lambda threaded=threaded: threaded.send_message(b"x", type=types.PYTHON_TEST_REQUEST),
+            )
+            attempt("threaded.connect", lambda threaded=threaded: threaded.connect(("127.0.0.1", 1), 0.1))
             del sync, threaded  # the orphan teardown: must neither hang nor hurt the parent
             report.append("dropped: ok")
             host, port = os.environ["MX_FORK_TEST_ENDPOINT"].rsplit(":", 1)

@@ -78,7 +78,9 @@ A routing rule has these fields:
 - `peer`: the name of the receiving peer type. The special name `ALL_TYPES`
   means every peer type that has a connection, the reserved ones apart: the
   controllers `mxcontrol` connects as get only answers and addressed
-  messages.
+  messages. It is for a notice to whoever is there, a shutdown's say: a
+  rule for `ALL_TYPES` never sends a `DELIVERY_ERROR`, whatever its
+  `report_delivery_error`, and nobody connected is no failure.
 - `whom`: `ANY` delivers to one connected peer of the type, round robin,
   skipping peers whose queue is full. `ALL` delivers to every connected peer
   of the type. Default `ANY`. The sender is not left out: a peer that sends
@@ -87,8 +89,8 @@ A routing rule has these fields:
 - `report_delivery_error`: when no peer received the message by this rule,
   send the sender a `DELIVERY_ERROR`. Default true. Requests need it; the
   client's `query()` starts its search on that report instead of waiting
-  out its timeout. The report is per rule, and with `ALL_TYPES` per peer
-  type, whatever the other rules delivered, while a query takes any
+  out its timeout. The report is per rule, whatever the other rules
+  delivered, while a query takes any
   `DELIVERY_ERROR` for its request to mean that nobody took it: give a
   request type one rule that reports, the one naming its backends, and
   set `report_delivery_error: false` on any other, such as a copy to a
@@ -134,10 +136,10 @@ and never pass it to `handle_message`.
 | `PEER_STATUS` | 12 | the multiplexer's answer, once in effect |
 | `MAX_MULTIPLEXER_META_PACKET` | 99 | end of the reserved range |
 
-The three recording types, the two rules types and the two peer types are
-defined in `Recording.proto` and `Multiplexer.proto` and handled by the
-multiplexer whatever the rules file says; the shipped rules files name
-them so that dumps and logs show names.
+The recording, rules and peer-control message types are defined in
+`Recording.proto` and `Multiplexer.proto` and handled by the multiplexer
+whatever the rules file says; the shipped rules files name them so that
+dumps and logs show names.
 
 ## The system rules above 99
 
