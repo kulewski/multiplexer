@@ -3,9 +3,11 @@
 
 #include "multiplexer/basic_client.h"
 
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
@@ -13,6 +15,7 @@
 #include "lib/fork.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/seconds.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/outbox.h"
 
@@ -80,6 +83,10 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     return;
   }
   if (incoming_queue_full()) {
+    // Not seen after all: its copy through another multiplexer, coming
+    // once there is room, is taken, where it was dropped as a duplicate of
+    // this one, which the queue dropped.
+    last_seen_message_ids_.forget_last();
     incoming_dropped_.fetch_add(1, std::memory_order_relaxed);
     if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
       MX_LOG(WARNING, LogSummary::VERBOSITY,
@@ -93,13 +100,21 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
 // After the socket's connect: the handshake, or the next address the
 // target resolved to, or the end of this attempt.
 void BasicClient::_connected(Connection::pointer conn, const asio::error_code& error) {
+  auto& data = conn->managers_private_data();
+  const bool timed_out = data.connect_timed_out;
+  data.connecting = false;
+  data.connect_timed_out = false;
+  if (data.connect_deadline) {
+    data.connect_deadline->cancel();
+  }
   if (!error) {
-    conn->managers_private_data().routing_in_welcome = routing_version_;  // what start() sends
+    data.routing_in_welcome = routing_version_;  // what start() sends
     conn->start();
   } else if (!conn->shuts_down()) {
     MX_LOG(DEBUG, MEDIUMVERBOSITY,
-           CTX("BasicClient") TEXT("connect to " + repr(conn->managers_private_data().expected_endpoint) +
-                                   " failed: " + error.message()));
+           CTX("BasicClient")
+               TEXT("connect to " + repr(data.expected_endpoint) + " failed: " +
+                    (timed_out ? "no answer within " + repr(CONNECT_ATTEMPT_SECONDS) + " s" : error.message())));
     _try_next_candidate(conn);
   }
 }
@@ -281,6 +296,7 @@ void BasicClient::connection_destroyed(Connection* conn) {
       target_connection.get() == conn) {
     connection_by_target_.erase(target_entry);
     still_wanted = true;
+    first_connection_over_.insert(target);  // its first connection ended before it came up, if it had not
   }
 
   if (!shuts_down_ && still_wanted) {
@@ -441,6 +457,7 @@ bool BasicClient::_disconnect(const Target& target) {
     connection_by_target_.erase(target_entry);
     had = true;
   }
+  first_connection_over_.erase(target);  // a later connect() is a first connection again
   if (had) {
     MX_LOG(INFO, MEDIUMVERBOSITY,
            CTX("BasicClient") TEXT("disconnecting from " + target.first + ":" + repr(target.second)));
@@ -499,15 +516,46 @@ void BasicClient::_try_next_candidate(Connection::pointer conn) {
   data.expected_endpoint = data.candidates[data.next_candidate++];
   _close_socket(*conn);  // the last address's, which failed to connect
   // Opened here rather than by async_connect, so that the table a forked
-  // child reads has it before it connects; one that cannot be opened is
-  // reported through the loop, as async_connect does.
+  // child reads has it before it connects, and closed on exec from its
+  // first instant, which asio's open cannot ask for: a program the process
+  // runs does not keep the connection open after the client closed it or
+  // died. One that cannot be opened is reported through the loop, as
+  // async_connect does.
+  const asio::ip::tcp protocol = data.expected_endpoint.protocol();
   asio::error_code error;
-  conn->socket().open(data.expected_endpoint.protocol(), error);
+  const int fd = ::socket(protocol.family(), protocol.type() | SOCK_CLOEXEC, protocol.protocol());
+  if (fd < 0) {
+    error.assign(errno, asio::error::get_system_category());
+  } else {
+    conn->socket().assign(protocol, fd, error);
+    if (error) {
+      ::close(fd);
+    }
+  }
   if (error) {
     asio::post(io_service_, [self = this->shared_from_this(), conn, error] { self->_connected(conn, error); });
     return;
   }
-  descriptors_.add(conn->socket().native_handle());
+  descriptors_.add(fd);
+  // An address that drops the SYNs would hold the attempt, and the
+  // target's other addresses and its reconnects, for the kernel's own
+  // timeout, two minutes: past CONNECT_ATTEMPT_SECONDS the connect is
+  // cancelled, and _connected takes it for the failure it is. Only while it
+  // is under way, so that a deadline met by a connect that had just
+  // succeeded leaves the connection's first read alone.
+  if (!data.connect_deadline) {
+    data.connect_deadline = std::make_shared<Timer>(io_service_);
+  }
+  data.connecting = true;
+  data.connect_deadline->expires_after(mx::from_seconds(CONNECT_ATTEMPT_SECONDS));
+  data.connect_deadline->async_wait([conn](const asio::error_code& error) {
+    auto& data = conn->managers_private_data();
+    if (!error && data.connecting) {
+      data.connect_timed_out = true;
+      asio::error_code ignored;
+      conn->socket().cancel(ignored);
+    }
+  });
   conn->socket().async_connect(
       data.expected_endpoint,
       [self = this->shared_from_this(), conn](const asio::error_code& error) { self->_connected(conn, error); });

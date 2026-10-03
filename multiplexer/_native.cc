@@ -970,6 +970,7 @@ PYBIND11_MODULE(_native, module) {
   module.attr("DEFAULT_INCOMING_QUEUE_MAX_SIZE") = pybind11::int_(multiplexer::DEFAULT_INCOMING_QUEUE_MAX_SIZE);
   module.attr("FORCED_FRAMES_PAST_FULL_QUEUE") = pybind11::int_(multiplexer::FORCED_FRAMES_PAST_FULL_QUEUE);
   module.attr("AUTO_RECONNECT_TIME") = pybind11::int_(multiplexer::AUTO_RECONNECT_TIME);
+  module.attr("CONNECT_ATTEMPT_SECONDS") = pybind11::float_(multiplexer::CONNECT_ATTEMPT_SECONDS);
   module.attr("DEFAULT_TIMEOUT") = pybind11::float_(multiplexer::DEFAULT_TIMEOUT);
   module.attr("ROOM_GRACE_SECONDS") = pybind11::float_(multiplexer::ROOM_GRACE_SECONDS);
   module.attr("CLOSE_FLUSH_SECONDS") = pybind11::float_(multiplexer::CLOSE_FLUSH_SECONDS);

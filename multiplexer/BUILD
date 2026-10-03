@@ -409,7 +409,7 @@ cc_test(
 
 cc_test(
     name = "threaded_client_test",
-    size = "small",
+    size = "medium",
     srcs = ["threaded_client_test.cc"],
     data = ["//tests:testing.rules"],
     deps = [
@@ -462,6 +462,20 @@ cc_test(
 )
 
 cc_test(
+    name = "connect_deadline_test",
+    size = "small",
+    srcs = ["connect_deadline_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "oversized_message_test",
     size = "small",
     srcs = ["oversized_message_test.cc"],
@@ -479,6 +493,33 @@ cc_test(
     data = ["//tests:testing.rules"],
     deps = [
         ":server",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "close_on_exec_test",
+    size = "small",
+    srcs = ["close_on_exec_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "duplicate_after_drop_test",
+    size = "small",
+    srcs = ["duplicate_after_drop_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -665,6 +706,18 @@ cc_test(
     data = ["//tests:testing.rules"],
     deps = [
         ":server",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "peers_file_start_test",
+    size = "small",
+    srcs = ["peers_file_start_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":server",
+        "@asio",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -1008,6 +1061,19 @@ py_test(
     ],
 )
 
+# A message sent to ALL just after the start reaches the multiplexer whose
+# first connection is still in its handshake, at its welcome.
+py_test(
+    name = "all_at_start_test",
+    size = "small",
+    srcs = ["all_at_start_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "server_connect_test",
     size = "small",
@@ -1270,6 +1336,22 @@ py_test(
     ],
 )
 
+# serve_forever(stall_seconds): the handling and periodic_task() watched,
+# never the poll's wait, the watchdog cancelled however they end.
+py_test(
+    name = "stall_seconds_test",
+    size = "small",
+    srcs = ["stall_seconds_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "zero_nan_timeout_py_test",
     size = "small",
@@ -1437,6 +1519,17 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "plain_delivery_error_test",
+    size = "small",
+    srcs = ["plain_delivery_error_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":multiplexer_constants",
         "//multiplexer/testing",
     ],
 )

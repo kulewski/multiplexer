@@ -233,11 +233,15 @@ class BaseMultiplexerServer(MultiplexerPeer):
         Each iteration waits up to `poll` seconds for a message, handles it
         if one came, and calls periodic_task(). `drain_seconds` is how long
         to keep serving after start_draining(), unless drained() is
-        overridden. With `stall_seconds`, an iteration that takes longer
-        dumps every thread's stack (faulthandler) to `stall_file` or stderr,
-        for finding a handler that hangs. The calling thread becomes the
-        backend's thread: a backend may be built on one thread and served
-        from another, but from here on only this thread may touch it.
+        overridden. With `stall_seconds`, a message's handling and the
+        periodic_task() after it that take longer, the wait before them
+        apart, dump every thread's stack to `stall_file` or stderr, for
+        finding a handler that hangs; the watchdog is faulthandler's, one
+        per process, so it replaces one armed elsewhere, and two backends
+        in one process watching at once replace each other's. The calling
+        thread becomes the backend's thread: a backend may be built on one
+        thread and served from another, but from here on only this thread
+        may touch it.
         """
         self.conn.bind_to_current_thread()
         self._drain_seconds = drain_seconds
@@ -253,18 +257,28 @@ class BaseMultiplexerServer(MultiplexerPeer):
             while self.working:
                 if self.draining and self.drained():
                     break
-                if stall > 0:
-                    faulthandler.dump_traceback_later(stall, file=stall_file)
+                received = False
                 try:
                     # Only the wait running out is the poll's timeout: what the
                     # handler raises, an OperationTimedOut of its own included,
                     # goes by on_handler_exception().
-                    if self.__receive_one(timeout=poll):
-                        self.__handle_received()
+                    received = self.__receive_one(timeout=poll)
                 finally:
-                    self.periodic_task()
+                    # The watchdog covers the handling and periodic_task(), not
+                    # the wait, an idle poll being no stall, and is cancelled
+                    # however they end; periodic_task() runs whatever the wait
+                    # and the handling did.
                     if stall > 0:
-                        faulthandler.cancel_dump_traceback_later()
+                        faulthandler.dump_traceback_later(stall, file=stall_file)
+                    try:
+                        try:
+                            if received:
+                                self.__handle_received()
+                        finally:
+                            self.periodic_task()
+                    finally:
+                        if stall > 0:
+                            faulthandler.cancel_dump_traceback_later()
             # The drain is over. What arrives from now on is refused at once,
             # so that its sender retries elsewhere, and what was already on
             # its way, read off the sockets when the drain ended, is handled
@@ -334,7 +348,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
         # back (__echo): a client searching for a backend learns that way that
         # this backend is alive and where to repeat the request; a PING
         # without references is an echo request.
-        """Answer the protocol's own messages: a client's search for a backend, and a PING without references, each with its payload echoed."""
+        """Answer the protocol's own messages: a client's search for a backend, and a PING without references, each with its payload echoed.
+        A DELIVERY_ERROR, for a message of this server's that went nowhere,
+        an event whose rule reports delivery errors say, it keeps to
+        itself, where the threaded server hands it to handle_message()."""
         mxmsg = self.last_mxmsg
         assert mxmsg is not None
         if mxmsg.type == types.BACKEND_FOR_PACKET_SEARCH:
@@ -349,6 +366,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
                 self.__echo(mxmsg, "PING")
             else:
                 self.no_response()
+
+        elif mxmsg.type == types.DELIVERY_ERROR:
+            log(DEBUG, LOWVERBOSITY, text="message #%d went nowhere: a DELIVERY_ERROR, kept here" % mxmsg.references)
+            self.no_response()
 
         else:
             log(
@@ -413,7 +434,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
         """Override: called with every non-meta MultiplexerMessage received.
 
         Reply with send_message(); for an event call no_response() instead, so
-        that the missing reply is not logged as a warning.
+        that the missing reply is not logged as a warning. A DELIVERY_ERROR
+        for a message of this server's, an event whose rule reports delivery
+        errors say, the class keeps to itself, logged at DEBUG; the threaded
+        server passes it to its handler.
         """
         raise NotImplementedError()
 

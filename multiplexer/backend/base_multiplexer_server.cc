@@ -350,7 +350,9 @@ void BaseMultiplexerServer::report_error(const std::string& message) {
 // references it and carries its payload back (_echo): a client's search
 // for a backend, which is how the client learns this backend is alive and
 // where to send the request, and a PING without references, an echo
-// request.
+// request. A DELIVERY_ERROR, for a message of this server's that went
+// nowhere, an event whose rule reports delivery errors say, it keeps to
+// itself, where the threaded server hands it to handle_message().
 void BaseMultiplexerServer::__handle_internal_message() {
   const MultiplexerMessage& mxmsg = *last_mxmsg;
   switch (mxmsg.type()) {
@@ -369,6 +371,12 @@ void BaseMultiplexerServer::__handle_internal_message() {
       } else {
         no_response();
       }
+      break;
+
+    case types::DELIVERY_ERROR:
+      MX_LOG(DEBUG, LOWVERBOSITY,
+             TEXT("message #" + repr(mxmsg.references()) + " went nowhere: a DELIVERY_ERROR, kept here"));
+      no_response();
       break;
 
     default:

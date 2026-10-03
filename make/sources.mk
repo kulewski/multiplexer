@@ -172,12 +172,15 @@ CC_TEST_SRCS := \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
   multiplexer/client_names_test.cc \
+  multiplexer/close_on_exec_test.cc \
   multiplexer/connect_again_test.cc \
   multiplexer/connect_by_name_test.cc \
+  multiplexer/connect_deadline_test.cc \
   multiplexer/descriptor_table_test.cc \
   multiplexer/disconnect_test.cc \
   multiplexer/disconnected_record_test.cc \
   multiplexer/drop_names_test.cc \
+  multiplexer/duplicate_after_drop_test.cc \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
@@ -185,6 +188,7 @@ CC_TEST_SRCS := \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
   multiplexer/oversized_message_test.cc \
+  multiplexer/peers_file_start_test.cc \
   multiplexer/query_stages_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/recording_copies_test.cc \
@@ -200,6 +204,7 @@ CC_TEST_SRCS := \
 
 PY_TEST_FILES := \
   multiplexer/aio_test.py \
+  multiplexer/all_at_start_test.py \
   multiplexer/all_types_test.py \
   multiplexer/callback_errors_test.py \
   multiplexer/client_names_test.py \
@@ -234,6 +239,7 @@ PY_TEST_FILES := \
   multiplexer/peers_file_test.py \
   multiplexer/pickle_failures_test.py \
   multiplexer/pickle_test.py \
+  multiplexer/plain_delivery_error_test.py \
   multiplexer/query_acknowledged_test.py \
   multiplexer/query_stages_test.py \
   multiplexer/recording_read_test.py \
@@ -247,6 +253,7 @@ PY_TEST_FILES := \
   multiplexer/server_connect_test.py \
   multiplexer/server_replies_test.py \
   multiplexer/servers_drain_test.py \
+  multiplexer/stall_seconds_test.py \
   multiplexer/sync_waits_test.py \
   multiplexer/testing/cluster_exit_test.py \
   multiplexer/testing/fakes_test.py \

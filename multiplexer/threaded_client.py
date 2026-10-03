@@ -243,8 +243,10 @@ class ThreadedClient:
     ) -> int:
         """Send an event and return its message id. `message` is a
         MultiplexerMessage, an empty id and sender filled in, or a payload
-        wrapped with the remaining kwargs, such as type= and to=. It goes on one connection, or on every one
-        with multiplexer=ALL, on a Lane's connection (the lane taking the
+        wrapped with the remaining kwargs, such as type= and to=. It goes on
+        one connection, or on every one with multiplexer=ALL, a multiplexer
+        whose first connection is still in its handshake getting its copy
+        at the welcome, on a Lane's connection (the lane taking the
         connection chosen when it has none or lost its own, unless pinned),
         or on a ConnectionWrapper's while it is live and another after; the
         io thread writes it right after. A message that cannot be queued

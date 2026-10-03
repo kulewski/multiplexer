@@ -288,7 +288,9 @@ class Client : public ExceptionDefinitions {
   // the message queued on one live connection, round robin or `lane`'s, or
   // held until one comes up, `timeout` seconds at most, and written as the
   // loop runs; a message the client gives up on is reported
-  // (set_drop_observer). queue_all() gives every live connection a copy.
+  // (set_drop_observer). queue_all() gives every live connection a copy,
+  // and a multiplexer whose first connection is still in its handshake one
+  // at its welcome.
   // `done`, when given, hears how the message ended, once, inside a later
   // call that runs the loop: 1 once it was written, the first copy for
   // ALL, 0 once it was given up on or shutdown() came first, as the Python

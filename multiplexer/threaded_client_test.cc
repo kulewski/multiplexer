@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -44,6 +45,8 @@ using multiplexer::ThreadedClient;
 
 namespace {
 
+using multiplexer::testing::FILL_FRAMES;
+using multiplexer::testing::fill_size;
 using multiplexer::testing::InProcessMultiplexer;
 
 }  // namespace
@@ -1086,30 +1089,26 @@ struct Freeze {
   bool done = false;
 };
 
-// What the two sockets of a connection may buffer at most: the largest the
-// kernel allows each.
-std::size_t socket_bytes() {
-  std::size_t buffers = 0;
-  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
-    std::ifstream limits(path);
-    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
-    limits >> least >> initial >> largest;
-    buffers += largest;
-  }
-  return buffers;
-}
+// The messages that fill a frozen multiplexer's connection, its two sockets
+// and twice its queue, whatever this machine's TCP buffers: FILL_FRAMES of
+// fill_size() bytes, then twice the queue's 1024 of the test's own size.
+// Past them, messages wait for room.
+class Fill {
+ public:
+  static constexpr int COUNT = FILL_FRAMES + 2 * 1024;
+  explicit Fill(std::size_t size) : sockets_(fill_size(), 'f'), queue_(size, 'x') {}
+  // The payload of the fill's message `index`, from 0 to COUNT.
+  const std::string& operator[](int index) const { return index < FILL_FRAMES ? sockets_ : queue_; }
 
-// How many messages of `size` bytes a frozen multiplexer's connection
-// cannot take: twice what the two sockets may buffer and twice the queue.
-// Past that, messages wait.
-int frames_to_fill(std::size_t size) { return static_cast<int>(2 * socket_bytes() / size) + 2 * 1024; }
+ private:
+  std::string sockets_, queue_;
+};
 
-// Sends `count` messages of `size` bytes, fire and forget; `to`, when
-// given, the instance that takes them.
-void burst(ThreadedClient& client, int count, std::size_t size, std::uint64_t to = 0) {
-  const std::string payload(size, 'x');
-  for (int index = 0; index < count; ++index) {
-    multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, payload);
+// Sends the messages of `fill`, fire and forget; `to`, when given, the
+// instance that takes them.
+void burst(ThreadedClient& client, const Fill& fill, std::uint64_t to = 0) {
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
     if (to) {
       msg.set_to(to);
     }
@@ -1171,9 +1170,9 @@ TEST(ThreadedClient, ASendFromTheIoThreadDuringTheShutdownsWriteOutGoesOut) {
   std::thread closing;
   {
     Freeze frozen(first);
-    const std::string filler(1024, 'f');
-    for (int index = 0; index < frames_to_fill(filler.size()); ++index) {
-      multiplexer::MultiplexerMessage msg = answering.new_message(9999, filler);  // a type nobody takes
+    const Fill fill(1024);
+    for (int index = 0; index < Fill::COUNT; ++index) {
+      multiplexer::MultiplexerMessage msg = answering.new_message(9999, fill[index]);  // a type nobody takes
       msg.set_report_delivery_error(false);
       answering.send_all(msg);
     }
@@ -1210,10 +1209,10 @@ TEST(ThreadedClient, ABurstBeyondTheQueueArrivesWholeAtACostInProportion) {
   Sink backend(mx.port);
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  const int count = frames_to_fill(1024);
+  const int count = Fill::COUNT;
   {
     Freeze freeze(mx);
-    burst(client, count, 1024);
+    burst(client, Fill(1024));
     EXPECT_FALSE(client.flush_all(0.2f)) << "frozen: something waits";
   }
   EXPECT_TRUE(client.flush_all(120));
@@ -1232,12 +1231,12 @@ TEST(ThreadedClient, EveryMultiplexerGetsItsCopyOfASendToAll) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
   ASSERT_TRUE(client.connect("127.0.0.1", second.port, 5));
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   {
     Freeze freeze(second);
     for (int index = 0; index < count; ++index) {
-      client.send_all(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk));
+      client.send_all(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
     }
     EXPECT_TRUE(behind_first.wait_for(count, 60)) << behind_first.received.load() << " of " << count;
   }
@@ -1259,7 +1258,7 @@ TEST(ThreadedClient, QueriesThatFindTheQueueFullAreAnswered) {
   std::promise<void> all_ended;
   {
     Freeze freeze(mx);
-    burst(client, frames_to_fill(16 * 1024), 16 * 1024, sink.client.instance_id());  // for the sink: the queue fills
+    burst(client, Fill(16 * 1024), sink.client.instance_id());  // for the sink: the queue fills
     for (int index = 0; index < count; ++index) {
       multiplexer::MultiplexerMessage request =
           client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "q" + std::to_string(index));
@@ -1281,10 +1280,12 @@ TEST(ThreadedClient, QueriesThatFindTheQueueFullAreAnswered) {
   EXPECT_EQ(count, replied.load());
 }
 
-// While messages wait for room and a flush_all() waits for them, the
-// threads sleep until something happens: over half a second the process
-// wakes a handful of times, where the two 5 ms polls that ran then woke it
-// some two hundred.
+// While messages wait for room, a flushing send and a flush_all() waiting
+// for them, the threads sleep until something happens: over half a second
+// the process wakes a handful of times, where the 5 ms polls that ran then,
+// one for each kind of wait, woke it some two hundred. The flushing send,
+// with a callback, is placed before the count: its wait is the io
+// thread's, as a blocking one's is.
 TEST(ThreadedClient, NothingPollsWhileAMessageWaits) {
   std::uint64_t before = 0, after = 0;
   if (!voluntary_switches(&before)) {
@@ -1295,9 +1296,14 @@ TEST(ThreadedClient, NothingPollsWhileAMessageWaits) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   std::future<bool> flushed;
+  std::promise<unsigned int> sent;
   {
     Freeze freeze(mx);
-    burst(client, frames_to_fill(16 * 1024), 16 * 1024);  // the queue fills, the rest waits
+    burst(client, Fill(16 * 1024));  // the queue fills, the rest waits
+    const multiplexer::MultiplexerMessage last = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "last");
+    client.send_serialized_with_callback(
+        last.SerializeAsString(), last.id(), last.type(), false, 60,
+        [&sent](unsigned int written) { sent.set_value(written); }, multiplexer::LanePtr());
     flushed = std::async(std::launch::async, [&client] { return client.flush_all(60); });
     // A round trip through the io thread: every send before it is placed,
     // so what follows counts waiting, not work.
@@ -1308,6 +1314,7 @@ TEST(ThreadedClient, NothingPollsWhileAMessageWaits) {
     EXPECT_LT(after - before, 20u);
   }
   EXPECT_TRUE(flushed.get());
+  EXPECT_EQ(1u, sent.get_future().get()) << "the flushing send ends once written";
 }
 
 // flush_all() counts what waits for a connection: with none up it is not
@@ -1348,25 +1355,48 @@ TEST(ThreadedClient, FlushAllWaitsForAMessageThatFoundNoConnection) {
 }
 
 // flush_all() waits for what was sent before it, not for what is sent
-// meanwhile: with another thread sending all along, it still ends.
-TEST(ThreadedClient, FlushAllEndsWhileAnotherThreadKeepsSending) {
-  InProcessMultiplexer mx;
-  Sink backend(mx.port);
+// meanwhile: begun while the first multiplexer, frozen, holds back what was
+// sent through it before, it ends once that is written, though what was
+// sent after it through the second multiplexer, frozen too and full, still
+// waits. Ordered, not timed: every send and the flush are handed to the io
+// thread from this one, the flush behind the first sends and ahead of the
+// second ones, and the first multiplexer is released only then. A flush
+// that waits for everything, as the all_written() poll did, runs out of
+// its time instead.
+TEST(ThreadedClient, FlushAllWaitsOnlyForWhatWasSentBeforeIt) {
+  InProcessMultiplexer first, second;
+  Sink first_backend(first.port), second_backend(second.port);
   ThreadedClient client(multiplexer::peers::WEBSITE);
-  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  std::atomic<bool> stop(false);
-  std::thread sender([&] {
-    while (!stop.load()) {
-      burst(client, 10, 100);
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  });
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  for (int round = 0; round < 5; ++round) {
-    EXPECT_TRUE(client.flush_all(30));
+  ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
+  ASSERT_TRUE(client.connect("127.0.0.1", second.port, 5));
+  // Two fresh lanes: the round robin gives the second the other connection.
+  multiplexer::LanePtr to_first(new multiplexer::Lane()), to_second(new multiplexer::Lane());
+  ASSERT_EQ(1, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "which"), to_first, 5));
+  ASSERT_EQ(1, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "which"), to_second, 5));
+  if (to_first->connection().endpoint().port() != first.port) {
+    std::swap(to_first, to_second);
   }
-  stop = true;
-  sender.join();
+  ASSERT_EQ(first.port, to_first->connection().endpoint().port());
+  ASSERT_EQ(second.port, to_second->connection().endpoint().port());
+  const Fill fill(16 * 1024);  // more than the sockets and the queue take
+  const int count = Fill::COUNT;
+  std::promise<bool> flushed;
+  {
+    Freeze frozen_first(first);
+    Freeze frozen_second(second);
+    for (int index = 0; index < count; ++index) {
+      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), to_first);
+    }
+    client.flush_all_with_callback(30, [&flushed](bool all_written) { flushed.set_value(all_written); });
+    for (int index = 0; index < count; ++index) {  // waiting longer than the flush may
+      const multiplexer::MultiplexerMessage msg =
+          client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
+      client.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), to_second, 60,
+                             ThreadedClient::SendCallback());
+    }
+    frozen_first.release();
+    EXPECT_TRUE(flushed.get_future().get()) << "the flush waited for what was sent after it";
+  }
 }
 
 // A pinned lane whose connection's queue is full waits for room there,
@@ -1379,13 +1409,13 @@ TEST(ThreadedClient, APinnedLaneWaitsForRoomOnItsConnection) {
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   multiplexer::LanePtr pinned(new multiplexer::Lane(true));
   ASSERT_EQ(1u, client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "first"), pinned, 5));
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   std::future<unsigned int> last;
   {
     Freeze freeze(mx);
     for (int index = 0; index < count; ++index) {  // the queue fills, the rest waits
-      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk), pinned);
+      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), pinned);
     }
     last = std::async(std::launch::async, [&client, pinned] {
       return client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "last"), pinned, 30);
@@ -1413,12 +1443,12 @@ TEST(ThreadedClient, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
   InProcessMultiplexer& frozen = held == first.port ? first : second;
   Sink& its = held == first.port ? behind_first : behind_second;
   Sink& other = held == first.port ? behind_second : behind_first;
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   {
     Freeze freeze(frozen);
     for (int index = 0; index < count; ++index) {
-      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk), lane);
+      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), lane);
     }
     ASSERT_EQ(2u, client.connections_count());  // a round trip through the io thread: every send placed
     EXPECT_EQ(held, lane->connection().endpoint().port()) << "the lane moved";
@@ -1428,13 +1458,43 @@ TEST(ThreadedClient, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
   EXPECT_EQ(0u, other.received.load()) << "went the other way";
 }
 
-// connect() ends when the connection does: when it fails, at once rather
-// than at its timeout.
+// connect() ends when the connection does: when it fails, at once. With
+// no deadline, a negative timeout, it can end on nothing else; one that
+// waits fails by the test's own timeout.
 TEST(ThreadedClient, ConnectEndsWhenTheConnectionFails) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
-  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-  EXPECT_FALSE(client.connect("127.0.0.1", 1, 30));  // nothing listens on port 1
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(15)) << "not at its timeout";
+  EXPECT_FALSE(client.connect("127.0.0.1", 1, -1));  // nothing listens on port 1
+}
+
+// connect() sleeps while it waits: over half a second of a connect to a
+// listener that takes the connection and never says its welcome, the
+// process wakes a handful of times, where a connect that polled every
+// 20 ms woke it some twenty-five. The connection in the listener's queue
+// says the connect is past the TCP connect and waits for the welcome.
+TEST(ThreadedClient, NothingPollsWhileAConnectWaits) {
+  std::uint64_t before = 0, after = 0;
+  if (!voluntary_switches(&before)) {
+    GTEST_SKIP() << "no /proc/self/task to count wakeups in";
+  }
+  const int listener = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  sockaddr_in address = {};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  socklen_t length = sizeof address;
+  ASSERT_EQ(0, ::bind(listener, reinterpret_cast<sockaddr*>(&address), length));
+  ASSERT_EQ(0, ::listen(listener, 8));
+  ASSERT_EQ(0, ::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length));
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  std::future<bool> connected = std::async(
+      std::launch::async, [&client, &address] { return client.connect("127.0.0.1", ntohs(address.sin_port), 2); });
+  pollfd queued = {listener, POLLIN, 0};
+  ASSERT_EQ(1, ::poll(&queued, 1, 30000)) << "the connection never reached the listener";
+  voluntary_switches(&before);
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  voluntary_switches(&after);
+  EXPECT_LT(after - before, 10u);
+  EXPECT_FALSE(connected.get()) << "no welcome, no connection";
+  ::close(listener);
 }
 
 // --- The synchronous Client and full connections -----------------------------
@@ -1493,13 +1553,13 @@ TEST(Client, WhatAFullConnectionCannotTakeWaitsForItsRoom) {
   InProcessMultiplexer mx;
   Sink backend(mx.port);
   Peer sender(mx.port, multiplexer::peers::WEBSITE);
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   int refused = 0;
   {
     Freeze freeze(mx);
     for (int index = 0; index < count; ++index) {
-      if (!sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0))) {
+      if (!sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0))) {
         ++refused;
       }
     }
@@ -1515,10 +1575,10 @@ TEST(Client, AFlushingSendWaitsForRoomAsleep) {
   InProcessMultiplexer mx;
   Sink backend(mx.port);
   Peer sender(mx.port, multiplexer::peers::WEBSITE);
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0));
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0));
   }
   const std::chrono::nanoseconds before = thread_cpu();
   EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "last", 0), 0.5f),
@@ -1533,12 +1593,13 @@ TEST(Client, EveryMultiplexerGetsItsCopyOfASendToAll) {
   Sink behind_first(first.port), behind_second(second.port);
   Peer sender(first.port, multiplexer::peers::WEBSITE);
   sender.client.connect("127.0.0.1", second.port, 5);
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   {
     Freeze freeze(second);
     for (int index = 0; index < count; ++index) {
-      EXPECT_EQ(2u, sender.client.schedule_all(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0)));
+      EXPECT_EQ(2u,
+                sender.client.schedule_all(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0)));
     }
     EXPECT_FALSE(sender.client.flush_all(0.2f)) << "frozen: the copies for it wait";
   }
@@ -1565,12 +1626,13 @@ TEST(Client, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
   InProcessMultiplexer& frozen = held == first.port ? first : second;
   PayloadSink& its = held == first.port ? behind_first : behind_second;
   PayloadSink& other = held == first.port ? behind_second : behind_first;
-  const std::string chunk(16 * 1024, 'x');
-  const int count = frames_to_fill(chunk.size());
+  const Fill fill(16 * 1024);
+  const int count = Fill::COUNT;
   {
     Freeze freeze(frozen);
     for (int index = 0; index < count; ++index) {
-      sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0), lane->connection());
+      sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0),
+                                 lane->connection());
     }
     EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "last", 0), 0.2f, lane),
                  multiplexer::Client::OperationTimedOut);
@@ -1595,11 +1657,11 @@ TEST(Client, ASendThatTimedOutHasItsMessageDropped) {
   InProcessMultiplexer mx;
   PayloadSink backend(mx.port);
   Peer sender(mx.port, multiplexer::peers::WEBSITE);
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   {
     Freeze freeze(mx);
-    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-      sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, chunk, 0));
+    for (int index = 0; index < Fill::COUNT; ++index) {
+      sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0));
     }
     EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f),
                  multiplexer::Client::OperationTimedOut);
@@ -1620,10 +1682,10 @@ TEST(Client, APinnedLaneThatRunsOutOfTimeTimesOut) {
   Peer sender(mx.port, multiplexer::peers::WEBSITE);
   multiplexer::LanePtr lane(new multiplexer::Lane(true));
   sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "first", 0), 5, lane);
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, chunk, 0), lane->connection());
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0), lane->connection());
   }
   EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f, lane),
                multiplexer::Client::OperationTimedOut);
@@ -2074,10 +2136,12 @@ class DeafAfterWelcome {
 // answers with its own only on answer(), then counts the frames of `type`
 // the client writes. `notify` runs on its thread after the client's
 // welcome is read and after each frame counted, for the test to wake its
-// client's loop.
+// client's loop; `id` is the instance id its welcome gives, a different
+// one for each of two in a test.
 class LateWelcome {
  public:
-  LateWelcome(std::uint32_t type, std::function<void()> notify) : type_(type), notify_(std::move(notify)) {
+  LateWelcome(std::uint32_t type, std::function<void()> notify, std::uint64_t id = 0x6d78)
+      : type_(type), id_(id), notify_(std::move(notify)) {
     listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in address = {};
     address.sin_family = AF_INET;
@@ -2125,7 +2189,7 @@ class LateWelcome {
       welcome_read_.store(true);
       notify_();
       go_.get_future().wait();
-      if (!write_frame(fd, *multiplexer::impl::create_welcome_message(multiplexer::peers::MULTIPLEXER, 0x6d78))) {
+      if (!write_frame(fd, *multiplexer::impl::create_welcome_message(multiplexer::peers::MULTIPLEXER, id_))) {
         for (;;) {
           multiplexer::RawMessage frame;
           multiplexer::MultiplexerMessage message;
@@ -2143,6 +2207,7 @@ class LateWelcome {
   }
 
   const std::uint32_t type_;
+  const std::uint64_t id_;
   const std::function<void()> notify_;
   int listener_;
   std::promise<void> go_;
@@ -2151,6 +2216,16 @@ class LateWelcome {
   std::atomic<int> counted_{0};
   std::future<void> serving_;
 };
+
+// A frame of `type` from `client`, as it would send one.
+std::shared_ptr<const multiplexer::RawMessage> frame_from(multiplexer::BasicClient& client, std::uint32_t type) {
+  multiplexer::MultiplexerMessage msg;
+  msg.set_id(client.random64());
+  msg.set_sender(client.instance_id());
+  msg.set_type(type);
+  msg.set_message("to all");
+  return std::shared_ptr<const multiplexer::RawMessage>(multiplexer::RawMessage::FromMessage(msg));
+}
 
 // A message as a multiplexer routes it to a peer: of `type`, answering
 // `references` unless that is 0.
@@ -2601,8 +2676,8 @@ TEST(ThreadedClient, AConnectionsOwnFramesGoWithItUnreported) {
     ASSERT_TRUE(multiplexer.welcomed());
     // More than the sockets hold: the rest, and the routing after it, wait
     // in the client.
-    const std::string filler(1 << 20, 'f');
-    for (std::size_t index = 0; index <= 2 * socket_bytes() / filler.size(); ++index) {
+    const std::string filler(fill_size(), 'f');
+    for (int index = 0; index < FILL_FRAMES; ++index) {
       multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, filler);
       {
         std::lock_guard<std::mutex> lock(mutex);
@@ -2660,8 +2735,8 @@ TEST(ThreadedClient, TheRequestASearchThroughAPinnedLaneEndsInIsPinnedToo) {
   ASSERT_TRUE(client.connect("127.0.0.1", other.port, 5));
   // More than the sockets hold, through the lane: the rest, and the
   // request the search ends in after it, wait in the client.
-  const std::string filler(1 << 20, 'f');
-  for (std::size_t index = 0; index <= 2 * socket_bytes() / filler.size(); ++index) {
+  const std::string filler(fill_size(), 'f');
+  for (int index = 0; index < FILL_FRAMES; ++index) {
     client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, filler), lane);
   }
   ASSERT_TRUE(stalled.answer(backend.instance_id(), "noted"));
@@ -2859,8 +2934,8 @@ TEST(BasicClient, AFullConnectionKeepsABoundedRestOfWhatEndedWaitingForRoom) {
   std::shared_ptr<multiplexer::BasicClient> client =
       multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
-  const std::string payload(1024, 'x');
-  auto frame = [&] {
+  const Fill fill(1024);
+  auto frame = [&](const std::string& payload) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client->random64());
     msg.set_sender(client->instance_id());
@@ -2878,15 +2953,14 @@ TEST(BasicClient, AFullConnectionKeepsABoundedRestOfWhatEndedWaitingForRoom) {
   };
   Freeze frozen(mx);
   // The sockets and the queue filled; what does not fit waits half a second.
-  const int filler = frames_to_fill(payload.size());
-  for (int index = 0; index < filler; ++index) {
-    client->send(frame(), false, multiplexer::LanePtr(), 0.5f);
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    client->send(frame(fill[index]), false, multiplexer::LanePtr(), 0.5f);
   }
   ASSERT_TRUE(run_until([&] { return client->outbox_entries() == 0; })) << "the filler that waited ended";
   const std::uint64_t before = client->dropped();
-  client->send(frame(), false, multiplexer::LanePtr(), 60);  // waits for room all along
+  client->send(frame("waits"), false, multiplexer::LanePtr(), 60);  // waits for room all along
   for (int index = 0; index < 200; ++index) {
-    client->send(frame(), false, multiplexer::LanePtr(), 0.001f);
+    client->send(frame("ends"), false, multiplexer::LanePtr(), 0.001f);
   }
   ASSERT_TRUE(run_until([&] { return client->dropped() == before + 200; }));
   EXPECT_LE(client->outbox_entries(), 1u + 64u) << "messages that ended beside one that waits";
@@ -2901,10 +2975,10 @@ TEST(BasicClient, AFullConnectionKeepsABoundedRestOfWhatEndedWaitingForRoom) {
 // still under way at the registration they stayed waiting, with no room
 // event to come, as none comes but for a queue that was full, and every
 // later message for the connection queued behind them, until each was
-// dropped at its deadline. The first message is more than the sockets
-// hold, and the multiplexer reads nothing before its welcome, so its write
-// is under way then. Counted: what waits, at once after the registration,
-// and what the multiplexer read.
+// dropped at its deadline. The first FILL_FRAMES messages are more than
+// the sockets hold, and the multiplexer reads nothing before its welcome,
+// so a write is under way then. Counted: what waits, at once after the
+// registration, and what the multiplexer read.
 TEST(BasicClient, WhatWaitsOnAConnectionInItsHandshakeMovesInAtTheRegistration) {
   asio::io_service io_service;
   LateWelcome multiplexer(multiplexer::types::PYTHON_TEST_REQUEST, [&io_service] { io_service.post([] {}); });
@@ -2916,13 +2990,14 @@ TEST(BasicClient, WhatWaitsOnAConnectionInItsHandshakeMovesInAtTheRegistration) 
     client->run_one();  // the connect, and the client's welcome written
   }
   ASSERT_TRUE(multiplexer.welcome_read());
-  const int sent = 5;
+  const std::string filler(fill_size(), 'f');
+  const int sent = FILL_FRAMES + 4;
   for (int index = 0; index < sent; ++index) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client->random64());
     msg.set_sender(client->instance_id());
     msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
-    msg.set_message(index ? std::to_string(index) : std::string(2 * socket_bytes(), 'f'));
+    msg.set_message(index < FILL_FRAMES ? filler : std::to_string(index));
     client->schedule_one(std::shared_ptr<const multiplexer::RawMessage>(multiplexer::RawMessage::FromMessage(msg)),
                          connection, 60);
   }
@@ -2934,6 +3009,68 @@ TEST(BasicClient, WhatWaitsOnAConnectionInItsHandshakeMovesInAtTheRegistration) 
     client->run_one();
   }
   EXPECT_EQ(sent, multiplexer.counted());
+  client->shutdown();
+}
+
+// A send to ALL made while one multiplexer is registered and another's
+// first connection is in its handshake reaches that one too, at its
+// welcome, where only the multiplexers registered by then got a copy: a
+// program that sends to ALL just after its start misses no multiplexer
+// slower to welcome it. Counted: the frames of the type the late
+// multiplexer reads.
+TEST(BasicClient, AnAllSendDuringAFirstHandshakeReachesThatMultiplexerAtItsWelcome) {
+  asio::io_service io_service;
+  InProcessMultiplexer up;
+  LateWelcome late(multiplexer::types::PYTHON_TEST_REQUEST, [&io_service] { io_service.post([] {}); });
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client->wait_for_connection(client->async_connect("127.0.0.1", up.port), 30));
+  const multiplexer::ConnectionWrapper to_late = client->async_connect("127.0.0.1", late.port);
+  std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(30);
+  while (!late.welcome_read() && !timer->expired()) {
+    client->run_one();  // the connect, and the client's welcome written
+  }
+  ASSERT_TRUE(late.welcome_read());
+  ASSERT_TRUE(client->send(frame_from(*client, multiplexer::types::PYTHON_TEST_REQUEST), /*all=*/true,
+                           multiplexer::LanePtr(), 60));
+  late.answer();
+  ASSERT_TRUE(client->wait_for_connection(to_late, 30));
+  while (late.counted() < 1 && !timer->expired()) {
+    client->run_one();
+  }
+  EXPECT_EQ(1, late.counted()) << "the multiplexer that welcomed late got no copy";
+  client->shutdown();
+}
+
+// The same with no multiplexer registered when the message is sent, both
+// first connections in their handshakes: held whole, it goes to the first
+// to welcome, and the copy for the other is made then and goes in at that
+// one's welcome, where it went to the first alone.
+TEST(BasicClient, AnAllSendBeforeAnyWelcomeReachesEachMultiplexerAtItsWelcome) {
+  asio::io_service io_service;
+  const std::function<void()> wake = [&io_service] { io_service.post([] {}); };
+  LateWelcome first(multiplexer::types::PYTHON_TEST_REQUEST, wake, 0x6d78);
+  LateWelcome second(multiplexer::types::PYTHON_TEST_REQUEST, wake, 0x6d79);
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  const multiplexer::ConnectionWrapper to_first = client->async_connect("127.0.0.1", first.port);
+  const multiplexer::ConnectionWrapper to_second = client->async_connect("127.0.0.1", second.port);
+  std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(30);
+  while (!(first.welcome_read() && second.welcome_read()) && !timer->expired()) {
+    client->run_one();
+  }
+  ASSERT_TRUE(first.welcome_read() && second.welcome_read());
+  ASSERT_TRUE(client->send(frame_from(*client, multiplexer::types::PYTHON_TEST_REQUEST), /*all=*/true,
+                           multiplexer::LanePtr(), 60));
+  first.answer();
+  ASSERT_TRUE(client->wait_for_connection(to_first, 30));
+  second.answer();
+  ASSERT_TRUE(client->wait_for_connection(to_second, 30));
+  while ((first.counted() < 1 || second.counted() < 1) && !timer->expired()) {
+    client->run_one();
+  }
+  EXPECT_EQ(1, first.counted());
+  EXPECT_EQ(1, second.counted()) << "the multiplexer that welcomed second got no copy";
   client->shutdown();
 }
 
@@ -2952,8 +3089,8 @@ TEST(BasicClient, AConnectionReadingOnAfterAFailedWriteGoesToTheNewOwnerThread) 
       multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", multiplexer.port, 5), 5));
   ASSERT_TRUE(multiplexer.welcomed());
-  const std::string filler(1 << 20, 'f');  // more than the sockets hold: a write waits for room
-  for (std::size_t index = 0; index <= 2 * socket_bytes() / filler.size(); ++index) {
+  const std::string filler(fill_size(), 'f');  // more than the sockets hold: a write waits for room
+  for (int index = 0; index < FILL_FRAMES; ++index) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client->random64());
     msg.set_sender(client->instance_id());
@@ -3466,13 +3603,13 @@ TEST(Client, AHandedOverRequestIsAnsweredWithoutAResend) {
   multiplexer::ConnectionWrapper to_going = client.connect("127.0.0.1", going->port, 5);
   multiplexer::LanePtr lane(new multiplexer::Lane(to_going));  // the request goes through the one that goes
   Freeze freeze(*going);
-  const std::string chunk(16 * 1024, 'x');
+  const Fill payloads(16 * 1024);
   multiplexer::MultiplexerMessage fill;  // routed nowhere: fills the connection, answered by nobody
   fill.set_type(multiplexer::types::TEST_UNROUTED);
   fill.set_sender(client.instance_id());
-  fill.set_message(chunk);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
+  for (int index = 0; index < Fill::COUNT; ++index) {
     fill.set_id(client.random64());
+    fill.set_message(payloads[index]);
     client.schedule_one(fill, to_going, 30);
   }
   std::thread killer([&freeze, &going] {
@@ -3551,12 +3688,12 @@ TEST(ThreadedClient, EveryMessageIsDeliveredOrReportedAtShutdown) {
     }
   });
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   {
     Freeze freeze(mx);
     frozen = &freeze;
-    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-      multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk);
+    for (int index = 0; index < Fill::COUNT; ++index) {
+      multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
       sent.insert(msg.id());
       client.send(msg);
     }
@@ -3653,10 +3790,10 @@ TEST(ThreadedClient, AMessagesCallbackHearsHowItEnded) {
     std::lock_guard<std::mutex> lock(mutex);
     EXPECT_EQ(std::vector<unsigned int>({1, 1}), heard) << "each once, by the time flush_all() returned";
   }
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk));
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
   }
   client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "left"), multiplexer::LanePtr(), record);
   client.shutdown(0);
@@ -3675,10 +3812,10 @@ TEST(ThreadedClient, AFlushingSendThatWroteNothingSaysWhy) {
   std::promise<std::pair<unsigned int, bool>> ended;  // before the client, which settles it as it shuts down
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, chunk));
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
   }
   bool not_connected = true;
   const multiplexer::MultiplexerMessage late = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "late");
@@ -3794,10 +3931,11 @@ static void expect_shutdown_writes_what_was_sent(bool threaded) {
   threaded_client.set_drop_observer([&reported](std::uint64_t, multiplexer::DropReason) { ++reported; });
   sync_client.client.set_drop_observer([&reported](std::uint64_t, multiplexer::DropReason) { ++reported; });
   ASSERT_TRUE(threaded_client.connect("127.0.0.1", mx.port, 5));
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    const multiplexer::MultiplexerMessage msg = sync_client.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0);
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    const multiplexer::MultiplexerMessage msg =
+        sync_client.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0);
     sent.insert(msg.id());
     if (threaded) {
       threaded_client.send(msg);
@@ -3833,10 +3971,10 @@ TEST(Client, AMessageThatWaitedForRoomPastItsTimeoutIsReported) {
   Peer sender(mx.port, multiplexer::peers::WEBSITE);
   sender.client.set_drop_observer(
       [&heard](std::uint64_t id, multiplexer::DropReason reason) { heard.emplace_back(id, reason); });
-  const std::string chunk(16 * 1024, 'x');
+  const Fill fill(16 * 1024);
   Freeze freeze(mx);
-  for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, chunk, 0));
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0));
   }
   const multiplexer::MultiplexerMessage late = sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0);
   sender.client.schedule_one(late, 0.3f);

@@ -9,7 +9,13 @@
 // message given no connection goes to one with room, round robin, or, with
 // every one full, waits on the one with the least waiting. With no
 // connection live, it is held, in order, behind whatever was held before
-// it, until one comes up (_place_held). A message waits `timeout` seconds
+// it, until one comes up (_place_held). A send to ALL gives every live
+// connection its copy, and the connection of each multiplexer whose first
+// connection is still on its way one in its backlog, which the welcome
+// lets in (after_connection_registration): what is sent to ALL just after
+// the start reaches every multiplexer, not only those whose handshakes
+// ended first; with none live, it is held whole, and those copies are made
+// when the first comes up. A message waits `timeout` seconds
 // at most: one timer runs to the earliest deadline, and what still waits
 // then is dropped, its tracker reading LOST, and reported. A message with
 // no time to wait, a timeout of 0 or NaN or a deadline already past, goes
@@ -396,6 +402,27 @@ bool BasicClient::_place_now(const std::shared_ptr<const RawMessage>& raw, bool 
       placed = true;
       if (trackers) {
         trackers->push_back(copy);
+      }
+    }
+    // A multiplexer whose first connection is still on its way gets its
+    // copy too, in that connection's backlog until the welcome lets it in:
+    // what is sent to ALL just after the start reaches every multiplexer,
+    // not only those whose handshakes ended first. With none registered,
+    // the message is held whole, and these copies are made when the first
+    // comes up (_place_held); a message with no time to wait for one gets
+    // none.
+    if (placed && deadline > std::chrono::steady_clock::now()) {
+      for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin();
+           entry != connection_by_target_.end(); ++entry) {
+        Connection::pointer conn = entry->second.lock();
+        if (!conn || !conn->living() || conn->registered() || first_connection_over_.count(entry->first)) {
+          continue;
+        }
+        BasicScheduledMessageTracker copy =
+            _place_on(conn, raw, BasicScheduledMessageTracker(), number, deadline, /*copy=*/true, LanePtr());
+        if (trackers && copy) {
+          trackers->push_back(copy);
+        }
       }
     }
     return placed;
@@ -1039,7 +1066,10 @@ void BasicClient::_drop_expired(const WaitingPtr& waiting) {
   waiting->over = true;
   --outbox.waiting;
   _wait_flushes(waiting->number, -1);
-  report_drop(waiting->raw, held ? DropReason::NO_CONNECTION : DropReason::NO_ROOM);
+  // One that waited on a connection not registered yet waited for that
+  // connection, not for room on it.
+  Connection::pointer on = backlog ? backlog->connection.lock() : Connection::pointer();
+  report_drop(waiting->raw, held || (on && !on->registered()) ? DropReason::NO_CONNECTION : DropReason::NO_ROOM);
   if (waiting->state && *waiting->state == SendState::QUEUED) {
     *waiting->state = SendState::LOST;
     if (waiting->state.use_count() > 1) {

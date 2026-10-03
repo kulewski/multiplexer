@@ -102,8 +102,9 @@ client.shutdown();
 - `connect(host, port, timeout = 10)` connects, performs the handshake and
   returns a `ConnectionWrapper`. `host` is an address or a name; a name is
   resolved inside the library, on every attempt, and each address it has
-  is tried in turn, so a multiplexer that moved is found at the next
-  reconnect. It does not throw when the multiplexer is unreachable or the
+  is tried in turn, for 5 s at most (`CONNECT_ATTEMPT_SECONDS`), so that
+  one that drops the attempt holds up the others no longer, and a
+  multiplexer that moved is found at the next reconnect. It does not throw when the multiplexer is unreachable or the
   name does not resolve yet; the connection is retried every 3 s while the
   library runs. A multiplexer the client has a connection to, live or on
   its way, keeps it: connecting to it again returns that connection.
@@ -161,7 +162,8 @@ client.shutdown();
   timeout, done)` send an event the way every client sends,
   `ThreadedClient`'s `send(msg)` included, and return at once: the event is
   queued on one live connection, round robin or the lane's, or on every one,
-  waits for room on a full connection, or, with no connection live, is held
+  a multiplexer whose first connection is still in its handshake getting its
+  copy at the welcome, waits for room on a full connection, or, with no connection live, is held
   until one comes up, `timeout` seconds at most each way, and is written as
   a later call runs the loop. A connection that dies with it unwritten hands
   it, with the rest it had not written, in order, to one other, or has it
@@ -650,7 +652,9 @@ client.shutdown();
   a connection comes up or has room, for 10 seconds at most, and is dropped
   and reported after that (see [Messages the library gives up
   on](#messages-the-library-gives-up-on)): `send_all` gives every live
-  connection its copy, a full one as soon as it has room, and a lane waits
+  connection its copy, a full one as soon as it has room, and a multiplexer
+  whose first connection is still in its handshake one at its welcome, so
+  that a send just after the start misses none, and a lane waits
   for room on its own connection while that lives. The io thread takes
   sends and queries in the order they were made, from a queue of its own
   that has no bound, so a program that sends faster than the io thread
@@ -874,6 +878,16 @@ waiting for them. A `pthread_atfork` child handler in `lib/fork.h` bumps a
 fork generation that every client and lane compares with the one it was
 created under; one load per call, nothing when nobody forks. Create
 clients after forking.
+
+**Exec.** Every socket the clients and the multiplexer open is closed on
+exec: a program the process runs, by `system()`, `posix_spawn()` or an
+exec after a fork, holds none of the connections, which would otherwise
+stay open after the client closed them or its process died, the
+multiplexer routing to the silent copy until the heartbeats dropped it.
+A client's socket is created so; the multiplexer's are marked right after
+asio opens or accepts them, which a program embedding the server and
+running a program from another thread at that instant could still hand
+on.
 
 **What a forked child can still wait on.** The child of a process with
 threads has only the thread that forked; a lock another thread held at

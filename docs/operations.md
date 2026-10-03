@@ -419,7 +419,8 @@ library, which makes a liveness check possible from any client.
 ### Who is connected
 
 `run_multiplexer --peers-file PATH` keeps a file with one line per connected
-peer, `<instance id> <peer type name> <peer type>`, rewritten atomically
+peer, `<instance id> <peer type name> <peer type>`, written at start,
+empty, whatever a process that died left there, and rewritten atomically
 (written next to it, then renamed) after a registration or a departure:
 at once, unless it was written less than 10 ms before, and then once
 when those 10 ms are up, for every change meanwhile, so that peers

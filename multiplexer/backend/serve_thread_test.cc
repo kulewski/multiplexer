@@ -11,17 +11,27 @@
 // OperationTimedOut ends serve_forever() when on_handler_exception() says
 // so, as any exception does. A reply given as a whole MultiplexerMessage
 // gets its empty fields from the request it answers, and message fields
-// beside one are refused.
+// beside one are refused. A DELIVERY_ERROR for an event of its own is kept
+// quietly, not logged as an unknown meta-packet. The replies to requests a
+// connection brought that died before they were handled all go through one
+// new connection once its multiplexer is back, which the multiplexer
+// registers once, where each reply opened a connection of its own to the
+// address and closed the one before.
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -365,7 +375,110 @@ std::shared_ptr<multiplexer::MultiplexerMessage> reply_to(multiplexer::Client& c
   return nullptr;
 }
 
+// A backend that, for every request, sends an event nobody takes, whose
+// rule reports delivery errors, and then the reply.
+class Publishing : public BaseMultiplexerServer {
+ public:
+  explicit Publishing(const MultiplexerAddresses& addresses)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::atomic<bool> serving{false};
+  std::atomic<bool> leave{false};
+
+ protected:
+  void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
+    send_message(mx::util::kwargs::Kwargs()
+                     .set("message", std::string("nobody"))
+                     .set("type", static_cast<std::uint32_t>(multiplexer::types::TEST_EVENT))
+                     .set("to", std::uint64_t(0))
+                     .set("references", std::uint64_t(0)));
+    send_message(mx::util::kwargs::Kwargs()
+                     .set("message", "re: " + mxmsg.message())
+                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+  }
+  void periodic_task() override {
+    serving = true;
+    if (leave.load()) {
+      working = false;
+    }
+  }
+};
+
+// Descriptor 2, which everything in this process logs to, goes to a file
+// while it lives; text() is what was logged meanwhile.
+class StderrToFile {
+ public:
+  StderrToFile() : path_(std::string(std::getenv("TEST_TMPDIR") ? std::getenv("TEST_TMPDIR") : "/tmp") + "/stderr") {
+    std::fflush(stderr);
+    saved_ = ::dup(2);
+    std::FILE* file = std::fopen(path_.c_str(), "w");
+    ::dup2(::fileno(file), 2);
+    std::fclose(file);
+  }
+  ~StderrToFile() { restore(); }
+  std::string text() {
+    restore();
+    std::ifstream in(path_);
+    std::stringstream read;
+    read << in.rdbuf();
+    return read.str();
+  }
+
+ private:
+  void restore() {
+    if (saved_ >= 0) {
+      std::fflush(stderr);
+      ::dup2(saved_, 2);
+      ::close(saved_);
+      saved_ = -1;
+    }
+  }
+  std::string path_;
+  int saved_ = -1;
+};
+
+// The number of times `text` holds `part`.
+int count(const std::string& text, const std::string& part) {
+  int found = 0;
+  for (std::size_t at = text.find(part); at != std::string::npos; at = text.find(part, at + 1)) {
+    ++found;
+  }
+  return found;
+}
+
 }  // namespace
+
+// A plain server keeps a DELIVERY_ERROR for a message of its own to
+// itself, quietly: an event of its, whose rule reports delivery errors,
+// sent where nobody takes it, came back as an "unknown meta-packet" logged
+// at ERROR, and a WARNING that nothing answered it, every time; the
+// threaded server hands it to handle_message(), as documented. Ordered,
+// not timed: the event goes out before the reply, so the server takes its
+// DELIVERY_ERROR before a second request sent once that reply came back.
+TEST(ServeThread, ADeliveryErrorForAMessageOfItsOwnIsKeptQuietly) {
+  InProcessMultiplexer mx;
+  MultiplexerAddresses addresses;
+  addresses.push_back(std::make_pair("127.0.0.1", mx.port));
+  StderrToFile logged;
+  {
+    Publishing backend(addresses);
+    std::thread serving([&backend] { backend.serve_forever(0.05f); });
+    for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    multiplexer::Client client(multiplexer::peers::WEBSITE);
+    ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+    for (const char* payload : {"one", "two"}) {
+      std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, request(client, payload));
+      ASSERT_TRUE(answer) << "no answer";
+      EXPECT_EQ(std::string("re: ") + payload, answer->message());
+    }
+    backend.leave = true;
+    serving.join();
+  }
+  const std::string text = logged.text();
+  EXPECT_EQ(0, count(text, "unknown meta-packet")) << "logged as an unknown meta-packet";
+  EXPECT_EQ(0, count(text, "w/o any response")) << "logged as not answered";
+}
 
 // A PING is answered with its payload echoed. One whose echo, a
 // `references` field longer, would be over MAX_MESSAGE_SIZE threw where the
@@ -1195,4 +1308,157 @@ TEST(ServeThread, AHandlersOwnTimeoutEndsServeForeverWhenAskedTo) {
   }
   EXPECT_TRUE(ended) << "the handler's OperationTimedOut did not end serve_forever()";
   EXPECT_THROW(served.get(), multiplexer::Client::OperationTimedOut);
+}
+
+namespace {
+
+// Holds its first request until release(), then answers every request the
+// default way, through the connection it came on, and leaves once asked.
+// Notes its live connections at every turn of its loop, on the serving
+// thread, where its client may be asked.
+class HoldingBackend : public BaseMultiplexerServer {
+ public:
+  explicit HoldingBackend(const MultiplexerAddresses& addresses)
+      : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::uint64_t instance_id() const { return conn->instance_id(); }
+  std::atomic<bool> leave{false};
+  std::atomic<int> turns{0};                 // periodic_task() calls so far
+  std::atomic<unsigned int> connections{0};  // live connections at the last of them
+  // Whether the first request is being handled, once it is, 30 s at most.
+  bool holding() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return changed_.wait_for(lock, std::chrono::seconds(30), [this] { return holding_; });
+  }
+  // Lets the first request's handler go on.
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    changed_.notify_all();
+  }
+
+ protected:
+  // Waits for the release on the first request, 60 s at most, a failure
+  // detector's bound; answers each.
+  void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (!holding_) {
+        holding_ = true;
+        changed_.notify_all();
+        changed_.wait_for(lock, std::chrono::seconds(60), [this] { return released_; });
+      }
+    }
+    send_message(mx::util::kwargs::Kwargs()
+                     .set("message", "re: " + mxmsg.message())
+                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+  }
+  void periodic_task() override {
+    connections = conn->connections_count();
+    ++turns;
+    if (leave.load()) {
+      working = false;
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool holding_ = false;
+  bool released_ = false;
+};
+
+// Whether the multiplexer has written out what `client` sent before, to the
+// peers it routed it to: a PING the client sends itself, routed after it,
+// came back within 30 s, a failure detector's bound. The multiplexer
+// handles a connection's frames one at a time, and writes a frame to a
+// receiver's socket that has room before it handles the next one from the
+// same connection, so what came before the PING reaches its receivers
+// whatever becomes of the multiplexer afterwards.
+bool written_out(multiplexer::Client& client) {
+  multiplexer::MultiplexerMessage ping;
+  ping.set_id(client.random64());
+  ping.set_sender(client.instance_id());
+  ping.set_to(client.instance_id());
+  ping.set_type(multiplexer::types::PING);
+  ping.set_message("written out?");
+  client.flush(client.schedule_one(ping), 5);
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (std::chrono::steady_clock::now() < deadline) {
+    try {
+      if (client.receive_message(1).first->id() == ping.id()) {
+        return true;
+      }
+    } catch (const multiplexer::Client::OperationTimedOut&) {
+    }
+  }
+  return false;
+}
+
+// The messages of `sent` that a reply `client` reads references, once each
+// has one or 30 s passed, a failure detector's bound.
+std::set<std::uint64_t> answered(multiplexer::Client& client, const std::set<std::uint64_t>& sent) {
+  std::set<std::uint64_t> got;
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (got.size() < sent.size() && std::chrono::steady_clock::now() < deadline) {
+    try {
+      const std::shared_ptr<multiplexer::MultiplexerMessage> reply = client.receive_message(1).first;
+      if (sent.count(reply->references())) {
+        got.insert(reply->references());
+      }
+    } catch (const multiplexer::Client::OperationTimedOut&) {
+    }
+  }
+  return got;
+}
+
+}  // namespace
+
+// Requests a connection brought, still to handle when their multiplexer was
+// stopped and started again: their replies all go through one new
+// connection, which the multiplexer registers once, as for the Python class
+// (server_replies_test.py). Each reply opened a connection of its own to
+// the old address and closed the one before: a registration per reply.
+// Counted, not timed: the requests are in the backend's socket before the
+// stop (written_out), and the multiplexer logs its registrations.
+TEST(ServeThread, RepliesToWhatADeadConnectionBroughtTakeOneNewConnection) {
+  const int held = 5;  // requests a connection brought that died before they were handled
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  HoldingBackend backend({{"127.0.0.1", port}});
+  backend.connect();
+  // Served on a thread of its own until the test ends, however it ends.
+  struct Served {
+    HoldingBackend& backend;
+    std::thread thread;
+    ~Served() {
+      backend.release();
+      backend.leave = true;
+      thread.join();
+    }
+  } served{backend, std::thread([&backend] { backend.serve_forever(0.05f); })};
+  multiplexer::Client requester(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(requester.connect("127.0.0.1", port, 5));
+  std::set<std::uint64_t> sent{request(requester, "request 0")};
+  ASSERT_TRUE(backend.holding()) << "the backend took up the first request";
+  for (int index = 1; index < held; ++index) {
+    sent.insert(request(requester, "request " + std::to_string(index)));
+  }
+  ASSERT_TRUE(written_out(requester)) << "the PING the requester sent itself did not come back";
+  StderrToFile logged;  // what the multiplexer says once started again
+  mx.reset();
+  mx.reset(new InProcessMultiplexer(port));
+  requester.disconnect("127.0.0.1", port);  // back at once, where its reconnect comes 3 s on
+  ASSERT_TRUE(requester.connect("127.0.0.1", port, 5));
+  backend.release();
+  EXPECT_EQ(sent, answered(requester, sent));
+  const int turns = backend.turns.load();
+  for (int waited = 0; waited < 3000 && backend.turns.load() <= turns; ++waited) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));  // a turn after the replies, 30 s at most
+  }
+  EXPECT_EQ(1u, backend.connections.load()) << "the backend's live connections";
+  const std::string text = logged.text();
+  const std::string registered = "registered connection id=" + std::to_string(backend.instance_id()) + " ";
+  EXPECT_EQ(1, count(text, registered) - count(text, "un" + registered))
+      << "the backend's connections the multiplexer registered since its restart:\n"
+      << text;
 }

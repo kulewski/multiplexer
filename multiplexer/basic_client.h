@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -163,6 +164,12 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
     BasicClientTraits::Endpoint expected_endpoint;
     std::vector<BasicClientTraits::Endpoint> candidates;
     std::size_t next_candidate = 0;
+    // The TCP connect to expected_endpoint is under way, and its deadline,
+    // CONNECT_ATTEMPT_SECONDS, which cancels it: past it the connect is a
+    // failure, `connect_timed_out` says why (see _try_next_candidate).
+    bool connecting = false;
+    bool connect_timed_out = false;
+    std::shared_ptr<asio::steady_timer> connect_deadline;
     // The client's routing (see BasicClient::set_routing) as versions: the
     // one this connection's welcome carried, and the last one the
     // multiplexer confirmed, by its own welcome or by the PEER_STATUS
@@ -629,6 +636,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if (data.routing_in_welcome != routing_version_) {
       _send_routing(conn);
     }
+    first_connection_over_.insert(data.target);
     // The queue took one until now: what waited on this connection for
     // room moves in under the peer type's size, ahead of what waited for
     // any connection, as no room event comes but for a queue that was full.
@@ -807,7 +815,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
   // How every client sends a message: ONE way, round robin or through
   // `lane` (its connection while that lives; a lane not pinned takes the
-  // one chosen when it has none or lost its own), or to ALL. Returns at
+  // one chosen when it has none or lost its own), or to ALL: every live
+  // connection, and each still on its target's first way, whose copy the
+  // welcome lets in (see _place_now in outbox.cc). Returns at
   // once: the message goes into a connection's queue, or its backlog when
   // the connection is full (schedule_on, schedule_one, schedule_all), or,
   // with no connection live or others already waiting for one, it is held
@@ -993,6 +1003,13 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // shutdown() cancels, as disconnect() does its target's.
   ConnectionByTarget connection_by_target_;
   ReconnectTimers reconnect_timers_;
+  // The targets whose first connection is over: it came up, or it ended
+  // before it did. A send to ALL gives a copy to the connection of every
+  // other target on the way (_place_now), which the welcome lets in, so
+  // that one made just after the start reaches every multiplexer, not
+  // only those whose handshakes ended first. disconnect() forgets a
+  // target, and a later connect() is a first connection again.
+  std::set<Target> first_connection_over_;
   std::vector<Connection::weak_pointer> closing_;  // reading to their end; see connection_destroyed()
   // Every connection made that still exists: one shut down lives on until
   // its last handler ran, and bind_to_current_thread() takes it along.

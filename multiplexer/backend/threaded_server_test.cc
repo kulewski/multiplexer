@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
-#include <fstream>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -33,6 +32,8 @@ using multiplexer::ThreadedClient;
 using multiplexer::backend::BaseThreadedMultiplexerServer;
 using multiplexer::backend::RequestPtr;
 using multiplexer::backend::ThreadedServerOptions;
+using multiplexer::testing::FILL_FRAMES;
+using multiplexer::testing::fill_size;
 using multiplexer::testing::InProcessMultiplexer;
 
 namespace {
@@ -359,20 +360,6 @@ struct Freeze {
   std::promise<void> released;
   bool done = false;
 };
-
-// More bytes than a frozen multiplexer's connection takes in: twice what
-// the two sockets may buffer, the largest the kernel allows each, within
-// what one message may carry.
-std::size_t bytes_to_fill() {
-  std::size_t buffers = 0;
-  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
-    std::ifstream limits(path);
-    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
-    limits >> least >> initial >> largest;
-    buffers += largest;
-  }
-  return std::min<std::size_t>(2 * buffers, multiplexer::MAX_MESSAGE_SIZE / 2);
-}
 
 }  // namespace
 
@@ -825,6 +812,9 @@ TEST(ThreadedServer, ASecondCloseWaitsForTheFirst) {
 // A message that answers another, one with `references`, arriving while
 // the server leaves is dropped, not refused: nobody retries a reply, and
 // refusing one could start a loop with a peer that answers the refusal.
+// Ordered, not timed: the reply and a request behind it go out on the one
+// connection, and the server takes both in order on its io thread, so a
+// refusal of the reply would come back before the request's.
 TEST(ThreadedServer, AReplyArrivingWhileLeavingIsDroppedNotRefused) {
   InProcessMultiplexer mx;
   Served served(mx.port);
@@ -837,10 +827,18 @@ TEST(ThreadedServer, AReplyArrivingWhileLeavingIsDroppedNotRefused) {
   multiplexer::MultiplexerMessage reply = requester.message("an answer", multiplexer::types::PYTHON_TEST_RESPONSE);
   reply.set_to(server.instance_id());
   reply.set_references(requester.client.random64());
-  EXPECT_THROW(requester.answer_to(reply, 1), multiplexer::Client::OperationTimedOut) << "dropped: nothing back";
   multiplexer::MultiplexerMessage late = requester.message("late", multiplexer::types::PYTHON_TEST_REQUEST);
   late.set_to(server.instance_id());
-  EXPECT_EQ(multiplexer::types::DELIVERY_ERROR, requester.answer_to(late, 5)) << "a request is still refused";
+  requester.client.schedule_one(reply);
+  requester.client.flush(requester.client.schedule_one(late), 5);
+  for (;;) {
+    multiplexer::IncomingMessage got = requester.client.read_raw_message(10);
+    ASSERT_NE(reply.id(), got.third->references()) << "the reply was answered, refused rather than dropped";
+    if (got.third->references() == late.id()) {
+      EXPECT_EQ(multiplexer::types::DELIVERY_ERROR, got.third->type()) << "a request is still refused";
+      break;
+    }
+  }
   server.release();
   closing.join();
   EXPECT_EQ(2u, server.dropped());
@@ -1028,11 +1026,11 @@ TEST(ThreadedServer, CloseFromAnotherThreadReturnsFromServeForever) {
 // A reply still being written when close() begins reaches the requester:
 // close() writes out what was sent before it, `timeout` seconds at most,
 // and only then shuts the sockets. The multiplexer is frozen while the
-// reply, more than the two sockets between them hold, is sent and close()
-// begins, and reads again once the client's shutdown is under way: the
-// reply arrives after close() began, where a close that shut the sockets
-// at once cut it off. A short reply is written before close() gets there,
-// and passes either way.
+// reply, behind more than the two sockets between them hold, events nobody
+// takes, is sent and close() begins, and reads again once the client's
+// shutdown is under way: the reply arrives after close() began, where a
+// close that shut the sockets at once cut it off. A reply with nothing
+// before it is written before close() gets there, and passes either way.
 TEST(ThreadedServer, TheLastReplyIsWrittenBeforeTheClose) {
   InProcessMultiplexer mx;
   Served served(mx.port);
@@ -1041,7 +1039,11 @@ TEST(ThreadedServer, TheLastReplyIsWrittenBeforeTheClose) {
   requester.client.flush(requester.client.schedule_one(request), 5);
   ASSERT_TRUE(eventually([&] { return served.server.kept_request() != nullptr; }));
   Freeze frozen(mx);
-  served.server.kept_request()->reply(std::string(bytes_to_fill(), 'r'), multiplexer::types::PYTHON_TEST_RESPONSE);
+  const std::string filler(fill_size(), 'f');
+  for (int index = 0; index < FILL_FRAMES; ++index) {  // more than the sockets hold, ahead of the reply
+    served.server.client().send(served.server.client().new_message(multiplexer::types::TEST_UNROUTED, filler));
+  }
+  served.server.kept_request()->reply(std::string(1024, 'r'), multiplexer::types::PYTHON_TEST_RESPONSE);
   EXPECT_FALSE(served.server.client().flush_all(0)) << "the reply written at once: nothing left for close()";
   std::thread closing([&served] { served.server.close(60); });  // a write-out deadline only a failure reaches
   // The client's shutdown under way: its calls throw from then on.

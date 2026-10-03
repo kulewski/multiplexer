@@ -564,8 +564,10 @@ backends; it costs one copy per multiplexer on every link.
             steps=[
                 Step(
                     "One copy per connection",
-                    "The client queues the message on every live connection, or, with "
-                    "none live, holds it whole for the first to come up. C++ `queue_all()` "
+                    "The client queues the message on every live connection, and on each "
+                    "one still in its first handshake, which lets it in at the welcome; "
+                    "with none live, it holds the message whole for the first to come up "
+                    "and copies it then to those still on their first way. C++ `queue_all()` "
                     "returns the first copy's tracker; a Python send returns the message "
                     "id, and with `flush=True` waits until one copy is written, in every "
                     "client; `flush_all()` waits for every copy.",

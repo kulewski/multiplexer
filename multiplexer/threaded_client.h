@@ -203,7 +203,9 @@ class ThreadedClient : public ExceptionDefinitions {
   // before it, for a connection to come up, or, when the connections'
   // queues are full, for room, within DEFAULT_TIMEOUT, and is dropped and
   // reported after that (set_drop_observer); send_all() gives every live
-  // connection its copy, a full one as soon as it has room. With a lane,
+  // connection its copy, a full one as soon as it has room, and a
+  // multiplexer whose first connection is still in its handshake one at
+  // its welcome. With a lane,
   // on the lane's connection, which takes the connection chosen when it
   // has none or lost its own, and waits for room on its own while that
   // lives. Through a pinned lane already closed() it throws NotConnected,

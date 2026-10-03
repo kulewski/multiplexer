@@ -127,7 +127,10 @@ class BaseMultiplexerServer {
   // Called with every message that is not the protocol's own. Reply with
   // send_message(); for a message that needs no reply call no_response(),
   // otherwise the missing reply is logged as a warning. While it runs,
-  // last_mxmsg and last_connwrap are the message and its connection.
+  // last_mxmsg and last_connwrap are the message and its connection. A
+  // DELIVERY_ERROR for a message of this server's, an event whose rule
+  // reports delivery errors say, the class keeps to itself, logged at
+  // DEBUG; BaseThreadedMultiplexerServer passes it to its handler.
   virtual void handle_message(MultiplexerMessage&) = 0;
 
   // Called after every iteration of serve_forever(), message or not, so at

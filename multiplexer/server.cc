@@ -3,6 +3,7 @@
 // translation unit so it inlines the way it did as header code.
 #include "multiplexer/server.h"
 
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -30,6 +31,20 @@ namespace multiplexer {
 
 using mx::repr;
 
+namespace {
+// Closed on exec: a program the process runs, which inherits every other
+// descriptor, does not hold the socket, nor keep a connection open after
+// the multiplexer closed it. asio opens and accepts with no flag for it,
+// so it is set right after; an embedding program's thread that forks and
+// runs a program in between still hands it on.
+void close_on_exec(int descriptor) {
+  const int flags = ::fcntl(descriptor, F_GETFD);
+  if (flags != -1) {
+    ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC);
+  }
+}
+}  // namespace
+
 // `host` must be an IP address; names are not resolved. Port 0 lets the
 // system choose, see local_port().
 Server::Server(asio::io_service& io_service, const std::string& host, unsigned short port)
@@ -42,9 +57,16 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
       peers_timer_(io_service),
       accept_timer_(io_service),
       drain_timer_(io_service),
-      drops_(io_service, "multiplexer.server") {}
+      drops_(io_service, "multiplexer.server") {
+  close_on_exec(acceptor_.native_handle());
+}
 
+// The peers file is written first, empty: a file a process that died
+// left listed its peers until the first arrival or departure here.
 void Server::start() {
+  if (!peers_file_.empty()) {
+    _write_peers_file();
+  }
   _start_accept();
   _arm_rules_check();
 }
@@ -239,6 +261,7 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
   if (!error) {
     // reading only, until the peer has introduced itself with
     // CONNECTION_WELCOME; routed traffic before that closes the connection
+    close_on_exec(new_connection->socket().native_handle());
     accepted_[new_connection.get()] = new_connection;
     keep_alive(new_connection->socket());
     new_connection->start_only_read();

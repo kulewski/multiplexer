@@ -45,7 +45,7 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--rules-check-interval S` | 2 | seconds between reads of the rules file, 0.01 at least, a shorter one refused as a malformed command line; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
 | `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on; `HOST` alone keeps port 1980 |
 | `--port-file PATH` | none | after binding, write `host:port` to this file, atomically |
-| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, rewritten atomically after a change, at most once every 10 ms |
+| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, written at start and rewritten atomically after a change, at most once every 10 ms |
 | `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording) |
 | `--record-payload-bytes N` | 0 (whole payloads) | keep only the first N bytes of each recorded payload |
 | `--recording-dir DIR` | off | let peers start and stop recording sessions over the protocol, written under `DIR`; see [recording on demand](operations.md#recording-on-demand-over-the-protocol) |

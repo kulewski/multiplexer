@@ -95,8 +95,10 @@ client = SyncClient([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_CL
 Named `Client` up to 2.3.1; `Client` is still the same class. Connects to
 every address, each with a 10 s timeout, and keeps the
 connections. A host is an address or a name; a name is resolved by the
-library on every attempt, each address it has tried in turn, so a
-multiplexer that moved is found at the next reconnect, and a name that
+library on every attempt, each address it has tried in turn, for 5 s at
+most (`CONNECT_ATTEMPT_SECONDS`), so that one that drops the attempt holds
+up the others no longer, and a multiplexer that moved is found at the
+next reconnect, and a name that
 does not resolve yet is retried like a port that refuses. A connection that
 fails or drops is retried every 3 s, but only while the library is running
 its loop, which for a client means inside calls. A call that waits, the
@@ -149,8 +151,10 @@ the time and their peer types are ordinary ones.
   every receiver drops a message without an id. Message fields beside a
   whole message, `type=`, `to=` and the like, are a `TypeError`.
   `multiplexer=SyncClient.ONE` uses one
-  connection; `SyncClient.ALL` uses every connection, in which case the
-  receivers drop the copies; a `ConnectionWrapper` from an earlier reply
+  connection; `SyncClient.ALL` uses every connection, a multiplexer whose
+  first connection is still in its handshake included, its copy going in
+  at the welcome, so that what is sent just after the start reaches every
+  multiplexer, and the receivers drop the copies; a `ConnectionWrapper` from an earlier reply
   prefers that connection, and a `Lane` from `lane()` keeps a stream on one,
   see below. Without `flush` the call returns at once: the message is
   queued, or waits for room on a full connection (1024 queued), or, with no
@@ -568,9 +572,15 @@ it; the drain file needs neither. The [FAQ](faq.md) has the details. A
 process with non-daemon threads still needs its own exit after
 `serve_forever()` returns.
 
-`stall_seconds` arms `faulthandler.dump_traceback_later` around every
-iteration: an iteration that takes longer dumps every thread's stack to
-`stall_file` or stderr, which finds a handler that hangs.
+`stall_seconds` arms `faulthandler.dump_traceback_later` around the
+handling of every message and the `periodic_task()` after it, the poll's
+wait apart: when they take longer, every thread's stack goes to
+`stall_file` or stderr, which finds a handler that hangs. The watchdog is
+cancelled however they end, an exception included. It is faulthandler's,
+one per process, which dumps even while a call in C holds the interpreter:
+`serve_forever()` replaces one armed elsewhere, pytest's
+`faulthandler_timeout` among them, and two backends that watch in one
+process at once replace each other's.
 
 `MultiplexerServer` is a `BaseMultiplexerServer`, built the same way, that
 unpickles the payload, calls `process_pickle(data)`, and replies with its
@@ -768,8 +778,9 @@ on](#messages-the-library-gives-up-on).
   (1024 messages each), waits there, behind those sent before it, until a
   connection comes up or has room, within `timeout`, and is dropped and
   reported after that: with `ALL` a full connection gets its copy as soon
-  as it has room, and a lane waits for room on its own connection while
-  that lives. The io thread takes sends and queries in the order they
+  as it has room, and a multiplexer whose first connection is still in its
+  handshake at its welcome, and a lane waits for room on its own
+  connection while that lives. The io thread takes sends and queries in the order they
   were made, from a queue of its own that has no bound, so a program that
   sends faster than the io thread places what it sends holds the
   difference in memory; `timeout` counts from the call, and a message the
@@ -1181,6 +1192,12 @@ thread holds the old one; `AsyncClient.holder()` does both. The detection
 is a fork generation counter maintained by a `pthread_atfork` handler, so
 it covers forks the library never saw; a call pays one load for it, and
 nothing else runs when nobody forks.
+
+**Exec.** Every socket a client opens is closed on exec: a program the
+process runs, by `subprocess`, `os.system()` or an exec after a fork,
+holds none of the connections, which would otherwise stay open after the
+client closed them or the process died, the multiplexer routing to the
+silent copy until the heartbeats dropped it.
 
 **What a forked child can still wait on.** The child of a process with
 threads has only the thread that forked; a lock another thread held at

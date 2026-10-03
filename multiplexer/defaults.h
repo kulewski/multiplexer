@@ -20,6 +20,11 @@ static const unsigned int DEFAULT_INCOMING_QUEUE_MAX_SIZE = 1024;
 static const unsigned int FORCED_FRAMES_PAST_FULL_QUEUE = 64;
 // Seconds between a connection dropping and the library reconnecting.
 static const unsigned int AUTO_RECONNECT_TIME = 3;
+// Seconds a client gives the TCP connect to one address before it tries
+// the next its target resolved to, or ends the attempt: an address that
+// drops the SYNs held the attempt for the kernel's own timeout, two
+// minutes on Linux.
+static const float CONNECT_ATTEMPT_SECONDS = 5.0;
 // Seconds for connect, flush, and each stage of a query.
 static const float DEFAULT_TIMEOUT = 10.0;
 // Seconds a message a synchronous flushing send placed waits for room, or

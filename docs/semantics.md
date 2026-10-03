@@ -346,6 +346,7 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `ROOM_GRACE_SECONDS` | 0.01 s | how much longer than its synchronous flushing send a message waits for room or for a connection, so that the send times out before its message is dropped |
 | `DEFAULT_READ_TIMEOUT` | none | `receive_message` waits forever by default |
 | `AUTO_RECONNECT_TIME` | 3 s | between a connection dropping and the library reconnecting |
+| `CONNECT_ATTEMPT_SECONDS` | 5 s | the TCP connect to one address, before the library tries the next the name resolved to, or ends the attempt |
 | `HEARTBIT_INTERVAL` | 3 s | between heartbeats on an idle connection |
 | `CLOSE_FLUSH_SECONDS` | 1 s | every `shutdown()` and `close()`: how long what was sent before it is written before the connections close; the `timeout=` default |
 | `CLOSE_READ_SECONDS` | 1 s | a client's `shutdown()`: how long a connection reads on, waiting for its multiplexer to close its side |

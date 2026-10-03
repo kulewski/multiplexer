@@ -149,9 +149,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void stop_recording(const std::string& reason);
   bool recording() const { return recorder_ != nullptr; }
 
-  // --peers-file: rewritten atomically on every registration and
-  // unregistration, one line per connected peer: "<instance id> <peer type
-  // name> <peer type>". Empty, the default, writes nothing.
+  // --peers-file: written atomically at start(), and on every
+  // registration and unregistration, one line per connected peer:
+  // "<instance id> <peer type name> <peer type>". Empty, the default,
+  // writes nothing.
   void set_peers_file(const std::string& path) { peers_file_ = path; }
   // How many peer types the routing index holds: those some peer has
   // connected as, a type a rule only names never entering it. For tests;

@@ -36,6 +36,16 @@ struct SpanSet {
     return false;
   }
 
+  // Forgets the element the last insert() that returned true added: one
+  // its caller did not keep after all, whose next copy is new again. Only
+  // right after that insert; the oldest element it may have pushed out is
+  // not brought back.
+  void inline forget_last() {
+    DbgAssert(!queue_.empty());
+    set_.erase(queue_.back());
+    queue_.pop_back();
+  }
+
  private:
   InnerSetImpl set_;
   std::deque<T> queue_;

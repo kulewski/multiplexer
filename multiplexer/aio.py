@@ -365,8 +365,10 @@ class AsyncClient:
         """Send an event and return its message id, as every client sends
         (ThreadedClient.send_message): `message` is a MultiplexerMessage or
         a payload wrapped with the remaining kwargs, such as type= and to=;
-        on one connection, on every one with multiplexer=ALL, on a Lane's
-        connection, or on a ConnectionWrapper's while it is live and
+        on one connection, on every one with multiplexer=ALL, a multiplexer
+        whose first connection is still in its handshake getting its copy at
+        the welcome, on a Lane's connection, or on a ConnectionWrapper's
+        while it is live and
         another after. It returns once the io thread has the message, which
         it writes right after, or holds until a connection comes up or has
         room, within `timeout`, and drops and reports (on_drop) after that.
