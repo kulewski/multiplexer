@@ -24,9 +24,10 @@ int MxMain(int argc, char** argv) {
                  "multiplexer.rules file.\n";
     return 1;
   }
-  multiplexer::Config<std::multimap> config(argv[1]);
+  const std::string text = multiplexer::constants::read_rules(argv[1]);  // once, as mxcontrol does
+  const multiplexer::Config<std::multimap> config = multiplexer::Config<std::multimap>::from_text(text, argv[1]);
   multiplexer::constants::check_config(config);
-  multiplexer::constants::write_constants(config, argv[1], argv[2]);
+  multiplexer::constants::write_constants(config, argv[1], mx::fingerprint(text), argv[2]);
   return 0;
 }
 

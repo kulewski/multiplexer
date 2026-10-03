@@ -66,6 +66,15 @@ class Config {
 
   Config(const std::string& file) : initialized_(true), unknown_("UNKNOWN") { read_configuration(file); }
 
+  // The rules in `text`, a rules file's contents read already, alone, as
+  // a file gives them; `what` names them in the errors. Throws as
+  // read_configuration_text does.
+  static Config from_text(const std::string& text, const std::string& what) {
+    Config config(Unread{});
+    config.read_configuration_text(text, what);
+    return config;
+  }
+
   // Back to the built-in minimum.
   void clear() {
     *this = Config();
@@ -109,6 +118,12 @@ class Config {
 
   bool inline initialized() const { return initialized_; }
 
+ private:
+  // Nothing read: from_text's start, without the built-in minimum.
+  struct Unread {};
+  explicit Config(Unread) : initialized_(false), unknown_("UNKNOWN") {}
+
+ public:
   // make 4-argument map_template_ 2-argument
   template <typename Key, typename Data>
   struct map_template {

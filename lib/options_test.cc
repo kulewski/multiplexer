@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <sstream>
+
 using mx::options::Error;
 using mx::options::Options;
 
@@ -113,6 +116,28 @@ TEST(Options, Errors) {
   } catch (const Error& error) {
     EXPECT_EQ("the option '--type' is required but missing", std::string(error.what()));
   }
+}
+
+// An unsigned option refuses a negative number, which a stream reads as the
+// type's largest: --max-bytes -1 was no cap, a port of -1 was 65535. A
+// signed one takes it.
+TEST(Options, ANegativeNumberIsRefusedWhereNoneMayBe) {
+  unsigned type = 0;
+  std::uint16_t port = 0;
+  int count = 0;
+  Options options;
+  options.add("type", &type, "the type");
+  options.add("port", &port, "the port");
+  options.add("count", &count, 1, "N");
+  std::vector<std::string> negative_type = {"--type", "-1"};
+  EXPECT_THROW(options.parse(negative_type), Error);
+  std::vector<std::string> negative_port = {"--port", " -1"};
+  EXPECT_THROW(options.parse(negative_port), Error);
+  std::vector<std::string> negative_count = {"--count", "-1"};
+  EXPECT_NO_THROW(options.parse(negative_count));
+  EXPECT_EQ(-1, count);
+  EXPECT_THROW(mx::from_string<std::uint64_t>("-1"), std::invalid_argument);
+  EXPECT_EQ(7u, mx::from_string<std::uint64_t>("7"));
 }
 
 TEST(Options, Help) {

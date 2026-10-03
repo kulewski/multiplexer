@@ -193,6 +193,19 @@ def cpu_seconds(pid: int) -> float:
     return (utime + stime) / os.sysconf("SC_CLK_TCK")
 
 
+def write_calls(pid: int) -> int:
+    """The write syscalls the process has made so far, write() and its
+    kin, from /proc/<pid>/io (syscw): a socket's sendmsg(), which asio
+    sends with, is not one, a file's write() is. Raises OSError when the
+    process is gone or the kernel keeps no count, rather than read as
+    none."""
+    with open("/proc/%d/io" % pid) as counters:
+        for line in counters:
+            if line.startswith("syscw:"):
+                return int(line.split()[1])
+    raise OSError("no syscw in /proc/%d/io" % pid)
+
+
 def rss_kb(pid: int) -> int:
     """The process's resident set size in KiB, from /proc; 0 if it is gone."""
     try:
@@ -542,11 +555,23 @@ class Mx:
         assert self.proc is not None
         self.proc.send_signal(signal.SIGHUP)
 
-    def log_contains(self, text: str) -> bool:
-        """Whether the multiplexer's log holds `text` so far; with
-        wait_until, a way to wait for a line such as "rules reloaded"."""
+    def log_mark(self) -> int:
+        """Where the multiplexer's log ends now: a `since` for
+        log_contains(), taken before what should log a line."""
+        try:
+            return os.path.getsize(self.log_path)
+        except OSError:
+            return 0
+
+    def log_contains(self, text: str, since: int = 0) -> bool:
+        """Whether the multiplexer's log holds `text` so far, past `since`,
+        a log_mark(); with wait_until, a way to wait for a line such as
+        "rules reloaded". Without a mark the whole log counts, a line an
+        earlier step wrote too, so a wait for a line that may come again
+        takes one."""
         try:
             with open(self.log_path, "rb") as log:
+                log.seek(since)
                 return text.encode() in log.read()
         except OSError:
             return False
@@ -559,6 +584,14 @@ class Mx:
     def cpu_seconds(self) -> float:
         """CPU time the multiplexer process has used so far, in seconds."""
         return cpu_seconds(self.proc.pid) if self.proc else 0.0
+
+    def write_calls(self) -> int:
+        """The write syscalls the multiplexer process has made so far, see
+        write_calls(); OSError when it is not running."""
+        if not self.running:
+            raise OSError("multiplexer %d is not running" % self.index)
+        assert self.proc is not None
+        return write_calls(self.proc.pid)
 
     def connected_peers(self) -> list[tuple[int, str, int]]:
         """(instance id, peer type name, peer type) for every peer registered

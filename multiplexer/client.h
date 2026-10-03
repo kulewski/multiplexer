@@ -396,6 +396,8 @@ class Client : public ExceptionDefinitions {
   // dropped() counts them. See BasicClient::report_drop.
   void set_drop_observer(BasicClient::DropObserver observer) { basic_client_->set_drop_observer(observer); }
   std::uint64_t dropped() const { return basic_client_->dropped(); }
+  // See BasicClient::incoming_dropped().
+  std::uint64_t incoming_dropped() const { return basic_client_->incoming_dropped(); }
 
  protected:
   // The query algorithm, its stages and the one reader of what comes back

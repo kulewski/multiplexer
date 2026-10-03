@@ -4,6 +4,8 @@
 // a second one stops at once; SIGPIPE is ignored.
 #include "mxcontrol/start_multiplexer_server.h"
 
+#include <signal.h>  // sigaction
+
 #include <asio.hpp>
 #include <csignal>
 #include <cstdio>
@@ -64,6 +66,9 @@ void reload_on_signal(multiplexer::Server::pointer server, asio::signal_set& sig
   if (error || server->stopped()) {
     return;
   }
+  // The next wait first: nothing the reload does can leave SIGHUP unheard.
+  signals.async_wait(
+      [server, &signals](const asio::error_code& next_error, int) { reload_on_signal(server, signals, next_error); });
   std::string reload_error;
   switch (server->load_rules(&reload_error)) {
     case multiplexer::Server::RulesLoad::LOADED:
@@ -76,8 +81,20 @@ void reload_on_signal(multiplexer::Server::pointer server, asio::signal_set& sig
       MX_LOG(ERROR, LOWVERBOSITY, TEXT("received SIGHUP; the rules file is not in use: " + reload_error));
       break;
   }
-  signals.async_wait(
-      [server, &signals](const asio::error_code& next_error, int) { reload_on_signal(server, signals, next_error); });
+}
+
+// Adds `signal_number` to `signals`, its handler with SA_RESTART, so that a
+// signal arriving during a call that blocks, a write to stderr say,
+// restarts it rather than failing it with EINTR. Set with sigaction() on
+// the handler asio installed: asio's own signal_set::flags::restart is
+// newer than the asio Debian 12 and Ubuntu 22.04 ship.
+void add_restarting(asio::signal_set& signals, int signal_number) {
+  signals.add(signal_number);
+  struct sigaction action;
+  if (::sigaction(signal_number, nullptr, &action) == 0) {
+    action.sa_flags |= SA_RESTART;
+    ::sigaction(signal_number, &action, nullptr);
+  }
 }
 
 }  // namespace
@@ -121,10 +138,14 @@ int StartMultiplexerServer::run() {
   // The signals first, before anything a supervisor might react to: SIGTERM
   // and SIGINT shut the server down, so the process exits with 0; SIGHUP
   // reloads the rules, and must not end the process from the moment it
-  // exists (asio queues one that lands before run()).
-  asio::signal_set reload(io_service, SIGHUP);
+  // exists (asio queues one that lands before run()). Each with SA_RESTART
+  // (add_restarting).
+  asio::signal_set reload(io_service);
+  add_restarting(reload, SIGHUP);
   reload.async_wait([server, &reload](const asio::error_code& error, int) { reload_on_signal(server, reload, error); });
-  asio::signal_set signals(io_service, SIGINT, SIGTERM);
+  asio::signal_set signals(io_service);
+  add_restarting(signals, SIGINT);
+  add_restarting(signals, SIGTERM);
   const float drain_seconds = drain_seconds_ > 0 ? drain_seconds_ : 0;
   signals.async_wait([server, &signals, &reload, drain_seconds](const asio::error_code& error, int signal_number) {
     stop_on_signal(server, signals, reload, drain_seconds, error, signal_number);

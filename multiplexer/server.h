@@ -25,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -234,9 +235,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     _peers_changed();
   }
 
-  // A registered peer's connection ended; a tap it held ends with it.
+  // A registered peer's connection ended for routing; a tap it held ends
+  // with it. Its DISCONNECTED is recorded when the connection closes
+  // (connection_closed): after a failed write it reads on to the peer's
+  // end, delivering what it reads, whose records come before it.
   void connection_unregistered(Connection* conn) {
-    _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
+    departed_.insert(conn);
     _untap(conn);
     _peers_changed();
   }
@@ -479,6 +483,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // Every connection accepted and not yet ended, registered or not, for
   // stop(); keyed by address, which connection_closed() erases.
   std::map<const Connection*, Connection::weak_pointer> accepted_;
+  // Unregistered, their DISCONNECTED recorded when they close.
+  std::set<const Connection*> departed_;
   asio::steady_timer accept_timer_;
   // stop(): whether it ran, its deadline for the drain, its callback, and
   // what it dropped, said in its last line.

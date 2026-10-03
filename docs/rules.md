@@ -32,7 +32,12 @@ peer {
   ([below](#the-system-rules-above-99)); use any other number from 100 up.
 - `name`: the constant generated for it, so `peers.ECHO_BACKEND` in Python and
   `multiplexer::peers::ECHO_BACKEND` in C++. Unique among peer types. Rules
-  refer to peer types by this name.
+  refer to peer types by this name. It must be able to be a constant in
+  both languages as it is: letters, digits and underscores, a digit
+  neither first nor two underscores, no keyword of Python or C++, and none
+  of the names the generated code uses beside the constants, `idtoname`,
+  `get_name`, `t` and `default_`; `generate_constants` refuses a file with
+  another, naming it.
 - `comment`: optional, for the reader.
 - `queue_size`: how many messages the multiplexer will hold for one
   connection of this type before dropping new ones. Default 1024. A file
@@ -66,7 +71,8 @@ type {
   types. 1 to 99 belong to the protocol and 112 to 115 to the system rules
   ([below](#the-system-rules-above-99)); use any other number from 100 up.
 - `name`: the constant, `types.ECHO_REQUEST` in Python and
-  `multiplexer::types::ECHO_REQUEST` in C++. Unique among message types.
+  `multiplexer::types::ECHO_REQUEST` in C++. Unique among message types,
+  and a name a constant can have, as a peer type's.
 - `to`: zero or more routing rules, each applied to every message of the type.
   A message type with no rule, such as a reply, is only ever addressed
   directly through the `to` field of a message; one sent without `to` is

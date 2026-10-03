@@ -484,6 +484,21 @@ cc_test(
 )
 
 cc_test(
+    name = "disconnected_record_test",
+    size = "small",
+    srcs = ["disconnected_record_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":connections_manager",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "//lib/protobuf:stream",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "live_id_test",
     size = "small",
     srcs = ["live_id_test.cc"],
@@ -650,6 +665,18 @@ cc_test(
     data = ["//tests:testing.rules"],
     deps = [
         ":server",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "rules_read_errors_test",
+    size = "small",
+    srcs = ["rules_read_errors_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":server",
+        "@asio",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -1100,6 +1127,19 @@ py_test(
 )
 
 py_test(
+    name = "recording_tap_test",
+    size = "medium",
+    srcs = ["recording_tap_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":recording",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "recording_read_test",
     size = "small",
     srcs = ["recording_read_test.py"],
@@ -1397,6 +1437,20 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "reserved_types_test",
+    size = "small",
+    srcs = ["reserved_types_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":recording",
+        ":recording_py_proto",
         "//multiplexer/testing",
     ],
 )

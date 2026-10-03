@@ -26,6 +26,7 @@ sequenceDiagram
 
 - Each kind of malformed or out-of-order input costs the sender its connection and nothing else.
 - The multiplexer keeps serving: a good peer still completes a handshake and events still flow.
+- Its log follows an id clash: a peer refused for claiming a live id is never logged as registered, and a replaced connection is logged leaving before its replacement is logged in, with `; replaces its earlier connection`.
 
 ## Run
 

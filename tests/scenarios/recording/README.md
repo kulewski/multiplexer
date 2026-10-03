@@ -37,7 +37,7 @@ sequenceDiagram
 - The request and its reply are recorded with sender, recipient and both peer types resolved, the request first.
 - A broadcast yields one record per subscriber, with the same message id.
 - A request nobody serves is recorded as NO_RECIPIENT for the intended peer type, with the error reported, and the DELIVERY_ERROR sent back appears as a routed message.
-- Peers appear as CONNECTED before their traffic and DISCONNECTED after.
+- Each peer's traffic, sent or received, comes after its CONNECTED and before its DISCONNECTED, which every peer that left has.
 - With `--record-payload-bytes 3`, payloads are cut to three bytes and marked truncated.
 
 ## Run

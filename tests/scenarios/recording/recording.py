@@ -29,7 +29,7 @@ class Recording(unittest.TestCase):
                 serves={C.types.TEST_REQUEST_A: C.types.TEST_RESPONSE},
             )
             backend_id = backend.wait_for("connected")["instance_id"]
-            subscribers = []
+            subscribers = []  # each one's role and instance id
             for index in range(2):
                 subscriber = spawn(
                     "event_backend",
@@ -37,9 +37,9 @@ class Recording(unittest.TestCase):
                     mx=cluster.addresses,
                     name="subscriber%d" % index,
                     type=C.peers.TEST_EVENT_BACKEND,
-                    **{"for": 3},
+                    until=1,  # the broadcast, its only message
                 )
-                subscribers.append(subscriber.wait_for("connected")["instance_id"])
+                subscribers.append((subscriber, subscriber.wait_for("connected")["instance_id"]))
             client = spawn(
                 "client",
                 cfg.lang("client"),
@@ -59,7 +59,10 @@ class Recording(unittest.TestCase):
                 send=[(C.types.TEST_EVENT, "to everyone")],
             )
             self.assertEqual(0, event_client.wait())
+            event_client_id = event_client.events_of("connected")[0]["instance_id"]
             event_id = event_client.events_of("sent")[0]["id"]
+            for subscriber, _ in subscribers:
+                self.assertEqual(0, subscriber.wait(), "it got the broadcast, routed to it before the stop below")
             self.assertEqual(0, backend.stop())
             cluster.mx[0].stop()
 
@@ -68,12 +71,24 @@ class Recording(unittest.TestCase):
             self.assertEqual("header", kinds[0])
             self.assertEqual(C.RULES_FINGERPRINT, records[0].header.rules_fingerprint)
 
-            peers = [(record.peer.kind, record.peer.peer_id) for record in records if record.HasField("peer")]
-            self.assertIn((PeerEvent.CONNECTED, backend_id), peers)
-            self.assertIn((PeerEvent.DISCONNECTED, backend_id), peers)
-            self.assertLess(
-                peers.index((PeerEvent.CONNECTED, backend_id)), peers.index((PeerEvent.DISCONNECTED, backend_id))
-            )
+            # Each peer's traffic, sent or received, comes after its
+            # CONNECTED and before its DISCONNECTED, which every peer that
+            # left has.
+            arrived: dict[int, int] = {}  # a peer's id: the index of its CONNECTED
+            left: dict[int, int] = {}  # and of its DISCONNECTED
+            for index, record in enumerate(records):
+                if record.HasField("peer") and record.peer.kind == PeerEvent.CONNECTED:
+                    arrived[record.peer.peer_id] = index
+                if record.HasField("peer") and record.peer.kind == PeerEvent.DISCONNECTED:
+                    left[record.peer.peer_id] = index
+            for peer_id in (backend_id, client_id, event_client_id):
+                self.assertIn(peer_id, left, "a peer that left is DISCONNECTED")
+            not_peers = {0, records[0].header.multiplexer_id}  # no recipient, and the multiplexer itself
+            for index, record in enumerate(records):
+                if record.HasField("routed"):
+                    for peer_id in {record.routed.sender, record.routed.recipient} - not_peers:
+                        self.assertLess(arrived.get(peer_id, len(records)), index, "CONNECTED before its traffic")
+                        self.assertLess(index, left.get(peer_id, len(records)), "DISCONNECTED after its traffic")
 
             routed = [record.routed for record in records if record.HasField("routed")]
             request = [r for r in routed if r.id == request_id]
@@ -93,7 +108,11 @@ class Recording(unittest.TestCase):
 
             broadcast = [r for r in routed if r.id == event_id]
             self.assertEqual(RoutedMessage.DELIVERED, broadcast[0].disposition)
-            self.assertEqual(sorted(subscribers), sorted(r.recipient for r in broadcast), "one record per subscriber")
+            self.assertEqual(
+                sorted(subscriber_id for _, subscriber_id in subscribers),
+                sorted(r.recipient for r in broadcast),
+                "one record per subscriber",
+            )
 
             unserved = [r for r in routed if r.type == C.types.TEST_REQUEST_B]
             self.assertTrue(unserved)

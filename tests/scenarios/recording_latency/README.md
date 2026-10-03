@@ -1,10 +1,16 @@
 # Recording latency
 
-Recording costs the routed message nothing a client can measure.
+Recording costs the routed message no write of its own, so nothing a
+client could wait for: the multiplexer buffers its records and writes the
+file a block at a time, and once a second.
 
-The same client runs the same queries against a multiplexer with `--record`
-and one without; the median round trip differs by less than half a
-millisecond, ten times the cost of the buffered write the recording adds.
+The same client runs the same queries against a multiplexer without
+`--record` and one with it. The write syscalls each multiplexer makes over
+the queries, counted in `/proc/<pid>/io` (`syscw`), differ by fewer than
+one per ten records the recording holds, and the recording holds every
+query and its response. Counted, not timed: a write per record would add
+one for each, however fast or loaded the machine; sockets are written
+with `sendmsg()`, which the count leaves out.
 
 ## What happens
 
@@ -16,16 +22,19 @@ sequenceDiagram
     participant B as backend
     C->>M1: 300 queries
     M1->>B: requests
-    B->>C: responses, median round trip measured
+    B->>C: responses, M1's write syscalls counted meanwhile
     C->>M2: 300 queries
-    M2->>B: requests, each also written to the recording
-    B->>C: responses, median round trip measured
+    M2->>B: requests, each also recorded
+    B->>C: responses, M2's write syscalls counted meanwhile
 ```
 
 ## What is checked
 
 - Every query is answered in both runs.
-- The two medians differ by less than 0.5 ms.
+- The recording holds every request delivered to the backend and every
+  response delivered to the client.
+- The multiplexer with `--record` makes fewer than one more write syscall
+  per ten records than the one without.
 
 ## Run
 

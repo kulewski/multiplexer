@@ -1396,9 +1396,11 @@ a shared build machine looks like.
 ## Recording
 
 `multiplexer.recording.read(path)` yields the `Record` messages of a file
-written by a multiplexer, checking that the recording's rules match the
-generated constants (`check_rules=False` to skip); `read_many(paths)`
-merges several files by time, each record tagged with its multiplexer;
+written by a multiplexer, a record at a time, checking that the
+recording's rules match the generated constants at every header, one a
+restarted multiplexer appended included (`check_rules=False` to skip);
+`read_many(paths)` merges several files by time, each record tagged with
+the multiplexer of the header before it;
 `describe(record)` renders one with names, `involves_peer(record, id)`
 filters by instance id. A file that ends partway through a record, as
 one a session is still writing or a multiplexer that died left can,
@@ -1436,6 +1438,12 @@ recording.stop(controller)
   `multiplexer_id`; it raises `OperationTimedOut` after `timeout` seconds
   without one. Records the client does not read in time are dropped and
   counted in the status. `control(client, RecordingControl.UNTAP)` ends it.
+  It raises `TapFailed` when a multiplexer refused the tap, its status's
+  `error` saying why, taps being off say, or did not answer within
+  `timeout`, after ending the subscriptions it made; the exception's
+  `statuses` hold what came back. The records the client reads while it
+  waits for a status, its own `status()` or `stop()` say, are kept and
+  yielded by the iterator first.
 - In a test, `Cluster(remote_recording=True)` starts every multiplexer with
   both options and one shared `recording_dir`; `cluster.recording_files()`
   lists the sessions written, and `mxcontrol("recording", "start", ...)`

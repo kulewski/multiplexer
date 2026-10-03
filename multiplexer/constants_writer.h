@@ -11,16 +11,22 @@
 // without the logging library (IS_GENERATE_CONSTANTS) and mxcontrol with
 // it, and one translation unit must not see both. check_config() refuses a
 // rules file where a name or a number repeats, which the multiplexer's own
-// Config<std::map> would silently collapse; hence the callers' multimap.
+// Config<std::map> would silently collapse, hence the callers' multimap,
+// and one with a name the generated files cannot hold as it is.
 #ifndef MX_MULTIPLEXER_CONSTANTS_WRITER_H_
 #define MX_MULTIPLEXER_CONSTANTS_WRITER_H_
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdint>
 #include <fstream>
-#include <iterator>
 #include <ostream>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <system_error>
 #include <unordered_set>
 
 #include "lib/assertion.h"
@@ -38,6 +44,11 @@ struct RepeatedKeyException : mx::Exception {
       : mx::Exception("value of '" + mx::repr(value) + "' repeats (" + hint + ")") {}
 };
 
+struct UnusableNameException : mx::Exception {
+  UnusableNameException(const std::string& name, std::uint32_t type, const char* why)
+      : mx::Exception("the name '" + name + "' of type " + std::to_string(type) + " cannot be a constant: " + why) {}
+};
+
 namespace detail {
 
 template <typename SetType, typename ValueType>
@@ -51,6 +62,57 @@ template <typename SetType, typename ValueType>
 void checked_add(SetType& values, const ValueType& value, const std::string& hint) {
   if (!values.insert(value).second) {
     MXTHROW(RepeatedKeyException<ValueType>(value, hint));
+  }
+}
+
+// Why `name` cannot be a constant of the generated files, NULL when it
+// can: the Python classes and the C++ namespaces hold every name as it is,
+// next to the names the generated code itself uses there, idtoname and
+// get_name, and the C++ get_name()'s parameters, t and default_, which
+// would hide a constant of the same name in its switch.
+inline const char* unusable_name(const std::string& name) {
+  static const std::set<std::string> KEYWORDS = {
+      // Python's
+      "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+      "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
+      "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+      // C++'s
+      "alignas", "alignof", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "case", "catch", "char", "char8_t",
+      "char16_t", "char32_t", "co_await", "co_return", "co_yield", "compl", "concept", "const", "const_cast",
+      "consteval", "constexpr", "constinit", "decltype", "default", "delete", "do", "double", "dynamic_cast", "enum",
+      "explicit", "export", "extern", "false", "float", "friend", "goto", "inline", "int", "long", "mutable",
+      "namespace", "new", "noexcept", "not_eq", "nullptr", "operator", "or_eq", "private", "protected", "public",
+      "register", "reinterpret_cast", "requires", "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+      "struct", "switch", "template", "this", "thread_local", "throw", "true", "typedef", "typeid", "typename", "union",
+      "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "xor", "xor_eq"};
+  static const std::set<std::string> GENERATED = {"idtoname", "get_name", "t", "default_"};
+  auto letter = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; };
+  if (name.empty() || !letter(name[0])) {
+    return "not an identifier";
+  }
+  for (char c : name) {
+    if (!letter(c) && !(c >= '0' && c <= '9')) {
+      return "not an identifier";
+    }
+  }
+  if (name.compare(0, 2, "__") == 0) {
+    return "reserved, it starts with two underscores";
+  }
+  if (KEYWORDS.count(name)) {
+    return "a keyword of Python or C++";
+  }
+  if (GENERATED.count(name)) {
+    return "a name the generated code uses";
+  }
+  return NULL;
+}
+
+template <typename Map>
+void check_names_usable(const Map& entries) {
+  for (const typename Map::value_type& value : entries) {
+    if (const char* why = unusable_name(value.second.name())) {
+      MXTHROW(UnusableNameException(value.second.name(), value.second.type(), why));
+    }
   }
 }
 
@@ -136,26 +198,52 @@ void write_cxx_mapping(std::ostream& out, const Map& map, const std::string& set
 
 }  // namespace detail
 
-// Refuses a rules file where a peer or message name or number repeats.
+// Refuses a rules file where a peer or message name or number repeats, or
+// a name could not be a constant in Python and C++ (unusable_name).
 template <typename Config>
 void check_config(const Config& config) {
   detail::check_names_and_numbers_unique(config.message_description_by_id());
   detail::check_names_and_numbers_unique(config.peer_by_type());
+  detail::check_names_usable(config.message_description_by_id());
+  detail::check_names_usable(config.peer_by_type());
 }
 
-// The CRC-32 of the rules file's text, so that a recording made by a
-// multiplexer running with a different rules file can be told apart.
-inline std::string rules_fingerprint(const std::string& source_file) {
-  std::ifstream in(source_file.c_str(), std::ifstream::binary);
-  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  return mx::fingerprint(text);
+// The rules file's text, read once: the constants are parsed from it and
+// its fingerprint, the CRC-32 that tells a recording made with other rules
+// apart, is its own. Read a second time for the fingerprint, a pipe or a
+// process substitution gave nothing, and the files said 00000000. Throws
+// std::runtime_error saying why it could not be read.
+inline std::string read_rules(const std::string& path) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    throw std::runtime_error("cannot read " + path + ": " + std::system_category().message(errno));
+  }
+  std::string text;
+  char buffer[16384];
+  for (;;) {
+    const ssize_t got = ::read(fd, buffer, sizeof buffer);
+    if (got > 0) {
+      text.append(buffer, static_cast<std::size_t>(got));
+    } else if (got == 0) {
+      break;
+    } else if (errno != EINTR) {
+      const int error = errno;
+      ::close(fd);
+      throw std::runtime_error("cannot read " + path + ": " + std::system_category().message(error));
+    }
+  }
+  ::close(fd);
+  return text;
 }
 
+// `fingerprint` is mx::fingerprint of the text `config` was parsed from,
+// in every writer that writes one.
 template <typename Config>
-void write_python(const Config& config, std::ostream& out, const std::string& source_file) {
+void write_python(const Config& config, std::ostream& out, const std::string& source_file,
+                  const std::string& fingerprint) {
   detail::write_signature("#", out, source_file);
   out << "# CRC-32 of the rules file these constants were generated from; a recording's header carries the same.\n"
-      << "RULES_FINGERPRINT = \"" << rules_fingerprint(source_file) << "\"\n\n";
+      << "RULES_FINGERPRINT = \"" << fingerprint << "\"\n\n";
   out << "\n"
       << "class _constants_base:\n"
       << "    idtoname = None  # dict defined by a subclass\n"
@@ -187,8 +275,8 @@ void write_python_stub(const Config& config, std::ostream& out, const std::strin
 // different rules get different guards, and the same rules give the same
 // header, byte for byte, in every build.
 template <typename Config>
-void write_cxx(const Config& config, std::ostream& out, const std::string& source_file) {
-  const std::string fingerprint = rules_fingerprint(source_file);
+void write_cxx(const Config& config, std::ostream& out, const std::string& source_file,
+               const std::string& fingerprint) {
   out << "#ifndef GENERATED_MX_CONSTANTS_" << fingerprint << "\n"
       << "#define GENERATED_MX_CONSTANTS_" << fingerprint << "\n"
       << "\n"
@@ -211,7 +299,8 @@ void write_cxx(const Config& config, std::ostream& out, const std::string& sourc
 // number, std::runtime_error on an extension it does not know or a file
 // it cannot open.
 template <typename Config>
-void write_constants(const Config& config, const std::string& rules_file, const std::string& path) {
+void write_constants(const Config& config, const std::string& rules_file, const std::string& fingerprint,
+                     const std::string& path) {
   enum Language { PYTHON, PYTHON_STUB, CXX } language;
   auto ends_with = [&path](const char* suffix) {
     std::string with(suffix);
@@ -232,13 +321,13 @@ void write_constants(const Config& config, const std::string& rules_file, const 
   }
   switch (language) {
     case PYTHON:
-      write_python(config, out, rules_file);
+      write_python(config, out, rules_file, fingerprint);
       break;
     case PYTHON_STUB:
       write_python_stub(config, out, rules_file);
       break;
     case CXX:
-      write_cxx(config, out, rules_file);
+      write_cxx(config, out, rules_file, fingerprint);
       break;
   }
 }

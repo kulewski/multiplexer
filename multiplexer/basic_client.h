@@ -670,6 +670,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     drop_observer_ = observer;
   }
   std::uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
+  // How many messages that arrived were dropped for a full incoming
+  // queue (incoming_queue_full()), which a summarized WARNING only says;
+  // from any thread.
+  std::uint64_t incoming_dropped() const { return incoming_dropped_.load(std::memory_order_relaxed); }
   void report_drop(const std::shared_ptr<const RawMessage>& raw, DropReason reason);
   // Lets go of the observer, from the thread that ends the client: a
   // ThreadedClient's io thread at its end, or a forked child's teardown.
@@ -982,6 +986,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   LogSummary drop_lines_;
   DropObserver drop_observer_;
   std::atomic<std::uint64_t> dropped_{0};
+  std::atomic<std::uint64_t> incoming_dropped_{0};  // see incoming_dropped()
 
   // The targets the client has: those with a connection, live or on its
   // way, and those with a reconnect armed, by a lost connection, which

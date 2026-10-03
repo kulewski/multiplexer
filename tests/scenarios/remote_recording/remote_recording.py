@@ -9,6 +9,7 @@ read_many merges them by time into one session. The Python API does the
 same from a test.
 """
 
+import itertools
 import os
 import re
 import unittest
@@ -89,13 +90,15 @@ class RemoteRecording(unittest.TestCase):
             self.assertTrue(
                 all(record.multiplexer_id in paths for record in merged), "every record says which multiplexer"
             )
-            snapshots = [
-                (record.multiplexer_id, record.peer.peer_id)
-                for record in merged
-                if record.HasField("peer") and record.peer.kind == PeerEvent.CONNECTED
-            ]
             for multiplexer_id in paths:
-                self.assertIn((multiplexer_id, backend_id), snapshots, "the already connected backend is written first")
+                own = [record for record in merged if record.multiplexer_id == multiplexer_id]  # in the file's order
+                self.assertTrue(own[0].HasField("header"))
+                snapshot = itertools.takewhile(lambda record: record.HasField("peer"), own[1:])  # ROUTING among them
+                self.assertIn(
+                    (PeerEvent.CONNECTED, backend_id),
+                    [(record.peer.kind, record.peer.peer_id) for record in snapshot],
+                    "the already connected backend is among the CONNECTED records the file starts with",
+                )
             request = [record for record in merged if record.HasField("routed") and record.routed.id == request_id]
             self.assertEqual(1, len(request), "the request went through one multiplexer")
             self.assertEqual(

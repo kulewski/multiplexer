@@ -155,11 +155,14 @@ PY_FILES := \
 
 # Unit tests: one binary per C++ test file, one unittest module per Python one.
 CC_TEST_SRCS := \
+  lib/core_dump_test.cc \
   lib/digest_test.cc \
   lib/encoding/little_endian_test.cc \
   lib/exception_test.cc \
   lib/kwargs_test.cc \
   lib/logging/concurrent_settings_test.cc \
+  lib/logging/process_name_test.cc \
+  lib/logging/stderr_test.cc \
   lib/logging/stream_test.cc \
   lib/logging/verbosity_test.cc \
   lib/options_test.cc \
@@ -173,6 +176,7 @@ CC_TEST_SRCS := \
   multiplexer/connect_by_name_test.cc \
   multiplexer/descriptor_table_test.cc \
   multiplexer/disconnect_test.cc \
+  multiplexer/disconnected_record_test.cc \
   multiplexer/drop_names_test.cc \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
@@ -187,6 +191,7 @@ CC_TEST_SRCS := \
   multiplexer/recording_session_test.cc \
   multiplexer/routing_index_test.cc \
   multiplexer/rules_check_interval_test.cc \
+  multiplexer/rules_read_errors_test.cc \
   multiplexer/server_release_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
@@ -232,7 +237,9 @@ PY_TEST_FILES := \
   multiplexer/query_acknowledged_test.py \
   multiplexer/query_stages_test.py \
   multiplexer/recording_read_test.py \
+  multiplexer/recording_tap_test.py \
   multiplexer/report_loop_test.py \
+  multiplexer/reserved_types_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
   multiplexer/sender_field_test.py \

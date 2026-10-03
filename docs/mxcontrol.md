@@ -167,7 +167,7 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 | `--max-bytes N` | `start`: close the session at this size; default 1 GiB, 0 for no cap |
 | `--max-seconds N` | `start`: close the session after this long |
 | `--stay` | `start`: keep running and start the session, once each, on every multiplexer it reaches that is not recording, whatever sessions it had before: a replica that comes back, under its old address or a new one of its name, or one reached later; stop every session on SIGINT or SIGTERM. One whose session of this run ended, at its cap or by a stop, or that refused it, is not started again |
-| `--out FILE` | `tap`: append the records to this file instead of stdout |
+| `--out FILE` | `tap`: append the records to this file instead of stdout, after its last whole record: one a tap that died left half written is cut first, said on stderr |
 | `--timeout S` | seconds to wait for connections and answers; default 5. The wait for answers ends then, however much else still arrives; a multiplexer that has not answered by then is said not to have, exit 1 |
 
 One line per multiplexer comes back, `multiplexer <id>: recording <path>
@@ -198,8 +198,10 @@ is down at an address a name still resolves to, cut off maybe, its
 session going on; for `tap`, when a replica last seen streaming to it,
 over a connection that lives, did not answer the untap, a tap ending
 with its connection anyway, or when the records could not all be
-written to the output; 0 otherwise. Each such replica is named on
-stderr.
+written to the output, a write failing or records dropped here for a
+full incoming queue; and for both, when a multiplexer refused the START
+or the TAP, taps being off say, which is said once and not asked
+again; 0 otherwise. Each such replica is named on stderr.
 
 ```
 mxcontrol recording start -M mx-0.mx.svc:1980 -M mx-1.mx.svc:1980 --label checkout-bug

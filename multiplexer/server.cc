@@ -13,9 +13,9 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
-#include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <vector>
 
 #include "lib/exception.h"
@@ -129,6 +129,9 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
 
 void Server::connection_closed(Connection* conn) {
   accepted_.erase(conn);
+  if (departed_.erase(conn)) {
+    _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
+  }
   if (stopping_) {
     stop_dropped_read_ += conn->dropped_while_closing();
     _stop_if_done();
@@ -487,13 +490,26 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       meta_handler.conn->shutdown();
       return true;
 
-    case types::PING:
     case types::DELIVERY_ERROR:
+      // Only meaningful with a `to` field, which was handled before this;
+      // never answered with another, which could answer it back.
+      return true;
+
+    case types::PING:
     case RECORDING_STATUS:
     case RECORDING_RECORD:
     case RULES_STATUS:
     case PEER_STATUS:
-      // Only meaningful with a `to` field, which was handled before this.
+      // Only meaningful with a `to` field, which was handled before this:
+      // without one nobody could receive it, which its sender is told, as
+      // for a type of the rules file with no rule.
+      if (const std::string* line = drops_.first({NO_RULE, WARNING, meta_handler.msg.type(), 0}, [&] {
+            return "protocol message of type " + repr(meta_handler.msg.type()) + " without `to`; dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+      }
+      meta_handler.unroutable();
+      _record(meta_handler, 0, 0, RoutedMessage::NO_RULE, true);
       return true;
 
     case PEER_CONTROL:
@@ -553,11 +569,15 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       return true;
 
     default:
+      // A number the protocol keeps and does not use, 0 among them: told to
+      // its sender and recorded as a type of no entry is.
       if (const std::string* line = drops_.first({UNKNOWN_PROTOCOL_TYPE, WARNING, meta_handler.msg.type(), 0}, [&] {
             return "unknown protocol message type " + repr(meta_handler.msg.type()) + "; dropping";
           })) {
         MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") TEXT(*line));
       }
+      meta_handler.unknown();
+      _record(meta_handler, 0, 0, RoutedMessage::UNKNOWN_TYPE, true);
       return true;
   }
 }
@@ -843,22 +863,44 @@ Server::RulesLoad Server::load_rules(std::string* error) {
   MX_DCHECK_RUN_ON(&owner_thread());
   std::string text;
   if (!_read_rules_file(&text, error)) {
+    // The error is the read's now: bytes that failed before and come back
+    // are parsed and said again, rather than said as this read failure.
+    rules_failed_fingerprint_.clear();
     return _rules_failed(*error, error);
   }
   return _apply_rules_text(text, error);
 }
 
+// Read with read(2), which says why it failed: "cannot read FILE: REASON",
+// descriptors exhausted or a directory say. An ifstream said only that it
+// could not open the file, and threw out of the read on a directory, which
+// it opens, or an I/O error, leaving the periodic check and the reload on
+// SIGHUP stopped for good and a RELOAD unanswered.
 bool Server::_read_rules_file(std::string* text, std::string* error) {
   if (rules_file_.empty()) {
     *error = "no rules file was named";
     return false;
   }
-  std::ifstream in(rules_file_.c_str(), std::ios::in | std::ios::binary);
-  if (!in) {
-    *error = "cannot read " + rules_file_;
+  const int fd = ::open(rules_file_.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    *error = "cannot read " + rules_file_ + ": " + std::system_category().message(errno);
     return false;
   }
-  text->assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  text->clear();
+  char buffer[16384];
+  for (;;) {
+    const ssize_t got = ::read(fd, buffer, sizeof buffer);
+    if (got > 0) {
+      text->append(buffer, static_cast<std::size_t>(got));
+    } else if (got == 0) {
+      break;
+    } else if (errno != EINTR) {
+      *error = "cannot read " + rules_file_ + ": " + std::system_category().message(errno);
+      ::close(fd);
+      return false;
+    }
+  }
+  ::close(fd);
   if (text->empty()) {
     *error = "empty rules file " + rules_file_;
     return false;
@@ -982,8 +1024,8 @@ void Server::_on_rules_check(weak_pointer server, const asio::error_code& error)
   if (!self || self->stopped()) {
     return;  // stop() came after the timer had expired: do not re-arm
   }
+  self->_arm_rules_check();  // first: nothing the check does can leave the next one unarmed
   self->_check_rules_file();
-  self->_arm_rules_check();
 }
 
 // The timer's check. A file that differs from the rules in use is put in
@@ -995,6 +1037,7 @@ void Server::_check_rules_file() {
   std::string error;
   if (!_read_rules_file(&text, &error)) {
     rules_pending_fingerprint_.clear();
+    rules_failed_fingerprint_.clear();  // as in load_rules
     _rules_failed(error, &error);
     return;
   }
@@ -1045,7 +1088,9 @@ void Server::_handle_peer_control(MessageMetaHandler& meta_handler) {
   PeerStatus status;
   if (!control.ParseFromString(meta_handler.msg.message())) {
     status.set_error("garbled PeerControl");
-  } else if (!same_routing(conn->routing(), control.routing())) {
+  } else if (conn->living() && !same_routing(conn->routing(), control.routing())) {
+    // One read on after its connection failed, its peer gone from routing,
+    // changes nothing and records nothing.
     conn->set_routing(control.routing());
     MX_LOG(INFO, LOWVERBOSITY,
            CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +

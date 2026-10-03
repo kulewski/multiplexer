@@ -19,7 +19,6 @@
 using namespace mx;
 using namespace multiplexer;
 using mx::SimpleTimer;
-using std::cerr;
 
 BasicClient::BasicClient(asio::io_service& io_service, std::uint32_t client_type)
     : Base(io_service),
@@ -81,6 +80,7 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     return;
   }
   if (incoming_queue_full()) {
+    incoming_dropped_.fetch_add(1, std::memory_order_relaxed);
     if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
       MX_LOG(WARNING, LogSummary::VERBOSITY,
              CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping #" + repr(mxmsg->id())));

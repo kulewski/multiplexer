@@ -6,14 +6,22 @@ it ended serve_forever(); what periodic_task() sends is routed by its
 type, where it went to the last requester; the requester's
 _send_and_receive() takes a payload, where it raised AttributeError; and
 the replies the server sends itself, an echo, a report, a pickle reply,
-are queued as in the C++ class, where each waited for its write; and
-every client raises the one BackendError for a BACKEND_ERROR reply.
+are queued as in the C++ class, where each waited for its write; every
+client raises the one BackendError for a BACKEND_ERROR reply; and the
+replies to requests a connection brought that died before they were
+handled all go through one new connection once its multiplexer is back,
+which the multiplexer registers once, where each reply opened a
+connection of its own to the address and closed the one before, a
+registration per reply, and the requests each new connection brought
+kept the loop going for good.
 """
 
 import asyncio
 import pickle
 import queue
+import re
 import threading
+import time
 import unittest
 
 from multiplexer.aio import AsyncClient
@@ -21,7 +29,7 @@ from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.servers import BackendError, BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, FakePeer
+from multiplexer.testing import BackendThread, Cluster, FakePeer, Mx, TestClient, wait_until
 from multiplexer.testing import runfile
 from multiplexer.threaded_client import ThreadedClient
 
@@ -29,6 +37,7 @@ RULES = runfile("tests/testing.rules")  # the file the constants were generated 
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
+HELD = 5  # requests a connection brought that died before they were handled
 
 
 class Backend(BaseMultiplexerServer):
@@ -83,6 +92,74 @@ def reply_to(client: Client, message_id: int, timeout: float = 10.0):
         mxmsg = client.read_message(timeout=timeout)
         if mxmsg.references == message_id:
             return mxmsg
+
+
+class HoldingBackend(BaseMultiplexerServer):
+    """Holds its first request until `release` is set, then answers every
+    request with its payload upper-cased, the default way: through the
+    connection the request came on. Notes its live connections at every
+    turn of its loop, on its own thread, where its client may be asked."""
+
+    def __init__(self, addresses: list[tuple[str, int]]):
+        super().__init__(addresses, type=peers.PYTHON_TEST_SERVER)
+        self.holding = threading.Event()  # the first request is being handled
+        self.release = threading.Event()  # the test's: answer it
+        self.turns = 0  # periodic_task() calls so far
+        self.connections = -1  # live connections at the last of them
+
+    def handle_message(self, mxmsg) -> None:
+        """Wait for the release on the first request, 60 s at most, a
+        failure detector's bound; answer each."""
+        if not self.holding.is_set():
+            self.holding.set()
+            self.release.wait(60)
+        self.send_message(message=mxmsg.message.upper(), type=RESPONSE)
+
+    def periodic_task(self) -> None:
+        """Note the live connections, then count the turn."""
+        self.connections = self.conn.connections_count()
+        self.turns += 1
+
+
+def written_out(client: Client, timeout: float = 30.0) -> None:
+    """Return once the multiplexer has written out what `client` sent
+    before, to the peers it routed it to: a PING the client sends itself,
+    routed after it, came back. The multiplexer handles a connection's
+    frames one at a time, and writes a frame to a receiver's socket that
+    has room before it handles the next one from the same connection, so
+    what came before the PING reaches its receivers whatever becomes of
+    the multiplexer afterwards. OperationTimedOut after `timeout`, a
+    failure detector's bound."""
+    marker = client.send_message(b"written out?", type=types.PING, to=client.instance_id, flush=True)
+    deadline = time.monotonic() + timeout
+    while client.read_message(timeout=max(0.0, deadline - time.monotonic())).id != marker:
+        pass
+
+
+def registrations(multiplexer: Mx, instance_id: int, since: int) -> int:
+    """How many connections of the peer `instance_id` the multiplexer's log
+    says it registered past `since`, a log_mark(); an "unregistered" line
+    is not one."""
+    with open(multiplexer.log_path, "rb") as log:
+        log.seek(since)
+        text = log.read().decode(errors="replace")
+    return len(re.findall(r"\bregistered connection id=%d\b" % instance_id, text))
+
+
+def replies(client: Client, sent: list[int], timeout: float = 30.0) -> dict[int, bytes]:
+    """The payloads of the replies `client` reads to the messages `sent`,
+    by the id each references, once every one came or `timeout` seconds
+    passed, a failure detector's bound."""
+    got: dict[int, bytes] = {}
+    deadline = time.monotonic() + timeout
+    while len(got) < len(sent):
+        try:
+            mxmsg = client.read_message(timeout=max(0.0, deadline - time.monotonic()))
+        except OperationTimedOut:
+            break
+        if mxmsg.references in sent:
+            got[mxmsg.references] = mxmsg.message
+    return got
 
 
 class ServerRepliesTest(unittest.TestCase):
@@ -203,6 +280,50 @@ class ServerRepliesTest(unittest.TestCase):
                 self.assertEqual(b"answer", reply.message)
             finally:
                 client.shutdown()
+
+    def test_replies_to_what_a_dead_connection_brought_take_one_new_connection(self) -> None:
+        """Requests a connection brought, still to handle when its
+        multiplexer was killed and started again: their replies all go
+        through one new connection, which the multiplexer registers once.
+        Each reply opened a connection of its own to the old address and
+        closed the one before: a registration per reply, and the requests
+        each new connection brought would have kept that going. A literal
+        address, as the releases that did so resolved a name to one; the
+        name's case is connect_by_name_test.py's. Counted, not timed: the
+        requests are in the backend's socket before the kill
+        (written_out), and the multiplexer's log has its registrations."""
+        with Cluster(1, rules=RULES) as cluster:
+            multiplexer = cluster.mx[0]
+            address = cluster.endpoints[0]
+            with (
+                BackendThread(lambda: HoldingBackend([address])) as served,
+                TestClient(cluster, peers.WEBSITE) as requester,
+            ):
+                backend = served.backend
+                assert backend is not None
+                try:
+                    sent = [requester.send(b"request 0", REQUEST)]
+                    self.assertTrue(backend.holding.wait(30), "the backend took up the first request")
+                    sent += [requester.send(b"request %d" % index, REQUEST) for index in range(1, HELD)]
+                    written_out(requester.client)
+                    since = multiplexer.log_mark()
+                    multiplexer.kill()
+                    multiplexer.start()
+                    requester.client.disconnect(address)  # back at once, where its reconnect comes 3 s on
+                    requester.client.connect(address)
+                    cluster.wait_for_peer(peers.WEBSITE)
+                finally:
+                    backend.release.set()
+                answered = replies(requester.client, sent)
+                self.assertEqual(
+                    1,
+                    registrations(multiplexer, backend.conn.instance_id, since),
+                    "the backend's connections the multiplexer registered since its restart",
+                )
+                self.assertEqual({request: b"REQUEST %d" % index for index, request in enumerate(sent)}, answered)
+                turns = backend.turns
+                wait_until(lambda: backend.turns > turns, 30, "a turn of the backend's loop after the replies")
+                self.assertEqual(1, backend.connections, "the backend's live connections")
 
 
 if __name__ == "__main__":

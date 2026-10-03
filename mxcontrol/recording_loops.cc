@@ -5,7 +5,9 @@
 // recording, once each, and stops every session on the way out; tap writes
 // every record that arrives and taps again a multiplexer not streaming to
 // it. Each decides its exit status at the end, from what each address's
-// multiplexer said last. The class and the rest of the subcommand are in
+// multiplexer said last and from any refusal on the way: a START or a TAP
+// a multiplexer refused, taps being off say, is not sent to it again, and
+// the command exits 1. The class and the rest of the subcommand are in
 // recording_control.h and recording_control.cc.
 #include <algorithm>
 #include <asio/ip/tcp.hpp>
@@ -122,12 +124,14 @@ bool every_tap_ended(const HeardByAddress& heard, const std::vector<Answer>& ans
 // run ended, at its cap or by someone's stop, or that refused it, is not
 // started again. Each poll also connects to the addresses the names
 // resolve to now, which the next one asks, and lets go of those gone. What
-// the answers say decides nothing until the end (every_session_stopped).
+// the answers say decides nothing until the end (every_session_stopped),
+// but a START a multiplexer refused, which makes it exit 1.
 int RecordingControlTask::_stay(Client& client, EveryAddress& addresses, const RecordingControl& start) {
   std::signal(SIGINT, request_stop);
   std::signal(SIGTERM, request_stop);
   HeardByAddress heard;
   std::set<std::uint64_t> started;  // every multiplexer this run sent `start` to
+  bool refused = false;             // a multiplexer refused it
   if (client.connections_count()) {
     std::vector<Answer> answers;
     _control(client, start, false, &answers);
@@ -135,6 +139,7 @@ int RecordingControlTask::_stay(Client& client, EveryAddress& addresses, const R
       addresses.heard(answer.second);
       note(heard, answer.first, answer.second, answer.first.recording());
       started.insert(answer.first.multiplexer_id());
+      refused = refused || answer.first.has_error();
     }
   }
   RecordingControl status_request;
@@ -159,8 +164,9 @@ int RecordingControlTask::_stay(Client& client, EveryAddress& addresses, const R
         continue;
       }
       note(heard, status, incoming.second, status.recording());
-      if (status.has_error()) {
+      if (status.has_error()) {  // the answer to a START: a STATUS never carries one
         std::cout << _describe(status, false) << "\n";
+        refused = true;
       } else if (!status.recording() && started.insert(status.multiplexer_id()).second) {
         // One that had a session before, an earlier run's, gets one too.
         std::cout << "multiplexer " << status.multiplexer_id() << ": "
@@ -176,20 +182,36 @@ int RecordingControlTask::_stay(Client& client, EveryAddress& addresses, const R
   stop.set_action(RecordingControl::STOP);
   std::vector<Answer> answers;
   _control(client, stop, false, &answers);
-  return every_session_stopped(heard, answers, addresses) ? 0 : 1;
+  const bool stopped = every_session_stopped(heard, answers, addresses);
+  if (refused) {
+    std::cerr << "a multiplexer refused the session; see its answer above\n";
+  }
+  return stopped && !refused ? 0 : 1;
 }
 
 // Until SIGINT or SIGTERM: every RECORDING_RECORD that arrives goes to the
 // output as a Record; every POLL_SECONDS a status request finds the
 // multiplexers not streaming to us (a replica that restarted, or one that
 // came up since) and taps them again, the addresses the names resolve to
-// now included, connected to at the start of the round. Statuses go to
-// stderr, the records are the output. The exit status says whether every
-// record reached the output and the tap ended everywhere it streamed.
+// now included, connected to at the start of the round; one that refused
+// the tap is not asked again. Statuses go to stderr, the records are the
+// output, appended to --out after its last whole record. The exit status
+// says whether every record reached the output, none dropped here for a
+// full incoming queue, the tap ended everywhere it streamed, and no
+// multiplexer refused it.
 int RecordingControlTask::_tap(Client& client, EveryAddress& addresses) {
   std::ofstream file;
   std::ostream* out = &std::cout;
   if (!out_.empty()) {
+    Record scratch;
+    const std::int64_t cut = mx::protobuf::cut_torn_tail(out_, scratch);
+    if (cut < 0) {
+      std::cerr << "cannot read " << out_ << " to find its last whole record\n";
+      return 1;
+    }
+    if (cut > 0) {
+      std::cerr << "cut " << cut << " bytes of a record left half written at the end of " << out_ << "\n";
+    }
     file.open(out_.c_str(), std::ios::out | std::ios::binary | std::ios::app);
     if (!file.good()) {
       std::cerr << "cannot open " << out_ << "\n";
@@ -207,8 +229,45 @@ int RecordingControlTask::_tap(Client& client, EveryAddress& addresses) {
   status_request.set_action(RecordingControl::STATUS);
   HeardByAddress heard;
   std::set<std::uint64_t> tapped;
+  std::set<std::uint64_t> refused;  // the multiplexers that refused the tap, not asked again
   std::uint64_t records = 0;
   bool written = true;  // every record reached the output
+  // A record to the output, a status to stderr, a multiplexer not
+  // streaming to us tapped again unless it refused.
+  const auto handle = [&](const std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper>& incoming) {
+    addresses.heard(incoming.second);
+    const MultiplexerMessage& mxmsg = *incoming.first;
+    if (mxmsg.type() == multiplexer::RECORDING_RECORD) {
+      Record record;
+      if (record.ParseFromString(mxmsg.message())) {
+        if (stream.write(record)) {
+          ++records;
+        } else {
+          written = false;
+        }
+      }
+      return;
+    }
+    RecordingStatus status;
+    if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message())) {
+      return;
+    }
+    note(heard, status, incoming.second, status.tapping());
+    if (status.has_error()) {  // the answer to a TAP: a STATUS never carries one
+      if (refused.insert(status.multiplexer_id()).second) {
+        std::cerr << _describe(status, true) << "; not asking it again\n";
+      }
+      return;
+    }
+    if (status.tapping()) {
+      if (tapped.insert(status.multiplexer_id()).second) {
+        std::cerr << "multiplexer " << status.multiplexer_id() << ": tapping\n";
+      }
+    } else if (!refused.count(status.multiplexer_id())) {
+      std::cerr << "multiplexer " << status.multiplexer_id() << ": not tapping; tapping again\n";
+      _send(client, tap, incoming.second);
+    }
+  };
   _send(client, tap);
   while (!stop_requested) {
     Deadline timer(POLL_SECONDS);
@@ -222,36 +281,21 @@ int RecordingControlTask::_tap(Client& client, EveryAddress& addresses) {
       } catch (const Client::NotConnected&) {
         continue;
       }
-      addresses.heard(incoming.second);
-      const MultiplexerMessage& mxmsg = *incoming.first;
-      if (mxmsg.type() == multiplexer::RECORDING_RECORD) {
-        Record record;
-        if (record.ParseFromString(mxmsg.message())) {
-          if (stream.write(record)) {
-            ++records;
-          } else {
-            written = false;
-          }
-        }
-        continue;
+      handle(incoming);
+    }
+    // What the queue holds goes out first: sending the status request reads
+    // what waits in the sockets into the queue, which then has its whole
+    // room for it.
+    while (client.has_incoming_messages()) {
+      std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> incoming;
+      try {
+        incoming = client.receive_message(0);
+      } catch (const Client::OperationTimedOut&) {
+        break;
+      } catch (const Client::NotConnected&) {
+        break;
       }
-      RecordingStatus status;
-      if (mxmsg.type() != multiplexer::RECORDING_STATUS || !status.ParseFromString(mxmsg.message())) {
-        continue;
-      }
-      note(heard, status, incoming.second, status.tapping());
-      if (status.has_error()) {
-        std::cerr << _describe(status, true) << "\n";
-        continue;
-      }
-      if (status.tapping()) {
-        if (tapped.insert(status.multiplexer_id()).second) {
-          std::cerr << "multiplexer " << status.multiplexer_id() << ": tapping\n";
-        }
-      } else {
-        std::cerr << "multiplexer " << status.multiplexer_id() << ": not tapping; tapping again\n";
-        _send(client, tap, incoming.second);
-      }
+      handle(incoming);
     }
     out->flush();
     _send(client, status_request);
@@ -273,8 +317,15 @@ int RecordingControlTask::_tap(Client& client, EveryAddress& addresses) {
     std::cerr << "cannot write the records to " << (out_.empty() ? "stdout" : out_) << "\n";
     written = false;
   }
+  if (const std::uint64_t dropped = client.incoming_dropped()) {
+    std::cerr << dropped << " messages dropped here, the incoming queue full, records among them\n";
+    written = false;
+  }
+  if (!refused.empty()) {
+    std::cerr << refused.size() << " multiplexer(s) refused the tap\n";
+  }
   std::cerr << records << " records written\n";
-  return untapped && written ? 0 : 1;
+  return untapped && written && refused.empty() ? 0 : 1;
 }
 
 }  // namespace mxcontrol

@@ -24,7 +24,7 @@ sequenceDiagram
     X->>M2: RECORDING_CONTROL START label=session
     M1-->>X: RECORDING_STATUS recording session.<time>.<id1>.rec
     M2-->>X: RECORDING_STATUS recording session.<time>.<id2>.rec
-    Note over M1,M2: one file each, the backend written first
+    Note over M1,M2: one file each, the connected peers written first, the backend among them
     Note over M1: client's request and the reply routed
     X->>M1: STOP
     X->>M2: STOP
@@ -36,7 +36,7 @@ sequenceDiagram
 
 - `status` before shows both idle; `start` answers one line per multiplexer with a path in the shared directory, named after the label and that multiplexer's instance id; the two names differ.
 - `status` under traffic counts the records; `stop` reports the path, the counts and who stopped it.
-- The two files merged by `read_many` carry both headers with the label, every record tagged with its multiplexer, the connected backend as the first peer event of each file, the request delivered once and its reply after it.
+- The two files merged by `read_many` carry both headers with the label, every record tagged with its multiplexer, the already connected backend among the CONNECTED records each file starts with, the request delivered once and its reply after it.
 - `mxcontrol dump_recording` over both files prints them merged by time, every line marked with its multiplexer, the headers with the label.
 - A second `start` with the same label makes two new files.
 - The Python API (`recording.start`, `status`, `stop`) does the same, with `payload_limit` in the header.

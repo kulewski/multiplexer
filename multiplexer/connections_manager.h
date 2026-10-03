@@ -148,14 +148,6 @@ class ConnectionsManager {
       return;
     }
 
-    MX_LOG(INFO, HIGHVERBOSITY,
-           CTX("ConnectionsManager") TEXT(
-               "registered connection"
-               " id=" +
-               repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
-               repr(config_.peer_name_by_type(conn->peer_type())) + ")" +
-               (welcome.has_routing() && restricted(welcome.routing()) ? "; " + routing_text(welcome.routing()) : "")));
-
     Config::PeerDescriptionById::const_iterator peer_description = config_.peer_by_type().find(conn->peer_type());
     if (peer_description != config_.peer_by_type().end()) {
       conn->set_is_passive(peer_description->second.is_passive());
@@ -170,6 +162,7 @@ class ConnectionsManager {
     //	    connection_by_id_.find(welcome.id()) != connection_by_id_.end()
     // because the peer can be reconnecting after losing its connection and we
     // may still not know about the connection being lost.
+    bool replaced = false;
     typename ConnectionById::iterator prev = connection_by_id_.find(welcome.id());
     if (prev != connection_by_id_.end()) {
       if (typename Connection::pointer previous = prev->second.lock()) {
@@ -183,7 +176,8 @@ class ConnectionsManager {
           conn->shutdown();
           return;
         }
-        previous->shutdown();
+        previous->shutdown();  // logs its own "unregistered connection"
+        replaced = true;
       }
     }
 
@@ -194,6 +188,18 @@ class ConnectionsManager {
     conn->in_type_list = true;
 
     conn->set_outgoing_queue_max_size(outgoing_queue_max_size(conn->peer_type()));
+
+    // Said once the connection is in: a refused one never logs it, and a
+    // replacement logs it after the departure of the connection it replaces,
+    // so that the last line about an id tells whether it is connected.
+    MX_LOG(INFO, HIGHVERBOSITY,
+           CTX("ConnectionsManager") TEXT(
+               "registered connection"
+               " id=" +
+               repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
+               repr(config_.peer_name_by_type(conn->peer_type())) + ")" +
+               (welcome.has_routing() && restricted(welcome.routing()) ? "; " + routing_text(welcome.routing()) : "") +
+               (replaced ? "; replaces its earlier connection" : "")));
 
     // after_connection_registration(conn, welcome);
   }

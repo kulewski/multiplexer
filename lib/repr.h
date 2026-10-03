@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace mx {
@@ -24,9 +25,17 @@ inline std::string repr(const T& value) {
 }
 
 // The number `text` holds, as T; std::invalid_argument when it is not one
-// or has anything after it.
+// or has anything after it, or for an unsigned T, is negative: a stream
+// reads "-1" as an unsigned number's largest, which made --max-bytes -1
+// no cap and a port of -1 65535.
 template <typename T>
 inline T from_string(const std::string& text) {
+  if (std::is_unsigned<T>::value) {
+    const std::string::size_type first = text.find_first_not_of(" \t\n\v\f\r");
+    if (first != std::string::npos && text[first] == '-') {
+      throw std::invalid_argument("not a number of 0 or more: '" + text + "'");
+    }
+  }
   std::istringstream in(text);
   T value;
   if (!(in >> value) || !in.eof()) {

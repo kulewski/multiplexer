@@ -4,9 +4,11 @@
 
 namespace mx {
 
-// Raises the soft and hard RLIMIT_CORE of the calling process to unlimited so
-// that a crash leaves a complete core file. Prints a warning to stderr and
-// continues if the limit cannot be raised.
+// Raises RLIMIT_CORE of the calling process as far as it may go, so that a
+// crash leaves as complete a core file as the limits allow: both limits to
+// unlimited where the process is privileged, the soft limit to the hard
+// one otherwise. Prints a warning to stderr, and continues, only when the
+// soft limit could not reach the hard one.
 void enable_core_dump();
 
 }  // namespace mx

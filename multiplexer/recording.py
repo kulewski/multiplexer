@@ -31,14 +31,16 @@ controller type:
 """
 
 import argparse
+import collections
 import datetime
 import sys
 import time
-from typing import Any, Iterator
+import weakref
+from typing import Any, BinaryIO, Iterator
 
 from google.protobuf.message import DecodeError
 
-from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER
+from multiplexer.Multiplexer_pb2 import RULES_CONTROLLER, MultiplexerMessage
 from multiplexer.mxclient import NotConnected, OperationTimedOut, wait_seconds
 
 
@@ -66,72 +68,90 @@ class TruncatedRecording(Exception):
     dies. Raised after every whole record before it."""
 
 
-def _decode_varint(data: bytes, position: int) -> tuple[int, int] | None:
-    """The base-128 varint at `position`: (value, position after it), as the
-    length prefix of every record in a recording is written; None when the
-    data ends inside it."""
+def _read_length(recording: BinaryIO) -> tuple[int, int] | None:
+    """The base-128 varint at the file's position, as the length prefix of
+    every record in a recording is written: (the length, how many bytes the
+    prefix took); None at the end of the file, before the prefix's first
+    byte; (-1, the bytes read) when the file ends inside it."""
     result = 0
     shift = 0
-    while position < len(data):
-        byte = data[position]
-        position += 1
-        result |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return result, position
+    taken = 0
+    while True:
+        byte = recording.read(1)
+        if not byte:
+            return (-1, taken) if taken else None
+        taken += 1
+        result |= (byte[0] & 0x7F) << shift
+        if not byte[0] & 0x80:
+            return result, taken
         shift += 7
-    return None
+
+
+def _check_rules(record: Record, position: int, constants) -> None:
+    """RulesMismatch when `record`, at byte `position` of its file, says the
+    rules were not those `constants` were generated from: a header, the
+    file's first record or one a restarted multiplexer appended to a
+    --record file, or a `rules` record, for a file put in use while
+    recording."""
+    if record.HasField("header") and record.header.rules_fingerprint != constants.RULES_FINGERPRINT:
+        if position == 0:
+            raise RulesMismatch(
+                "recorded with rules %s, these constants are from %s"
+                % (record.header.rules_fingerprint, constants.RULES_FINGERPRINT)
+            )
+        raise RulesMismatch(
+            "a multiplexer restarted with rules %s appended to the recording at byte %d, these constants are from %s"
+            % (record.header.rules_fingerprint, position, constants.RULES_FINGERPRINT)
+        )
+    if record.HasField("rules") and record.rules.fingerprint != constants.RULES_FINGERPRINT:
+        raise RulesMismatch(
+            "the rules changed to %s while recording, these constants are from %s"
+            % (record.rules.fingerprint, constants.RULES_FINGERPRINT)
+        )
 
 
 def read(path: str, check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
-    """Yield every Record in the file, in order. With `check_rules`, the
-    first record's rules fingerprint must match RULES_FINGERPRINT of `constants`, the
-    generated constants module of the rules file the multiplexer ran with,
-    and so must every later `rules` record's, one for a file put in use
-    while recording: RulesMismatch is raised there, after the records
-    before it were yielded. A file that ends partway through a record, as
-    one a session is still writing or a multiplexer that died left can,
-    raises TruncatedRecording there, after every whole record."""
+    """Yield every Record in the file, in order, read a record at a time, so
+    that a file of any size takes the memory of one record, and records
+    written while the iteration goes on are read too. With `check_rules`,
+    every header's rules fingerprint must match RULES_FINGERPRINT of
+    `constants`, the generated constants module of the rules file the
+    multiplexer ran with, the first record's and that of a header a
+    restarted multiplexer appended to a --record file, and so must every
+    `rules` record's, one for a file put in use while recording:
+    RulesMismatch is raised there, after the records before it were
+    yielded. A file that ends partway through a record, as one a session is
+    still writing or a multiplexer that died left can, raises
+    TruncatedRecording there, after every whole record."""
     with open(path, "rb") as recording:
-        data = recording.read()
-    position = 0
-    first = True
-    while position < len(data):
-        prefix = _decode_varint(data, position)
-        if prefix is None or prefix[1] + prefix[0] > len(data):
-            raise TruncatedRecording("%s ends partway through the record at byte %d" % (path, position))
-        size, start = prefix
-        record = Record()
-        try:
-            record.ParseFromString(data[start : start + size])
-        except DecodeError as error:
-            raise TruncatedRecording(
-                "%s: the record at byte %d does not parse: %s" % (path, position, error)
-            ) from error
-        position = start + size
-        if first:
-            first = False
-            if (
-                check_rules
-                and record.HasField("header")
-                and record.header.rules_fingerprint != constants.RULES_FINGERPRINT
-            ):
-                raise RulesMismatch(
-                    "recorded with rules %s, these constants are from %s"
-                    % (record.header.rules_fingerprint, constants.RULES_FINGERPRINT)
-                )
-        elif check_rules and record.HasField("rules") and record.rules.fingerprint != constants.RULES_FINGERPRINT:
-            # The multiplexer put another file in use while recording.
-            raise RulesMismatch(
-                "the rules changed to %s while recording, these constants are from %s"
-                % (record.rules.fingerprint, constants.RULES_FINGERPRINT)
-            )
-        yield record
+        position = 0
+        while True:
+            prefix = _read_length(recording)
+            if prefix is None:
+                return
+            size, taken = prefix
+            body = recording.read(size) if size >= 0 else b""
+            if size < 0 or len(body) < size:
+                raise TruncatedRecording("%s ends partway through the record at byte %d" % (path, position))
+            record = Record()
+            try:
+                record.ParseFromString(body)
+            except DecodeError as error:
+                raise TruncatedRecording(
+                    "%s: the record at byte %d does not parse: %s" % (path, position, error)
+                ) from error
+            if check_rules:
+                _check_rules(record, position, constants)
+            position += taken + size
+            yield record
 
 
 def read_many(paths: list[str], check_rules: bool = True, constants=multiplexer_constants) -> Iterator[Record]:
     """Every record of every file, merged by timestamp, each with
-    `multiplexer_id` set from its file's header: the recordings of several
-    multiplexers as one session. Clocks of different hosts differ, so the
+    `multiplexer_id` set from the header before it in its file, the
+    file's own or one a restarted multiplexer appended to a --record file:
+    the recordings of several multiplexers as one session, one record of
+    each file in memory at a time. Clocks of different hosts differ, so the
     order between multiplexers is as good as their clocks. A file that
     ends partway through a record ends there, the others merge on to
     their ends, and TruncatedRecording then names every such file."""
@@ -148,16 +168,14 @@ def read_many(paths: list[str], check_rules: bool = True, constants=multiplexer_
     streams = []
     for path in paths:
         records = read(path, check_rules=check_rules, constants=constants)
-        multiplexer_id = 0
         first = advance(records)
-        if first is None:
-            continue
-        if first.HasField("header"):
-            multiplexer_id = first.header.multiplexer_id
-        streams.append((first, records, multiplexer_id))
+        if first is not None:
+            streams.append((first, records, 0))
     while streams:
         index = min(range(len(streams)), key=lambda position: streams[position][0].timestamp_us)
         record, records, multiplexer_id = streams[index]
+        if record.HasField("header"):
+            multiplexer_id = record.header.multiplexer_id  # a restart's header names the new process
         if multiplexer_id and not record.multiplexer_id:
             record.multiplexer_id = multiplexer_id
         yield record
@@ -255,13 +273,28 @@ def involves_peer(record: Record, peer_id: int) -> bool:
 # multiplexer the client is connected to, one RecordingStatus back from each.
 
 
-def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **fields: Any) -> list[RecordingStatus]:
-    """Send a RecordingControl with `action` and `fields` on every
-    connection of `client` and return the statuses that came back within
-    `timeout`, one per multiplexer; fewer when one did not answer. A
-    negative `timeout` waits as long as it takes, as math.inf does; 0 and
-    NaN wait for none, and read none. Raises NotConnected when the client
-    has no connection."""
+class TapFailed(Exception):
+    """A TAP a multiplexer refused, its status saying why, taps being off
+    say, or that not every multiplexer answered in time. tap() ended the
+    subscriptions it did make before raising; `statuses` holds those that
+    came back."""
+
+    def __init__(self, message: str, statuses: list[RecordingStatus]):
+        super().__init__(message)
+        self.statuses = statuses
+
+
+# The RECORDING_RECORDs a client that taps read while it waited for
+# statuses, its own TAP's or a later request's, kept for its tap()
+# iterator, which yields them before it reads on; by client, from its
+# tap() to an UNTAP.
+_kept_records: "weakref.WeakKeyDictionary[Any, collections.deque[MultiplexerMessage]]" = weakref.WeakKeyDictionary()
+
+
+def _control(
+    client, action: "RecordingControl.Action", timeout: float, **fields: Any
+) -> tuple[list[RecordingStatus], int]:
+    """control()'s statuses, and how many multiplexers were asked."""
     request = RecordingControl(action=action, **fields)
     mxmsg = client.new_message(message=request.SerializeToString(), type=RECORDING_CONTROL)
     # A copy on every live connection now, and one status expected from each;
@@ -270,6 +303,7 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
     if not expected:
         raise NotConnected()
     request_id = mxmsg.id
+    kept = _kept_records.get(client)
     statuses = []
     deadline = time.monotonic() + wait_seconds(timeout)
     while len(statuses) < expected:
@@ -277,7 +311,7 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
         if remaining <= 0:
             break
         try:
-            mxmsg, _ = client._receive([request_id], ignore_types=(RECORDING_RECORD,), timeout=remaining)
+            mxmsg, _ = client._receive([request_id], ignore_types=(RECORDING_RECORD,), timeout=remaining, kept=kept)
         except OperationTimedOut:
             break
         if mxmsg.type != RECORDING_STATUS:
@@ -285,7 +319,20 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
         status = RecordingStatus()
         status.ParseFromString(mxmsg.message)
         statuses.append(status)
-    return statuses
+    if action == RecordingControl.UNTAP:
+        _kept_records.pop(client, None)
+    return statuses, expected
+
+
+def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **fields: Any) -> list[RecordingStatus]:
+    """Send a RecordingControl with `action` and `fields` on every
+    connection of `client` and return the statuses that came back within
+    `timeout`, one per multiplexer; fewer when one did not answer. A
+    negative `timeout` waits as long as it takes, as math.inf does; 0 and
+    NaN wait for none, and read none. Raises NotConnected when the client
+    has no connection. The records a client that taps reads meanwhile are
+    kept for its tap() iterator, until an UNTAP."""
+    return _control(client, action, timeout, **fields)[0]
 
 
 def start(
@@ -318,15 +365,29 @@ def status(client, timeout: float = 5.0) -> list[RecordingStatus]:
 def tap(client, payload_limit: int = 0, timeout: float = 10.0) -> Iterator[Record]:
     """Subscribe on every connection, now, and return an iterator over the
     records as the multiplexers route them, `multiplexer_id` set; it raises
-    OperationTimedOut when nothing arrives for `timeout` seconds. The
-    subscriptions end with the client's connections, or with an UNTAP
-    (`control(client, RecordingControl.UNTAP)`). Records the client does not
-    read in time are dropped by the multiplexer, counted in its status."""
-    control(client, RecordingControl.TAP, timeout=timeout, payload_limit=payload_limit)
+    OperationTimedOut when nothing arrives for `timeout` seconds. TapFailed
+    when a multiplexer refused the TAP, taps being off say, or did not
+    answer within `timeout`, the subscriptions made ended first. The
+    records the client reads while it waits for statuses, of this TAP or of
+    a later status() or stop() on it, are kept and yielded first, in
+    order. The subscriptions end with the client's connections, or with an
+    UNTAP (`control(client, RecordingControl.UNTAP)`). Records the client
+    does not read in time are dropped by the multiplexer, counted in its
+    status."""
+    kept = _kept_records.setdefault(client, collections.deque())
+    statuses, asked = _control(client, RecordingControl.TAP, timeout, payload_limit=payload_limit)
+    refused = [status for status in statuses if status.error]
+    if refused or len(statuses) < asked:
+        control(client, RecordingControl.UNTAP, timeout=timeout)
+        reasons = ["multiplexer %d refused it: %s" % (status.multiplexer_id, status.error) for status in refused]
+        if len(statuses) < asked:
+            reasons.append("%d of %d multiplexer(s) did not answer" % (asked - len(statuses), asked))
+        raise TapFailed("tap: " + "; ".join(reasons), statuses)
 
     def records() -> Iterator[Record]:
+        """The kept records first, then those read on."""
         while True:
-            mxmsg = client.read_message(timeout=timeout)
+            mxmsg = kept.popleft() if kept else client.read_message(timeout=timeout)
             if mxmsg.type != RECORDING_RECORD:
                 continue
             record = Record()

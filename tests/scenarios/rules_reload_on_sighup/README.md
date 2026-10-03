@@ -8,8 +8,8 @@ who wants edits applied on their say-so runs it. Two backends of different
 types both serve TEST_REQUEST_A; the file routes it to the first. The rule
 is edited to name the second type: queries keep going to the first until
 SIGHUP, and to the second from then on. A SIGHUP with the file unchanged is
-logged as such, and so is one with a file that does not parse. A peer
-whose type an edit removed stays connected, counted in the log, and still
+logged as such, and so is one with a file naming a peer that does not
+exist. A peer whose type an edit removed stays connected, counted in the log, and still
 gets what is addressed to it, while a new peer of that type is refused.
 
 ## What happens
@@ -41,6 +41,7 @@ sequenceDiagram
 - A second SIGHUP with the file unchanged logs that the file is the rules in use; a SIGHUP right after the port file appears is handled, not fatal.
 - A SIGHUP with a file naming a peer that does not exist logs the refusal.
 - With the first backend's peer type removed from the file, the log counts it as kept, it is still in the peers file, an event addressed to it arrives, and a fresh backend of that type reports zero connections and is refused.
+- A SIGHUP with a directory in the file's place logs that it cannot be read, and why; with the file back, the next SIGHUP puts it in use.
 
 ## Run
 

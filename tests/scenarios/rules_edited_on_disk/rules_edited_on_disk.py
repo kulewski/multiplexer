@@ -10,11 +10,12 @@ are appended in place: both multiplexers put the file in use, the backend
 is admitted at its next attempt, and the query is answered. Then the file is replaced the way a
 ConfigMap update arrives, a new directory and one atomic rename of the
 `..data` link, with a second pair of types, and that is seen too. A file
-that does not parse changes nothing, and neither does one caught empty
-between a truncate and a write: the last good rules stay in use, the log
-says so once, and `mxcontrol rules status` names the error until the file
-is fixed. A change is put in use once two checks have read the same new
-bytes, so nothing half written is ever applied.
+naming a peer that does not exist changes nothing, and neither does one
+caught empty between a truncate and a write: the last good rules stay in
+use, the log says so once, and `mxcontrol rules status` names the error
+until the file is fixed. A change is put in use once two checks have read
+the same new bytes, so nothing half written is ever applied, which
+rules_check_reads_twice shows.
 """
 
 import os
@@ -153,7 +154,7 @@ class RulesEditedOnDisk(unittest.TestCase):
             self.assertEqual("WORLD", self.ask(cluster, LATER_REQUEST, "world"))
             self.assertEqual("AGAIN", self.ask(cluster, LATE_REQUEST, "again"), "the first pair is still there")
 
-            # A file that does not parse: the last good rules stay in use.
+            # A file naming a peer that does not exist: the last good rules stay in use.
             good = volume.read()
             volume.edit_in_place(good + BROKEN_ENTRY)
             for multiplexer in cluster.mx:

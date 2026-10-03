@@ -43,6 +43,12 @@ mx_integration_test(
     scenario = "idle_passive_peers/idle_passive_peers.py",
 )
 
+# The periodic check's wait for a second read of the same bytes.
+mx_integration_test(
+    name = "rules_check_reads_twice_test",
+    scenario = "rules_check_reads_twice/rules_check_reads_twice.py",
+)
+
 # What a reload does to the peers already connected.
 mx_integration_test(
     name = "rules_reload_peers_test",
@@ -400,6 +406,10 @@ mx_integration_test(
     mx_integration_test(
         name = "recording_latency_%s_%s" % (backend, client),
         size = "medium",
+        extra_deps = [
+            "//multiplexer:recording",
+            "//multiplexer:recording_py_proto",
+        ],
         roles = {
             "backend": backend,
             "client": client,

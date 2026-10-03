@@ -79,7 +79,7 @@ message RecordingHeader {
 message PeerEvent {
   enum Kind {
     CONNECTED = 1;      // the peer's welcome was accepted, or it was already connected when the session started
-    DISCONNECTED = 2;   // its connection ended
+    DISCONNECTED = 2;   // its connection closed: after the records of what it sent last
     ROUTING = 3;        // it changed which routing reaches it (PEER_CONTROL); the flags below say what
   }
   optional Kind kind = 1;

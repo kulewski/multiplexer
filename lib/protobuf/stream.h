@@ -94,10 +94,17 @@ struct OstreamMessageOutputStream : MessageOutputStream {
 struct FileMessageOutputStream : MessageOutputStream {
   FileMessageOutputStream(const FileMessageOutputStream&) = delete;
   FileMessageOutputStream& operator=(const FileMessageOutputStream&) = delete;
-  explicit FileMessageOutputStream(int fd, bool own_fd = false) : fd_(fd, own_fd) {}
+  explicit FileMessageOutputStream(int fd, bool own_fd = false) : fd_(fd, own_fd) {
+    struct stat status;
+    if (::fstat(fd, &status) == 0 && S_ISREG(status.st_mode)) {
+      whole_ = status.st_size;
+    }
+  }
 
+  // A message is written whole by write() and the flush() after it.
   virtual bool write(const google::protobuf::Message& m) {
     if (!file_output_stream_) {
+      error_ = 0;  // a new message
       file_output_stream_.reset(new google::protobuf::io ::FileOutputStream(fd_.fd()));
     }
     if (Write(m, *file_output_stream_)) {
@@ -108,20 +115,36 @@ struct FileMessageOutputStream : MessageOutputStream {
   }
 
   virtual void flush() {
-    if (file_output_stream_ && !file_output_stream_->Flush()) {
-      error_ = file_output_stream_->GetErrno();
+    if (file_output_stream_) {
+      if (!file_output_stream_->Flush()) {
+        error_ = file_output_stream_->GetErrno();
+      } else if (whole_ >= 0 && !error_) {
+        whole_ += file_output_stream_->ByteCount();
+      }
     }
     file_output_stream_.reset();
   }
 
-  // The errno of the last write to the descriptor that failed, 0 while
-  // none has.
+  // The errno of the descriptor's failure on the last message written, 0
+  // when it took it whole.
   int error() const { return error_; }
+
+  // Cuts a regular file back to the end of its last message written whole,
+  // and the descriptor's offset with it, which a descriptor opened without
+  // O_APPEND writes the next message at: what a failed write left of one
+  // goes, so that a reader, which stops at a message cut short, reads the
+  // ones after it. False for a pipe or a socket, which keep what they
+  // took, or when the cut failed. The file is this stream's alone: another
+  // process appending to it would lose what it wrote since.
+  bool cut_back() {
+    return whole_ >= 0 && ::ftruncate(fd_.fd(), whole_) == 0 && ::lseek(fd_.fd(), whole_, SEEK_SET) == whole_;
+  }
 
  private:
   util::Fd fd_;
   std::unique_ptr<google::protobuf::io::FileOutputStream> file_output_stream_;
   int error_ = 0;
+  off_t whole_ = -1;  // a regular file's size after its last whole message; -1 for any other descriptor
 };
 
 struct FileMessageInputStream : MessageInputStream {

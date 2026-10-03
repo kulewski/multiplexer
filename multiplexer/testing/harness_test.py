@@ -4,8 +4,11 @@ recording outlives a restart of its multiplexer; a BackendThread whose
 start() ran out of time closes the backend it builds after; an Event line
 that does not parse is kept as such; a Cluster that cannot start every
 multiplexer stops the ones it started; $MX_TEST_OUTPUT gives every process
-a directory of its own; and a test process that is killed takes its
-multiplexers with it. Each failed on the harness before. Counted, not
+a directory of its own; a test process that is killed takes its
+multiplexers with it; and log_contains() past a log_mark() sees only what
+came after the mark, where it searched the whole log, so that a wait for a
+line an earlier step wrote ended at once. Each failed on the harness
+before. Counted, not
 timed, but for receive_type(), whose timeout is the thing tested: every
 other wait is a failure detector.
 """
@@ -68,6 +71,19 @@ class HarnessTest(unittest.TestCase):
             cluster.mx[0].kill()
             self.assertEqual([], cluster.mx[0].connected_peers())
             cluster.wait_for_peer_gone(peers.TEST_EVENT_BACKEND, timeout=5)
+            peer.close()
+
+    def test_a_log_mark_hides_what_came_before(self) -> None:
+        """The start's line is in the log, and not past a mark taken after
+        it; a line logged after the mark is."""
+        with Cluster(1, rules=RULES) as cluster:
+            multiplexer = cluster.mx[0]
+            self.assertTrue(multiplexer.log_contains("rules loaded from"))
+            mark = multiplexer.log_mark()
+            self.assertFalse(multiplexer.log_contains("rules loaded from", since=mark))
+            peer = RawPeer(cluster.endpoints[0], peers.TEST_EVENT_BACKEND)
+            peer.handshake()
+            wait_until(lambda: multiplexer.log_contains("registered connection", since=mark), 30, "the arrival")
             peer.close()
 
     def test_a_recording_outlives_a_restart(self) -> None:

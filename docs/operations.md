@@ -295,7 +295,17 @@ compiles with `-g` and installs unstripped.
 
 The multiplexer and both libraries log to stderr, one entry per line, with
 the level, timestamp, pid, context, workflow id, message and source
-location. The multiplexer logs every peer that registers and leaves at `INFO`, a
+location, each line one `write(2)` to descriptor 2, made again when a
+signal interrupts it. A line stderr does not take, from a pipe that does
+not block and is full or a full disk, is dropped and counted, and the next
+that gets through is preceded by an `ERROR` line, `N log entries lost:
+stderr did not take them`. The multiplexer logs every peer that registers and leaves at `INFO`,
+`registered connection id=ID type=N (NAME)` once the peer is in and
+`unregistered connection` when it leaves, so the last line about an id
+says whether it is connected: a peer that comes back from the same host
+before its old connection was noticed dead is logged leaving and then
+registered again, with `; replaces its earlier connection`, and one
+refused for claiming a live id is never logged as registered. It logs a
 message a rule queued nowhere at `ERROR`, or `WARNING` when the rule's
 `delivery_error_is_error` is false, saying why (below), and a copy a full
 connection refuses at `WARNING`, as `outgoing queue full, dropping message
@@ -357,7 +367,14 @@ log shipper and the smallest example of a backend. A stream
 whose reader goes away, a shipper that exits, is dropped at the first
 entry that finds it gone, with a `WARNING` saying so (`the binary log
 stream's reader is gone`); stderr goes on. The multiplexer ignores
-`SIGPIPE` so as to outlive such a reader, of the stream or of stderr.
+`SIGPIPE` so as to outlive such a reader, of the stream or of stderr. A
+file that takes only part of an entry, a full disk say, is cut back to its
+last whole entry, so that what comes after reads, and entries are dropped
+until it takes them again, with a `WARNING` when that begins and one with
+the count when it ends; a pipe or a socket that takes part of one is
+dropped as a reader gone, since its reader could not find the next entry.
+The file is the process's own: it is cut where this process's last entry
+ended.
 
 The Python library logs through the same mechanism, so a Python backend's
 stderr has the same shape.
@@ -430,8 +447,10 @@ Read it with `mxcontrol dump_recording FILE --rules FILE` (names from the
 rules file, `--type` and `--peer` to filter), with
 `bazel run @mx//multiplexer:dump_recording -- FILE` (names from the
 generated constants), or from Python with `multiplexer.recording.read()`,
-which yields the records and refuses a file made with other rules than the
-constants were generated from. A file a session is still writing, or one
+which yields the records, a record at a time, and refuses a file made with
+other rules than the constants were generated from, a session a restarted
+multiplexer appended to a `--record` file included; `read_many()` gives
+each record the multiplexer id of the header before it. A file a session is still writing, or one
 a multiplexer that died left, can end partway through a record: both
 readers give every whole record and then say so, `dump_recording` with
 exit status 1, `recording.read()` by raising `TruncatedRecording`. A
@@ -445,7 +464,11 @@ was told, saying why for the type as a whole, as the log line does:
 every peer that takes the message has its queue full, `NOT_ACCEPTED` when
 none takes it; a fan-out (`whom: ALL`) records each peer it passed over
 besides. A `PeerEvent` marks a peer
-arriving, leaving, or changing its routing. A rules file put in use while
+arriving, leaving, or changing its routing. A peer's `DISCONNECTED` comes
+when its connection has closed, after the records of what it sent last: a
+connection whose write failed reads on to the peer's end and routes what
+it reads, and a `PEER_CONTROL` among that changes nothing, its peer gone
+from routing. A rules file put in use while
 the session is open ([changing the rules](#changing-the-rules)) leaves a
 `rules` record with the new fingerprint, from which the numbers are the
 new file's; both readers show it, and `recording.read()` refuses to go on
@@ -570,6 +593,14 @@ queues: up to `queue_size` messages per connection, and 64 small protocol
 frames past that, each held as long as it is unsent, so a slow backend can
 pin up to 1024 messages of whatever size your peers send. Lower
 `queue_size` for peer types that receive large messages.
+
+Every connection takes a file descriptor, as do a recording session and
+each read of the rules file, so the descriptor limit (`ulimit -n`,
+systemd's `LimitNOFILE`, a container runtime's `nofile`) must exceed the
+peers you expect, with room to spare. With descriptors exhausted the
+multiplexer accepts no connection, logging `cannot accept a connection:
+Too many open files` and trying again every 0.1 s, and a rules check or
+reload says `cannot read <path>: Too many open files`.
 
 Backends are where the work is; add more of a type and `whom: ANY` spreads
 requests over them. A backend built on `BaseMultiplexerServer` handles one

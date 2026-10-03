@@ -13,8 +13,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <iostream>
-#include <sstream>
 #include <string>
 
 #include "lib/assertion.h"
@@ -119,25 +117,19 @@ inline bool should_log(unsigned int level, unsigned int verbosity) {
  */
 void _emit_log(const LogEntry& log_msg);
 
-// Writes an (already initialized) LogEntry on cerr and on the binary
-// logging stream; the Python binding's entry point.
-static inline void emit_log(const unsigned int level, const LogEntry& log_msg, unsigned int flags = 0) {
+// Writes the entry's text line to stderr, `data` after it when given,
+// with write(2) itself: see logging.cc.
+void _emit_text(unsigned int level, const LogEntry& log_msg, const std::string* data);
+
+// Writes an (already initialized) LogEntry on stderr and on the binary
+// logging stream; the Python binding's entry point. `data`, when given,
+// follows the line, as the text of the entry's data.
+static inline void emit_log(const unsigned int level, const LogEntry& log_msg, unsigned int flags = 0,
+                            const std::string* data = nullptr) {
   if (!(flags & SKIP_LOGGING_TO_STREAM)) {
     _emit_log(log_msg);
   }
-  std::ostringstream cerr;
-  cerr << "[" << logging_get_level_name(level) << "]"
-       << "  ts=" << log_msg.timestamp() << "  pid=" << log_msg.pid() << "  ctx=" << log_msg.context() << "  flw=\""
-       << log_msg.workflow() << "\""
-       << "  txt=\"" << log_msg.text() << "\"";
-  if (log_msg.has_source_file()) {
-    cerr << "  from=" << log_msg.source_file();
-    if (log_msg.has_source_line()) {
-      cerr << ":" << log_msg.source_line();
-    }
-  }
-  cerr << "\n";
-  std::cerr << cerr.str();
+  _emit_text(level, log_msg, data);
 }
 
 // as the above but without level->str optimization
@@ -198,10 +190,7 @@ class Entry {
   }
   void emit() {
     entry_.set_context(context_);
-    impl::emit_log(level_, entry_, flags_);
-    if (has_data_) {
-      std::cerr << data_text_ << "\n\n";
-    }
+    impl::emit_log(level_, entry_, flags_, has_data_ ? &data_text_ : nullptr);
   }
 
  private:

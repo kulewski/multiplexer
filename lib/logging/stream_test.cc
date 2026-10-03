@@ -4,15 +4,20 @@
 // order its thread wrote it, and counted, where the threads wrote into one
 // buffer, or into one being freed, and crashed; a forked child logs and
 // exits, where one forked while the other thread held the stream's lock
-// would wait for it until its alarm.
+// would wait for it until its alarm. And an entry the stream's file takes
+// only part of is cut back out, so that the entries after it read, where
+// every one after it was unreadable.
 #include "lib/protobuf/stream.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -156,4 +161,42 @@ TEST(LogStream, AChildForkedWhileAnotherThreadLogsCanLog) {
   forking = false;
   writer.join();
   EXPECT_EQ(-1, stuck) << "a child waited for the stream's lock until its alarm";
+}
+
+// An entry the stream's file takes only part of, cut short by a file size
+// limit here as by a full disk, is cut back out: the entries before and
+// after it read whole. In a forked child, whose limit nothing else of the
+// test's shares; a write past it fails with EFBIG, SIGXFSZ ignored.
+TEST(LogStream, AnEntryTakenInPartIsCutAndTheNextReads) {
+  std::string path;
+  const int fd = scratch_file("cut", &path);
+  ASSERT_LE(0, fd);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+  if (pid == 0) {
+    alarm(10);
+    std::signal(SIGXFSZ, SIG_IGN);
+    mx::logging::set_logging_fd(fd, /*close_on_delete=*/true, /*log_the_fact=*/false);
+    log_entry(1);
+    struct stat status;
+    rlimit limit;
+    if (fstat(fd, &status) != 0 || getrlimit(RLIMIT_FSIZE, &limit) != 0) {
+      _exit(2);
+    }
+    rlimit tight = limit;
+    tight.rlim_cur = static_cast<rlim_t>(status.st_size) + 50;  // part of the next entry, of 200 bytes and more
+    setrlimit(RLIMIT_FSIZE, &tight);
+    log_entry(2);
+    setrlimit(RLIMIT_FSIZE, &limit);
+    log_entry(3);
+    _exit(0);
+  }
+  ASSERT_EQ(0, exit_code_of(pid));
+  std::vector<std::uint64_t> ids;
+  for (std::uint64_t id : ids_in(path)) {
+    if (id <= 3) {
+      ids.push_back(id);  // the test's own: the warnings the library logs have ids of their own
+    }
+  }
+  EXPECT_EQ((std::vector<std::uint64_t>{1, 3}), ids) << "the part of 2 cut, and 3 read after it";
 }

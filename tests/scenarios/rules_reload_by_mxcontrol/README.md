@@ -55,7 +55,8 @@ sequenceDiagram
 - A recording session started before the edit and stopped after it holds, on each multiplexer, a `rules` record with the new fingerprint.
 - `reload` with a broken file exits 1, each line says why and which rules are kept; `status` says the file on disk is not in use; the query still works.
 - `reload` with the file put back answers `unchanged` and the status no longer mentions the file on disk.
-- `reload` with the file renamed away exits 1 with `cannot read`, the query still works, `status` repeats the reason with the periodic check off, and a `reload` with the file put back answers `unchanged` and clears it.
+- A broken file renamed away and back is said as broken again, not as the read failure between.
+- `reload` with the file renamed away exits 1 with `cannot read <path>: No such file or directory`, the query still works, `status` repeats the reason with the periodic check off, and a `reload` with the file put back answers `unchanged` and clears it.
 - `reload` with an empty file exits 1 with `empty rules file`, with a file holding no peer type with `no peer types`, with a file repeating a number with `duplicate peer type`, with a peer type of `queue_size: 0` with `queue_size 0 holds no message`, the query still works, and the file put back is `unchanged`.
 - `status` with a second address nobody listens on exits 1 and says so on stderr; the reachable multiplexer's line is still printed.
 

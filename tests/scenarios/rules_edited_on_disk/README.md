@@ -12,12 +12,12 @@ are appended in place: both multiplexers put the file in use, the backend
 is admitted at its next attempt, and the query is answered. Then the file
 is replaced the way a ConfigMap update arrives, a new directory and one
 atomic rename of the `..data` link, with a second pair of types, and that
-is seen too. A file
-that does not parse changes nothing, and neither does one caught empty
-between a truncate and a write: the last good rules stay in use, the log
-says so once, and `mxcontrol rules status` names the error until the file
-is fixed. A change is put in use once two checks have read the same new
-bytes, so nothing half written is ever applied.
+is seen too. A file naming a peer that does not exist changes nothing,
+and neither does one caught empty between a truncate and a write: the
+last good rules stay in use, the log says so once, and `mxcontrol rules
+status` names the error until the file is fixed. A change is put in use
+once two checks have read the same new bytes, so nothing half written is
+ever applied, which rules_check_reads_twice shows.
 
 ## What happens
 
@@ -40,7 +40,7 @@ sequenceDiagram
     Note over F: new directory, ..data renamed over: peer 251 and type 251
     M->>F: read: changed, in use
     Note over F: an entry naming a peer that does not exist
-    M->>F: read: does not parse, logged once, rules in use kept
+    M->>F: read: refused, logged once, rules in use kept
     C->>M: request of type 251
     B->>C: reply
 ```

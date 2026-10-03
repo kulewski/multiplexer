@@ -4,6 +4,8 @@
 // streamlogs sends; give any peer type a rule and it is a tap on that type.
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
+#include <iostream>
+
 #include "lib/logging/logging.h"
 #include "lib/protobuf/stream.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */

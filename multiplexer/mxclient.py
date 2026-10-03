@@ -957,10 +957,13 @@ class Client(_mxclient.Client):
         timeout=DEFAULT_TIMEOUT,
         timeout_ticker=None,
         watch=None,
+        kept=None,
     ):
         """Wait for a reply that references one of `accept_ids`, as
         _send_and_receive() does, without sending anything. With `watch`, a
-        connection, NotConnected as soon as it is gone."""
+        connection, NotConnected as soon as it is gone. A message of
+        `ignore_types` is passed over, appended to `kept` when that is
+        given, a list say, for whoever reads such messages."""
         if timeout_ticker is None:
             timeout_ticker = TimeoutTicker(timeout)
 
@@ -974,6 +977,8 @@ class Client(_mxclient.Client):
                 mxmsg, connwrap = self.__parse_incoming(got)
             if mxmsg.type in ignore_types:
                 self.__acknowledged(mxmsg, accept_ids, ignore_ids)
+                if kept is not None:
+                    kept.append(mxmsg)
                 continue
 
             if mxmsg.references in accept_ids:

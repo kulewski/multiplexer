@@ -2,6 +2,7 @@
 #include "lib/options.h"
 
 #include <algorithm>
+#include <sstream>
 
 namespace mx {
 namespace options {

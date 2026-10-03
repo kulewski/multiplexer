@@ -7,6 +7,12 @@ DecodeError, or yielded the cut record as a whole one. read_many() merges
 the other files to their ends before it raises, where it gave up on every
 file at the first broken one. And `python -m multiplexer.recording`
 prints up to the break and exits 1, as mxcontrol dump_recording does.
+Every header is checked, the one a restarted multiplexer appends to a
+--record file too, which passed unchecked, and read_many() stamps each
+record with the multiplexer id of the header before it, where it stamped
+every record with the file's first. And read() reads a record at a time:
+a record appended while it iterates is read, where the whole file was
+read at the start.
 """
 
 import contextlib
@@ -17,7 +23,7 @@ import unittest
 
 from multiplexer import multiplexer_constants
 from multiplexer.Recording_pb2 import Record
-from multiplexer.recording import TruncatedRecording, main, read, read_many
+from multiplexer.recording import RulesMismatch, TruncatedRecording, main, read, read_many
 
 PAYLOAD = b"x" * 200  # a routed record past 127 bytes: its length takes two bytes
 
@@ -38,11 +44,12 @@ def framed(record: Record) -> bytes:
     return varint(len(body)) + body
 
 
-def header(multiplexer_id: int) -> Record:
-    """The first record of a file, with the rules the constants come from."""
-    record = Record(timestamp_us=1)
+def header(multiplexer_id: int, timestamp_us: int = 1, fingerprint: str = "") -> Record:
+    """A header, a file's first record or one a restart appends, with the
+    rules the constants come from unless `fingerprint` names others."""
+    record = Record(timestamp_us=timestamp_us)
     record.header.multiplexer_id = multiplexer_id
-    record.header.rules_fingerprint = multiplexer_constants.RULES_FINGERPRINT
+    record.header.rules_fingerprint = fingerprint or multiplexer_constants.RULES_FINGERPRINT
     return record
 
 
@@ -106,6 +113,35 @@ class RecordingReadTest(unittest.TestCase):
                 merged.append(record)
         self.assertEqual([1, 1, 10, 20, 30, 40, 60, 80], [record.timestamp_us for record in merged])
         self.assertIn(torn, str(raised.exception))
+
+    def test_a_header_a_restart_appended_is_checked(self) -> None:
+        """A restarted multiplexer with other rules appended its session: the
+        records before its header are yielded, then RulesMismatch."""
+        appended = framed(header(9, 30, fingerprint="0badc0de")) + framed(routed(40))
+        path = self.write("appended.rec", self.whole(7, [10, 20]) + appended)
+        records: list[Record] = []
+        with self.assertRaises(RulesMismatch):
+            for record in read(path):
+                records.append(record)
+        self.assertEqual([1, 10, 20], [record.timestamp_us for record in records])
+        self.assertEqual(5, sum(1 for _ in read(path, check_rules=False)))
+
+    def test_read_many_stamps_each_session_with_its_own_multiplexer(self) -> None:
+        """The records after a restart's header carry the new process's id."""
+        restarted = self.whole(7, [10]) + framed(header(9, 30)) + framed(routed(40))
+        path = self.write("restarted.rec", restarted)
+        stamped = [(record.timestamp_us, record.multiplexer_id) for record in read_many([path])]
+        self.assertEqual([(1, 7), (10, 7), (30, 9), (40, 9)], stamped)
+
+    def test_a_record_appended_while_reading_is_read(self) -> None:
+        """read() takes the file a record at a time: one appended after the
+        first was yielded comes out too."""
+        path = self.write("growing.rec", self.whole(7, []))
+        records = read(path)
+        self.assertEqual(1, next(records).timestamp_us)
+        with open(path, "ab") as growing:
+            growing.write(framed(routed(10)))
+        self.assertEqual([10], [record.timestamp_us for record in records])
 
     def test_the_command_prints_up_to_the_break_and_exits_1(self) -> None:
         path = self.write("torn.rec", self.whole(7, [10, 20]) + framed(routed(30))[:1])

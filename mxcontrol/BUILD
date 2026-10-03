@@ -261,6 +261,22 @@ py_test(
 )
 
 py_test(
+    name = "recording_loops_test",
+    size = "medium",
+    srcs = ["recording_loops_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = [
+        "//multiplexer:clients",
+        "//multiplexer:multiplexer_constants",
+        "//multiplexer:recording",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "answer_deadline_test",
     size = "medium",
     srcs = ["answer_deadline_test.py"],

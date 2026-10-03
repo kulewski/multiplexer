@@ -36,6 +36,16 @@ cc_library(
 )
 
 cc_test(
+    name = "core_dump_test",
+    size = "small",
+    srcs = ["core_dump_test.cc"],
+    deps = [
+        ":core_dump",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "thread_checker_test",
     size = "small",
     srcs = ["thread_checker_test.cc"],

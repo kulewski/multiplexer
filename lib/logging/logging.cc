@@ -6,14 +6,15 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
 // #include <google/protobuf/io/zero_copy_stream_impl.h>
 // #include <google/protobuf/io/coded_stream.h>
@@ -41,6 +42,8 @@ namespace impl {
 // one load of stream_set_.
 static mx::Mutex stream_mutex_;
 static std::unique_ptr<mx::protobuf::FileMessageOutputStream> message_output_stream_ MX_GUARDED_BY(stream_mutex_);
+// Entries the stream's file did not take, in the run of failures under way.
+static std::uint64_t stream_entries_dropped_ MX_GUARDED_BY(stream_mutex_) = 0;
 static std::atomic<bool> stream_set_{false};
 
 // Null until the library sets its default; constant-initialized, as the
@@ -98,24 +101,17 @@ static inline void initialize_hostname() {
 }
 MX_TRIGGER_STATIC_INITIALIZATION(initialize_hostname(), hostname.empty());
 
+// The program's name in the log context: the basename of argv[0], as glibc
+// keeps it from before any static initializer runs, spaces and all. It
+// read /proc/<getpid()>/cmdline, which in a PID namespace without its own
+// /proc is another process's or none, the process then exiting as the
+// library loaded, and cut the name at a space. An empty argv[0], or one
+// ending in '/', is "unknown", where the assertion below ended the process.
 static inline void initialize_process_name() {
-  std::string proc = "/proc/" + mx::repr(getpid()) + "/cmdline";
-  std::ifstream cmdline(proc.c_str(), std::ofstream::binary);
-  if (!cmdline) {
-    std::cerr << "logging::impl::initialize_process_context_all_defaults: " << proc << ": No such file or directory\n";
-    exit(EXIT_FAILURE);
+  process_name = program_invocation_short_name;
+  if (process_name.empty()) {
+    process_name = "unknown";
   }
-
-  cmdline >> proc;                  // read the process name and parameters
-  std::string name = proc.c_str();  // extract the process name
-  if (name.empty()) {
-    std::cerr << "logging::impl::initialize_process_context_all_defaults: "
-                 "coulnd't get the process name from /proc\n";
-  }
-
-  process_name.clear();
-  std::string::size_type spos = name.rfind('/');  // get the basename
-  process_name.append(name, (spos == std::string::npos && name.size() > spos) ? 0 : spos + 1, name.size());
 }
 MX_TRIGGER_STATIC_INITIALIZATION(initialize_process_name(), process_name.empty());
 
@@ -155,6 +151,80 @@ static void replace_stream(mx::protobuf::FileMessageOutputStream* stream) MX_REQ
   stream_set_.store(stream != nullptr, std::memory_order_relaxed);
 }
 
+// The entries whose text stderr did not take since a line last got
+// through, which the next one that does says first.
+static std::atomic<std::uint64_t> text_entries_lost_{0};
+
+// The stderr form of `log_msg` at `level`, one line, `data` after it when
+// given: built in one string, which a stream formatting each piece would
+// make slower.
+static std::string text_of(unsigned int level, const LogEntry& log_msg, const std::string* data) {
+  std::string text;
+  text.reserve(96 + log_msg.context().size() + log_msg.workflow().size() + log_msg.text().size() +
+               log_msg.source_file().size() + (data ? data->size() + 2 : 0));
+  text.append("[").append(logging_get_level_name(level)).append("]");
+  text.append("  ts=").append(std::to_string(log_msg.timestamp()));
+  text.append("  pid=").append(std::to_string(log_msg.pid()));
+  text.append("  ctx=").append(log_msg.context());
+  text.append("  flw=\"").append(log_msg.workflow()).append("\"");
+  text.append("  txt=\"").append(log_msg.text()).append("\"");
+  if (log_msg.has_source_file()) {
+    text.append("  from=").append(log_msg.source_file());
+    if (log_msg.has_source_line()) {
+      text.append(":").append(std::to_string(log_msg.source_line()));
+    }
+  }
+  text.append("\n");
+  if (data) {
+    text.append(*data).append("\n\n");
+  }
+  return text;
+}
+
+// Writes `text` whole to stderr: false at the first error but EINTR, which
+// a signal's handler causes and is tried again, as is what a partial write
+// left. No lock: a thread holding one at a fork would leave a child's log
+// waiting for good; a line of a few KiB is one write, which a pipe keeps
+// whole.
+static bool write_whole(const std::string& text) {
+  const char* at = text.data();
+  std::size_t left = text.size();
+  while (left) {
+    const ssize_t written = ::write(STDERR_FILENO, at, left);
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    at += written;
+    left -= static_cast<std::size_t>(written);
+  }
+  return true;
+}
+
+// A line stderr does not take, a full pipe that does not block or a full
+// disk say, is dropped and counted, and the next that gets through says
+// how many were, at ERROR, ahead of it in the same write. It went through
+// std::cerr, which one failed write left failing for good, every later
+// line of the process dropped unsaid.
+void _emit_text(unsigned int level, const LogEntry& log_msg, const std::string* data) {
+  std::string text = text_of(level, log_msg, data);
+  const std::uint64_t lost = text_entries_lost_.exchange(0, std::memory_order_relaxed);
+  if (lost) {
+    LogEntry notice;
+    notice.set_timestamp(current_timestamp());
+    notice.set_pid(getpid());
+    notice.set_context(current_process_context());
+    notice.set_level(ERROR);
+    notice.set_text(mx::repr(lost) + " log entries lost: stderr did not take them");
+    text.insert(0, text_of(ERROR, notice, nullptr));
+  }
+  if (!write_whole(text)) {
+    text_entries_lost_.fetch_add(lost + 1, std::memory_order_relaxed);
+  }
+}
+
 void _emit_log(const LogEntry& log_msg) {
   if (!mx::logging::module_is_initialized) {
     std::cerr << "Warning: mx::logging::_emit_log called before "
@@ -164,6 +234,9 @@ void _emit_log(const LogEntry& log_msg) {
   if (!stream_set_.load(std::memory_order_relaxed)) {
     return;  // no logging stream set
   }
+  enum { DROPPING, TAKEN_AGAIN, GONE } outcome;
+  int error = 0;
+  std::uint64_t dropped = 0;
   {
     mx::MutexLock locked(stream_mutex_);
     if (!message_output_stream_) {
@@ -171,16 +244,55 @@ void _emit_log(const LogEntry& log_msg) {
     }
     message_output_stream_->write(log_msg);
     message_output_stream_->flush();
-    if (message_output_stream_->error() != EPIPE) {
-      return;
+    error = message_output_stream_->error();
+    if (!error) {
+      if (!stream_entries_dropped_) {
+        return;
+      }
+      dropped = stream_entries_dropped_;
+      stream_entries_dropped_ = 0;
+      outcome = TAKEN_AGAIN;
+    } else if (error != EPIPE && message_output_stream_->cut_back()) {
+      // A regular file that took part of the entry, full say: cut back to
+      // the last whole entry, so that the ones after are read, where every
+      // entry after the part was lost to its reader. Said when the
+      // dropping begins and when it ends.
+      if (stream_entries_dropped_++) {
+        return;
+      }
+      outcome = DROPPING;
+    } else {
+      // The reader is gone for good, a log shipper or the other end of a
+      // pipe, or a pipe or a socket took part of the entry, after which its
+      // reader finds no next one: the stream is dropped, once, and the
+      // text on stderr goes on.
+      replace_stream(nullptr);
+      outcome = GONE;
     }
-    // The reader is gone for good, a log shipper or the other end of a
-    // pipe, and every later write would fail the same way: the stream is
-    // dropped, once, and the text on stderr goes on.
-    replace_stream(nullptr);
   }
-  MX_LOG(WARNING, LOWVERBOSITY,
-         CTX("logging") TEXT("the binary log stream's reader is gone (EPIPE): no more entries are written to it"));
+  // Said once the lock is let go: the line goes to the stream too.
+  const std::string why = std::system_category().message(error);
+  switch (outcome) {
+    case DROPPING:
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("logging") TEXT("the binary log stream could not take an entry (" + why +
+                                 "): its file is cut back to the last whole entry, and entries are dropped until it "
+                                 "takes them again"));
+      break;
+    case TAKEN_AGAIN:
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("logging") TEXT("the binary log stream takes entries again; " + repr(dropped) + " were dropped"));
+      break;
+    case GONE:
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("logging")
+                 TEXT(error == EPIPE ? std::string("the binary log stream's reader is gone (EPIPE): no more entries "
+                                                   "are written to it")
+                                     : "the binary log stream took part of an entry (" + why +
+                                           "): no more entries are written to it, as its reader could not find "
+                                           "the next one"));
+      break;
+  }
 }
 
 };  // namespace impl

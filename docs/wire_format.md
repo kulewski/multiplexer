@@ -98,6 +98,13 @@ not answer a `PING`.
 | `PEER_CONTROL` (11) | `PeerControl { routing }` | a peer, without `to`, telling the multiplexer it is connected to which rule-routed paths reach it from now on, replacing what its welcome said ([how a backend leaves](leaving.md#what-a-draining-backend-still-takes)) |
 | `PEER_STATUS` (12) | `PeerStatus` | the multiplexer's answer, `references` the request's id, once the routing is in effect: `routing` as applied, `error` set when the request was ignored; queued after everything routed to the peer before the change |
 
+A `PING`, a `RECORDING_RECORD` or a status sent without `to`, which nobody
+could receive, is answered with a `DELIVERY_ERROR` and recorded as a type
+of the rules file with no rule is; so is a message of type 0 or 13 to 99,
+numbers the protocol keeps and does not use, as a type with no entry, with
+`is_known_type` false. A `DELIVERY_ERROR` without `to` is dropped, never
+answered with another.
+
 ## What the multiplexer does with a frame
 
 In this order, the first that applies wins:

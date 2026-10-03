@@ -47,6 +47,14 @@ def parse(output: str) -> dict[int, str]:
 class RulesReloadByMxcontrol(unittest.TestCase):
     """status, a reload that applies, a reload that is refused, a reload of the file put back."""
 
+    def answers(self, *args: str, expect: int = 0) -> list[str]:
+        """The line each of the two multiplexers answered `mxcontrol *args` with:
+        both, or the test fails, so that a check of every line is not met by
+        no line at all."""
+        lines = parse(mxcontrol(*args, expect=expect).stdout)
+        self.assertEqual(2, len(lines), lines)
+        return list(lines.values())
+
     def ask(self, cluster: Cluster, payload: str) -> str:
         """One query of the new type from a fresh client: the answer's payload, or the error's kind."""
         client = spawn(
@@ -106,63 +114,76 @@ class RulesReloadByMxcontrol(unittest.TestCase):
 
             with open(path, "w") as rules:
                 rules.write(original + NEW_ENTRIES + BROKEN_ENTRY)
-            refused = mxcontrol("rules", "reload", *addresses, expect=1)
-            for line in parse(refused.stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 self.assertRegex(
                     line,
                     r"^error: Unknown peer definition: 'NOBODY' \(content [0-9a-f]{8}\); keeps rules %s "
                     % fingerprint(original + NEW_ENTRIES),
                 )
-            for line in parse(mxcontrol("rules", "status", *addresses).stdout).values():
+            for line in self.answers("rules", "status", *addresses):
                 self.assertIn("; the file on disk is not in use: Unknown peer definition: 'NOBODY'", line)
             self.assertEqual("STILL", self.ask(cluster, "still"), "the rules in use serve on")
 
             with open(path, "w") as rules:
                 rules.write(original + NEW_ENTRIES)
-            for line in parse(mxcontrol("rules", "reload", *addresses).stdout).values():
+            for line in self.answers("rules", "reload", *addresses):
                 self.assertTrue(line.startswith("unchanged; rules %s " % fingerprint(original + NEW_ENTRIES)), line)
                 self.assertNotIn("not in use", line)
 
             os.rename(path, path + ".away")
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
-                self.assertTrue(line.startswith("error: cannot read %s; keeps rules " % path), line)
+            for line in self.answers("rules", "reload", *addresses, expect=1):
+                self.assertTrue(
+                    line.startswith("error: cannot read %s: No such file or directory; keeps rules " % path), line
+                )
             self.assertEqual("GONE", self.ask(cluster, "gone"), "a missing file changes nothing either")
             os.rename(path + ".away", path)
-            for line in parse(mxcontrol("rules", "status", *addresses).stdout).values():
+            for line in self.answers("rules", "status", *addresses):
                 self.assertIn("the file on disk is not in use: cannot read", line, "until something reads it again")
-            for line in parse(mxcontrol("rules", "reload", *addresses).stdout).values():
+            for line in self.answers("rules", "reload", *addresses):
                 self.assertTrue(line.startswith("unchanged; rules %s " % fingerprint(original + NEW_ENTRIES)), line)
                 self.assertNotIn("not in use", line)
 
             # An empty file, what a truncating editor leaves for a moment, and
             # a file without a peer type are no rules files either.
             open(path, "w").close()
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 self.assertTrue(line.startswith("error: empty rules file %s; keeps rules " % path), line)
             with open(path, "w") as rules:
                 rules.write('type {\n    type: 300\n    name: "TEST_NO_PEERS"\n}\n')
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 self.assertTrue(line.startswith("error: no peer types in %s (content " % path), line)
             with open(path, "w") as rules:
                 rules.write(original + NEW_ENTRIES + NEW_ENTRIES)  # the same numbers twice
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
+                self.assertTrue(line.startswith("error: duplicate peer type %d (content " % NEW_BACKEND), line)
+            # The broken file moved away and back is said as broken again,
+            # not as the read failure between, which it was.
+            os.rename(path, path + ".away")
+            for line in self.answers("rules", "reload", *addresses, expect=1):
+                self.assertTrue(line.startswith("error: cannot read %s: No such file or directory; " % path), line)
+            os.rename(path + ".away", path)
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 self.assertTrue(line.startswith("error: duplicate peer type %d (content " % NEW_BACKEND), line)
             with open(path, "w") as rules:  # a message name twice, under two numbers, as generate_constants refuses
                 rules.write(original + NEW_ENTRIES + 'type {\n    type: 251\n    name: "TEST_NEW_REQUEST"\n}\n')
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 self.assertTrue(line.startswith("error: duplicate message name TEST_NEW_REQUEST (content "), line)
             with open(path, "w") as rules:  # a peer type whose queue holds nothing
                 rules.write(
                     original
                     + NEW_ENTRIES.replace('"TEST_NEW_BACKEND"\n}', '"TEST_NEW_BACKEND"\n    queue_size: 0\n}', 1)
                 )
-            for line in parse(mxcontrol("rules", "reload", *addresses, expect=1).stdout).values():
+            for line in self.answers("rules", "reload", *addresses, expect=1):
                 prefix = "error: peer type %d (TEST_NEW_BACKEND): queue_size 0 holds no message (content " % NEW_BACKEND
                 self.assertTrue(line.startswith(prefix), line)
+            with open(path, "w") as rules:  # a file that does not parse: an entry left open
+                rules.write(original + NEW_ENTRIES + "type {\n    type: 253\n")
+            for line in self.answers("rules", "reload", *addresses, expect=1):
+                self.assertTrue(line.startswith("error: cannot parse %s as a rules file (content " % path), line)
             self.assertEqual("LAST", self.ask(cluster, "last"), "the rules in use serve on")
             with open(path, "w") as rules:
                 rules.write(original + NEW_ENTRIES)
-            for line in parse(mxcontrol("rules", "reload", *addresses).stdout).values():
+            for line in self.answers("rules", "reload", *addresses):
                 self.assertTrue(line.startswith("unchanged; rules %s " % fingerprint(original + NEW_ENTRIES)), line)
 
             # An address nobody listens on fails the command, the reachable one still answers.

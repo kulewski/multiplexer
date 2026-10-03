@@ -1,16 +1,20 @@
 """The Python clients connect by host name: the name goes to the library,
 which resolves it on every attempt and tries each address it has, for the
-synchronous client, ThreadedClient and AsyncClient alike."""
+synchronous client, ThreadedClient and AsyncClient alike; and a backend
+given a name replies through the connection it made again to that name,
+never through one of its own to the old address, which the multiplexer
+took for the same peer, the two replacing each other every 3 s."""
 
 import asyncio
-import time
+import re
+import threading
 import unittest
 
 from multiplexer.aio import AsyncClient
 from multiplexer.clients import Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient
+from multiplexer.testing import BackendThread, Cluster, FakePeer, Mx, TestClient
 from multiplexer.threaded_client import ThreadedClient
 from multiplexer.testing import runfile
 
@@ -58,42 +62,82 @@ class ConnectByName(unittest.TestCase):
     def test_a_reply_through_a_dead_connection_leaves_one_connection_per_multiplexer(self):
         """A BaseMultiplexerServer given a host name replies through the
         connection its request came on. With that connection dead, the
-        reply waits for the connection the client makes again to the same
-        name, rather than opening one of its own to the old address, which
-        the multiplexer would take for the same peer: the two would replace
-        each other every 3 s for good."""
+        reply goes through the connection the client made again to the
+        same name, rather than through one of its own to the old address,
+        which the multiplexer took for the same peer: it registered the
+        backend twice at once, and the two went on replacing each other
+        every 3 s for good. The handler, its multiplexer killed and started
+        again under it, waits for its client to be back by name before it
+        replies (HeldBackend), so that a connection of the reply's own,
+        had it made one, is registered by the time the reply arrives.
+        Counted, not timed: the multiplexer's log has its registrations of
+        the backend."""
         with Cluster(1, rules=RULES) as cluster:
-            mx = cluster.mx[0]
-            port = cluster.endpoints[0][1]
-            with BackendThread(lambda: SlowBackend([("localhost", port)])) as served:
-                assert served.backend is not None
-                sender = TestClient(cluster, peers.WEBSITE)
+            multiplexer = cluster.mx[0]
+            address = cluster.endpoints[0]
+            with (
+                BackendThread(lambda: HeldBackend([("localhost", address[1])])) as served,
+                TestClient(cluster, peers.WEBSITE) as requester,
+            ):
+                backend = served.backend
+                assert backend is not None
                 try:
-                    sender.send(b"slow", types.PYTHON_TEST_REQUEST)
-                    time.sleep(0.4)  # the backend is handling it
-                    mx.kill()
-                    time.sleep(0.4)
-                    mx.start()
-                    time.sleep(8)  # the reply went out after the reconnect; two more reconnect periods pass
-                    registered = "registered connection id=%d " % served.backend.conn.instance_id
-                    with open(mx.log_path, "rb") as log:
-                        since_restart = log.read().decode(errors="replace").rsplit("starting MX server", 1)[-1]
-                    self.assertEqual(1, since_restart.count(registered), "one connection, registered once")
+                    request = requester.send(b"hello", types.PYTHON_TEST_REQUEST)
+                    self.assertTrue(backend.holding.wait(30), "the backend took up the request")
+                    since = multiplexer.log_mark()
+                    multiplexer.kill()
+                    multiplexer.start()
+                    requester.client.disconnect(address)  # back at once, where its reconnect comes 3 s on
+                    requester.client.connect(address)
+                    cluster.wait_for_peer(peers.WEBSITE)
                 finally:
-                    sender.shutdown()
+                    backend.release.set()
+                self.assertEqual(b"HELLO", reply_to(requester.client, request).message)
+                self.assertEqual(
+                    1,
+                    registrations(multiplexer, backend.conn.instance_id, since),
+                    "the backend's connections the multiplexer registered since its restart",
+                )
 
 
-class SlowBackend(BaseMultiplexerServer):
-    """Answers a request after a second and a half: long enough for its
-    multiplexer to be killed and started again under it."""
+class HeldBackend(BaseMultiplexerServer):
+    """Holds a request until `release` is set; then sends an event and
+    waits for its write, which, the multiplexer having gone under it,
+    waits for the client to come back by name; then replies the default
+    way, through the connection the request came on."""
 
     def __init__(self, addresses):
         super().__init__(addresses, type=peers.PYTHON_TEST_SERVER)
+        self.holding = threading.Event()  # the request is being handled
+        self.release = threading.Event()  # the test's: go on
 
     def handle_message(self, mxmsg):
-        """Sleep, then reply the default way, through the request's connection."""
-        time.sleep(1.5)
+        """Hold, 60 s at most, a failure detector's bound; wait for a
+        connection, 30 s at most; reply."""
+        self.holding.set()
+        self.release.wait(60)
+        self.conn.send_message(b"back", type=types.TEST_UNROUTED, flush=True, timeout=30, report_delivery_error=False)
         self.send_message(message=mxmsg.message.upper(), type=types.PYTHON_TEST_RESPONSE)
+
+
+def reply_to(client: Client, message_id: int, timeout: float = 30.0):
+    """The next message `client` reads that references `message_id`;
+    OperationTimedOut after `timeout` seconds of nothing, a failure
+    detector's bound."""
+    while True:
+        mxmsg = client.read_message(timeout=timeout)
+        if mxmsg.references == message_id:
+            return mxmsg
+
+
+def registrations(multiplexer: Mx, instance_id: int, since: int) -> int:
+    """How many connections of the peer `instance_id` the multiplexer's log
+    says it registered past `since`, a log_mark(); an "unregistered" line
+    is not one."""
+    with open(multiplexer.log_path, "rb") as log:
+        log.seek(since)
+        text = log.read().decode(errors="replace")
+    return len(re.findall(r"\bregistered connection id=%d\b" % instance_id, text))
 
 
 if __name__ == "__main__":

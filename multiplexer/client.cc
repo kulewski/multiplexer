@@ -12,7 +12,6 @@
 #include "multiplexer/multiplexer.constants.h"
 
 using namespace multiplexer;
-using std::cerr;
 
 namespace {
 

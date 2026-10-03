@@ -55,11 +55,13 @@ int GenerateConstants::run() {
     std::cerr << "generate_constants: nothing to write; give --python, --pyi or --cxx\n";
     return 2;
   }
-  multiplexer::Config<std::multimap> config(rules_);
+  const std::string text = multiplexer::constants::read_rules(rules_);  // once: a pipe gives it once
+  const multiplexer::Config<std::multimap> config = multiplexer::Config<std::multimap>::from_text(text, rules_);
   multiplexer::constants::check_config(config);
+  const std::string fingerprint = mx::fingerprint(text);
   for (const std::string& path : {python_, pyi_, cxx_}) {
     if (!path.empty()) {
-      multiplexer::constants::write_constants(config, rules_, path);
+      multiplexer::constants::write_constants(config, rules_, fingerprint, path);
       std::cout << path << "\n";
     }
   }
