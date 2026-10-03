@@ -36,8 +36,6 @@
 // there, which everything queued there before it goes out ahead of.
 #include "multiplexer/outbox.h"
 
-#include <google/protobuf/io/coded_stream.h>
-
 #include <algorithm>
 #include <cmath>
 
@@ -62,57 +60,6 @@ std::chrono::steady_clock::time_point deadline_after(float timeout) {
     return std::chrono::steady_clock::time_point::min();  // 0 and NaN
   }
   return std::chrono::steady_clock::now() + mx::from_seconds(timeout);
-}
-
-// The id and the type of a serialized MultiplexerMessage (fields 1 and 4,
-// written ahead of the payload), read without parsing the rest: what a
-// drop is reported by. 0 for what is not there.
-std::pair<std::uint64_t, std::uint32_t> id_and_type(const std::string& serialized) {
-  google::protobuf::io::CodedInputStream input(reinterpret_cast<const std::uint8_t*>(serialized.data()),
-                                               static_cast<int>(serialized.size()));
-  std::uint64_t id = 0;
-  std::uint32_t type = 0;
-  bool found_id = false, found_type = false;
-  while (!(found_id && found_type)) {
-    const std::uint32_t tag = input.ReadTag();
-    if (!tag) {
-      break;
-    }
-    std::uint64_t varint = 0;
-    std::uint32_t length = 0;
-    switch (tag & 7) {  // the wire type
-      case 0:
-        if (!input.ReadVarint64(&varint)) {
-          return {id, type};
-        }
-        if ((tag >> 3) == 1) {
-          id = varint;
-          found_id = true;
-        } else if ((tag >> 3) == 4) {
-          type = static_cast<std::uint32_t>(varint);
-          found_type = true;
-        }
-        break;
-      case 1:
-        if (!input.Skip(8)) {
-          return {id, type};
-        }
-        break;
-      case 2:
-        if (!input.ReadVarint32(&length) || !input.Skip(static_cast<int>(length))) {
-          return {id, type};
-        }
-        break;
-      case 5:
-        if (!input.Skip(4)) {
-          return {id, type};
-        }
-        break;
-      default:
-        return {id, type};
-    }
-  }
-  return {id, type};
 }
 
 // The log kind, and what its line says, of a drop for `reason`.
@@ -147,11 +94,10 @@ const char* drop_text(DropReason reason) {
 void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, DropReason reason) {
   MX_DCHECK_RUN_ON(&owner_thread());
   dropped_.fetch_add(1, std::memory_order_relaxed);
-  const std::pair<std::uint64_t, std::uint32_t> named = id_and_type(raw->get_message());
   if (const std::string* text =
-          drop_lines_.first({drop_line(reason), WARNING, named.second, 0}, [reason] { return drop_text(reason); })) {
+          drop_lines_.first({drop_line(reason), WARNING, raw->type(), 0}, [reason] { return drop_text(reason); })) {
     MX_LOG(WARNING, LogSummary::VERBOSITY,
-           CTX("BasicClient") TEXT(*text + "; id " + repr(named.first) + ", type " + repr(named.second)));
+           CTX("BasicClient") TEXT(*text + "; id " + repr(raw->id()) + ", type " + repr(raw->type())));
   }
   // A flush that waits for the message ends with not all written.
   const std::uint64_t number = raw->number();
@@ -162,7 +108,7 @@ void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, Drop
   }
   if (drop_observer_) {
     try {
-      drop_observer_(named.first, reason);
+      drop_observer_(raw->id(), reason);
     } catch (const std::exception& error) {
       MX_LOG(ERROR, LOWVERBOSITY, CTX("BasicClient") TEXT(std::string("the drop observer raised: ") + error.what()));
     }
@@ -500,6 +446,7 @@ BasicClient::WaitingPtr BasicClient::_hold(const std::shared_ptr<const RawMessag
                                            std::chrono::steady_clock::time_point deadline, bool all,
                                            const LanePtr& lane) {
   raw->mark_number(number);
+  raw->mark_deadline(deadline);
   WaitingPtr waiting(new Waiting());
   waiting->raw = raw;
   waiting->state = state ? state : std::make_shared<SendState>(SendState::QUEUED);
@@ -683,6 +630,7 @@ BasicClient::BasicScheduledMessageTracker BasicClient::_place_on(
     return BasicScheduledMessageTracker();
   }
   raw->mark_number(number);
+  raw->mark_deadline(deadline);
   if (lane) {
     lane->watch(conn);  // a seeded lane's first message: it learns the connection's live flag
   }
@@ -836,6 +784,7 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection* dead, Connection
   const Connection::pointer conn =
       outgoing_messages.empty() && outbox_->displaced.empty() ? Connection::pointer() : _successor(dead);
   Connection::MessagesBuffer left;  // what the connection reports lost
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
   for (Connection::MessagesBuffer::value_type& message : outgoing_messages) {
     const std::shared_ptr<const RawMessage>& raw = message.second;
     if (raw->pinned() || shuts_down_) {
@@ -843,26 +792,39 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection* dead, Connection
       continue;
     }
     BasicScheduledMessageTracker state = message.first.lock();
+    // A message keeps its own deadline on the next connection: the time its
+    // send gave it to wait for room or for a connection, which a send that
+    // gave up on it has seen run out. One whose time is up waits for nothing.
+    const std::chrono::steady_clock::time_point deadline = raw->deadline();
     if (raw->for_all()) {
       if (conn) {
         left.push_back(message);  // the other connections have their copies
       } else if (_held_whole(raw)) {
         _supersede(state);
+      } else if (deadline <= now) {
+        left.push_back(message);  // no time left to wait for a connection
       } else {
-        _hold(raw, state, raw->number(), deadline_after(DEFAULT_TIMEOUT), /*all=*/true, LanePtr());
+        _hold(raw, state, raw->number(), deadline, /*all=*/true, LanePtr());
       }
       continue;
     }
     if (!conn) {
-      _hold(raw, state, raw->number(), deadline_after(DEFAULT_TIMEOUT), false, LanePtr());  // for the next connection
+      if (deadline <= now) {
+        left.push_back(message);  // no time left to wait for a connection
+      } else {
+        _hold(raw, state, raw->number(), deadline, false, LanePtr());  // for the next connection
+      }
       continue;
     }
     ++outbox_->retries;
-    if (!_place_on(conn, raw, state, raw->number(), deadline_after(DEFAULT_TIMEOUT), false, LanePtr())) {
+    const BasicScheduledMessageTracker placed = _place_on(conn, raw, state, raw->number(), deadline, false, LanePtr());
+    if (!placed) {
       left.push_back(message);
       continue;
     }
-    _moved(state, _wrap(conn));
+    if (*placed != SendState::LOST) {  // not given up on at once, with no room and no time left to wait for it
+      _moved(state, _wrap(conn));
+    }
   }
   outgoing_messages.swap(left);
   for (const Connection::MessagesBuffer::value_type& message : outgoing_messages) {
@@ -912,6 +874,12 @@ ConnectionWrapper BasicClient::followed(const BasicScheduledMessageTracker& stat
   }
   moved.resize(kept);
   return last;
+}
+
+bool BasicClient::live(const ConnectionWrapper& wrapper) const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  Connection::pointer conn = wrapper.lock();
+  return conn && conn->living();
 }
 
 // What waited for a dead connection goes to `conn`, the one its queue went

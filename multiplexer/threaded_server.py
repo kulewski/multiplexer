@@ -29,7 +29,14 @@ from typing import Any, Callable, TypeVar
 
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
-from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, NotConnected, parse_message, wait_seconds
+from multiplexer.mxclient import (
+    CLOSE_FLUSH_SECONDS,
+    ConnectionWrapper,
+    NotConnected,
+    as_reply,
+    parse_message,
+    wait_seconds,
+)
 from multiplexer.mxlog import DEBUG, ERROR, HIGHVERBOSITY, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
@@ -115,7 +122,8 @@ class Request:
         `to`, `references`, `workflow` and `multiplexer` default to the
         request's. A whole MultiplexerMessage goes with those of its
         fields that are empty filled in so, its id and from too, as the
-        C++ Request::reply does. The kwargs are
+        C++ Request::reply does, and message fields beside it are a
+        TypeError. The kwargs are
         ThreadedClient.send_message()'s, so `flush=True` waits for the
         write. Returns the message id. A reply that raised did not go out:
         the request is not answered, and a handler's exception then gets
@@ -129,7 +137,7 @@ class Request:
         no `references`, correlated in the payload."""
         kwargs.setdefault("multiplexer", self.connection)
         if isinstance(message, MultiplexerMessage):
-            message = self._completed(message)
+            message = as_reply(message, self.mxmsg, self.client.instance_id, self.client.random)
         else:
             kwargs.setdefault("to", self.mxmsg.from_)
             kwargs.setdefault("references", self.mxmsg.id)
@@ -137,23 +145,6 @@ class Request:
         sent = self.client.send_message(message, **kwargs)
         self.answered = True  # once it went: a reply that raised is no answer
         return sent
-
-    def _completed(self, message: MultiplexerMessage) -> MultiplexerMessage:
-        """A copy of `message` with its empty fields filled in as a reply
-        to this request's: id, from, to, references and workflow."""
-        reply = MultiplexerMessage()
-        reply.CopyFrom(message)
-        if not reply.id:
-            reply.id = self.client.random()
-        if not reply.from_:
-            setattr(reply, "from", self.client.instance_id)  # a keyword; from_ only reads
-        if not reply.to:
-            reply.to = self.mxmsg.from_
-        if not reply.references:
-            reply.references = self.mxmsg.id
-        if not reply.workflow:
-            reply.workflow = self.mxmsg.workflow
-        return reply
 
     def no_response(self) -> None:
         """Declare that the message needs no reply, as for an event."""
@@ -343,13 +334,13 @@ class BaseThreadedMultiplexerServer:
         return self._accepting and self.should_respond_to_backend_for_packet_search()
 
     def connect(self) -> None:
-        """Start the workers and connect to every multiplexer, once;
-        serve_forever() calls it first, and a second call does nothing.
-        Call it yourself when something waits for a line you print before
-        it sends, so that the line means reachable, or in a test that
-        wants the backend connected without a thread serving it. A close()
-        on another thread meanwhile ends it: what is not connected yet is
-        not."""
+        """Start the workers and connect to every multiplexer at once,
+        waiting for them all against one timeout, once; serve_forever()
+        calls it first, and a second call does nothing. Call it yourself
+        when something waits for a line you print before it sends, so that
+        the line means reachable, or in a test that wants the backend
+        connected without a thread serving it. A close() on another thread
+        meanwhile ends it: what is not connected yet is not."""
         self._check_not_inherited()
         client = self._client
         with self._cond:  # once, as the C++ class's atomic flag makes it, whichever thread calls
@@ -357,13 +348,14 @@ class BaseThreadedMultiplexerServer:
                 return
             self._connected = True
         self._start_workers()  # before the first connection, so that nothing waits for a worker
-        for endpoint in self._addresses:
-            try:
-                client.connect(endpoint, self._timeout)
-            except NotConnected:
-                if not self._closed:
-                    raise
-                return  # close() shut the client down under us
+        # Every connection at once, against one timeout, as the plain server
+        # connects: a multiplexer that never welcomes costs it once.
+        try:
+            client.connect_all(self._addresses, self._timeout)
+        except NotConnected:
+            if not self._closed:
+                raise
+            # close() shut the client down under us
 
     # Leaving.
 

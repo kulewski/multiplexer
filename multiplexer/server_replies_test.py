@@ -4,8 +4,7 @@ reply counted as sent before it was; a report of a handler's exception
 that fails leaves the loop serving and on_handler_exception() told, where
 it ended serve_forever(); what periodic_task() sends is routed by its
 type, where it went to the last requester; the requester's
-_send_and_receive(), a query's step, takes a payload, where it raised
-AttributeError; and
+_send_and_receive() takes a payload, where it raised AttributeError; and
 the replies the server sends itself, an echo, a report, a pickle reply,
 are queued as in the C++ class, where each waited for its write; and
 every client raises the one BackendError for a BACKEND_ERROR reply.

@@ -6,19 +6,24 @@
 // parent is frozen inside a call, holding a lock the call took, while the
 // main thread forks. A client made in the child refuses a lane or a
 // connection from before the fork, the child's copies of the parent's
-// sockets are closed once, and a threaded backend the child inherited
-// refuses its calls and is destroyed without waiting for the parent's
-// workers.
+// sockets are closed once, those of connections closing at the fork too,
+// and a threaded backend the child inherited refuses its calls and is
+// destroyed without waiting for the parent's workers.
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -282,6 +287,28 @@ int sleeping_inside(const char* begin, const char* end) {
   return count;
 }
 
+// This process's descriptors that are sockets connected to `port` on this
+// host, the lowest first: getpeername() on every number below the
+// descriptor limit, which allocates nothing, as a forked child must not.
+// How many there are; `lowest` gets the first.
+int sockets_to(unsigned short port, int* lowest = nullptr) {
+  rlimit limit{};
+  getrlimit(RLIMIT_NOFILE, &limit);
+  const int highest = static_cast<int>(std::min<rlim_t>(limit.rlim_cur, 65536));
+  int count = 0;
+  for (int fd = 0; fd < highest; ++fd) {
+    sockaddr_in peer{};
+    socklen_t length = sizeof peer;
+    if (getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &length) == 0 && peer.sin_family == AF_INET &&
+        ntohs(peer.sin_port) == port) {
+      if (count++ == 0 && lowest) {
+        *lowest = fd;
+      }
+    }
+  }
+  return count;
+}
+
 // A threaded backend that answers nothing, for its own lifecycle.
 class Idle : public multiplexer::backend::BaseThreadedMultiplexerServer {
  public:
@@ -421,6 +448,81 @@ TEST(Fork, AnInheritedClientClosesTheChildsCopiesOnce) {
   EXPECT_EQ(0, exit_code_of(pid)) << "the first file of the child's that a client closed, counting from 1";
   EXPECT_EQ(1u, threaded->connections_count());
   EXPECT_EQ(1u, sync->connections_count());
+}
+
+// A child forked while disconnect() closes a connection, from the
+// connection observer the client calls meanwhile, closes its copy of that
+// connection's socket: the connection had left the targets and was not
+// yet among those closing, and the teardown, which walked those two, kept
+// the copy open, so that the multiplexer saw the parent's connection live
+// for as long as the child ran. The teardown reads the table of sockets
+// the client keeps as they open and close (DescriptorTable) instead.
+TEST(Fork, AChildForkedWhileAConnectionClosesClosesItsCopy) {
+  InProcessMultiplexer mx;
+  asio::io_service io_service;
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
+  pid_t pid = -1;
+  int found = 0;
+  client->set_connection_observer([&](const ConnectionWrapper&, bool up) {
+    if (up || pid != -1) {
+      return;
+    }
+    // The socket, by its inode, which stays its own whatever state the
+    // connection reaches once the parent goes on closing it.
+    int number = -1;
+    found = sockets_to(mx.port, &number);
+    struct stat socket {};
+    fstat(number, &socket);
+    pid = fork();
+    if (pid == 0) {
+      alarm(10);
+      client->orphan_close_descriptors();
+      struct stat now {};
+      _exit(fstat(number, &now) == 0 && now.st_ino == socket.st_ino ? 1 : 0);
+    }
+  });
+  EXPECT_TRUE(client->disconnect("127.0.0.1", mx.port));
+  ASSERT_EQ(1, found) << "the connection's socket, at the fork";
+  ASSERT_NE(-1, pid) << "the observer heard of the connection's end";
+  EXPECT_EQ(0, exit_code_of(pid)) << "1: the child kept its copy of the socket";
+  client->shutdown();
+}
+
+// A socket the client closed before the fork is gone from its table: the
+// child leaves alone the file the process opened since on its number. The
+// table forgets a socket before it is closed; one closed first, and still
+// listed, would have the child close the file.
+TEST(Fork, AChildLeavesAloneTheNumberOfASocketClosedBefore) {
+  InProcessMultiplexer mx;
+  asio::io_service io_service;
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
+  int number = -1;
+  ASSERT_EQ(1, sockets_to(mx.port, &number));
+  ASSERT_TRUE(client->disconnect("127.0.0.1", mx.port));
+  std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(30);
+  while (client->closing() && !timer->expired()) {
+    client->run_one();  // until the multiplexer's end of the stream closed it
+  }
+  ASSERT_EQ(-1, fcntl(number, F_GETFD)) << "the socket was closed";
+  const int file = open("/dev/null", O_RDONLY);  // a file of the process's on the socket's number:
+  if (file != number) {                          // the lowest free, unless another thread took it
+    ASSERT_EQ(number, dup2(file, number));
+    close(file);
+  }
+  pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+  if (pid == 0) {
+    alarm(10);
+    client->orphan_close_descriptors();
+    _exit(fcntl(number, F_GETFD) == -1 ? 1 : 0);
+  }
+  EXPECT_EQ(0, exit_code_of(pid)) << "1: the child closed the file on the socket's old number";
+  close(number);
+  client->shutdown();
 }
 
 // A child that makes a fresh client before it drops the inherited one, as a

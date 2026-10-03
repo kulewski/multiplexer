@@ -225,9 +225,9 @@ TEST(NegativeTimeout, AThreadedSendHoldsItsMessageForAConnection) {
   {
     Freeze frozen(mx);
     EXPECT_FALSE(client.connect("127.0.0.1", mx.port, 0)) << "on its way, not welcomed";
-    client.send_serialized(patient.SerializeAsString(), multiplexer::LanePtr(), NO_DEADLINE,
-                           [&patient_ended](unsigned int written) { patient_ended.set_value(written); });
-    client.send_serialized(hasty.SerializeAsString(), multiplexer::LanePtr(), 0.05f);
+    client.send_serialized(patient.SerializeAsString(), patient.id(), patient.type(), multiplexer::LanePtr(),
+                           NO_DEADLINE, [&patient_ended](unsigned int written) { patient_ended.set_value(written); });
+    client.send_serialized(hasty.SerializeAsString(), hasty.id(), hasty.type(), multiplexer::LanePtr(), 0.05f);
     std::unique_lock<std::mutex> lock(mutex);
     ASSERT_TRUE(told.wait_for(lock, std::chrono::seconds(30), [&] { return was_dropped(hasty.id()); }));
     ASSERT_FALSE(was_dropped(patient.id())) << "the message with no deadline is held still";

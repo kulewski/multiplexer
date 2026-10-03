@@ -134,11 +134,15 @@ TEST(Soak, ThousandsOfQueriesDoNotGrowTheHeap) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 
-  run_queries(client, 2000);  // warm-up: buffers, caches, the dedup window, the ring of finished query ids
+  run_queries(client, 2000);  // warm-up: buffers, caches, the dedup window
   run_lane_queries(client, backend_id, 200);
+  // The ids of ended queries are kept a while, by design and bounded: left
+  // out of both measurements.
+  client.forget_finished_ids();
   size_t before = mx::heap_in_use_bytes();
   run_queries(client, 8000);
   run_lane_queries(client, backend_id, 1000);  // five thousand more, through lanes and by address
+  client.forget_finished_ids();
   size_t after = mx::heap_in_use_bytes();
   // The three peers share this heap; a leak per message would be megabytes.
   EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after << " bytes over 13000 queries";
@@ -158,7 +162,8 @@ TEST(Soak, ThousandsOfRequestsThroughAThreadedBackendDoNotGrowTheHeap) {
   ThreadedClient client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
 
-  run_queries(client, 2000);  // warm-up
+  run_queries(client, 2000);     // warm-up
+  client.forget_finished_ids();  // kept a while by design and bounded: left out, as above
   size_t before = mx::heap_in_use_bytes();
   run_queries(client, 8000);
   std::vector<std::future<void>> at_once;  // and from four threads at once, for the two workers
@@ -168,6 +173,7 @@ TEST(Soak, ThousandsOfRequestsThroughAThreadedBackendDoNotGrowTheHeap) {
   for (auto& done : at_once) {
     done.get();
   }
+  client.forget_finished_ids();
   size_t after = mx::heap_in_use_bytes();
   EXPECT_LE(after, before + 64 * 1024) << "heap grew from " << before << " to " << after
                                        << " bytes over 12000 requests through a threaded backend";

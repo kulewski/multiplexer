@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <asio/ip/tcp.hpp>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <limits>
 #include <stdexcept>
@@ -23,29 +24,45 @@ using mx::repr;
 // One query in flight. Owned by the io thread; the shared_ptr keeps it alive
 // for the timer callback.
 struct ThreadedClient::Core::InFlight {
-  // WAITING: no connection was live when the request had to be (re)sent; it
-  // goes out as soon as one registers, the deadline still running. SEARCH
-  // is the locate phase of an addressed query too: the PING addressed to
-  // the instance out, the answers counted the same way. LATE: a typed
-  // query's direct request drew a delivery error, the backend that
-  // answered the search gone, while a backend took the request: only a late
-  // reply to an earlier attempt can answer, until the stage's deadline.
+  // WAITING: no connection was live when a stage's message had to go out;
+  // it goes out as soon as one registers, the stage's deadline still
+  // running, and `resume` says which: the request, the search or the
+  // direct request. SEARCH is the locate phase of an addressed query too:
+  // the PING addressed to the instance out, the delivery errors counted the
+  // same way. LATE: the query can only wait, until the stage's deadline,
+  // for a late reply to an attempt a backend may have (`pending`): the
+  // search found nobody, the direct request drew a delivery error, or its
+  // connection was lost. A query sends its request at most twice, the
+  // request and the direct request, and never goes back a stage.
   enum Stage { REQUEST, SEARCH, DIRECT, WAITING, LATE } stage = REQUEST;
-  ConnectionWrapper sent_via;    // REQUEST and DIRECT: the connection used
+  Stage resume = REQUEST;       // WAITING: the stage whose message goes out when a connection comes up
+  std::uint64_t direct_to = 0;  // the instance whose PING answered the search: the direct request's `to`
+  ConnectionWrapper sent_via;   // REQUEST and DIRECT: the connection used
+  // REQUEST and DIRECT: the attempt's tracker, which says whether it was
+  // written when sent_via died: one still queued is handed to another
+  // connection by the outbox, or held for the next, and is not lost.
+  BasicClient::BasicScheduledMessageTracker sent_state;
+  // The request's tracker and the direct request's, kept for the late
+  // wait: an attempt the client gave up on, reading LOST, went nowhere.
+  BasicClient::BasicScheduledMessageTracker request_state, direct_state;
   MultiplexerMessage prototype;  // the request; id and from set per attempt
   float timeout = 0;
   // An addressed query's one deadline across its stages; a typed query
   // arms each stage with `timeout`.
   std::chrono::steady_clock::time_point deadline;
   LanePtr lane;  // held until the query ends, then released
+  // The request's and the direct request's ids, its two attempts, each
+  // kept when its message waits for a connection, nothing having gone out
+  // under it, and the current search's.
   std::uint64_t request_id = 0, search_id = 0, direct_id = 0;
-  // The request and direct ids of attempts sent again since, tracked still
-  // for a late reply; empty unless a connection was lost under the query.
-  std::vector<std::uint64_t> earlier_ids;
-  // Whether a backend may have an attempt and answer it late: set when the
-  // request's stage runs out, or an attempt's connection is lost, and not
-  // when the request draws a delivery error, nobody taking it.
+  // Whether a backend may have the request and answer it late: set when
+  // the request's stage runs out, or its connection is lost, and cleared
+  // by a delivery error for the request, nobody taking it, at any stage.
   bool taken = false;
+  // LATE: the attempts a backend may still have, whose reply the query
+  // waits for; a delivery error for one strikes it off, and once none is
+  // left nothing can answer any more.
+  std::vector<std::uint64_t> pending;
   // During SEARCH: the connections the search went through that have not
   // answered it yet, with a delivery error or by going down. Only these
   // count: another connection ending, a failed connect for instance, says
@@ -145,9 +162,14 @@ std::uint64_t ThreadedClient::random64() { return core_->random64(); }
 bool ThreadedClient::connect(const std::string& host, std::uint16_t port, float timeout) {
   return core_->connect(host, port, timeout);
 }
+unsigned int ThreadedClient::connect_all(const std::vector<std::pair<std::string, std::uint16_t>>& addresses,
+                                         float timeout) {
+  return core_->connect_all(addresses, timeout);
+}
 bool ThreadedClient::disconnect(const std::string& host, std::uint16_t port) { return core_->disconnect(host, port); }
 unsigned int ThreadedClient::connections_count() { return core_->connections_count(); }
 std::size_t ThreadedClient::watched_ids() { return core_->watched_ids(); }
+void ThreadedClient::forget_finished_ids() { core_->forget_finished_ids(); }
 std::uint64_t ThreadedClient::retries() { return core_->retries(); }
 std::size_t ThreadedClient::waiting_queries() { return core_->waiting_queries(); }
 std::size_t ThreadedClient::waiting_messages() { return core_->waiting_messages(); }
@@ -169,23 +191,25 @@ unsigned int ThreadedClient::send(const MultiplexerMessage& msg, const Connectio
 unsigned int ThreadedClient::send_all(const MultiplexerMessage& msg, float timeout) {
   return core_->send_all(msg, timeout);
 }
-void ThreadedClient::send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done) {
-  core_->send_serialized(std::move(serialized), lane, timeout, done);
+void ThreadedClient::send_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, LanePtr lane,
+                                     float timeout, SendCallback done) {
+  core_->send_serialized(std::move(serialized), id, type, lane, timeout, done);
 }
-void ThreadedClient::send_all_serialized(std::string serialized, float timeout, SendCallback done) {
-  core_->send_all_serialized(std::move(serialized), timeout, done);
+void ThreadedClient::send_all_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, float timeout,
+                                         SendCallback done) {
+  core_->send_all_serialized(std::move(serialized), id, type, timeout, done);
 }
-unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane,
-                                                      bool* not_connected) {
-  return core_->send_serialized_and_wait(std::move(serialized), all, timeout, lane, not_connected);
+unsigned int ThreadedClient::send_serialized_and_wait(std::string serialized, std::uint64_t id, std::uint32_t type,
+                                                      bool all, float timeout, LanePtr lane, bool* not_connected) {
+  return core_->send_serialized_and_wait(std::move(serialized), id, type, all, timeout, lane, not_connected);
 }
-void ThreadedClient::send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
-                                                   LanePtr lane) {
-  core_->send_serialized_with_callback(std::move(serialized), all, timeout, done, lane);
+void ThreadedClient::send_serialized_with_callback(std::string serialized, std::uint64_t id, std::uint32_t type,
+                                                   bool all, float timeout, SendCallback done, LanePtr lane) {
+  core_->send_serialized_with_callback(std::move(serialized), id, type, all, timeout, done, lane);
 }
-void ThreadedClient::send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done,
-                                                LanePtr lane) {
-  core_->send_serialized_and_notify(std::move(serialized), all, timeout, done, lane);
+void ThreadedClient::send_serialized_and_notify(std::string serialized, std::uint64_t id, std::uint32_t type, bool all,
+                                                float timeout, FlushedCallback done, LanePtr lane) {
+  core_->send_serialized_and_notify(std::move(serialized), id, type, all, timeout, done, lane);
 }
 MultiplexerMessage ThreadedClient::new_message(std::uint32_t type, const std::string& payload) {
   return core_->new_message(type, payload);
@@ -404,6 +428,27 @@ MultiplexerMessage ThreadedClient::Core::new_message(std::uint32_t type, const s
 // Connects and waits for the handshake: the connection observer ends the
 // wait, up or down, and a timer ends it at `timeout`.
 bool ThreadedClient::Core::connect(const std::string& host, std::uint16_t port, float timeout) {
+  return _start_connect(host, port, timeout).get();
+}
+
+// Every connect started before any is waited for, so that their waits,
+// each armed on the io thread as it is posted, run together.
+unsigned int ThreadedClient::Core::connect_all(const std::vector<std::pair<std::string, std::uint16_t>>& addresses,
+                                               float timeout) {
+  std::vector<std::future<bool>> started;
+  for (const std::pair<std::string, std::uint16_t>& address : addresses) {
+    started.push_back(_start_connect(address.first, address.second, timeout));
+  }
+  unsigned int up = 0;
+  for (std::future<bool>& registered : started) {
+    up += registered.get() ? 1 : 0;
+  }
+  return up;
+}
+
+// A connect() handed to the io thread: the connection started there and its
+// wait armed, `timeout` from then; the future says how it ended.
+std::future<bool> ThreadedClient::Core::_start_connect(const std::string& host, std::uint16_t port, float timeout) {
   basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("blocking ThreadedClient::connect() called on the io thread, from a callback");
@@ -442,7 +487,7 @@ bool ThreadedClient::Core::connect(const std::string& host, std::uint16_t port, 
   if (!posted) {
     MXTHROW(NotConnected());
   }
-  return future.get();
+  return future;
 }
 
 // A connect() call ends: connected, failed, or out of time.
@@ -504,6 +549,20 @@ std::size_t ThreadedClient::Core::watched_ids() {
     MX_DCHECK_RUN_ON(&io_thread_);
     return by_id_.size();
   });
+}
+
+void ThreadedClient::Core::forget_finished_ids() {
+  auto forget = [this] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    std::unordered_set<std::uint64_t>().swap(finished_ids_);  // the buckets too
+    std::deque<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>>().swap(finished_order_);
+    return 0;
+  };
+  if (io_thread_.is_current()) {
+    forget();  // from a callback, where a test that counts its replies takes its measure
+    return;
+  }
+  _call(forget);
 }
 
 std::size_t ThreadedClient::Core::waiting_queries() {
@@ -690,19 +749,24 @@ unsigned int ThreadedClient::Core::send_all(const MultiplexerMessage& msg, float
   return future.get();
 }
 
-void ThreadedClient::Core::send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done) {
+void ThreadedClient::Core::send_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, LanePtr lane,
+                                           float timeout, SendCallback done) {
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // as send() does
   }
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), false, false, timeout, done, lane);
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), false, false, timeout, done,
+               lane);
 }
 
-void ThreadedClient::Core::send_all_serialized(std::string serialized, float timeout, SendCallback done) {
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), true, false, timeout, done, LanePtr());
+void ThreadedClient::Core::send_all_serialized(std::string serialized, std::uint64_t id, std::uint32_t type,
+                                               float timeout, SendCallback done) {
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), true, false, timeout, done,
+               LanePtr());
 }
 
-unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serialized, bool all, float timeout,
-                                                            LanePtr lane, bool* not_connected) {
+unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serialized, std::uint64_t id,
+                                                            std::uint32_t type, bool all, float timeout, LanePtr lane,
+                                                            bool* not_connected) {
   basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
     throw std::logic_error("flushing ThreadedClient send called on the io thread, from a callback");
@@ -710,7 +774,8 @@ unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serializ
   std::shared_ptr<std::promise<std::pair<unsigned int, bool>>> promise(
       new std::promise<std::pair<unsigned int, bool>>());
   std::future<std::pair<unsigned int, bool>> future = promise->get_future();
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, SendCallback(), lane,
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), all, true, timeout,
+               SendCallback(), lane,
                [promise](unsigned int written, bool lost) { promise->set_value(std::make_pair(written, lost)); });
   const std::pair<unsigned int, bool> ended = future.get();
   if (not_connected) {
@@ -719,15 +784,16 @@ unsigned int ThreadedClient::Core::send_serialized_and_wait(std::string serializ
   return ended.first;
 }
 
-void ThreadedClient::Core::send_serialized_with_callback(std::string serialized, bool all, float timeout,
-                                                         SendCallback done, LanePtr lane) {
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, done, lane);
+void ThreadedClient::Core::send_serialized_with_callback(std::string serialized, std::uint64_t id, std::uint32_t type,
+                                                         bool all, float timeout, SendCallback done, LanePtr lane) {
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), all, true, timeout, done,
+               lane);
 }
 
-void ThreadedClient::Core::send_serialized_and_notify(std::string serialized, bool all, float timeout,
-                                                      FlushedCallback done, LanePtr lane) {
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized)), all, true, timeout, SendCallback(), lane,
-               done);
+void ThreadedClient::Core::send_serialized_and_notify(std::string serialized, std::uint64_t id, std::uint32_t type,
+                                                      bool all, float timeout, FlushedCallback done, LanePtr lane) {
+  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), all, true, timeout,
+               SendCallback(), lane, done);
 }
 
 // Hands a send to the io thread. Never blocks the caller: a plain post, so
@@ -999,27 +1065,45 @@ ThreadedClient::Result ThreadedClient::Core::query(const std::string& payload, s
 void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callback, float timeout, LanePtr lane,
                                  ReceivedCallback received) {
   basic_client_->check_not_orphaned();
+  if (!callback) {
+    // A caller who wants the request delivered, not its reply: the query
+    // runs as any other, its stages and its deadline, and its outcome goes
+    // nowhere. Left empty it would read as over from the start, an empty
+    // callback being what marks a query's end.
+    callback = [](const Result&) {};
+  }
   if (lane) {
     lane->check_not_inherited();
     basic_client_->check_ours(lane);  // here, not on the io thread
   }
   InFlightPtr in_flight(new InFlight());
-  in_flight->prototype = msg;
-  in_flight->prototype.set_from(instance_id_);
+  in_flight->prototype = msg;  // the request itself, an empty from filled in; each attempt gets an id of its own
+  if (!msg.from()) {
+    in_flight->prototype.set_from(instance_id_);
+  }
   if (msg.to()) {
     in_flight->prototype.set_report_delivery_error(true);  // "not behind this multiplexer" must come back
   }
   // Here, on the caller's thread, the request as the io thread frames it:
-  // each attempt only gets its id, and a typed query the `to` of the
-  // backend its search found (_direct), both measured at their largest.
+  // each attempt only gets its id, and a typed query's request sent again
+  // (_direct) the `to` of the backend its search found and a delivery
+  // error asked for, all measured at their largest.
   in_flight->prototype.set_id(std::numeric_limits<std::uint64_t>::max());
   const bool typed = !msg.to();
+  const bool asked = in_flight->prototype.has_report_delivery_error();
+  const bool asked_value = in_flight->prototype.report_delivery_error();
   if (typed) {
     in_flight->prototype.set_to(std::numeric_limits<std::uint64_t>::max());
+    in_flight->prototype.set_report_delivery_error(true);
   }
   check_message_size(in_flight->prototype.ByteSizeLong());
   if (typed) {
     in_flight->prototype.clear_to();
+    if (asked) {
+      in_flight->prototype.set_report_delivery_error(asked_value);
+    } else {
+      in_flight->prototype.clear_report_delivery_error();
+    }
   }
   in_flight->timeout = timeout;
   in_flight->deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout);
@@ -1279,24 +1363,30 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
   }
 }
 
-void ThreadedClient::Core::_remember_finished(std::uint64_t id) {
+// A finished query's `id`, kept `until` a late reply to it can no longer
+// be expected; the ids whose time is up go first, from the front, where the
+// oldest ended, and the oldest whatever their time when there are too many.
+void ThreadedClient::Core::_remember_finished(std::uint64_t id, std::chrono::steady_clock::time_point until) {
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  while (!finished_order_.empty() &&
+         (finished_order_.front().second <= now || finished_order_.size() >= FINISHED_IDS_KEPT)) {
+    finished_ids_.erase(finished_order_.front().first);
+    finished_order_.pop_front();
+  }
   if (!id || !finished_ids_.insert(id).second) {
     return;
   }
-  finished_order_.push_back(id);
-  if (finished_order_.size() > REMEMBERED_FINISHED_IDS) {
-    finished_ids_.erase(finished_order_.front());
-    finished_order_.pop_front();
-  }
+  finished_order_.emplace_back(id, until);
 }
 
 void ThreadedClient::Core::_track(InFlightPtr in_flight, std::uint64_t id) { by_id_[id] = in_flight; }
 
 // A connection came (up) or went. A connect() waiting for it ends. Up, what
-// waits for a connection, sends and queries, goes now. Down, queries whose
-// request or direct request went through it are sent again through another
-// one, or wait for one; the deadline keeps running throughout. (What waited
-// for its room BasicClient hands over itself.)
+// waits for a connection, sends and queries, goes now. Down, a query whose
+// request or direct request went out through it moves on (_lost), and one
+// whose attempt still waited there unwritten follows it to where the outbox
+// hands it (_follow_handover); the deadline keeps running throughout.
+// (What waited for its room BasicClient hands over itself.)
 void ThreadedClient::Core::_on_connection(const ConnectionWrapper& connection, bool up) {
   std::vector<InFlightPtr> queries(in_flight_.begin(), in_flight_.end());  // a copy: the loop may finish queries
   MX_LOG(DEBUG, HIGHVERBOSITY,
@@ -1317,55 +1407,113 @@ void ThreadedClient::Core::_on_connection(const ConnectionWrapper& connection, b
       case InFlight::REQUEST:
       case InFlight::DIRECT:
         if (in_flight->sent_via.is_same_connection(connection)) {
-          _lost(in_flight);
+          if (!in_flight->pinned() && in_flight->sent_state && *in_flight->sent_state == SendState::QUEUED) {
+            _follow_handover(in_flight);  // not written yet: it goes on, not lost
+          } else {
+            _lost(in_flight);
+          }
         }
         break;
       case InFlight::SEARCH:
-        // One connection fewer to answer the search, if it carried it.
-        if (_answered(in_flight, connection) && in_flight->searched.empty()) {
-          _start_query(in_flight, /*keep_deadline=*/true);
+        // The search may have been routed before the connection went, and a
+        // PING may still come back another way: the search waits on, a loss
+        // counting as no answer. Through a pinned lane there is no other
+        // way, and the lane's contract is NotConnected.
+        if (in_flight->pinned() && _answered(in_flight, connection)) {
+          _finish(in_flight, NOT_CONNECTED, NULL);
+        }
+        break;
+      case InFlight::LATE:
+        // A late reply may come back another way, but through a pinned
+        // lane only the lane's: its connection gone, nothing can come, and
+        // the lane's contract is NotConnected.
+        if (in_flight->pinned() && in_flight->lane->connection().is_same_connection(connection)) {
+          _finish(in_flight, NOT_CONNECTED, NULL);
         }
         break;
       case InFlight::WAITING:
-      case InFlight::LATE:
         break;
     }
   }
 }
 
-// The connection a request or a direct request went through is gone. A
-// typed query sends the request again through another connection; an
-// addressed one locates its addressee instead, since the instance may be
-// behind another multiplexer now; through a pinned lane there is nothing
-// else to try.
+// The connection the query's attempt was queued on is going while the
+// attempt waits there unwritten: the outbox hands it to another connection
+// once the connection is down, or holds it for the next, as it does every
+// client's unwritten message, so the attempt goes out once and is not
+// lost. Once that is done the query follows it to the connection that took
+// it, whose loss then counts; an attempt the outbox gave up on went
+// nowhere, as one a delivery error answered. One found on no live
+// connection is lost under the query: the frame being written as the
+// connection went, set aside and so still queued when the loss was
+// reported, may have been written whole; and one held for the next
+// connection, or handed to one that went too, has no loss left to tell
+// the query.
+void ThreadedClient::Core::_follow_handover(InFlightPtr in_flight) {
+  const unsigned int generation = in_flight->generation;
+  const InFlight::Stage stage = in_flight->stage;
+  io_service_.post([this, in_flight, generation, stage] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (!in_flight->callback || in_flight->generation != generation || in_flight->stage != stage) {
+      return;  // over, or moved on meanwhile
+    }
+    if (*in_flight->sent_state == SendState::LOST) {
+      if (in_flight->stage == InFlight::REQUEST) {
+        _search(in_flight, /*keep_deadline=*/false);  // nobody took it: on to the search, no late reply
+      } else {
+        _wait_late(in_flight, /*direct=*/false);  // the direct request went nowhere
+      }
+      return;
+    }
+    const ConnectionWrapper where = basic_client_->followed(in_flight->sent_state, in_flight->sent_via);
+    if (!basic_client_->live(where)) {
+      _lost(in_flight);
+      return;
+    }
+    in_flight->sent_via = where;
+  });
+}
+
+// The connection a request or a direct request went through is gone. The
+// attempt may have reached a backend first, routed before the connection
+// went, and its reply may still come back another way, so it is accepted
+// to the query's end. The request goes out at most twice and a query
+// never goes back a stage: from the request it moves on to the search, or
+// for an addressed query to the locate, at once; from the direct request
+// it waits for a late reply until the stage's deadline. Through a pinned
+// lane there is nothing else to try.
 void ThreadedClient::Core::_lost(InFlightPtr in_flight) {
-  in_flight->taken = true;  // the attempt may have reached a backend before the connection went
   if (in_flight->pinned()) {
     _finish(in_flight, NOT_CONNECTED, NULL);
     return;
   }
+  const bool request = in_flight->stage == InFlight::REQUEST;
   MX_LOG(WARNING, MEDIUMVERBOSITY,
          CTX("ThreadedClient") TEXT("connection lost under query " + repr(in_flight->request_id) +
-                                    (in_flight->addressed() ? "; locating the addressee" : "; sending again")));
-  if (in_flight->addressed()) {
-    _search(in_flight);
+                                    (!request                 ? "; waiting for a late reply"
+                                     : in_flight->addressed() ? "; locating the addressee"
+                                                              : "; searching for a backend")));
+  if (request) {
+    in_flight->taken = true;
+    _search(in_flight, /*keep_deadline=*/false);
   } else {
-    _start_query(in_flight, /*keep_deadline=*/true);
+    _wait_late(in_flight, /*direct=*/true);
   }
 }
 
-// The query's message found no connection live: it waits, and goes again
-// from the request when one comes up, within its deadline.
-void ThreadedClient::Core::_wait_for_connection(const InFlightPtr& in_flight) {
+// The message of the query's stage `resume` found no connection live: it
+// waits, and goes out when one comes up, within the stage's deadline.
+void ThreadedClient::Core::_wait_for_connection(const InFlightPtr& in_flight, int resume) {
   in_flight->stage = InFlight::WAITING;
+  in_flight->resume = static_cast<InFlight::Stage>(resume);
   if (!in_flight->listed) {
     in_flight->listed = true;
     waiting_queries_.push_back(in_flight);
   }
 }
 
-// A connection came up: the waiting queries go again, in order; one that
-// finds none live after all waits on.
+// A connection came up: the waiting queries send the message of the stage
+// they wait in, in order; one that finds none live after all waits on.
 void ThreadedClient::Core::_restart_waiting_queries() {
   std::deque<InFlightPtr> pass;
   pass.swap(waiting_queries_);
@@ -1376,7 +1524,17 @@ void ThreadedClient::Core::_restart_waiting_queries() {
       continue;  // moved on, or finished
     }
     ++retries_;
-    _start_query(in_flight, /*keep_deadline=*/true);
+    switch (in_flight->resume) {
+      case InFlight::SEARCH:
+        _search(in_flight, /*keep_deadline=*/true);
+        break;
+      case InFlight::DIRECT:
+        _send_direct(in_flight, ConnectionWrapper(), /*keep_deadline=*/true);
+        break;
+      default:
+        _start_query(in_flight, /*keep_deadline=*/true);
+        break;
+    }
   }
 }
 
@@ -1395,30 +1553,30 @@ void ThreadedClient::Core::_start_query(InFlightPtr in_flight, bool keep_deadlin
     _finish(in_flight, SHUT_DOWN, NULL);
     return;
   }
-  // Ids of an earlier attempt stay tracked, so a late reply is accepted,
-  // until the query ends.
-  if (in_flight->request_id) {
-    in_flight->earlier_ids.push_back(in_flight->request_id);
+  if (!in_flight->request_id) {
+    in_flight->request_id = random64();  // kept by a request that waits for a connection
   }
   MultiplexerMessage request = in_flight->prototype;
-  request.set_id(random64());
-  in_flight->request_id = request.id();
+  request.set_id(in_flight->request_id);
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(request));
   ConnectionWrapper used;
   bool refused = false;
-  if (!_schedule(raw, in_flight->lane, &used, &refused, _stage_timeout(in_flight))) {
+  Tracker tracker = _schedule(raw, in_flight->lane, &used, &refused, _stage_timeout(in_flight));
+  if (!tracker) {
     if (refused) {
       _finish(in_flight, NOT_CONNECTED, NULL);  // the pinned lane's connection is gone
       return;
     }
     // Nothing to send through: wait for a connection, within the deadline.
-    _wait_for_connection(in_flight);
+    _wait_for_connection(in_flight, InFlight::REQUEST);
     if (!keep_deadline) {
       _arm(in_flight, in_flight->timeout);
     }
     return;
   }
   in_flight->sent_via = used;
+  in_flight->sent_state = tracker;
+  in_flight->request_state = tracker;
   MX_LOG(DEBUG, CHATTERBOX,  // per message: off by default, MX_LOG_VERBOSITY=DEBUG:CHATTERBOX shows the traffic
          CTX("ThreadedClient") TEXT("request " + repr(in_flight->request_id) + " via " + repr(used.endpoint_)));
   _track(in_flight, in_flight->request_id);
@@ -1443,55 +1601,68 @@ void ThreadedClient::Core::_acknowledged(const InFlightPtr& in_flight, const Mul
 void ThreadedClient::Core::_advance(InFlightPtr in_flight, const IncomingMessage& incoming) {
   const MultiplexerMessage& msg = *incoming.third;
   // What the message answers: one of the query's searches, whose answers
-  // are PINGs and delivery errors, or an attempt of the request itself (the
-  // first, a resend after a lost connection, the direct request), whose
-  // answer is the reply, accepted in any stage. A search's answer is never
-  // the reply: arriving after the query moved on, it is dropped.
+  // are PINGs and delivery errors, or one of the request's two attempts
+  // (the request and the direct request), whose answer is the reply,
+  // accepted in any stage, or a delivery error, which strikes the attempt
+  // off in any stage (_refused). A search's answer is never the reply:
+  // arriving after the query moved on, it is dropped.
   const std::vector<std::uint64_t>& searches = in_flight->search_ids;
   const bool to_a_search = std::find(searches.begin(), searches.end(), msg.references()) != searches.end();
   const bool delivery_error = msg.type() == types::DELIVERY_ERROR;
-  if (!to_a_search && !delivery_error) {
-    _finish(in_flight, REPLIED, &incoming);
+  if (!to_a_search) {
+    if (delivery_error) {
+      _refused(in_flight, msg.references());
+    } else {
+      _finish(in_flight, REPLIED, &incoming);
+    }
     return;
+  }
+  if (in_flight->stage != InFlight::SEARCH || msg.references() != in_flight->search_id) {
+    return;  // a search's answer after the query moved on: a later PING from another backend
+  }
+  if (delivery_error) {
+    // Every multiplexer the search went through reported no backend of
+    // the type: see _nobody.
+    _answered(in_flight, incoming.second);
+    if (in_flight->searched.empty()) {
+      _nobody(in_flight);
+    }
+  } else if (msg.type() == types::PING) {
+    _direct(in_flight, incoming);
+  }
+}
+
+// A delivery error for one of the query's attempts: nobody has it, and it
+// is struck off. The request's moves the query from its first stage on to
+// the search, and leaves a search that finds nobody no late reply to wait
+// for; the direct request's, in its stage, leaves only a late reply to the
+// request, if a backend may have that; in the late wait, the last attempt
+// struck off leaves nothing that can answer.
+void ThreadedClient::Core::_refused(InFlightPtr in_flight, std::uint64_t id) {
+  if (id == in_flight->request_id) {
+    in_flight->taken = false;
   }
   switch (in_flight->stage) {
     case InFlight::REQUEST:
-      if (!to_a_search && msg.references() == in_flight->request_id) {
-        _search(in_flight);  // nobody took the request
-      }
-      return;  // a delivery error for an earlier attempt, an earlier search's answer
-
-    case InFlight::SEARCH:
-      if (msg.references() != in_flight->search_id) {
-        return;  // for an earlier search or an earlier attempt
-      }
-      if (delivery_error) {
-        // Every multiplexer the search went through reported no backend of
-        // the type, so nothing can answer any more.
-        _answered(in_flight, incoming.second);
-        if (in_flight->searched.empty()) {
-          _finish(in_flight, FAILED, NULL);
-        }
-      } else if (msg.type() == types::PING) {
-        _direct(in_flight, incoming);
+      if (id == in_flight->request_id) {
+        _search(in_flight, /*keep_deadline=*/false);  // nobody took the request
       }
       return;
-
     case InFlight::DIRECT:
-      if (!to_a_search && msg.references() == in_flight->direct_id) {
-        // The backend that answered the search is gone. A backend that took
-        // the request may still answer it, and the stage waits on for that;
-        // with none, nothing can answer any more.
-        if (in_flight->addressed() || !in_flight->taken) {
-          _finish(in_flight, FAILED, NULL);
-        } else {
-          in_flight->stage = InFlight::LATE;
-        }
+      if (id == in_flight->direct_id) {
+        _wait_late(in_flight, /*direct=*/false);  // the instance that answered the search is gone
       }
-      return;  // a later PING from another backend, a stale delivery error
-
+      return;
+    case InFlight::LATE: {
+      std::vector<std::uint64_t>& pending = in_flight->pending;
+      pending.erase(std::remove(pending.begin(), pending.end(), id), pending.end());
+      if (pending.empty()) {
+        _finish(in_flight, FAILED, NULL);
+      }
+      return;
+    }
+    case InFlight::SEARCH:
     case InFlight::WAITING:
-    case InFlight::LATE:
       return;
   }
 }
@@ -1502,11 +1673,14 @@ void ThreadedClient::Core::_advance(InFlightPtr in_flight, const IncomingMessage
 // their search policy, with delivery errors requested so that a
 // multiplexer without the instance says so. Through a pinned lane the one
 // multiplexer behind it is asked instead of all.
-void ThreadedClient::Core::_search(InFlightPtr in_flight) {
+void ThreadedClient::Core::_search(InFlightPtr in_flight, bool keep_deadline) {
   float left = _stage_timeout(in_flight);
   if (in_flight->addressed() && left <= 0) {
     _finish(in_flight, TIMED_OUT, NULL);
     return;
+  }
+  if (!keep_deadline) {
+    _arm(in_flight, left);  // the stage's time runs from here, a wait for a connection included
   }
   MultiplexerMessage msg;
   if (in_flight->addressed()) {
@@ -1534,7 +1708,7 @@ void ThreadedClient::Core::_search(InFlightPtr in_flight) {
     basic_client_->schedule_all(raw, &sent, left > 0 ? left : in_flight->timeout);
   }
   if (sent.empty()) {
-    _wait_for_connection(in_flight);  // the request goes out again when a connection is back
+    _wait_for_connection(in_flight, InFlight::SEARCH);  // the search goes out when a connection is back
     return;
   }
   in_flight->search_id = msg.id();
@@ -1542,7 +1716,6 @@ void ThreadedClient::Core::_search(InFlightPtr in_flight) {
   in_flight->searched = sent;
   _track(in_flight, in_flight->search_id);
   in_flight->stage = InFlight::SEARCH;
-  _arm(in_flight, left);
 }
 
 // The search went through `connection` and has its answer from it now, a
@@ -1559,26 +1732,72 @@ bool ThreadedClient::Core::_answered(const InFlightPtr& in_flight, const Connect
   return false;
 }
 
-void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage& ping) {
-  MultiplexerMessage request = in_flight->prototype;
-  request.set_id(random64());
-  request.set_to(ping.third->from());
-  request.set_report_delivery_error(true);  // a backend gone since its PING says so
-  if (in_flight->direct_id) {
-    in_flight->earlier_ids.push_back(in_flight->direct_id);  // tracked still, as a request's
+// The search, or the locate, found nobody: every multiplexer it went
+// through answered with a delivery error. A request a backend may have
+// can still be answered late, and the query waits for that reply until
+// the stage's deadline; one that drew a delivery error itself cannot, and
+// nothing can answer any more.
+void ThreadedClient::Core::_nobody(InFlightPtr in_flight) { _wait_late(in_flight, /*direct=*/false); }
+
+// The query can only wait, until the stage's deadline, for a late reply to
+// an attempt a backend may have: the request when it may have been taken,
+// the direct request when its connection went (`direct`), unless the
+// client gave it up, its tracker reading LOST: it went nowhere. The
+// trackers are read once, here: a connection writes in order, so the
+// search every multiplexer answered went out behind the request on each,
+// and the request was written or given up on by then. With neither,
+// nothing can answer any more.
+void ThreadedClient::Core::_wait_late(InFlightPtr in_flight, bool direct) {
+  std::vector<std::uint64_t>& pending = in_flight->pending;
+  pending.clear();
+  auto given_up = [](const BasicClient::BasicScheduledMessageTracker& state) {
+    return state && *state == SendState::LOST;
+  };
+  if (in_flight->taken && !given_up(in_flight->request_state)) {
+    pending.push_back(in_flight->request_id);
   }
-  in_flight->direct_id = request.id();
+  if (direct && !given_up(in_flight->direct_state)) {
+    pending.push_back(in_flight->direct_id);
+  }
+  if (pending.empty()) {
+    _finish(in_flight, FAILED, NULL);
+    return;
+  }
+  in_flight->stage = InFlight::LATE;
+}
+
+// The search found the instance that sent `ping`: the direct request goes
+// to it, through the connection the PING came on.
+void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage& ping) {
+  in_flight->direct_to = ping.third->from();
+  in_flight->direct_id = random64();  // kept by a direct request that waits for a connection
+  _send_direct(in_flight, ping.second, /*keep_deadline=*/false);
+}
+
+// The direct request, the request again to `direct_to`: through
+// `preferred`, the connection the PING came on, which is known to reach
+// that instance; if it died meanwhile, or there is none, after a wait for
+// a connection, any connection, since `to` is set, but through a pinned
+// lane only the lane's. The lane adopts it: what follows the query goes
+// the same way.
+void ThreadedClient::Core::_send_direct(InFlightPtr in_flight, const ConnectionWrapper& preferred, bool keep_deadline) {
+  MultiplexerMessage request = in_flight->prototype;
+  request.set_id(in_flight->direct_id);
+  request.set_to(in_flight->direct_to);
+  request.set_report_delivery_error(true);  // a backend gone since its PING says so
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(request));
   if (in_flight->pinned()) {
     raw->mark_pinned();  // never handed to another connection if this one dies under it
   }
-  // Through the connection the PING came on, which is known to reach that
-  // backend; if it died meanwhile, any connection, since `to` is set, but
-  // through a pinned lane only the lane's. The lane adopts it: what follows
-  // the query goes the same way.
   const float left = _stage_timeout(in_flight);
-  ConnectionWrapper used = ping.second;
-  BasicClient::BasicScheduledMessageTracker tracker = basic_client_->schedule_on(raw, ping.second, left);
+  if (!keep_deadline) {
+    _arm(in_flight, left);  // the stage's time runs from here, a wait for a connection included
+  }
+  ConnectionWrapper used = preferred;
+  BasicClient::BasicScheduledMessageTracker tracker;
+  if (preferred) {
+    tracker = basic_client_->schedule_on(raw, preferred, left);
+  }
   if (tracker && in_flight->lane) {
     in_flight->lane->adopt(used);
   }
@@ -1591,13 +1810,14 @@ void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage&
     }
   }
   if (!tracker) {
-    _wait_for_connection(in_flight);
+    _wait_for_connection(in_flight, InFlight::DIRECT);
     return;
   }
   in_flight->sent_via = used;
+  in_flight->sent_state = tracker;
+  in_flight->direct_state = tracker;
   _track(in_flight, in_flight->direct_id);
   in_flight->stage = InFlight::DIRECT;
-  _arm(in_flight, _stage_timeout(in_flight));
 }
 
 void ThreadedClient::Core::_arm(InFlightPtr in_flight, float timeout) {
@@ -1615,7 +1835,7 @@ void ThreadedClient::Core::_on_deadline(InFlightPtr in_flight, unsigned int gene
   }
   if (in_flight->stage == InFlight::REQUEST) {
     in_flight->taken = true;  // no answer in time: a backend may have the request
-    _search(in_flight);
+    _search(in_flight, /*keep_deadline=*/false);
   } else if (in_flight->stage == InFlight::WAITING) {
     _finish(in_flight, NOT_CONNECTED, NULL);
   } else {
@@ -1629,19 +1849,21 @@ void ThreadedClient::Core::_finish(InFlightPtr in_flight, Outcome outcome, const
   ++in_flight->generation;
   // Every id the query was tracked under: the current request's and
   // direct request's, every search's, every earlier attempt's.
+  // Kept until a late reply can no longer be expected: twice the longer of
+  // the query's timeout and DEFAULT_TIMEOUT, a query with no deadline, or
+  // none to wait (0, NaN), counting as DEFAULT_TIMEOUT.
+  const float timeout = in_flight->timeout;
+  const float kept = 2 * (std::isfinite(timeout) && timeout > DEFAULT_TIMEOUT ? timeout : DEFAULT_TIMEOUT);
+  const std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + mx::from_seconds(kept);
   by_id_.erase(in_flight->request_id);
-  _remember_finished(in_flight->request_id);
+  _remember_finished(in_flight->request_id, until);
   if (in_flight->direct_id) {
     by_id_.erase(in_flight->direct_id);
-    _remember_finished(in_flight->direct_id);
+    _remember_finished(in_flight->direct_id, until);
   }
   for (std::uint64_t id : in_flight->search_ids) {
     by_id_.erase(id);
-    _remember_finished(id);
-  }
-  for (std::uint64_t id : in_flight->earlier_ids) {
-    by_id_.erase(id);
-    _remember_finished(id);
+    _remember_finished(id, until);
   }
   if (in_flight->started) {
     in_flight_.erase(in_flight->place);

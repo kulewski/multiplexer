@@ -1,5 +1,7 @@
 """The pickle convention end to end: query_pickle, blocking and with a callback,
-send_pickle and a MultiplexerServer, over a real multiplexer."""
+send_pickle and a MultiplexerServer, over a real multiplexer; and a
+MultiplexerServer takes what every backend takes, its peer type from the
+class and a drain routing."""
 
 import os
 import pickle
@@ -10,6 +12,7 @@ import time
 import unittest
 
 from multiplexer.clients import Client
+from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import MultiplexerServer
 from multiplexer.threaded_client import ThreadedClient
@@ -26,6 +29,13 @@ class Doubler(MultiplexerServer):
     def process_pickle(self, data):
         """Double the numbers, keep the rest."""
         return {key: value * 2 for key, value in data.items()}
+
+
+class ClassTyped(Doubler):
+    """A Doubler whose peer type is the class's, given no `type`: the one
+    the rules send TEST_REQUEST_A to, which no other peer here has."""
+
+    multiplexer_client_type = peers.TEST_BACKEND_A
 
 
 class PickleTest(unittest.TestCase):
@@ -93,6 +103,29 @@ class PickleTest(unittest.TestCase):
         self.assertEqual(["an", "event"], pickle.loads(incoming.get(timeout=10).message))
         sender.shutdown()
         receiver.shutdown()
+
+    def test_the_peer_type_may_be_the_class_s(self) -> None:
+        """A MultiplexerServer subclass that sets multiplexer_client_type is
+        built without `type`, as any backend may be, and registers as that
+        type: a query the rules send to that type alone is answered."""
+        backend = ClassTyped([self.endpoint])
+        backend.connect()  # registered before the query
+        serving = threading.Thread(target=backend.serve_forever, kwargs={"poll": 0.1}, daemon=True)
+        serving.start()
+        client = Client([self.endpoint], type=peers.WEBSITE)
+        try:
+            self.assertEqual({"a": 2}, client.query_pickle({"a": 1}, type=types.TEST_REQUEST_A))
+        finally:
+            client.shutdown()
+            backend.stop()
+            serving.join(10)
+
+    def test_a_drain_routing_is_taken(self) -> None:
+        """A MultiplexerServer takes the drain_routing any backend takes,
+        what its start_draining() tells the multiplexers."""
+        drain = Routing(any=False, all=False, last_resort=True)
+        with Doubler([self.endpoint], type=peers.PYTHON_TEST_SERVER, drain_routing=drain) as backend:
+            self.assertEqual(drain, backend.drain_routing)
 
 
 if __name__ == "__main__":

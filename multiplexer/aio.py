@@ -9,6 +9,9 @@ the loop the client was created on, which its subscriptions and
 messages() belong to; query() and send_message() may be awaited from any
 loop, as ThreadedClient may be called from any thread, which is what code
 run through asgiref's async_to_sync away from the server's loop needs.
+Once the client's loop has closed, subscribe() and messages() raise and
+what arrives is dropped, said once in a warning: a program that must
+receive again makes a new client on a running loop.
 docs/api_python.md has the user's view and
 docs/recipes/async_web_server.md an asyncio web server.
 
@@ -61,6 +64,13 @@ from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClien
 # coroutine function is scheduled as a task, a plain function is called.
 Handler = Callable[[MultiplexerMessage], Awaitable[None] | None]
 Matcher = Callable[[MultiplexerMessage], bool]
+
+# What subscribe(), messages() and the io thread say once the client's loop
+# has closed.
+_LOOP_CLOSED = (
+    "the loop the client was created on has closed; to receive, close the client,"
+    " or its holder, and make one on a running loop"
+)
 
 
 class _Subscription:
@@ -131,6 +141,8 @@ class AsyncClient:
         self._messages_ended = False  # on the loop: close() came, the mark is in the queue or will be at its making
         self._queue_size = queue_size
         self._dropped_since_warning = 0
+        # The io thread said that the loop had closed under what arrives: once.
+        self._said_loop_closed = False
         # close() or aclose() was called: no handler is called again. Set on
         # any thread, read by _deliver on the loop.
         self._closing = False
@@ -232,7 +244,10 @@ class AsyncClient:
         return self._loop
 
     def _check_loop(self) -> None:
-        """messages() from another loop, or from no loop, is a mistake made loud."""
+        """messages() from another loop, from no loop, or once the client's
+        loop has closed, is a mistake made loud."""
+        if self._loop.is_closed():
+            raise RuntimeError("AsyncClient.messages(): %s" % _LOOP_CLOSED)
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
@@ -292,14 +307,17 @@ class AsyncClient:
     async def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         to: int = 0,
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
     ) -> Any:
-        """Send a request and await its reply. Raises the same exceptions
+        """Send a request and await its reply: `message` itself when it is
+        a whole MultiplexerMessage, typed and addressed by its own fields,
+        else one built from the payload, `type` and `to`, as
+        ThreadedClient.query() takes them. Raises the same exceptions
         as SyncClient: NotConnected, OperationTimedOut,
         OperationFailed, BackendError. Cancelling the await does not cancel
         the request: a backend may still receive it, its reply is dropped.
@@ -417,10 +435,14 @@ class AsyncClient:
         coroutine function runs as a task. Returns the function that ends
         the subscription: once it has returned, on the loop, the handler is
         not called again, for a message already handed to the loop either;
-        a coroutine already running goes on. In a forked child, on a client
-        the parent made, it raises UsedAfterFork, and the function it
-        returned before the fork does nothing: nothing is delivered there."""
+        a coroutine already running goes on. RuntimeError once the client's
+        loop has closed, since nothing could be delivered there. In a forked
+        child, on a client the parent made, it raises UsedAfterFork, and the
+        function it returned before the fork does nothing: nothing is
+        delivered there."""
         self._threaded._check_not_orphaned()  # before the lock, which a thread of the parent may have held
+        if self._loop.is_closed():
+            raise RuntimeError("AsyncClient.subscribe(): %s" % _LOOP_CLOSED)
         with self._lock:
             entry = _Subscription(type, matching, handler, next(self._orders))
             by_type = dict(self._by_type)
@@ -464,7 +486,9 @@ class AsyncClient:
         """The io thread: hand the message to the loop, cheaply, looking at
         the subscriptions of its type and of every type only, in the order
         they were made. A `matching` that raises takes it for none of its
-        subscription's handlers, logged as a handler that raises is."""
+        subscription's handlers, logged as a handler that raises is. A loop
+        that has closed takes nothing, which is said once, unless the client
+        is closing."""
         by_type = self._by_type  # the snapshot: replaced whole, never changed
         typed = by_type.get(mxmsg.type, ())
         every = by_type.get(None, ())
@@ -483,8 +507,10 @@ class AsyncClient:
             return
         try:
             self._loop.call_soon_threadsafe(self._deliver, mxmsg, chosen)
-        except RuntimeError:
-            pass  # the loop is closed
+        except RuntimeError:  # the loop is closed
+            if not self._said_loop_closed and not self._closing:
+                self._said_loop_closed = True
+                log(WARNING, LOWVERBOSITY, text="AsyncClient: what arrives is dropped: %s" % _LOOP_CLOSED)
 
     def _deliver(self, mxmsg: MultiplexerMessage, subscriptions: list[_Subscription]) -> None:
         """On the loop: run the handlers of the subscriptions that still
@@ -615,7 +641,14 @@ class AsyncClient:
         """One client per process, bound to the running loop at first
         get() or aget(), or to `loop=` among the kwargs, the constructor's,
         forgotten in a forked child: what an ASGI server's worker uses.
-        `addresses` may be a callable, read at first use."""
+        `addresses` may be a callable, read at first use. The first
+        caller's loop is the client's for as long as the holder keeps it:
+        once that loop has closed, subscribe() raises, and close() makes
+        the next use start a client on its own loop, as a test whose loop
+        ends with it does in its tear-down. The holder does not replace the
+        client by itself: async_to_sync with no server's loop runs every
+        call on a new loop, closed after it, and a process that only sends
+        keeps one client through them all."""
         return Holder(cls, type, addresses, **kwargs)
 
 

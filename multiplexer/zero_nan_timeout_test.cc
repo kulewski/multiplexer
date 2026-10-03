@@ -165,9 +165,9 @@ TEST(ZeroOrNanTimeout, AThreadedSendWithNoConnectionIsDroppedAtOnce) {
   client.set_drop_observer(drops.observer());
   const MultiplexerMessage zero = client.new_message(multiplexer::types::TEST_UNROUTED, "zero");
   const MultiplexerMessage nan = client.new_message(multiplexer::types::TEST_UNROUTED, "nan");
-  client.send_serialized(zero.SerializeAsString(), multiplexer::LanePtr(), 0,
+  client.send_serialized(zero.SerializeAsString(), zero.id(), zero.type(), multiplexer::LanePtr(), 0,
                          [&zero_ended](unsigned int written) { zero_ended.set_value(written); });
-  client.send_all_serialized(nan.SerializeAsString(), std::nanf(""));
+  client.send_all_serialized(nan.SerializeAsString(), nan.id(), nan.type(), std::nanf(""));
   EXPECT_EQ(0u, client.waiting_messages()) << "held for a connection";
   EXPECT_EQ(2u, client.dropped());
   EXPECT_EQ((std::vector<std::pair<std::uint64_t, DropReason>>{{zero.id(), DropReason::NO_CONNECTION},

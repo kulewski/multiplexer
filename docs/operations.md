@@ -209,28 +209,33 @@ to the peers connected.
 ## Restarting one
 
 Restart multiplexers one at a time. With the others up, the restart costs
-nothing: a request in flight on the dead connection goes out again through
-another at once, and every peer is back on the restarted multiplexer within
+nothing: a query whose request was in flight on the dead connection
+searches through the others at once and sends the request again to the
+backend found, and every peer is back on the restarted multiplexer within
 about 3 s. What the multiplexer held for delivery when it was told to stop
 still reaches the peers that read, before their connections close; what
 it held for a peer that did not read within `--drain-seconds` is lost, as
 is everything it held when it was killed instead. What a peer had written
 to it in the moment before the peer saw its connection close is lost too:
-a request then goes out again through another connection, an event does
-not, and nothing reports it, since it was written. What the peer had not
+a query then searches and sends its request again, an event is not sent
+again, and nothing reports it, since it was written. What the peer had not
 written yet goes through another connection, or, with none live, waits
 for the next one within its timeout.
 
-With a single multiplexer there is nothing to fall back to. A threaded
-client sends its in-flight requests again as soon as it is reconnected, a
-synchronous client's current call waits for the reconnect and sends again,
-and the request is then answered if its backend is back on the fresh
-multiplexer first, or fails with `OperationFailed` if the client got there
-first, since a multiplexer with nobody of the type reports a delivery
-error. Both reconnects are scheduled 3 s after the drop, so the order is
-chance. An event sent meanwhile, by either client, is held and goes out
-once the client is reconnected, or is dropped and reported at its
-timeout. This is the reason to run at least two.
+With a single multiplexer there is nothing to fall back to. A query whose
+request was in flight goes on to its search, which waits for the
+reconnect, inside the current call on a synchronous client, and a query
+that starts meanwhile waits for the reconnect and sends its request then.
+Either is answered if its backend is back on the fresh multiplexer first.
+If the client got there first, a multiplexer with nobody of the type
+reports a delivery error: the query that started meanwhile fails at once
+with `OperationFailed`, and the one in flight waits out its search's
+timeout for the late reply its request may bring, and raises
+`OperationTimedOut` without it. Both reconnects are scheduled 3 s after
+the drop, so the order is chance. An event sent meanwhile, by either
+client, is held and goes out once the client is reconnected, or is
+dropped and reported at its timeout. This is the reason to run at least
+two.
 
 The `mx_restarts`, `threaded_mx_restarts` and `rolling_restart` scenarios
 in `tests/scenarios/` record exactly what a backend and a client see
@@ -333,9 +338,9 @@ queued for peers and M that arrived while their connection closed` at
 `WARNING` when it dropped anything. A multiplexer out of file descriptors
 logs `cannot accept a connection: Too many open files` and tries again
 every 0.1 s. A `ThreadedClient` warns
-`connection lost under query <id>; sending again`, or `; locating the
-addressee`, for each query it sends again. A message a rule queued nowhere
-gives one of three lines: `routing while none present of type N (NAME)`
+`connection lost under query <id>`, followed by what the query does
+next, for each query whose connection is lost under it. A message a rule
+queued nowhere gives one of three lines: `routing while none present of type N (NAME)`
 when no peer of the type is connected; `routing off on every peer of type
 N (NAME)` when every one has turned rule routing off, as while it drains;
 and `queue full on every peer of type N (NAME) that takes it` when every

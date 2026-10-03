@@ -161,9 +161,9 @@ another address is found too. A peer whose library runs the loop all the
 time, whatever its role, does this within a few seconds. A peer on
 `SyncClient` does it the next time it calls the library. The picture has
 one backend, one client on `SyncClient`, and one multiplexer
-that is restarted; with the several multiplexers a deployment runs, a
-request in flight simply goes through another one and none of this is
-visible to the caller.
+that is restarted; with the several multiplexers a deployment runs, the
+client simply goes on through another one, and none of this is visible to
+the caller.
 
 ### 1. The multiplexer goes down
 
@@ -221,7 +221,7 @@ graph LR
 
 ### 3. The client's next call finds the connection dead
 
-The client's library learns about the closed connection only when it next runs the loop, inside a call. The request it just wrote is lost with the connection; the call does not fail, it keeps running the loop.
+The client's library learns about the closed connection only when it next runs the loop, inside a call, which it does before it writes: the dead connection is retired, the request waits for a live one, and the call does not fail, it keeps running the loop.
 
 ```mermaid
 graph LR
@@ -246,9 +246,9 @@ graph LR
   style C fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
-### 4. The same call reconnects and sends again
+### 4. The same call reconnects and sends
 
-The reconnect timer fires 3 s later, inside the call, the handshake runs, and the request goes out again with a fresh id. The caller sees a slow call, not an error, as long as the multiplexer is back within the call's timeout and the backend reconnected before the client did: both reconnect 3 s after the drop, in no fixed order, and a request that reaches the fresh multiplexer before its backend fails with `OperationFailed`. With connections to several multiplexers the request goes through another one at once instead.
+The reconnect timer fires 3 s later, inside the call, the handshake runs, and the request goes out, once. The caller sees a slow call, not an error, as long as the multiplexer is back within the call's timeout and the backend reconnected before the client did: both reconnect 3 s after the drop, in no fixed order, and a request that reaches the fresh multiplexer before its backend fails with `OperationFailed`. With connections to several multiplexers the request goes through another one at once instead.
 
 ```mermaid
 graph LR

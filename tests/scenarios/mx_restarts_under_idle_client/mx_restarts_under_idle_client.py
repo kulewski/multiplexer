@@ -1,7 +1,8 @@
 """the multiplexer restarts while a passive client is idle; its next call still works.
 
-The client learns of the dead connection inside that call, waits for the
-reconnect there and sends again. A fresh client works too.
+The client learns of the dead connection inside that call, before it
+writes, waits for the reconnect there and sends then, once. A fresh client
+works too.
 """
 
 import unittest

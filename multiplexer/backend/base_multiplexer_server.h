@@ -81,18 +81,23 @@ class BaseMultiplexerServer {
   // takes the same two steps.
   virtual void loop_iter(float timeout = DEFAULT_READ_TIMEOUT);
 
-  // Connects to every address given to the constructor, once;
-  // serve_forever() calls it first, and a second call does nothing. Call
-  // it yourself when something waits for a line you print before it
-  // sends, so that the line means reachable; when you drive loop_iter()
+  // Connects to every address given to the constructor, once; a second
+  // call does nothing, nor does serve_forever() after it, which otherwise
+  // starts the connections itself, waiting for none. Every connection
+  // starts at once, and the call waits until each has its handshake done
+  // or has failed, DEFAULT_TIMEOUT at most in all. Call it
+  // yourself when something waits for a line you print before it sends,
+  // so that the line means reachable; when you drive loop_iter()
   // yourself; or in a test that wants the backend connected without a
   // thread serving it.
   void connect();
 
-  // The loop: connect() unless already connected, then until `working` is
-  // cleared or a drain is over, wait up to
-  // `poll` seconds for a message, handle it if one came, call
-  // periodic_task(); then close the connections. `drain_seconds` is how
+  // The loop: a connection to every address started unless connect() did,
+  // none waited for, then until `working` is cleared or a drain is over,
+  // wait up to `poll` seconds for a message, handle it if one came, call
+  // periodic_task(); then close the connections. The loop's waits finish
+  // the handshakes: the backend serves what one multiplexer routes to it
+  // while another has not welcomed it yet. `drain_seconds` is how
   // long to keep serving after start_draining(), unless drained() is
   // overridden. The calling thread becomes the backend's thread: a backend
   // may be built on one thread and served from another, but from here on
@@ -174,12 +179,15 @@ class BaseMultiplexerServer {
   // sent as it is, or a const std::string* or std::string payload, which
   // also needs `type` (std::uint32_t). Optional: `to` and `references`
   // (std::uint64_t), `workflow` (std::string or const std::string*), and
-  // `multiplexer`, ONE, ALL (int) or a ConnectionWrapper. While a message
-  // is handled the defaults make it the reply: `to` the requester,
-  // `references` and `workflow` the request's, `multiplexer` the
-  // connection it came on, replaced when gone; outside a handler, from
-  // periodic_task() say, there are none and the message is routed by its
-  // type through one connection. Sent as every client sends
+  // `multiplexer`, ONE, ALL (int) or a ConnectionWrapper; beside a whole
+  // MultiplexerMessage only `multiplexer`, the rest being std::invalid_argument.
+  // While a message is handled the defaults make it the reply: `to` the
+  // requester, `references` and `workflow` the request's, `multiplexer`
+  // the connection it came on, replaced when gone; a whole message gets
+  // those of its fields that are empty filled in so, as Request::reply
+  // fills a threaded server's. Outside a handler, from periodic_task()
+  // say, there are none and the message is routed by its type through one
+  // connection. Sent as every client sends
   // (SyncClient::queue): placed, or held while no connection is live, and
   // reported to the drop observer if given up on. Returns, in the
   // std::any, the message's ScheduledMessageTracker, the first copy's for
@@ -226,6 +234,10 @@ class BaseMultiplexerServer {
   Routing drain_routing_ = direct_only_routing();
 
  private:
+  // A connection to every address started, once, none waited for: the
+  // ones to wait for, none when they were started before.
+  std::vector<ConnectionWrapper> _start_connecting();
+
   std::unique_ptr<multiplexer::Client> __conn;
   const MultiplexerAddresses addresses_;
   bool connected_ = false;

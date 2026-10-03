@@ -64,7 +64,7 @@ class BasicClient(mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = ...,
         timeout: float = ...,
         to: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
@@ -77,7 +77,7 @@ class BasicClient(mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = ...,
         timeout: float = ...,
         to: int = ...,
         multiplexer: int | Lane | ConnectionWrapper = ...,
@@ -90,7 +90,7 @@ class BasicClient(mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = None,
         timeout: float = mxclient.DEFAULT_TIMEOUT,
         to: int = 0,
         multiplexer: int | Lane | ConnectionWrapper = mxclient.Client.ONE,

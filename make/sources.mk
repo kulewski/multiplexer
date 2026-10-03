@@ -20,6 +20,7 @@ LIB_SRCS := \
   multiplexer/basic_client.cc \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
+  multiplexer/descriptor_table.cc \
   multiplexer/io/raw_message.cc \
   multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
@@ -104,6 +105,7 @@ HEADERS := \
   multiplexer/connections_manager.h \
   multiplexer/constants_writer.h \
   multiplexer/defaults.h \
+  multiplexer/descriptor_table.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
   multiplexer/log_summary.h \
@@ -163,16 +165,21 @@ CC_TEST_SRCS := \
   lib/options_test.cc \
   lib/protobuf/stream_test.cc \
   lib/thread_checker_test.cc \
+  multiplexer/backend/connect_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
   multiplexer/client_names_test.cc \
+  multiplexer/connect_again_test.cc \
   multiplexer/connect_by_name_test.cc \
+  multiplexer/descriptor_table_test.cc \
   multiplexer/disconnect_test.cc \
+  multiplexer/drop_names_test.cc \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
+  multiplexer/query_stages_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/recording_copies_test.cc \
   multiplexer/recording_session_test.cc \
@@ -187,6 +194,7 @@ PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/all_types_test.py \
   multiplexer/client_names_test.py \
+  multiplexer/connect_again_test.py \
   multiplexer/connect_by_name_test.py \
   multiplexer/direct_request_test.py \
   multiplexer/disconnect_test.py \
@@ -197,6 +205,7 @@ PY_TEST_FILES := \
   multiplexer/foreign_lane_test.py \
   multiplexer/fork_test.py \
   multiplexer/frames_at_the_limit_test.py \
+  multiplexer/frozen_multiplexer_test.py \
   multiplexer/full_connection_test.py \
   multiplexer/graceful_stop_test.py \
   multiplexer/handler_timeout_test.py \
@@ -217,11 +226,13 @@ PY_TEST_FILES := \
   multiplexer/pickle_failures_test.py \
   multiplexer/pickle_test.py \
   multiplexer/query_acknowledged_test.py \
+  multiplexer/query_stages_test.py \
   multiplexer/recording_read_test.py \
   multiplexer/report_loop_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
   multiplexer/serve_thread_test.py \
+  multiplexer/server_connect_test.py \
   multiplexer/server_replies_test.py \
   multiplexer/servers_drain_test.py \
   multiplexer/sync_waits_test.py \

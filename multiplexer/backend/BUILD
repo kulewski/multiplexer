@@ -45,6 +45,22 @@ cc_test(
 )
 
 cc_test(
+    name = "connect_test",
+    size = "small",
+    srcs = ["connect_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":base_multiplexer_server",
+        ":base_threaded_multiplexer_server",
+        "//lib:kwargs",
+        "//multiplexer:client",
+        "//multiplexer:in_process_multiplexer",
+        "//multiplexer:multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "serve_thread_test",
     size = "small",
     srcs = ["serve_thread_test.cc"],

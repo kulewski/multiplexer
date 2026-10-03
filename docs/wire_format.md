@@ -27,7 +27,7 @@ the protocol:
 
 | Field | Number | Role |
 |---|---|---|
-| `id` | 1 | required in practice: a receiver drops a message without one, and uses it to drop a copy it has already seen. A client that sends a request again, after a timeout, a search or a lost connection, gives the new attempt a new id and accepts replies to any of them |
+| `id` | 1 | required in practice: a receiver drops a message without one, and uses it to drop a copy it has already seen. A client that sends a request again, to the backend its search found, gives that attempt a new id and accepts a reply to either |
 | `from` | 2 | the sender's instance id; the multiplexer sends delivery errors to it |
 | `to` | 3 | an instance id; when set the multiplexer delivers there and consults no rule |
 | `type` | 4 | the message type; decides routing and, below 100, protocol meaning |

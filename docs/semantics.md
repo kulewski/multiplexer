@@ -5,7 +5,7 @@ It is written for the deployment the multiplexer is designed for and every
 other page assumes: several multiplexers, every client and every backend
 connected to all of them ([the healthy deployment](README.md#the-healthy-deployment)).
 A query's search stage asks every multiplexer the client is connected to,
-a request whose connection dies goes out again through another, and a
+a query whose connection dies goes on to that search at once, and a
 multiplexer restarting costs nobody anything. With a single multiplexer
 there is no other connection to use, and the failure modes below say what
 that changes.
@@ -65,26 +65,36 @@ that changes.
   client moves what waits along inside its next call, the only time its
   loop runs.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
-  delivery error means the search starts, the search finding nobody means
-  `OperationFailed`, a stage running out of time means `OperationTimedOut`.
+  delivery error, a lost connection or a typed query's first timeout
+  means the search starts, the search finding nobody means
+  `OperationFailed`, and the time running out after that, or an addressed
+  query's one deadline, means `OperationTimedOut`. A query never goes
+  back a stage, and its request goes out at most twice: first, and to the
+  backend the search found. A first attempt that timed out or lost its
+  connection may still be with a backend, and a reply to either attempt
+  ends the query at any stage, so where the query would fail, the search
+  finding nobody or the backend it found gone, it waits out the stage for
+  that late reply instead, and raises `OperationTimedOut` without it
+  ([every way a stage ends](query.md#every-way-a-stage-ends)).
   An addressed request, one with `to`, reaches that instance or nobody:
-  the instance gone means `OperationFailed`, and its being behind another
-  multiplexer than the one asked is bridged by the locate phase.
+  the instance gone means `OperationFailed`, or that wait, and its being
+  behind another multiplexer than the one asked is bridged by the locate
+  phase.
   A request that reached a backend which then died is repeated to another
   backend, so a backend must tolerate seeing the same request twice, or make
-  its work idempotent. Every attempt is a new message with a new `id`: the
-  repeat after a timeout, the direct request after a search, and the resend
-  after a lost connection. The client accepts a reply to any attempt, but a
-  backend cannot tell the attempts apart by `id`, so deduplicate on
-  something in the payload, never on the message id. A backend that calls
-  `notify_start()` lets the caller see it happen: a query's `on_received`
-  is called with each backend that acknowledged the request, so a second
-  call says the request may be running twice
+  its work idempotent. The repeat, the direct request after the search, is
+  a new message with a new `id`. The client accepts a reply to either
+  attempt, but a backend cannot tell the attempts apart by `id`, so
+  deduplicate on something in the payload, never on the message id. A
+  backend that calls `notify_start()` lets the caller see it happen: a
+  query's `on_received` is called with each backend that acknowledged the
+  request, so a second call says the request may be running twice
   ([Python](api_python.md#knowing-a-backend-took-the-request),
   [C++](api_cpp.md#knowing-a-backend-took-the-request)).
 - **`references` means "this is the reply".** A client matches replies to
   its queries by the id they reference, and a threaded or asyncio client
-  drops what references a query it has seen answered, the last 1024,
+  drops what references a query that has ended, for twice the longer of
+  the query's timeout and 10 s after it ended, 131072 queries at most,
   since a retried query's second reply must not reach the program as a
   stray and nothing tells such a reply from a follow-up that merely points
   at its request. So a message that follows a request but is not its
@@ -105,25 +115,31 @@ that changes.
 
 - **A backend dies mid-request.** The client waits out its timeout, searches,
   and repeats the request elsewhere; the total wait is up to three timeouts,
-  more on a `ThreadedClient` or `AsyncClient` that loses the connection of
-  the search or of the direct request, which starts the query over.
+  whatever happens to the connections meanwhile, since a query never goes
+  back a stage.
   [How a query is answered](query.md) shows it.
 - **The addressee of an addressed request dies or leaves.** Every
   multiplexer reports it gone and the request fails with `OperationFailed`
-  at once; no other instance of its type gets it. An addressee that only
-  moved, behind a multiplexer the client's request did not go through, is
-  found by the locate phase within the one timeout.
-- **A multiplexer dies.** Requests in flight on that connection go out again
-  with a fresh id through another connection, at once, so a backend may see
-  them twice and the caller sees nothing. A reply that was to go back
+  at once, unless a late reply may still come (above), which the query
+  waits for until its timeout; no other instance of its type gets it. An
+  addressee that only moved, behind a multiplexer the client's request
+  did not go through, is found by the locate phase within the one
+  timeout.
+- **A multiplexer dies.** A query whose request was in flight on that
+  connection searches through the others at once, or locates its
+  addressee, and sends the request again, with a fresh id, to the backend
+  found, so a backend may see it twice and the caller sees only a slower
+  call. A reply that was to go back
   through the dead connection goes through another live one, or the first to
   come up, so it can reach the caller through another multiplexer than its
   request took. What a client's connection to it had not written goes, in
   order, through one other live connection, or, with none live, waits for
-  the next:
-  what still waited for room within its own timeout, what was queued
-  `DEFAULT_TIMEOUT` from then, so that it rides through a restart however
-  long ago it was sent; a pinned lane's messages are dropped, and so are the
+  the next, each message within its own timeout, the one its send gave
+  it, so that a send that gave up on a message never sees it written
+  later: one whose time is up when it would wait, for room or for a
+  connection, goes with the dead connection, reported; with the default
+  10 s, a restart of 3 s loses only what had waited unwritten more than
+  7 s; a pinned lane's messages are dropped, and so are the
   copies of messages sent to every connection while another connection
   lives, the other multiplexers having theirs, each drop reported; with none
   live, the message is held once, whole, until one comes up. Backends and
@@ -134,8 +150,8 @@ that changes.
   held for the peers that read still arrives; a peer that reads nothing by
   `--drain-seconds` loses what was queued for it. The peers do not know it
   is leaving until their connection closes: what one sends in that last
-  moment is lost, a request going out again through another connection
-  as when a multiplexer dies. Neither loss, nor what the queue of a peer
+  moment is lost, a query going on to its search as when a multiplexer
+  dies. Neither loss, nor what the queue of a peer
   dropped for silence held, is reported to the sender with a
   `DELIVERY_ERROR`.
 - **A multiplexer moves.** A peer given a host name resolves it inside the
@@ -152,16 +168,20 @@ that changes.
   to another as a lost connection's does: tried for good, an address
   nobody serves any more can one day be another deployment's
   multiplexer's, as pod addresses are reused.
-- **The only multiplexer dies.** There is no other connection. A threaded
-  client sends its in-flight requests again as soon as it is reconnected; a
-  synchronous client waits for the reconnect inside its current call and
-  sends again. An event sent meanwhile, by either client, is held and goes
+- **The only multiplexer dies.** There is no other connection. A query
+  whose request was in flight goes on to its search, which waits for the
+  reconnect, inside the current call on a synchronous client; a query
+  that starts meanwhile waits for the reconnect and sends its request
+  then. An event sent meanwhile, by either client, is held and goes
   out once the client is reconnected, or is dropped and reported at its
-  timeout. The request is answered if the backend of its type is back
-  on the fresh multiplexer by then, and fails at once with `OperationFailed`
-  if the client reconnected first: a multiplexer with nobody of the type
-  reports a delivery error, and the search that follows asks the same one
-  multiplexer. Which reconnect lands first is chance, since both are
+  timeout. The query is answered if the backend of its type is back
+  on the fresh multiplexer by then. If the client reconnected first, a
+  multiplexer with nobody of the type reports a delivery error, and the
+  search asks the same one multiplexer: a query that started meanwhile
+  fails at once with `OperationFailed`, and one that was in flight waits
+  out its search's timeout for a late reply, which comes only if the
+  backend had the request before the drop, and raises `OperationTimedOut`
+  without it. Which reconnect lands first is chance, since both are
   scheduled 3 s after the drop. Run two multiplexers if a restart must be
   invisible; the `threaded_mx_restarts` scenario records both cases.
 - **A backend leaves.** A draining backend tells every multiplexer to
@@ -274,8 +294,11 @@ that changes.
   rather than by timeout.
 - **A message is bigger than 128 MiB.** The sending library refuses it at
   the call, `ValueError` in Python and `std::length_error` in C++, before
-  anything is queued; a sender that frames its own bytes and gets past
-  that has the receiving side close the connection. The limit is
+  anything is queued, and a query's request too when the copy the query
+  may send again, with an id of its own, the `to` of the backend found and
+  a delivery error asked for, would be over the limit; a sender that frames
+  its own bytes and gets past that has the receiving side close the
+  connection. The limit is
   `MAX_MESSAGE_SIZE`, below; protocol buffers are built for messages far
   smaller, so anything near it belongs in a store the message points at.
 - **Handling a message fails.** When the code handling an arriving message

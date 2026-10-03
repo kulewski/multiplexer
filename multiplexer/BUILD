@@ -448,6 +448,45 @@ cc_test(
 )
 
 cc_test(
+    name = "drop_names_test",
+    size = "small",
+    srcs = ["drop_names_test.cc"],
+    deps = [
+        ":client",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "connect_again_test",
+    size = "small",
+    srcs = ["connect_again_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+py_test(
+    name = "connect_again_py_test",
+    size = "small",
+    srcs = ["connect_again_test.py"],
+    main = "connect_again_test.py",
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+cc_test(
     name = "disconnect_test",
     size = "small",
     srcs = ["disconnect_test.cc"],
@@ -458,6 +497,31 @@ cc_test(
         ":multiplexer_cc_constants",
         ":threaded_client",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "query_stages_test",
+    size = "small",
+    srcs = ["query_stages_test.cc"],
+    deps = [
+        ":client",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+py_test(
+    name = "query_stages_py_test",
+    size = "small",
+    srcs = ["query_stages_test.py"],
+    main = "query_stages_test.py",
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
     ],
 )
 
@@ -580,6 +644,22 @@ cc_test(
 )
 
 cc_library(
+    name = "descriptor_table",
+    srcs = ["descriptor_table.cc"],
+    hdrs = ["descriptor_table.h"],
+)
+
+cc_test(
+    name = "descriptor_table_test",
+    size = "small",
+    srcs = ["descriptor_table_test.cc"],
+    deps = [
+        ":descriptor_table",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "basic_client",
     srcs = [
         "basic_client.cc",
@@ -589,6 +669,7 @@ cc_library(
     hdrs = ["basic_client.h"],
     deps = [
         ":connections_manager",
+        ":descriptor_table",
         ":log_summary",
         ":multiplexer_cc_constants",
         "//lib:fork",
@@ -736,6 +817,7 @@ py_test(
     deps = [
         ":clients",
         ":multiplexer_constants",
+        ":multiplexer_py_proto",
         ":servers",
         ":threaded_client_py",
     ],
@@ -858,6 +940,42 @@ py_test(
 )
 
 py_test(
+    name = "server_connect_test",
+    size = "small",
+    srcs = ["server_connect_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+# Preloaded into a child Python by sync_client_destroy_test.py; see the
+# source.
+cc_binary(
+    name = "lookup_join_probe.so",
+    testonly = True,
+    srcs = ["lookup_join_probe.cc"],
+    linkopts = ["-ldl"],  # dlsym, in libdl before glibc 2.34
+    linkshared = True,
+)
+
+py_test(
+    name = "sync_client_destroy_test",
+    size = "small",
+    srcs = ["sync_client_destroy_test.py"],
+    data = [":lookup_join_probe.so"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "no_connection_test",
     size = "small",
     srcs = ["no_connection_test.py"],
@@ -913,12 +1031,13 @@ py_test(
 
 py_test(
     name = "whole_message_test",
-    size = "small",
+    size = "medium",
     srcs = ["whole_message_test.py"],
     deps = [
         ":aio",
         ":clients",
         ":multiplexer_constants",
+        ":servers",
         ":threaded_client_py",
         "//multiplexer/testing",
     ],
@@ -1250,6 +1369,8 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        ":recording",
+        ":recording_py_proto",
         ":threaded_client_py",
         "//multiplexer/testing",
     ],
@@ -1350,6 +1471,23 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+# A backend whose one multiplexer stops reading: the loop serves on through
+# the other, and nothing holds the GIL.
+py_test(
+    name = "frozen_multiplexer_test",
+    size = "medium",
+    srcs = ["frozen_multiplexer_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":servers",
         "//multiplexer/testing",
     ],
 )

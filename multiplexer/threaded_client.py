@@ -27,7 +27,7 @@ a reply came through, preferred while it is live. docs/api_python.md,
 """
 
 import pickle
-from typing import Any, Callable, Literal, TypeVar, overload
+from typing import Any, Callable, Iterable, Literal, TypeVar, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
@@ -42,6 +42,7 @@ from multiplexer.mxclient import (
     UsedAfterFork,
     make_message,
     stamped,
+    whole,
 )
 from multiplexer.multiplexer_constants import types
 import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
@@ -140,13 +141,21 @@ class ThreadedClient:
         under another address is found."""
         return self._native.connect(endpoint[0], endpoint[1], timeout)
 
+    def connect_all(self, endpoints: Iterable[Endpoint], timeout: float = DEFAULT_TIMEOUT) -> int:
+        """connect() to every (host, port) at once, each waited for against
+        the same `timeout`: a multiplexer that never welcomes costs the call
+        its timeout once, not once for every address after it. How many are
+        connected when it returns; the others the io thread keeps trying,
+        as after connect()."""
+        return self._native.connect_all([(host, port) for host, port in endpoints], timeout)
+
     def disconnect(self, endpoint: Endpoint) -> bool:
         """Drop the multiplexer given to connect() or to the constructor as
         `endpoint`, the same (host, port), an address in any spelling: no
         reconnect to it any more, unless connect() is called again; a live
-        connection to it closed, what it had not written going to the
-        other connections or held, and queries through it sent again
-        elsewhere, as for a lost connection; a connect() waiting for it
+        connection to it closed, what it had not written going to another
+        connection or held, and the queries whose request it carried
+        moving on as after a lost connection; a connect() waiting for it
         returns False. Returns once the io thread has done it, whether the
         client had it. Raises NotConnected after shutdown(), as connect()
         does, and RuntimeError from a callback, on the io thread."""
@@ -155,6 +164,15 @@ class ThreadedClient:
     def connections_count(self) -> int:
         """How many multiplexers are connected right now."""
         return self._native.connections_count()
+
+    def forget_finished_ids(self) -> None:
+        """Forget the ids of every query that has ended now, as if their
+        time were up, giving back the memory they held: a late reply to one
+        reaches on_message. For a test that measures the heap across many
+        queries, the ids being kept a while by design, bounded, and no
+        leak. From any thread, a callback's included; as the C++
+        ThreadedClient::forget_finished_ids()."""
+        self._native.forget_finished_ids()
 
     def set_routing(self, routing: Routing) -> None:
         """Which of a multiplexer's routing paths reach this peer, a
@@ -248,14 +266,14 @@ class ThreadedClient:
         first copy for ALL, 0 once it was given up on, and reported, or
         shutdown() came first; safe from callbacks. flush_all() waits for
         every copy."""
-        mxmsg_id, raw, every, lane = self._prepare(message, multiplexer, kwargs)
+        mxmsg_id, mxmsg_type, raw, every, lane = self._prepare(message, multiplexer, kwargs)
         if callback is not None or not flush:
             if every:
-                self._native.send_all(raw, timeout=timeout, callback=callback)
+                self._native.send_all(raw, mxmsg_id, mxmsg_type, timeout=timeout, callback=callback)
             else:
-                self._native.send(raw, lane, timeout=timeout, callback=callback)
+                self._native.send(raw, mxmsg_id, mxmsg_type, lane, timeout=timeout, callback=callback)
             return mxmsg_id
-        written, not_connected = self._native.send_and_wait(raw, every, timeout, lane)
+        written, not_connected = self._native.send_and_wait(raw, mxmsg_id, mxmsg_type, every, timeout, lane)
         if written == 0:
             self._raise_for_nothing_written(lane, not_connected)
         return mxmsg_id
@@ -273,8 +291,8 @@ class ThreadedClient:
         the first copy for ALL, 0 when it was given up on or `timeout`
         passed first, `not_connected` saying which exception that is; what
         multiplexer.aio awaits. Returns the message id."""
-        mxmsg_id, raw, every, lane = self._prepare(message, multiplexer, kwargs)
-        self._native.send_and_notify(raw, every, timeout, notify, lane)
+        mxmsg_id, mxmsg_type, raw, every, lane = self._prepare(message, multiplexer, kwargs)
+        self._native.send_and_notify(raw, mxmsg_id, mxmsg_type, every, timeout, notify, lane)
         return mxmsg_id
 
     def _flush_all_and_notify(self, timeout: float, notify: Callable[[bool], None]) -> None:
@@ -284,13 +302,15 @@ class ThreadedClient:
 
     def _prepare(
         self, message: Any, multiplexer: int | Lane | ConnectionWrapper, kwargs: dict[str, Any]
-    ) -> tuple[int, bytes, bool, Lane | None]:
-        """A send's (message id, serialized message, to ALL, lane): the
-        message built from the payload and `kwargs` unless it is one, a
+    ) -> tuple[int, int, bytes, bool, Lane | None]:
+        """A send's (message id, message type, serialized message, to ALL,
+        lane), the id and the type being what a drop is reported by: the
+        message built from the payload and `kwargs` unless it is a whole
+        one, sent as it is, `kwargs` beside it a TypeError; a
         ConnectionWrapper as a lane that prefers it. NotConnected for a
         pinned lane whose connection is gone."""
         if isinstance(message, MultiplexerMessage):
-            mxmsg = stamped(message, self.instance_id, self.random)
+            mxmsg = whole(message, kwargs, self.instance_id, self.random)
         else:
             mxmsg = self.new_message(message=message, **kwargs)
         lane = multiplexer if isinstance(multiplexer, Lane) else None
@@ -298,7 +318,7 @@ class ThreadedClient:
             raise NotConnected()
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
-        return mxmsg.id, mxmsg.SerializeToString(), multiplexer is ThreadedClient.ALL, lane
+        return mxmsg.id, mxmsg.type, mxmsg.SerializeToString(), multiplexer is ThreadedClient.ALL, lane
 
     def _raise_for_nothing_written(self, lane: Lane | None, not_connected: bool) -> None:
         """A flushing send wrote nothing: the reason, as an exception, the
@@ -323,7 +343,7 @@ class ThreadedClient:
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = ...,
         timeout: float = ...,
         *,
         to: int = ...,
@@ -336,7 +356,7 @@ class ThreadedClient:
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = ...,
         timeout: float = ...,
         *,
         to: int = ...,
@@ -349,7 +369,7 @@ class ThreadedClient:
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = ...,
         timeout: float = ...,
         *,
         callback: QueryCallback,
@@ -362,7 +382,7 @@ class ThreadedClient:
     def query(
         self,
         message: Any,
-        type: int,
+        type: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         callback: QueryCallback | None = None,
         to: int = 0,
@@ -370,7 +390,12 @@ class ThreadedClient:
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
     ) -> Any:
-        """Send a request. Without `callback`, block and return the reply,
+        """Send a request: `message` itself when it is a whole
+        MultiplexerMessage, typed by its own `type` and addressed by its own
+        `to`, an empty id and from filled in, `type=` or `to=` beside it a
+        TypeError; else one built from the payload, bytes, str or a protocol
+        buffer message, and `type`, which it needs, and `to`. Without
+        `callback`, block and return the reply,
         raising OperationTimedOut, OperationFailed, NotConnected (from
         multiplexer.mxclient) or BackendError; RuntimeError when called from
         a callback, on the io thread, where it would block that thread. With
@@ -386,8 +411,10 @@ class ThreadedClient:
         a PING addressed to it on every connection (answered as long as the
         peer lives, by the server classes, ThreadedClient and AsyncClient
         whatever their search policy, never by a SyncClient), and the request
-        goes again through the connection that found it. A peer nobody has is
-        OperationFailed; one `timeout` covers the three stages.
+        goes again, its second and last time, through the connection that
+        found it. A peer nobody has is OperationFailed, unless a request it
+        may have taken, after a lost connection, can still be answered, which
+        the query then waits for; one `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() (the request goes through
         the lane's connection and the lane adopts the connection the reply
@@ -407,10 +434,20 @@ class ThreadedClient:
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
-        fields: dict[str, Any] = {"message": message, "type": type}
-        if to:
-            fields["to"] = to
-        raw_request = self.new_message(**fields).SerializeToString()
+        if isinstance(message, MultiplexerMessage):
+            if type is not None or to:
+                raise TypeError(
+                    "a whole MultiplexerMessage is the request itself: set its type and to, not type= or to="
+                )
+            request = stamped(message, self.instance_id, self.random)
+        elif type is None:
+            raise TypeError("a query of a payload needs its type")
+        else:
+            fields: dict[str, Any] = {"message": message, "type": type}
+            if to:
+                fields["to"] = to
+            request = self.new_message(**fields)
+        raw_request = request.SerializeToString()
         if callback is None:
             raw, connection = self._native.query(raw_request, timeout, lane, on_received)
             reply = self._parse(raw)

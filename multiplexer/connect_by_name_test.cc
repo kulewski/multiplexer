@@ -102,6 +102,23 @@ TEST(ConnectByName, TheSystemResolverAndLocalhost) {
   client.shutdown();
 }
 
+// The wrapper connect() returns for a name has the address the name
+// resolved to and the connection took, the second here, the first
+// refusing: it was the wrapper made as the connect began, whose endpoint()
+// stayed what it was then, unspecified while the system resolver works,
+// or the first address, refused, with a resolver that answers at once.
+TEST(ConnectByName, TheWrapperConnectReturnsHasTheAddressInUse) {
+  InProcessMultiplexer mx;
+  Client client(peers::WEBSITE);
+  client.set_resolver([&](const std::string&, std::uint16_t, asio::error_code&) {
+    return std::vector<Endpoint>{local(1), local(mx.port)};  // nothing listens on the first
+  });
+  multiplexer::ConnectionWrapper wrapper = client.connect("mx", 1980, 5);
+  ASSERT_TRUE(wrapper);
+  EXPECT_EQ(local(mx.port), wrapper.endpoint());
+  EXPECT_EQ(std::string("mx"), wrapper.target().first);
+}
+
 TEST(ConnectByName, TheSynchronousClientDoesNotThrowOnAnUnknownName) {
   Client client(peers::WEBSITE);
   client.set_resolver([&](const std::string&, std::uint16_t, asio::error_code& error) {

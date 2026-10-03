@@ -85,9 +85,9 @@ class CountedReads:
         """As the client's."""
         return self.client.new_message(**kwargs)
 
-    def _schedule_all(self, serialized: bytes, timeout: float) -> int:
+    def _schedule_all(self, serialized: bytes, message_id: int, message_type: int, timeout: float) -> int:
         """As the client's."""
-        return self.client._schedule_all(serialized, timeout)
+        return self.client._schedule_all(serialized, message_id, message_type, timeout)
 
     def _receive(self, *args: Any, **kwargs: Any) -> Any:
         """As the client's, counted."""

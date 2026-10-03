@@ -9,7 +9,9 @@
 // the answer to the PING that locates it for an addressed query, which a
 // backend that declines searches sends too. And a handler's own
 // OperationTimedOut ends serve_forever() when on_handler_exception() says
-// so, as any exception does.
+// so, as any exception does. A reply given as a whole MultiplexerMessage
+// gets its empty fields from the request it answers, and message fields
+// beside one are refused.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -227,7 +229,9 @@ class StrictBackend : public BaseMultiplexerServer {
 // backend does.
 class ReplyingBackend : public BaseMultiplexerServer {
  public:
-  enum Reply { ANSWER, ANSWER_EVERYWHERE, THROW, NOTIFY_THEN_ANSWER, NOTIFY_THEN_HOLD };
+  // WHOLE answers with a whole MultiplexerMessage that sets only its type
+  // and payload; WHOLE_WITH_TYPE gives a `type` beside it too.
+  enum Reply { ANSWER, ANSWER_EVERYWHERE, THROW, NOTIFY_THEN_ANSWER, NOTIFY_THEN_HOLD, WHOLE, WHOLE_WITH_TYPE };
   ReplyingBackend(const MultiplexerAddresses& addresses, Reply reply)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER), reply_(reply) {}
   std::atomic<bool> serving{false};
@@ -235,6 +239,14 @@ class ReplyingBackend : public BaseMultiplexerServer {
   std::atomic<int> exceptions{0};
   std::atomic<bool> declining_searches{false};
   std::uint64_t instance_id() const { return conn->instance_id(); }
+  // How many handler exceptions were counted, once `count` were, 30 s at
+  // most, a failure detector: the report a requester gets goes out before
+  // the server hands the exception to on_handler_exception().
+  int exceptions_once(int count) {
+    std::unique_lock<std::mutex> lock(exceptions_mutex_);
+    exceptions_counted_.wait_for(lock, std::chrono::seconds(30), [&] { return exceptions.load() >= count; });
+    return exceptions.load();
+  }
 
  protected:
   // Declines every search while `declining_searches` is set.
@@ -245,6 +257,19 @@ class ReplyingBackend : public BaseMultiplexerServer {
     }
     if (reply_ == NOTIFY_THEN_HOLD) {
       no_response();
+      return;
+    }
+    if (reply_ == WHOLE || reply_ == WHOLE_WITH_TYPE) {
+      multiplexer::MultiplexerMessage whole;
+      whole.set_type(multiplexer::types::PYTHON_TEST_RESPONSE);
+      whole.set_message("re: " + mxmsg.message());
+      mx::util::kwargs::Kwargs reply;
+      reply.set("message", static_cast<const multiplexer::MultiplexerMessage*>(&whole));
+      if (reply_ == WHOLE_WITH_TYPE) {
+        reply.set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE));
+      }
+      send_message(reply);
+      ++announcements_;
       return;
     }
     mx::util::kwargs::Kwargs reply;
@@ -259,7 +284,9 @@ class ReplyingBackend : public BaseMultiplexerServer {
     ++announcements_;
   }
   bool on_handler_exception(const std::exception&) override {
+    std::lock_guard<std::mutex> lock(exceptions_mutex_);
     ++exceptions;
+    exceptions_counted_.notify_all();
     return true;
   }
   void periodic_task() override {
@@ -279,6 +306,8 @@ class ReplyingBackend : public BaseMultiplexerServer {
  private:
   const Reply reply_;
   int announcements_ = 0;
+  std::mutex exceptions_mutex_;
+  std::condition_variable exceptions_counted_;
 };
 
 // Serves `backend` on a thread of its own until destroyed.
@@ -474,7 +503,7 @@ TEST(ServeThread, AReplyThatThrowsIsAnsweredWithBackendError) {
   std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, request(client, "question"));
   ASSERT_TRUE(answer) << "no answer";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
-  EXPECT_EQ(1, backend.exceptions.load());
+  EXPECT_EQ(1, backend.exceptions_once(1));
 }
 
 // A backend that calls notify_start() first, as the docs suggest for a long
@@ -753,6 +782,41 @@ TEST(ServeThread, AnAddressedQueryLocatesABackendThatDeclinesSearches) {
 // A reply may name the connections it goes through, `multiplexer` being
 // one of send_message()'s documented keys, which the debug-build check of
 // the keys refused.
+// A reply given as a whole MultiplexerMessage that sets only its type and
+// payload gets the rest from the request it answers, as a threaded
+// server's Request::reply fills it: to, references and workflow, so the
+// requester reads it as its answer, where it went out as it was, an
+// answer to nothing.
+TEST(ServeThread, AWholeMessageReplyAnswersTheRequest) {
+  InProcessMultiplexer mx;
+  ReplyingBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}}, ReplyingBackend::WHOLE);
+  Serving serving(backend);
+  ASSERT_TRUE(backend.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, request(client, "question"));
+  ASSERT_TRUE(answer) << "no answer";
+  EXPECT_EQ(multiplexer::types::PYTHON_TEST_RESPONSE, answer->type());
+  EXPECT_EQ("re: question", answer->message());
+}
+
+// A whole MultiplexerMessage goes as it is: given with a `type` beside it,
+// send_message() throws std::invalid_argument, which the server reports to
+// the requester as BACKEND_ERROR, where the type was dropped unsaid and the
+// message went out as it was.
+TEST(ServeThread, FieldsBesideAWholeMessageAreRefused) {
+  InProcessMultiplexer mx;
+  ReplyingBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}}, ReplyingBackend::WHOLE_WITH_TYPE);
+  Serving serving(backend);
+  ASSERT_TRUE(backend.serving.load());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, request(client, "question"));
+  ASSERT_TRUE(answer) << "no answer";
+  EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
+  EXPECT_EQ(1, backend.exceptions_once(1));
+}
+
 TEST(ServeThread, AReplyMayNameItsMultiplexer) {
   InProcessMultiplexer mx;
   MultiplexerAddresses addresses;

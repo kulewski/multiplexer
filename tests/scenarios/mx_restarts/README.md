@@ -4,8 +4,8 @@ The multiplexer restarts under a live backend and a passive client; nobody notic
 
 The backend, a `BaseMultiplexerServer` that runs its loop all the time,
 reconnects after AUTO_RECONNECT_TIME. The client's next call finds its
-connection dead, waits for the reconnect inside the call and sends again, so
-every query is answered and none fails.
+connection dead before it writes, waits for the reconnect inside the call
+and sends then, so every query is answered and none fails.
 
 ## What happens
 
@@ -18,9 +18,9 @@ sequenceDiagram
     B->>C: reply 1
     Note over M: restart
     B-->>M: reconnect after 3 s
-    C->>M: request 2 (into the dead connection)
-    Note over C: the call sees the connection die, waits for its reconnect, sends again
-    C->>M: request 2 again, fresh id
+    Note over C: the next call finds the connection dead before it writes, and waits for its reconnect
+    C-->>M: reconnect after 3 s, inside the call
+    C->>M: request 2, once
     B->>C: reply 2
     C->>M: request 3
     B->>C: reply 3

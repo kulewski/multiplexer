@@ -2,8 +2,9 @@
 
 The multiplexer restarts while a passive client is idle; its next call still works.
 
-The client learns of the dead connection inside that call, waits for the
-reconnect there and sends again. A fresh client works too.
+The client learns of the dead connection inside that call, before it
+writes, waits for the reconnect there and sends then. A fresh client
+works too.
 
 ## What happens
 
@@ -16,8 +17,8 @@ sequenceDiagram
     B->>C: reply 1
     Note over M: restart while the client sleeps
     B-->>M: reconnects
-    C->>M: request 2 after idling
-    Note over C: dead connection noticed inside the call, reconnect, resend
+    Note over C: the next call notices the dead connection before it writes, and reconnects
+    C->>M: request 2 after idling, once reconnected
     B->>C: reply 2
     Note over C: a fresh client works too
 ```

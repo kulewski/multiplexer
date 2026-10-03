@@ -25,7 +25,7 @@ from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer import mxclient
-from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, OperationTimedOut, parse_message
+from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, OperationTimedOut, as_reply, parse_message
 
 
 def format_exception(exc, trace=None):
@@ -73,17 +73,33 @@ class MultiplexerPeer(object):
         self._connected = False
 
     def connect(self) -> None:
-        """Connect to every address given to the constructor, once;
-        serve_forever() calls it first, and a second call does nothing.
-        Call it yourself when something waits for a line you print before
-        it sends, so that the line means reachable; when you drive
-        loop_iter() yourself; or in a test that wants the backend
-        connected without a thread serving it."""
+        """Connect to every address given to the constructor, once; a
+        second call does nothing, nor does serve_forever() after it, which
+        otherwise starts the connections itself, waiting for none. Every
+        connection starts at once, and the call waits until each has its
+        handshake done or has failed, DEFAULT_TIMEOUT at most in all, as
+        the C++ BaseMultiplexerServer does. Call it yourself when
+        something waits for a line you print before it sends, so that the
+        line means reachable; when you drive loop_iter() yourself; or in a
+        test that wants the backend connected without a thread serving
+        it."""
+        # Each wait against what is left of one deadline: a multiplexer that
+        # drops the connect or never welcomes costs it once, not once for
+        # each address after it, while those already connected route
+        # requests here that nobody reads yet. Every wait runs the loop, so
+        # all the connections get on at once.
+        deadline = mxclient.TimeoutTicker(mxclient.DEFAULT_TIMEOUT)
+        for connection in self._start_connecting():
+            self.conn.wait_for_connection(connection, deadline())
+
+    def _start_connecting(self) -> list[ConnectionWrapper]:
+        """Start a connection to every address given to the constructor,
+        once, waiting for none: the ones to wait for, none when they were
+        started before."""
         if self._connected:
-            return
+            return []
         self._connected = True
-        for host, port in self._addresses:
-            self.conn.connect((host, port))
+        return [self.conn.async_connect((host, port)) for host, port in self._addresses]
 
 
 def nothing_more_arrives(routing: Routing) -> bool:
@@ -208,9 +224,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
         stall_seconds: float | None = None,
         stall_file=None,
     ) -> None:
-        """connect() unless already connected, then run the loop until
-        `working` is cleared or a drain is over, then close the connections
-        and return.
+        """Start a connection to every address unless connect() did, waiting
+        for none, then run the loop until `working` is cleared or a drain is
+        over, then close the connections and return. The loop's waits
+        finish the handshakes: the backend serves what one multiplexer
+        routes to it while another has not welcomed it yet.
 
         Each iteration waits up to `poll` seconds for a message, handles it
         if one came, and calls periodic_task(). `drain_seconds` is how long
@@ -227,7 +245,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
         stall = mxclient.wait_seconds(stall_seconds) if stall_seconds is not None else 0.0
         stall_file = stall_file or sys.stderr
         try:
-            self.connect()
+            # Every connection started, none waited for: the loop's waits
+            # finish the handshakes, so a multiplexer that welcomes the
+            # backend routes to one that serves, while one that never
+            # answers holds up nothing. connect(), called before, waited.
+            self._start_connecting()
             while self.working:
                 if self.draining and self.drained():
                     break
@@ -298,12 +320,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
         BACKEND_ERROR saying so, `what` naming it, when that echo would be
         over MAX_MESSAGE_SIZE, rather than not at all."""
         try:
-            self.send_message(message=mxmsg.message, embed=True, type=types.PING)
+            self.send_message(message=mxmsg.message, type=types.PING)
         except ValueError:
             self.send_message(
                 message=b"the echo of a %s of %d bytes would be over MAX_MESSAGE_SIZE"
                 % (what.encode(), len(mxmsg.message)),
-                embed=True,
                 type=types.BACKEND_ERROR,
                 workflow=b"",
             )
@@ -439,7 +460,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
         Defaults, each overridable through kwargs: `to` the requester's
         instance id, `references` the request's id, `workflow` the request's
-        workflow, `multiplexer` the connection the request arrived on. Other
+        workflow, `multiplexer` the connection the request arrived on. A
+        whole MultiplexerMessage as `message` goes with those of its fields
+        that are empty filled in so, its id and from too, as a threaded
+        server's reply does; message fields beside it are a TypeError. Other
         kwargs are as for mxclient.Client.send_message. Outside
         handle_message(), from periodic_task() say, there are no defaults:
         the message is routed by its type, as any client's.
@@ -447,9 +471,13 @@ class BaseMultiplexerServer(MultiplexerPeer):
         handling = self.last_mxmsg is not None
         if self.last_mxmsg is not None:
             kwargs.setdefault("multiplexer", self.last_connwrap)
-            kwargs.setdefault("references", self.last_mxmsg.id)
-            kwargs.setdefault("workflow", self.last_mxmsg.workflow)
-            kwargs.setdefault("to", self.last_mxmsg.from_)
+            message = kwargs.get("message")
+            if isinstance(message, MultiplexerMessage):
+                kwargs["message"] = as_reply(message, self.last_mxmsg, self.conn.instance_id, self.conn.random)
+            else:
+                kwargs.setdefault("references", self.last_mxmsg.id)
+                kwargs.setdefault("workflow", self.last_mxmsg.workflow)
+                kwargs.setdefault("to", self.last_mxmsg.from_)
         sent = self.conn.send_message(**kwargs)
         if handling:
             self._has_sent_response = True  # once it went: a send that raised is no answer
@@ -508,10 +536,11 @@ class MultiplexerServer(BaseMultiplexerServer):
     both ends are Python, and pickles from the network must be trusted."""
 
     @log_call
-    def __init__(self, addresses, type=None):
-        """A backend of peer type `type`, a peers.* constant."""
-        assert isinstance(type, int)
-        super(MultiplexerServer, self).__init__(addresses, type)
+    def __init__(self, addresses, type=None, drain_routing: Routing | None = None):
+        """As BaseMultiplexerServer's: a backend of peer type `type`, a
+        peers.* constant, or the class's `multiplexer_client_type` when it
+        is not given, whose drain tells the multiplexers `drain_routing`."""
+        super(MultiplexerServer, self).__init__(addresses, type, drain_routing)
 
     @log_call
     def process_pickle(self, data):

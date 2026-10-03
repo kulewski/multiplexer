@@ -103,11 +103,23 @@ struct Scripted : BaseThreadedMultiplexerServer {
     }
   }
   bool on_handler_exception(const std::exception&) override {
-    ++exceptions;
+    {
+      std::lock_guard<std::mutex> lock(exceptions_mutex);
+      ++exceptions;
+      exceptions_counted.notify_all();
+    }
     if (throw_from_on_handler_exception) {
       throw std::runtime_error("from on_handler_exception");
     }
     return keep_serving;
+  }
+  // How many handler exceptions were counted, once `count` were, 30 s at
+  // most, a failure detector: the report a requester gets goes out before
+  // the server hands the exception to on_handler_exception().
+  int exceptions_once(int count) {
+    std::unique_lock<std::mutex> lock(exceptions_mutex);
+    exceptions_counted.wait_for(lock, std::chrono::seconds(30), [&] { return exceptions.load() >= count; });
+    return exceptions.load();
   }
 
   void release() {
@@ -133,6 +145,8 @@ struct Scripted : BaseThreadedMultiplexerServer {
   std::atomic<bool> keep_serving{true};
   std::atomic<bool> throw_from_on_handler_exception{false};
   std::atomic<int> exceptions{0};
+  std::mutex exceptions_mutex;
+  std::condition_variable exceptions_counted;
 };
 
 // A Scripted served on its own thread, as a program would; built once it
@@ -627,7 +641,7 @@ TEST(ThreadedServer, AReplyThatThrowsIsAnsweredWithBackendError) {
   multiplexer::IncomingMessage reply =
       requester.client.query(requester.message("too big", multiplexer::types::PYTHON_TEST_REQUEST), 5);
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
-  EXPECT_EQ(1, served.server.exceptions.load());
+  EXPECT_EQ(1, served.server.exceptions_once(1));
 }
 
 // A report of a handler's exception that fails, the client shut down
@@ -639,7 +653,7 @@ TEST(ThreadedServer, AReportThatFailsStillTellsOnHandlerException) {
   Served served(mx.port);
   Requester requester(mx.port);
   requester.send("shut down and throw");
-  EXPECT_TRUE(eventually([&] { return served.server.exceptions.load() == 1; }));
+  EXPECT_EQ(1, served.server.exceptions_once(1));
 }
 
 TEST(ThreadedServer, CloseFromAHandlerIsAnErrorNotADeadlock) {

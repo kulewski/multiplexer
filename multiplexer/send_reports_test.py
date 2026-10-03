@@ -15,6 +15,7 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
 from multiplexer.testing import Cluster, FakePeer
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import past_the_queue
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
@@ -23,20 +24,9 @@ REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
 UNROUTED = types.TEST_UNROUTED  # routed nowhere: fills a connection without a backend answering
 CHUNK = b"x" * (16 * 1024)
-
-
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer, the largest the
-    kernel allows each, and twice the queue."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 2 * 1024
+FILLER_TIMEOUT = (
+    120  # seconds a message filling a connection may wait for room: none is given up on, however slow the fill
+)
 
 
 class FrameBeingWrittenTest(unittest.TestCase):
@@ -79,20 +69,20 @@ class HandedOverTest(unittest.TestCase):
                 client.send_message(b"first", type=UNROUTED, multiplexer=lane, flush=True)
                 frozen = cluster.multiplexer_at(lane.connection.endpoint)
                 frozen.pause()
-                for _ in range(frames_to_fill(len(CHUNK))):
-                    client.send_message(CHUNK, type=UNROUTED, multiplexer=lane)
+                for payload in past_the_queue(CHUNK):
+                    client.send_message(payload, type=UNROUTED, multiplexer=lane, timeout=FILLER_TIMEOUT)
                 assert frozen.proc is not None
                 # another process kills it during the call below, whatever the call holds meanwhile
                 frozen.expect_exit()
                 killer = subprocess.Popen(["sh", "-c", "sleep 0.5; kill -9 %d" % frozen.proc.pid])
                 question = client.new_message(message=b"question", type=REQUEST)
-                sent_ids: list[int] = []
+                attempts: dict = {}
                 try:
-                    reply, _ = client._send_and_receive(question, multiplexer=lane, sent_ids=sent_ids, timeout=30)
+                    reply, _ = client._send_and_receive(question, multiplexer=lane, attempts=attempts, timeout=30)
                 finally:
                     killer.wait()
-                self.assertEqual(len(sent_ids), 1, "sent once, not again under a new id")
-                self.assertEqual(reply.references, sent_ids[0])
+                self.assertEqual(len(attempts), 1, "sent once, not again under a new id")
+                self.assertEqual(reply.references, next(iter(attempts)))
                 self.assertEqual(len(backend.messages(REQUEST)), 1)
             finally:
                 client.shutdown()
@@ -111,8 +101,8 @@ class PinnedLaneTimeoutTest(unittest.TestCase):
                 client.send_message(b"first", type=EVENT, multiplexer=lane, flush=True)
                 cluster.mx[0].pause()
                 try:
-                    for _ in range(frames_to_fill(len(CHUNK))):
-                        client.send_message(CHUNK, type=UNROUTED, multiplexer=lane)
+                    for payload in past_the_queue(CHUNK):
+                        client.send_message(payload, type=UNROUTED, multiplexer=lane, timeout=FILLER_TIMEOUT)
                     with self.assertRaises(OperationTimedOut):
                         client.send_message(b"late", type=EVENT, multiplexer=lane, flush=True, timeout=0.2)
                     self.assertFalse(lane.closed)

@@ -6,7 +6,10 @@ the interpreter has allocated (tracemalloc) and how many objects exist, and
 the multiplexer logs its heap after every so many routed messages. A leak
 per message shows as growth in the second half of the run comparable to the
 first; caches and buffers plateau after the first stretch. Every language
-combination runs, with the synchronous Client and with a ThreadedClient.
+combination runs, with the synchronous Client and with a ThreadedClient,
+which forgets its finished queries' ids before each report: it keeps them
+a while, for late replies, by design and bounded (docs/semantics.md), and
+they are no leak.
 """
 
 import unittest

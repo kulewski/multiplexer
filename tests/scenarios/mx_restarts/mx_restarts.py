@@ -2,8 +2,8 @@
 
 The backend, a `BaseMultiplexerServer` that runs its loop all the time,
 reconnects after AUTO_RECONNECT_TIME. The client's next call finds its
-connection dead, waits for the reconnect inside the call and sends again, so
-every query is answered and none fails.
+connection dead before it writes, waits for the reconnect inside the call
+and sends then, once, so every query is answered and none fails.
 """
 
 import unittest

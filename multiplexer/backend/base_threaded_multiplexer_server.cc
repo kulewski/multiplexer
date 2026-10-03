@@ -307,15 +307,15 @@ void BaseThreadedMultiplexerServer::connect() {
     return;
   }
   _start_workers();  // before the first connection, so that nothing waits for a worker
-  for (const MultiplexerAddress& address : addresses_) {
-    try {
-      client_.connect(address.first, address.second, options_.connect_timeout);
-    } catch (const ThreadedClient::NotConnected&) {
-      if (!closed_.load()) {
-        throw;
-      }
-      return;  // close() shut the client down under us
+  // Every connection at once, against one connect_timeout, as the plain
+  // server connects: a multiplexer that never welcomes costs it once.
+  try {
+    client_.connect_all(addresses_, options_.connect_timeout);
+  } catch (const ThreadedClient::NotConnected&) {
+    if (!closed_.load()) {
+      throw;
     }
+    // close() shut the client down under us
   }
 }
 

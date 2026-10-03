@@ -6,14 +6,17 @@
 //
 // Client owns a BasicClient (the connections) and adds the query algorithm
 // in _query, the piece of the protocol that makes requests reliable: send
-// through one connection; on DELIVERY_ERROR or timeout, search every
-// connection for a backend of the type (BACKEND_FOR_PACKET_SEARCH), take the
-// first PING that answers, and repeat the request to that backend by
-// instance id. docs/query.md draws it. A request with `to` set is an
-// addressed query, _query_addressed: the same shape, except that the
-// middle stage locates that one instance, with a PING addressed to it,
-// rather than any backend of the type, and the three stages share one
-// timeout.
+// through one connection; on DELIVERY_ERROR, timeout or the connection
+// lost, search every connection for a backend of the type
+// (BACKEND_FOR_PACKET_SEARCH), take the first PING that answers, and
+// repeat the request to that backend by instance id. The request goes out
+// at most twice and a query never goes back a stage; a request a backend
+// may have, after a timeout or a lost connection, is waited for where the
+// query would otherwise fail. docs/query.md draws it and lists every way
+// a stage ends. A request with `to` set is an addressed query,
+// _query_addressed: the same shape, except that the middle stage locates
+// that one instance, with a PING addressed to it, rather than any backend
+// of the type, and the three stages share one timeout.
 //
 // A Lane (basic_client.h) given to send or query keeps a stream of messages
 // on one connection, following a failover or, pinned, refusing one; a
@@ -120,8 +123,12 @@ class Client : public ExceptionDefinitions {
 
   // A host name or an address in text. The name is resolved inside the
   // library, on every attempt, so a multiplexer that moved is found again.
+  // Both forms log the attempt, as the server classes' connect() does. A
+  // multiplexer the client has a connection to, live or on its way, keeps
+  // it: connecting again returns that connection.
   ConnectionWrapper async_connect(const std::string& host, std::uint16_t port) {
     basic_client_->check_not_orphaned();
+    MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
     return basic_client_->async_connect(host, port);
   }
   ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT) {
@@ -218,8 +225,8 @@ class Client : public ExceptionDefinitions {
   // null tracker from schedule_one(msg) means no connection is live, and
   // schedule_one(msg, wrapper) waits up to `timeout` for one instead and
   // throws NotConnected; queue() is the send that holds the message. `msg`
-  // may be a MultiplexerMessage, an already serialized std::string, or a
-  // RawMessage.
+  // may be a MultiplexerMessage, or a frame, a shared_ptr<const RawMessage>
+  // made of one or of its serialized bytes with its id and type.
   // Each of these polls the loop first (BasicClient::poll), so that a
   // connection the multiplexer closed while this client sat idle is retired
   // rather than written into.
@@ -371,12 +378,14 @@ class Client : public ExceptionDefinitions {
   }
 
   // Queues `msg` on every live connection, a full one's copy waiting for
-  // its room as above; returns how many connections got a copy.
+  // its room as above; returns how many connections got a copy, and puts
+  // them in `used` when given.
   template <typename T>
-  unsigned int schedule_all(const T& msg, float timeout = DEFAULT_TIMEOUT) {
+  unsigned int schedule_all(const T& msg, float timeout = DEFAULT_TIMEOUT,
+                            std::vector<ConnectionWrapper>* used = NULL) {
     basic_client_->check_not_orphaned();
     basic_client_->poll();
-    return basic_client_->schedule_all(_serialize(msg), NULL, timeout);
+    return basic_client_->schedule_all(_serialize(msg), used, timeout);
   }
 
   mx::Random64::result_type random64() const { return basic_client_->random64(); }  // a message id
@@ -389,32 +398,82 @@ class Client : public ExceptionDefinitions {
   std::uint64_t dropped() const { return basic_client_->dropped(); }
 
  protected:
-  // The query algorithm and the send-and-receive it is built on live in
-  // client.cc; see the comments there.
+  // The query algorithm, its stages and the one reader of what comes back
+  // that they share live in client.cc; see the comments there.
+  // One of a query's attempts, the request or the request sent again: the
+  // id it goes out under, the tracker of its message once it is placed,
+  // which says whether the client gave it up, and whether it is struck
+  // off: a delivery error said nobody has it, or the late wait found it
+  // given up on.
+  struct Attempt {
+    std::uint64_t id;
+    BasicClient::BasicScheduledMessageTracker state;
+    bool struck = false;
+  };
+  // A query's stage, as _await reads what ends it.
+  enum class Stage { REQUEST, SEARCH, DIRECT, LATE };
+  // What a query sent, for _await to read what comes back by the table
+  // every client follows (docs/query.md): its attempts, the request and
+  // the request sent again, in order, and its search, or locating PING,
+  // with the connections it went through that have not said nobody yet.
+  struct Ledger {
+    std::vector<Attempt> attempts;
+    std::uint64_t search_id = 0;
+    std::vector<ConnectionWrapper> searched;
+    // The attempt that went out as `id`, or null.
+    Attempt* attempt(std::uint64_t id);
+    // Whether an attempt is left that a backend may have: one not struck off.
+    bool any_left() const;
+    // Strikes off the attempts the client gave up on, or never placed:
+    // nobody can have them.
+    void strike_given_up();
+    // The search's "nobody" from `connection`: struck off the connections
+    // it waits for; false when it waited for none from there.
+    bool answered(const ConnectionWrapper& connection);
+  };
+  // How a stage's wait ended: an answer, a delivery error for the stage's
+  // own attempt, the search's PING, nobody anywhere, or in the late wait no
+  // attempt left, or the watched connection lost; `message` is what ended
+  // it, but for a loss.
+  struct Outcome {
+    enum Kind { ANSWER, REFUSED, FOUND, NOBODY, LOST } kind;
+    IncomingMessage message;
+  };
+  // The ids of `attempts`, which a reply may reference.
+  static std::vector<uint64_t> _ids(const std::vector<Attempt>& attempts);
   IncomingMessage _query(const MultiplexerMessage& query, float timeout, LanePtr lane, ReceivedCallback received);
   IncomingMessage _query_addressed(const MultiplexerMessage& query, float timeout, LanePtr lane);
-  IncomingMessage _send_and_receive(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, bool schedule_all = false,
-                                    bool handle_delivery_errors = false,
-                                    const std::vector<uint64_t>& also_accept = std::vector<uint64_t>(),
-                                    std::uint32_t ignore_type = 0, std::uint64_t ignore_id = -1,
-                                    ConnectionWrapper connection = ConnectionWrapper(), LanePtr lane = LanePtr(),
-                                    std::vector<uint64_t>* sent_ids = NULL);
-  IncomingMessage _send_and_receive_one(MultiplexerMessage mxmsg, mx::SimpleTimer& timer,
-                                        std::vector<uint64_t> accept_ids, std::uint32_t ignore_type,
-                                        std::uint64_t ignore_id, ConnectionWrapper connection, LanePtr lane,
-                                        std::vector<uint64_t>* sent_ids = NULL);
+  ConnectionWrapper _send_attempt(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
+                                  const LanePtr& lane, Ledger* ledger);
+  ConnectionWrapper _send_search(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, const LanePtr& lane,
+                                 Ledger* ledger);
+  void _place_search(std::shared_ptr<const RawMessage> raw, mx::SimpleTimer& timer,
+                     std::vector<ConnectionWrapper>* searched);
+  Outcome _await(Ledger& ledger, mx::SimpleTimer& timer, Stage stage, const ConnectionWrapper* watch,
+                 const LanePtr& lane);
+  IncomingMessage _late(Ledger& ledger, mx::SimpleTimer& timer, const LanePtr& lane);
+  // `placed`, when given, gets the message's tracker once it is placed,
+  // whatever the send then comes to.
   ConnectionWrapper _send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
-                              LanePtr lane = LanePtr());
+                              LanePtr lane = LanePtr(), BasicClient::BasicScheduledMessageTracker* placed = NULL);
   ConnectionWrapper _send_one(std::shared_ptr<const RawMessage> raw, mx::SimpleTimer& timer,
-                              ConnectionWrapper preferred, LanePtr lane);
+                              ConnectionWrapper preferred, LanePtr lane,
+                              BasicClient::BasicScheduledMessageTracker* placed = NULL);
+  // How long a message of a call with `left` seconds may wait for room, or
+  // for a connection: what the call has left and a moment more, so that
+  // the call's own deadline comes first; no limit for a call with no
+  // deadline, `left` negative.
+  static float _room_for(float left);
   // The flushing send's core, both languages': BasicClient::send, then the
   // loop runs until a copy is written, the first for ALL, none is left that
   // could be, or `timer` expires. Returns the copies written, 0 or 1;
   // `used` gets the connection that wrote it; `taken` is false when
   // nothing took the message (BasicClient::send), `lost` when every copy
-  // was given up on before the time ran out.
+  // was given up on before the time ran out; `placed`, when given, the
+  // first copy's tracker once the message is placed.
   unsigned int _send_and_wait(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane,
-                              mx::SimpleTimer& timer, ConnectionWrapper* used, bool* taken, bool* lost);
+                              mx::SimpleTimer& timer, ConnectionWrapper* used, bool* taken, bool* lost,
+                              BasicClient::BasicScheduledMessageTracker* placed = NULL);
   // queue() and queue_all(), and the binding's non-flushing send.
   ScheduledMessageTracker _queue(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
                                  const SendCallback& done) {
@@ -434,14 +493,10 @@ class Client : public ExceptionDefinitions {
   MultiplexerMessage _locator_for(const MultiplexerMessage& query);
   IncomingMessage _receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper* watch = NULL, bool* lost = NULL);
-  /**
-   * _serialize
-   */
+  // A send's `msg` as a frame: a whole message stamped (frame_stamped), a
+  // frame as it is.
   shared_ptr<const RawMessage> _serialize(const MultiplexerMessage& msg) {
     return frame_stamped(msg, instance_id(), [this] { return random64(); });
-  }
-  shared_ptr<const RawMessage> _serialize(std::string* serialized) {
-    return shared_ptr<const RawMessage>(new RawMessage(serialized));
   }
   shared_ptr<const RawMessage> _serialize(shared_ptr<const RawMessage> raw) { return raw; }
 

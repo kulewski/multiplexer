@@ -2,7 +2,8 @@
 verb, the exceptions, concurrency, cancellation, subscriptions, what
 arrived before a reply handled before its await resumes, the queue and its
 end at close(), a multiplexer restart, the loop rule, a create() given up
-on, a fork, and the interpreter's exit;
+on, a holder's client whose loop has closed, a fork, and the interpreter's
+exit;
 and sends as on every client, against a frozen multiplexer: the await
 returns once the io thread has the message, where it waited for the
 write, flush=True waits for the write, a callback hears how the message
@@ -918,6 +919,75 @@ class HolderTest(unittest.TestCase):
             finally:
                 holder.close()
             self.assertEqual(2, len(attempts))
+
+    def test_a_client_whose_loop_has_closed_says_so(self):
+        """The holder's client is the first caller's loop's, as in a suite
+        whose every test runs on a loop of its own. Once the first test's
+        loop has closed, what arrives for its subscription is dropped with a
+        warning, once, and the next test's subscribe() and messages() raise,
+        where the subscription took the handler and nothing ever came;
+        closing the holder makes the next use start a client on that test's
+        loop, whose subscription delivers. Counted, not timed: the first
+        subscription's predicate runs on the io thread for every message,
+        before the hand-over that fails, and three messages through means
+        the first two handed over."""
+        passes: list[bytes] = []
+        third = threading.Event()
+
+        def counted(mxmsg) -> bool:
+            passes.append(mxmsg.message)
+            if len(passes) == 3:
+                third.set()
+            return True
+
+        def push(cluster: Cluster, to: int, *payloads: bytes) -> None:
+            """`payloads` straight to the peer `to`, in this order, as a backend pushing events."""
+            with TestClient(cluster, peers.WEBSITE) as sender:
+                for payload in payloads:
+                    sender.send(payload, types.PYTHON_TEST_RESPONSE, to=to)
+
+        with Cluster(1, rules=RULES) as cluster:
+            holder = AsyncClient.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
+
+            async def first_test() -> int:
+                client = await holder.aget()
+                client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: None, matching=counted)
+                return client.instance_id
+
+            async def second_test() -> bytes:
+                client = await holder.aget()
+                with self.assertRaisesRegex(RuntimeError, "has closed"):
+                    client.subscribe(types.PYTHON_TEST_RESPONSE, lambda mxmsg: None)
+                with self.assertRaisesRegex(RuntimeError, "has closed"):
+                    client.messages()
+                await holder.aclose()
+                client = await holder.aget()
+                loop = asyncio.get_running_loop()
+                arrived: asyncio.Future[bytes] = loop.create_future()
+
+                def take(mxmsg) -> None:
+                    if not arrived.done():
+                        arrived.set_result(mxmsg.message)
+
+                client.subscribe(types.PYTHON_TEST_RESPONSE, take)
+                await loop.run_in_executor(None, push, cluster, client.instance_id, b"here")
+                return await asyncio.wait_for(arrived, 10)
+
+            try:
+                instance_id = asyncio.run(first_test())
+                with tempfile.TemporaryDirectory(dir=os.environ.get("TEST_TMPDIR")) as directory:
+                    path = os.path.join(directory, "stderr")
+                    with stderr_to(path):
+                        push(cluster, instance_id, b"one", b"two", b"three")
+                        self.assertTrue(third.wait(10), "the io thread saw the three messages")
+                    with open(path, "rb") as written:
+                        log = written.read().decode(errors="replace")
+                said = [line for line in log.splitlines() if "has closed" in line]
+                self.assertEqual(1, len(said), "one warning for the messages dropped:\n%s" % log[-3000:])
+                self.assertIn("[WARNING]", said[0])
+                self.assertEqual(b"here", asyncio.run(second_test()))
+            finally:
+                holder.close()
 
     def test_the_holder_makes_one_client_per_process(self):
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:

@@ -99,13 +99,20 @@ one process; the consumer's own test is an `IsolatedAsyncioTestCase`:
 
 ```python
 class LessonConsumerTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        await MX.aclose()  # the client is this test's loop's, which ends with the test
+
     async def test_a_message_is_answered(self):
         with Cluster(1) as cluster, FakePeer(cluster, peers.LESSON_SERVER) as backend:
             backend.reply_with(types.LESSON_REQUEST, b"done", types.LESSON_RESPONSE)
             settings.MULTIPLEXER_ADDRESSES = cluster.endpoints
             ...  # drive the consumer with Channels' communicator, assert on backend.received
-            MX.close()
 ```
+
+Every test runs on a loop of its own, and the holder's client delivers on
+the loop of its first use, so the tear-down closes it, a failed test's
+too: the next test's first use makes a client on that test's loop. One
+left over from an earlier test would raise at `subscribe()`.
 
 [Tests that hold up under load](../api_python.md#tests-that-hold-up-under-load)
 applies unchanged.

@@ -90,7 +90,7 @@ static inline void send_logs(ThreadedClient& client, const LogEntriesMessage& lo
   MX_LOG(DEBUG, HIGHVERBOSITY,
          TEXT("sending LOGS_STREAM with " + repr(logs.log_size()) + " LogEntries (encoded on " +
               repr(mxmsg.message().size()) + " b)"));
-  client.send_all_serialized(mxmsg.SerializeAsString(), timeout);
+  client.send_all_serialized(mxmsg.SerializeAsString(), mxmsg.id(), mxmsg.type(), timeout);
 }
 
 int StreamLogs::run() {

@@ -1,14 +1,18 @@
 """a multiplexer restarts with a ThreadedClient's queries in flight: what survives.
 
 With one multiplexer, the only promise is that nothing hangs: the client
-reconnects on its own, a query caught by the restart is sent again once
-reconnected and is answered if the backend is back by then, or fails at
-once with OperationFailed if the client reconnected first and the fresh
-multiplexer had nobody of the type yet. Which order happens is chance; the
-second test forces the good one by pausing the client until the backend
-is registered again. With two multiplexers the queries in flight on the
-dead connection go out again through the live one at once, and none fails
-or waits: the deployment docs/semantics.md is written for.
+reconnects on its own, and a query caught by the restart moves on to the
+search once reconnected, never sending its request a third time. It is
+answered if the backend is back by then, or by the backend that had it,
+late; a query sent while the client was reconnecting, which nobody took,
+fails at once with OperationFailed if the fresh multiplexer had nobody of
+the type yet; and one in flight at the restart, whose request a backend
+may have, waits out its search for that reply, OperationTimedOut without
+it. Which order happens is chance; the second test forces the good one by
+pausing the client until the backend is registered again. With two
+multiplexers the queries in flight on the dead connection search through
+the live one at once and are answered there, and none fails or waits: the
+deployment docs/semantics.md is written for.
 """
 
 import unittest
@@ -55,7 +59,10 @@ class ThreadedMxRestarts(unittest.TestCase):
         return client
 
     def test_one_multiplexer_nothing_hangs(self):
-        """Every query resolves, by a reply or by an immediate failure, never by a timeout."""
+        """Every query resolves: by a reply, by OperationFailed, nobody having
+        taken it, or by OperationTimedOut, after a search that found nobody
+        while a reply to the request could still come; and everything
+        issued well after the restart is answered."""
         cfg = harness.CONFIG
         with Cluster(1) as cluster:
             backend = self.start_backend(cluster, cfg)
@@ -67,10 +74,9 @@ class ThreadedMxRestarts(unittest.TestCase):
             errors = client.events_of("error")
             self.assertEqual(QUERIES, len(responses) + len(errors), "every query resolved")
             for error in errors:
-                self.assertEqual("OperationFailed", error["kind"], "a query caught by the restart fails at once")
-            self.assertLess(
-                max(r["ms"] for r in responses + errors), 10000, "delayed by the reconnect, not by a timeout"
-            )
+                self.assertIn(
+                    error["kind"], ("OperationFailed", "OperationTimedOut"), "how a query caught by the restart ends"
+                )
             tail = {r["round"] for r in responses if r["round"] >= QUERIES - 2 * IN_FLIGHT}
             self.assertEqual(
                 set(range(QUERIES - 2 * IN_FLIGHT, QUERIES)), tail, "everything issued well after is answered"
@@ -99,7 +105,7 @@ class ThreadedMxRestarts(unittest.TestCase):
             self.assertEqual(0, backend.stop())
 
     def test_one_of_two_multiplexers(self):
-        """The queries in flight on the dead connection go through the other one at once."""
+        """The queries in flight on the dead connection search through the other one at once, and are answered."""
         cfg = harness.CONFIG
         with Cluster(2) as cluster:
             backend = self.start_backend(cluster, cfg)

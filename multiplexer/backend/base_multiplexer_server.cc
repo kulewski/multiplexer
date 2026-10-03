@@ -2,7 +2,10 @@
 // messages a backend answers itself. See the header for the design.
 #include "multiplexer/backend/base_multiplexer_server.h"
 
+#include <chrono>
 #include <memory>
+#include <stdexcept>
+#include <vector>
 
 #include "lib/seconds.h"
 
@@ -59,13 +62,30 @@ void BaseMultiplexerServer::_forget_request() {
   last_connwrap = ConnectionWrapper();
 }
 
-void BaseMultiplexerServer::connect() {
+// Every connection is started before any is waited for, then each is
+// waited for, its handshake done or the connection ended, against what is
+// left of one deadline: a multiplexer that drops the connect or never
+// welcomes costs DEFAULT_TIMEOUT once, not once for each address after it,
+// while those already connected route requests here that nobody reads yet.
+// The loop runs inside every wait, so all the connections get on at once.
+std::vector<ConnectionWrapper> BaseMultiplexerServer::_start_connecting() {
+  std::vector<ConnectionWrapper> started;
   if (connected_) {
-    return;
+    return started;
   }
   connected_ = true;
   for (const MultiplexerAddress& address : addresses_) {
-    conn->connect(address.first, address.second);
+    started.push_back(conn->async_connect(address.first, address.second));
+  }
+  return started;
+}
+
+void BaseMultiplexerServer::connect() {
+  const std::chrono::steady_clock::time_point deadline =
+      std::chrono::steady_clock::now() + mx::from_seconds(DEFAULT_TIMEOUT);
+  for (const ConnectionWrapper& connection : _start_connecting()) {
+    const float left = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
+    conn->wait_for_connection(connection, left > 0 ? left : 0);
   }
 }
 
@@ -73,7 +93,11 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
   conn->bind_to_current_thread();
   drain_seconds_ = drain_seconds;
   try {
-    connect();
+    // Every connection started, none waited for: the loop's waits finish
+    // the handshakes, so a multiplexer that welcomes the backend routes to
+    // one that serves, while one that never answers holds up nothing.
+    // connect(), called before, waited.
+    _start_connecting();
     while (working) {
       if (draining_ && drained()) {
         break;
@@ -141,6 +165,13 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   DbgAssert(kwargs.empty_or<std::uint64_t>("references"));
   DbgAssert(kwargs.empty_or<std::uint64_t>("to"));
   DbgAssert(kwargs.empty_or<std::string>("workflow") || kwargs.unsafe_is<const std::string*>("workflow"));
+  // A whole message is the message itself: its fields are its own.
+  const bool whole = kwargs.unsafe_is<const MultiplexerMessage*>("message");
+  if (whole &&
+      (kwargs.has_key("type") || kwargs.has_key("to") || kwargs.has_key("references") || kwargs.has_key("workflow"))) {
+    throw std::invalid_argument(
+        "a whole MultiplexerMessage is sent as it is: set its fields, not type, to, references or workflow");
+  }
 
   // defaults
   if (last_mxmsg) {
@@ -188,6 +219,21 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
 
     mxmsg = _mxmsg.get();
 
+  } else if (last_mxmsg) {
+    // The reply: those of its fields that are empty filled in from the
+    // request, as the threaded server's Request::reply does; its id and from
+    // too, as every send fills them.
+    _mxmsg.reset(new MultiplexerMessage(*kwargs.get<const MultiplexerMessage*>("message")));
+    if (!_mxmsg->to()) {
+      _mxmsg->set_to(last_mxmsg->from());
+    }
+    if (!_mxmsg->references()) {
+      _mxmsg->set_references(last_mxmsg->id());
+    }
+    if (_mxmsg->workflow().empty()) {
+      _mxmsg->set_workflow(last_mxmsg->workflow());
+    }
+    mxmsg = _mxmsg.get();
   } else {
     mxmsg = kwargs.get<const MultiplexerMessage*>("message");
   }

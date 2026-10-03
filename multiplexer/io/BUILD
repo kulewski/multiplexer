@@ -24,6 +24,7 @@ cc_library(
         "//lib/encoding:encode_to_range",
         "//lib/encoding:little_endian",
         "//multiplexer:defaults",
+        "//multiplexer:multiplexer_cc_proto",
         "@asio",
     ],
 )

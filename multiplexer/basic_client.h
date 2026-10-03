@@ -41,6 +41,7 @@
 #include "lib/triple.h"
 #include "multiplexer/connections_manager.h"
 #include "multiplexer/defaults.h"
+#include "multiplexer/descriptor_table.h"
 #include "multiplexer/io/connection.h"
 #include "multiplexer/log_summary.h"
 
@@ -247,7 +248,9 @@ class ConnectionWrapper {
   // What the connection was asked for, host and port, kept after it is gone.
   const BasicClientTraits::Target& target() const { return target_; }
   // The address that resolved to and the connection used, kept after it is
-  // gone; unspecified until a name resolved.
+  // gone. For a host name, in the wrapper connect() returns once connected;
+  // the one async_connect() returns for a name, made before the name
+  // resolved, keeps it unspecified.
   const BasicClientTraits::Endpoint& endpoint() const { return endpoint_; }
 
  private:
@@ -455,7 +458,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // connection that fails or drops is retried from connection_destroyed
   // after AUTO_RECONNECT_TIME, whenever the loop runs, resolving the name
   // again each time, so a multiplexer that moved is found at the next try,
-  // until disconnect() drops the target.
+  // until disconnect() drops the target. A target that has a connection,
+  // live or on its way, keeps it: connecting to it again returns that one.
   // Closes every connection, the polite way (Connection::close_gracefully):
   // each goes on reading what its multiplexer still sends, while the loop
   // runs, until that multiplexer's end or CLOSE_READ_SECONDS, so that what
@@ -760,6 +764,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // on, when it was not handed over. What a flushing send reports as the
   // connection it used, and what a reply to it comes back through.
   ConnectionWrapper followed(const BasicScheduledMessageTracker& state, const ConnectionWrapper& first);
+  // Whether `wrapper`'s connection is live, as schedule_on() decides it:
+  // what a message placed on it now would need. On the client's thread.
+  bool live(const ConnectionWrapper& wrapper) const;
   // The next number in the order sent, for a caller that holds a message
   // before it is scheduled (ThreadedClient, waiting for a connection).
   std::uint64_t next_number();
@@ -939,13 +946,19 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   static Target _target(const std::string& host, std::uint16_t port);
   // disconnect(), once the target is known.
   bool _disconnect(const Target& target);
-  // A new connection for `target`, in the map, replacing an earlier one.
+  // The connection `target` has, live or on its way, that nobody shut
+  // down; null when it has none.
+  Connection::pointer _live_connection(const Target& target) const;
+  // A new connection for `target`, in the map, closing one it had that is
+  // shutting down already.
   Connection::pointer _new_connection(const Target& target);
   // Resolves the connection's target, then connects; on the io thread.
   void _resolve_and_start(Connection::pointer conn);
   void _resolved(Connection::pointer conn, const asio::error_code& error, std::vector<Endpoint> candidates);
   // Connects to the next address the target resolved to, or gives up.
   void _try_next_candidate(Connection::pointer conn);
+  // Closes the connection's socket, if open, gone from descriptors_ first.
+  void _close_socket(Connection& conn);
   void _connected(Connection::pointer conn, const asio::error_code& error);
 
   /* instance properties */
@@ -973,6 +986,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   std::uint64_t dropped_while_closing_ = 0;        // see dropped_while_closing()
   const unsigned int fork_generation_at_creation_;
   std::atomic<bool> orphan_descriptors_closed_{false};
+  DescriptorTable descriptors_;  // every socket open, for a forked child to close
   asio::ip::tcp::resolver resolver_;
   Resolver resolver_hook_;
 

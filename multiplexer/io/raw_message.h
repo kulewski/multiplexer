@@ -10,15 +10,15 @@
 #ifndef MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 #define MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 
-#include <google/protobuf/message.h>
-
 #include <asio/buffer.hpp>
+#include <chrono>
 #include <cstdint>
 #include <list>
 #include <stdexcept>
 #include <string>
 
 #include "lib/assertion.h"
+#include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/defaults.h"
 
 namespace multiplexer {
@@ -52,40 +52,52 @@ class RawMessage {
     static_assert(HEADER_LENGTH == sizeof(length_) + sizeof(crc32_), "the header is the length and the CRC");
   }
 
-  // construct message suitable for writing output with ASIO
-  inline explicit RawMessage(const std::string& message)
+  // construct message suitable for writing output with ASIO: `message`, a
+  // serialized MultiplexerMessage, with the id and the type it carries
+  inline explicit RawMessage(const std::string& message, std::uint64_t id, std::uint32_t type)
       : usability_(PRE_WRITING),
         length_(message.size()),
         crc32_(Crc32(message)),
         header_(HEADER_LENGTH, 0),
-        contents_(message) {
+        contents_(message),
+        id_(id),
+        type_(type) {
     check_message_size(contents_.size());
     initialize_header();
     switch_to_writing();
   }
 
   // like above but destroys `contents'
-  inline explicit RawMessage(std::string* message)
+  inline explicit RawMessage(std::string* message, std::uint64_t id, std::uint32_t type)
       : usability_(PRE_WRITING),
         length_(message->size()),
         crc32_(Crc32(*message)),
         header_(HEADER_LENGTH, 0),
-        contents_() {
+        contents_(),
+        id_(id),
+        type_(type) {
     contents_.swap(*message);
     check_message_size(contents_.size());
     initialize_header();
     switch_to_writing();
   }
 
-  static RawMessage* FromMessage(const ::google::protobuf::Message& mxmsg) {
+  // `mxmsg` serialized into a frame, with its id and type.
+  static RawMessage* FromMessage(const MultiplexerMessage& mxmsg) {
     std::string serialized;
     mxmsg.SerializeToString(&serialized);
-    return new RawMessage(&serialized);
+    return new RawMessage(&serialized, mxmsg.id(), mxmsg.type());
   }
 
   /* accessors */
   inline Usability usability() const { return usability_; }
   inline const std::string& get_message() const { return contents_; }
+  // The id and the type of the message in the frame, as its maker read
+  // them from the message: what a drop is reported by
+  // (BasicClient::report_drop), so that nothing parses the frame for them.
+  // 0 in a frame read from a connection, which nothing reports dropped.
+  inline std::uint64_t id() const { return id_; }
+  inline std::uint32_t type() const { return type_; }
 
   // A message pinned to its connection: when that connection dies with the
   // message still unsent, the client reports it lost instead of handing it
@@ -118,6 +130,17 @@ class RawMessage {
     }
   }
   inline std::uint64_t number() const { return number_; }
+  // How long the message may wait for room or for a connection: the
+  // deadline its first send gave it, kept here, as its place is, so that a
+  // message a dead connection hands over keeps it, its queue entry
+  // carrying none. None until it is placed.
+  inline void mark_deadline(std::chrono::steady_clock::time_point deadline) const {
+    if (!deadline_marked_) {
+      deadline_ = deadline;
+      deadline_marked_ = true;
+    }
+  }
+  inline std::chrono::steady_clock::time_point deadline() const { return deadline_; }
 
   /* ASIO reading buffers (for reading RawMessage from channel) */
   // returns buffer for reading-in RawMessage header
@@ -166,10 +189,14 @@ class RawMessage {
   std::uint32_t length_, crc32_;
   std::string header_;
   std::string contents_;
+  std::uint64_t id_ = 0;    // see id()
+  std::uint32_t type_ = 0;  // see type()
   mutable bool pinned_ = false;
   mutable bool for_all_ = false;
   mutable bool own_ = false;
   mutable std::uint64_t number_ = 0;
+  mutable std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
+  mutable bool deadline_marked_ = false;
   std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
 };
 

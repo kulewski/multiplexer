@@ -15,10 +15,11 @@
 // in shape: the middle stage locates that one instance, with a PING
 // addressed to it, and the three stages share one deadline. A
 // connection dying under a query does not cost the query its timeout: the
-// request is sent again through another connection, or as soon as one
-// comes back, the way the synchronous Client does inside a call (a request
-// resent to the only multiplexer before its backend is back fails, as
-// docs/semantics.md says). Many
+// query moves on to the search at once, through another connection or as
+// soon as one comes back, the way the synchronous Client does inside a
+// call, and a reply to the request that went with the connection is still
+// taken. The request goes out at most twice and a query never goes back a
+// stage (docs/query.md, "Every way a stage ends"). Many
 // queries may be in flight at once, from any number of threads: replies
 // are matched by the ids they reference, never by arrival order. The
 // asynchronous form calls back on the io thread; the synchronous form is
@@ -152,13 +153,22 @@ class ThreadedClient : public ExceptionDefinitions {
   // Connects and waits up to `timeout` for the handshake; true when the
   // connection is registered, false as soon as it failed. False is not
   // final: the io thread keeps reconnecting every AUTO_RECONNECT_TIME
-  // seconds on its own. Not from the io thread.
+  // seconds on its own. A multiplexer the client has a connection to, live
+  // or on its way, keeps it: true at once when it is registered, else the
+  // wait is for its handshake. Not from the io thread.
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  // connect() to every (host, port) at once, each waited for against the
+  // same `timeout`: a multiplexer that never welcomes costs the call its
+  // timeout once, not once for every address after it. How many are
+  // registered when the call returns; the others the io thread keeps
+  // trying, as after connect(). Not from the io thread.
+  unsigned int connect_all(const std::vector<std::pair<std::string, std::uint16_t>>& addresses,
+                           float timeout = DEFAULT_TIMEOUT);
   // Drops the multiplexer connect() was given with this host and port, as
   // SyncClient::disconnect() does, on the io thread: no reconnect to it
   // any more, unless connect() is called again; a live connection to it
-  // closed, what it had not written going to the other connections or
-  // held, and queries through it sent again elsewhere, as for a lost
+  // closed, what it had not written going to another connection or held,
+  // and the queries whose request it carried moving on as after a lost
   // connection; a connect() waiting for it returns false. Returns once
   // done, whether the client had it. Throws NotConnected after shutdown(),
   // as connect() does. Not from the io thread.
@@ -168,6 +178,11 @@ class ThreadedClient : public ExceptionDefinitions {
   // queries in flight, every attempt's and every search's. Zero once every
   // query has ended; for tests. Not from the io thread.
   std::size_t watched_ids();
+  // Forgets the ids of every query that has ended now, as if their time
+  // were up, the memory they held given back: a late reply to one reaches
+  // on_message. For tests that measure the heap, the ids being kept a
+  // while by design. From any thread, a callback's included.
+  void forget_finished_ids();
   // How many times the io thread has tried a message again after it could
   // not be queued at once, sends and queries: what waiting for room costs.
   // It grows with the messages that waited, never with their square; for
@@ -222,13 +237,15 @@ class ThreadedClient : public ExceptionDefinitions {
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
   // The same for an already serialized MultiplexerMessage (the Python
-  // side), waiting for a connection or for room within `timeout`. `done`,
-  // when given, hears how the message ended: 1 once it reached a socket,
-  // the first copy for ALL, 0 once it was given up on, and reported, or
+  // side), given with its id and type, which a drop is reported by,
+  // waiting for a connection or for room within `timeout`. `done`, when
+  // given, hears how the message ended: 1 once it reached a socket, the
+  // first copy for ALL, 0 once it was given up on, and reported, or
   // shutdown() came first.
-  void send_serialized(std::string serialized, LanePtr lane = LanePtr(), float timeout = DEFAULT_TIMEOUT,
-                       SendCallback done = SendCallback());
-  void send_all_serialized(std::string serialized, float timeout = DEFAULT_TIMEOUT, SendCallback done = SendCallback());
+  void send_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, LanePtr lane = LanePtr(),
+                       float timeout = DEFAULT_TIMEOUT, SendCallback done = SendCallback());
+  void send_all_serialized(std::string serialized, std::uint64_t id, std::uint32_t type,
+                           float timeout = DEFAULT_TIMEOUT, SendCallback done = SendCallback());
   // The flushing send for the serialized form; `not_connected`, when
   // given, says why one that returned 0 wrote nothing, as the synchronous
   // client tells it: true when the message was given up on, a pinned
@@ -237,20 +254,20 @@ class ThreadedClient : public ExceptionDefinitions {
   // one live; a message out of time waits ROOM_GRACE_SECONDS more and is
   // then dropped. NotConnected and OperationTimedOut, for the Python
   // clients, decided here on the io thread at the deadline.
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane = LanePtr(),
-                                        bool* not_connected = NULL);
+  unsigned int send_serialized_and_wait(std::string serialized, std::uint64_t id, std::uint32_t type, bool all,
+                                        float timeout, LanePtr lane = LanePtr(), bool* not_connected = NULL);
   // The flushing send with a callback instead of a wait, safe from any
   // thread including the io thread: `done(written)` runs on the io thread
   // with 1 once a copy reached a socket, the first for ALL, or with 0 when
   // the message was given up on, `timeout` passed or the client shut down
   // first. What an asyncio layer awaits.
-  void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
-                                     LanePtr lane = LanePtr());
+  void send_serialized_with_callback(std::string serialized, std::uint64_t id, std::uint32_t type, bool all,
+                                     float timeout, SendCallback done, LanePtr lane = LanePtr());
   // The same, `done` also hearing why a send that wrote nothing did, as
   // send_serialized_and_wait()'s `not_connected` says.
   typedef std::function<void(unsigned int written, bool not_connected)> FlushedCallback;
-  void send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done,
-                                  LanePtr lane = LanePtr());
+  void send_serialized_and_notify(std::string serialized, std::uint64_t id, std::uint32_t type, bool all, float timeout,
+                                  FlushedCallback done, LanePtr lane = LanePtr());
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
 
   // A request with a reply, see the file comment. The callback runs on the
@@ -267,7 +284,9 @@ class ThreadedClient : public ExceptionDefinitions {
   // instance id of each backend that acknowledges an attempt with
   // REQUEST_RECEIVED (notify_start()): once, normally, or again when a
   // retry reached a backend, the same or another; nothing about the query
-  // changes for it.
+  // changes for it. An empty `callback` runs the query all the same, for a
+  // caller who wants the request delivered and not the reply: its outcome
+  // goes nowhere.
   void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
   Result query(const std::string& payload, std::uint32_t type, float timeout = DEFAULT_TIMEOUT,

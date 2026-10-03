@@ -41,28 +41,16 @@ void BasicClient::check_not_orphaned() const {
   }
 }
 
-// The connections of the targets and those still closing, which
-// disconnect() leaves on a client that goes on; nothing allocated, as
+// Every socket open at the fork, from the table the owner thread keeps for
+// this: the maps and lists of connections are not read, as the owner
+// thread may have been changing them at the fork, and a connection that
+// is closing may be in none of them. Nothing allocated and no lock, as
 // nothing that could wait on a lock a parent thread held.
 void BasicClient::orphan_close_descriptors() {
   if (orphan_descriptors_closed_.exchange(true)) {
     return;
   }
-  auto close_descriptor = [](const Connection::weak_pointer& connection) {
-    if (Connection::pointer conn = connection.lock()) {
-      int fd = conn->socket().native_handle();
-      if (fd >= 0) {
-        ::close(fd);
-      }
-    }
-  };
-  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
-       ++entry) {
-    close_descriptor(entry->second);
-  }
-  for (const Connection::weak_pointer& closing : closing_) {
-    close_descriptor(closing);
-  }
+  descriptors_.close_all();
 }
 
 void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
@@ -253,8 +241,11 @@ bool BasicClient::closing() {
   return !closing_.empty();
 }
 
+// The socket is closed here, rather than when the connection is
+// destroyed, so that the table a forked child reads forgets it first.
 void BasicClient::connection_closed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  _close_socket(*conn);
   const std::uint64_t dropped = conn->dropped_while_closing();
   if (!dropped) {
     return;
@@ -330,9 +321,19 @@ void BasicClient::reconnect_after_timeout(TimerPointer timer, Target target, con
   }
 }
 
-// A new connection for `target`, in the map. Connecting twice to one target
-// replaces the earlier connection, which is also how the reconnect timer
-// behaves if the caller connected again in the meantime.
+BasicClient::Connection::pointer BasicClient::_live_connection(const Target& target) const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  ConnectionByTarget::const_iterator entry = connection_by_target_.find(target);
+  if (entry == connection_by_target_.end()) {
+    return Connection::pointer();
+  }
+  Connection::pointer conn = entry->second.lock();
+  return conn && !conn->shuts_down() ? conn : Connection::pointer();
+}
+
+// A new connection for `target`, in the map. async_connect keeps a live
+// one, and the reconnect timer makes one only for a target that has none,
+// so one found here is shutting down already, and is closed for good.
 BasicClient::Connection::pointer BasicClient::_new_connection(const Target& target) {
   MX_DCHECK_RUN_ON(&owner_thread());
   ConnectionByTarget::iterator target_entry = connection_by_target_.find(target);
@@ -367,7 +368,11 @@ ConnectionWrapper BasicClient::async_connect(const asio::ip::tcp::endpoint& peer
   if (shuts_down_) {
     MXTHROW(NotConnected());
   }
-  Connection::pointer conn = _new_connection(_target(peer_endpoint));
+  const Target target = _target(peer_endpoint);
+  if (Connection::pointer live = _live_connection(target)) {
+    return _wrap(live);  // connected, or on its way, already: kept, not replaced
+  }
+  Connection::pointer conn = _new_connection(target);
   conn->managers_private_data().candidates.assign(1, peer_endpoint);
   _try_next_candidate(conn);
   return _wrap(conn);
@@ -385,6 +390,9 @@ ConnectionWrapper BasicClient::async_connect(const std::string& host, std::uint1
   asio::ip::address address = asio::ip::make_address(host, literal);
   if (!literal) {
     return async_connect(Endpoint(address, port));
+  }
+  if (Connection::pointer live = _live_connection(Target(host, port))) {
+    return _wrap(live);  // connected, or on its way, already: kept, not replaced
   }
   Connection::pointer conn = _new_connection(Target(host, port));
   _resolve_and_start(conn);
@@ -481,11 +489,33 @@ void BasicClient::_try_next_candidate(Connection::pointer conn) {
     return;
   }
   data.expected_endpoint = data.candidates[data.next_candidate++];
-  asio::error_code ignored;
-  conn->socket().close(ignored);  // a socket that failed to connect is reopened by async_connect
+  _close_socket(*conn);  // the last address's, which failed to connect
+  // Opened here rather than by async_connect, so that the table a forked
+  // child reads has it before it connects; one that cannot be opened is
+  // reported through the loop, as async_connect does.
+  asio::error_code error;
+  conn->socket().open(data.expected_endpoint.protocol(), error);
+  if (error) {
+    asio::post(io_service_, [self = this->shared_from_this(), conn, error] { self->_connected(conn, error); });
+    return;
+  }
+  descriptors_.add(conn->socket().native_handle());
   conn->socket().async_connect(
       data.expected_endpoint,
       [self = this->shared_from_this(), conn](const asio::error_code& error) { self->_connected(conn, error); });
+}
+
+// Forgotten by the table first: a child forked between the two leaves the
+// number open in its copy, where one forked after a close that came first
+// could find it given to a file of the process, and close that.
+void BasicClient::_close_socket(Connection& conn) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (!conn.socket().is_open()) {
+    return;
+  }
+  descriptors_.remove(conn.socket().native_handle());
+  asio::error_code ignored;
+  conn.socket().close(ignored);
 }
 
 // Those still closing too, whose handlers run on the new owner's calls.
@@ -531,9 +561,16 @@ ConnectionWrapper BasicClient::connect(const asio::ip::tcp::endpoint& peer_endpo
   return connwrap;
 }
 
+// A name resolves while the wait runs: the wrapper returned is made once
+// the connection is up, so that its endpoint() is the address in use,
+// where async_connect()'s was made before the name resolved.
 ConnectionWrapper BasicClient::connect(const std::string& host, std::uint16_t port, float timeout) {
   ConnectionWrapper connwrap = async_connect(host, port);
-  wait_for_connection(connwrap, timeout);
+  if (wait_for_connection(connwrap, timeout)) {
+    if (Connection::pointer conn = connwrap.lock()) {
+      return _wrap(conn);
+    }
+  }
   return connwrap;
 }
 

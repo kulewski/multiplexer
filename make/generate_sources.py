@@ -29,8 +29,9 @@ PYTHON_PACKAGE = (
 )
 # Tests tagged slow (minutes each) are Bazel's `bazel test //...`, not make check.
 SLOW = "attr(tags, slow, //lib/... + //multiplexer/...)"
-# Python tests that need Bazel's runfiles layout and mean nothing outside it.
-NOT_OUTSIDE_BAZEL = {"multiplexer/testing/config_test.py"}
+# Python tests that need Bazel's runfiles layout and mean nothing outside it,
+# or a test library only Bazel builds (the probe a child Python preloads).
+NOT_OUTSIDE_BAZEL = {"multiplexer/testing/config_test.py", "multiplexer/sync_client_destroy_test.py"}
 
 
 def query(expression: str) -> list[str]:

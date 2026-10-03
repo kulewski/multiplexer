@@ -138,12 +138,13 @@ class BaseThreadedMultiplexerServer {
   // threw, which the worker it escaped leaves on: a request queued behind
   // it that no worker is left to take is refused, as one arriving then.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
-  // Starts the workers and connects to every address, once;
-  // serve_forever() calls it first, and a second call does nothing. Call
-  // it yourself when something waits for a line you print before it
-  // sends, so that the line means reachable, or in a test that wants the
-  // backend connected without a thread serving it. A close() on another
-  // thread meanwhile ends it: what is not connected yet is not.
+  // Starts the workers and connects to every address at once, waiting for
+  // them all against one connect_timeout, once; serve_forever() calls it
+  // first, and a second call does nothing. Call it yourself when something
+  // waits for a line you print before it sends, so that the line means
+  // reachable, or in a test that wants the backend connected without a
+  // thread serving it. A close() on another thread meanwhile ends it: what
+  // is not connected yet is not.
   void connect();
   // Take no more messages, tell every multiplexer the drain_routing as
   // start_draining() does, answer no search, let the workers finish what

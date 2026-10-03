@@ -95,9 +95,9 @@ A backend on `SyncClient` is possible in a pinch: a loop of its own calls
 `receive_message()` and answers each request with `send_message(reply,
 type=..., to=request.from_, references=request.id)`. On its own it
 answers neither the backend search nor a `PING`, so a typed request
-reaches it only through the rules, at a query's first attempt or that
-attempt sent again after a lost connection, never through the search that
-follows a delivery error or a timeout, and the `PING` that locates the
+reaches it only through the rules, at a query's first attempt, never
+through the search that follows a delivery error, a timeout or a lost
+connection, and the `PING` that locates the
 addressee of an addressed query never finds it. A backend that typed
 requests must find belongs on a server class or on a `ThreadedClient`
 given a search policy, and one reached only by `to` can be built on any

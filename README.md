@@ -97,9 +97,9 @@ type {
   automatically, and reconnect on their own. A rolling restart of three
   multiplexers under traffic costs no request more than a millisecond
   ([rolling_restart](tests/scenarios/rolling_restart/README.md)).
-- **Fault-tolerant requests.** A request whose backend dies is retried through
-  another backend found by a search across every multiplexer, and a request
-  whose connection dies is resent, all inside one call
+- **Fault-tolerant requests.** A request whose backend dies, or whose
+  connection dies, is retried once, through the backend a search across
+  every multiplexer finds, all inside one call
   ([how a query is answered](docs/query.md)).
 - **Zero-downtime deployments.** A backend asked to leave drains: it tells
   every multiplexer to route it nothing new, finishes what it holds, and

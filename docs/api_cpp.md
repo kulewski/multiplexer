@@ -23,17 +23,13 @@ complete example is [examples/echo](../examples/echo).
 [Multiplexer.proto](../multiplexer/Multiplexer.proto). The fields that matter
 are the same as in Python: `type`, `message` (a `std::string` of bytes),
 `id`, `from`, `to`, `references`, `workflow`. Setters are `set_type()`,
-`set_message()` and so on. `id` is drawn by the library per attempt: a query
-sent again after a timeout, a search or a lost connection carries a new id,
+`set_message()` and so on. `id` is drawn by the library per attempt: a query's
+request sent again, to the backend its search found, carries a new id,
 so a backend that must not do the same work twice keys on the payload, not
 on `id()`. A message you pass to a query is never changed, since the library
-sends copies: `SyncClient` sends the first attempt under the message's own id,
-`ThreadedClient` draws one for every attempt, the first included, and in
-both a reply's `references()` names the attempt it answers. So a message
-used for another query on `SyncClient` gets a fresh
-`set_id(client.random64())` first: a client drops a message whose id it
-saw among the last 2048 it received, and the query would wait out its
-first stage for nothing.
+sends copies: both clients draw an id for every attempt, the first
+included, and a reply's `references()` names the attempt it answers, so
+one message may be queried again and again as it is.
 
 ## Timeouts
 
@@ -109,9 +105,13 @@ client.shutdown();
   is tried in turn, so a multiplexer that moved is found at the next
   reconnect. It does not throw when the multiplexer is unreachable or the
   name does not resolve yet; the connection is retried every 3 s while the
-  library runs. `async_connect(host, port)` returns at once;
+  library runs. A multiplexer the client has a connection to, live or on
+  its way, keeps it: connecting to it again returns that connection.
+  `async_connect(host, port)` returns at once;
   `wait_for_connection(wrapper, timeout)` waits for it. The wrapper's
-  `target()` is the host and port given, `endpoint()` the address in use.
+  `target()` is the host and port given, `endpoint()` the address in use;
+  for a host name, the wrapper `async_connect()` returns, made before the
+  name resolved, has none, and `connect()`'s, once connected, has it.
   `connect(endpoint, timeout)` and `async_connect(endpoint)` take an
   `asio::ip::tcp::endpoint`.
 - `disconnect(host, port)`, or `disconnect(endpoint)`, drops a
@@ -135,13 +135,20 @@ client.shutdown();
   triple whose `third` is a `shared_ptr<MultiplexerMessage>` with the
   reply and whose `second` is the connection it came on. The algorithm is
   the one in [how a query is answered](query.md): one connection first,
-  then a search on all of them, then the request again to the backend
-  found, each stage with its own `timeout`. A message with `to` set is an
+  then, after a delivery error, a timeout or a lost connection, a search
+  on all of them, then the request again to the backend found, each stage
+  with its own `timeout`; the request goes out at most twice, and the
+  query never goes back a stage. `mxmsg` is the request itself, its empty
+  `from` filled in, each attempt with an id of its own, ids belonging to
+  attempts, so that one message may be queried again and again; the
+  request sent again is a copy of it, every field kept. A message with `to` set is an
   addressed query, with one `timeout` for its stages, see
-  [below](#lanes-pinning-and-addressed-queries). When the backend a search
-  found is gone by the direct request, the query fails at once if nobody
-  took the request, and otherwise waits out the stage for a late reply
-  from the backend that did. Throws
+  [below](#lanes-pinning-and-addressed-queries). When the search finds
+  nobody, or the backend it found is gone by the direct request, the
+  query fails at once if nobody took the request, and otherwise, after a
+  timeout or a lost connection, waits out the stage for a late reply from
+  a backend that did
+  ([every way a stage ends](query.md#every-way-a-stage-ends)). Throws
   `SyncClient::OperationFailed` when no backend can be found,
   `SyncClient::OperationTimedOut` when a stage runs out of time,
   `SyncClient::NotConnected` when no connection is live. All three derive from
@@ -189,8 +196,9 @@ client.shutdown();
   `timeout` for one to come up and throws `NotConnected` if none did, so
   it never returns null; `queue(mxmsg, timeout,
   std::make_shared<Lane>(wrapper))` is the form that holds the message
-  instead. `schedule_all(mxmsg, timeout)` queues it on every connection
-  and returns how many, 0 when none is live. A message a full connection
+  instead. `schedule_all(mxmsg, timeout, used = NULL)` queues it on
+  every connection and returns how many, 0 when none is live, and puts
+  those connections in `*used` when given. A message a full connection
   cannot take (1024 queued) waits for its room, in order, `timeout`
   seconds at most, as in `ThreadedClient`; it goes in while a later call
   runs the loop, and is dropped and reported after its timeout. On an
@@ -240,11 +248,21 @@ client.shutdown();
   `CLOSE_READ_SECONDS` at most, so that what was written arrives
   ([semantics](semantics.md#failure-modes)). After it `connect()`,
   `async_connect()` and `disconnect()` throw `NotConnected`, as
-  `ThreadedClient::connect()` does, and nothing is sent or placed.
+  `ThreadedClient::connect()` does, and nothing is sent or placed. The
+  destructor then waits for a name lookup in progress, for an address
+  given by name, which runs on asio's resolver thread and ends with the
+  client's `io_service`: nothing cuts a lookup short, so against a slow or
+  unreachable DNS server it waits up to the resolver's own timeout. A
+  client given addresses never waits so.
 
 A message built by hand that has no id or sender gets them where it is
 sent: a fresh id, and the client's instance id as `from`. The receiving
-library drops a message without an id.
+library drops a message without an id. `SyncClient`'s `queue()`,
+`queue_all()` and `schedule_*()` also take a frame, a
+`std::shared_ptr<const RawMessage>`, sent as it is:
+`RawMessage::FromMessage(msg)`, or, for a message serialized already,
+`new RawMessage(&serialized, msg.id(), msg.type())`, the id and type a
+drop is reported by.
 
 ### Lanes, pinning and addressed queries
 
@@ -256,10 +274,12 @@ The same on `SyncClient` and `ThreadedClient`; the reasoning is in
   multiplexer reports the instance is not behind it, or the connection
   dies under the wait, the client locates it with a `PING` addressed to
   it on every connection and repeats the request through the connection
-  that found it; an instance nobody has is `OperationFailed` (`FAILED`)
-  at once; one `timeout` covers the stages. The `PING` reaches the
-  instance whatever its routing, as every addressed message does, and the
-  server classes and `ThreadedClient` all answer it whatever their search
+  that found it, once; an instance nobody has is `OperationFailed`
+  (`FAILED`) at once, unless the request may still be with it, its
+  connection lost under it, when the query waits for that late reply
+  until its timeout; one `timeout` covers the stages. The `PING` reaches
+  the instance whatever its routing, as every addressed message does, and
+  the server classes and `ThreadedClient` all answer it whatever their search
   policy, so it finds a backend that declines searches as well as a peer
   that serves no requests; `SyncClient` does not answer it. The library
   sets `report_delivery_error` on the request. The old behaviour of
@@ -353,9 +373,17 @@ protected:
 
 The constructor takes a vector of `(host, port)` pairs and makes the
 instance id; it must be called from a subclass because it is protected.
-`connect()` connects to each address, once, and `serve_forever()` calls it
-first, so no multiplexer knows the backend before it can serve, and a
-program that only constructs and serves never calls it. Call it yourself
+`connect()` connects to every address, once: it starts every connection
+at once and returns when each has its handshake done or has failed, 10 s
+at most in all, so a multiplexer that drops the connect or never answers
+holds up the others' requests that long once, not once for every address
+after it. It throws nothing for an address it could not reach, which the
+library goes on trying. `serve_forever()` starts the connections itself
+unless `connect()` did, waiting for none: its loop finishes the
+handshakes, so the backend serves what one multiplexer routes to it while
+another has not welcomed it yet, a multiplexer that never answers holds
+up nothing, and no multiplexer knows the backend before it can serve. A
+program that only constructs and serves never calls `connect()`. Call it yourself
 when something waits for a line you print before it sends, a test that
 reads `ready` from your stdout or a notebook that greps your log, so that
 the line means reachable: the echo backend does. Call it before you
@@ -391,9 +419,14 @@ optional fields. Keys and their exact types:
 | `workflow` | `std::string` or `const std::string *` | the request's workflow |
 | `multiplexer` | `int` `BaseMultiplexerServer::ONE` or `ALL`, or a `ConnectionWrapper` | the connection the request arrived on |
 
-Outside a handler, from `periodic_task()` say, there are no such
-defaults: `to` and `references` are 0 and the message goes through one
-connection, routed by its type like any client's. The message is sent as
+A whole `MultiplexerMessage` is sent as it is: beside one, only
+`multiplexer` may be given, and `type`, `to`, `references` or `workflow`
+throws `std::invalid_argument`. While a request is handled, its empty `to`,
+`references` and `workflow` are filled in from the request, as
+`Request::reply` fills a threaded server's. Outside a handler, from
+`periodic_task()` say, there are no such defaults: `to` and `references`
+are 0 and the message goes through one connection, routed by its type like
+any client's. The message is sent as
 `SyncClient::queue()` sends: placed, or held while no connection is live,
 and reported if given up on, so a reply through a connection that is gone
 waits for another rather than holding the loop. The `std::any` it returns
@@ -453,7 +486,10 @@ message itself, so check `reply.third->type()` when the backend may fail.
 `SyncClient::shutdown(timeout)` does, what is still queued, the last
 replies, written first; a request that arrives meanwhile, or was read and
 will not be handled, is refused with `DELIVERY_ERROR`, so that its sender
-retries elsewhere at once.
+retries elsewhere at once. It then destroys its client, which waits for a
+name lookup in progress, up to the resolver's own timeout, as
+`SyncClient`'s destructor does; so does the server's destructor when
+`close()` did not run.
 
 ## BaseThreadedMultiplexerServer
 
@@ -503,7 +539,9 @@ Echo(addresses, options).serve_forever();
   `drain_routing` (what `start_draining()` tells the multiplexers; `any` and
   `all` off by default).
 - The constructor only makes the instance id; `connect()` starts the
-  workers and connects, once, and `serve_forever()` calls it first, so
+  workers and connects, to every address at once against one
+  `connect_timeout`, as `BaseMultiplexerServer` does, once, and
+  `serve_forever()` calls it first, so
   nothing reaches `handle_message()` before your constructor has
   finished, and no multiplexer knows the backend until it can serve.
   `instance_id()` is valid from construction. When to call `connect()`
@@ -582,14 +620,12 @@ client.shutdown();
 
 - `query(payload, type, timeout, lane, received)` blocks and returns a
   `Result`: `outcome` is `REPLIED`, `TIMED_OUT`, `FAILED` (no backend
-  anywhere, the backend a search found gone with nobody holding the
-  request, or the addressee gone), `NOT_CONNECTED` or `SHUT_DOWN`, and
+  anywhere, the backend a search found gone, or the addressee gone, with
+  nobody holding the request), `NOT_CONNECTED` or `SHUT_DOWN`, and
   `check()` returns the reply or throws the exception `SyncClient::query`
-  would have. The stages are `SyncClient`'s, but that a connection lost
-  under the search or the direct request starts a typed query over from its
-  first stage, the stage's deadline running on, so each such loss can add up
-  to two timeouts to the three. `query(msg, timeout, lane)` takes the
-  request as a whole, `to` included, and sets its id and from per attempt:
+  would have. The stages are `SyncClient`'s. `query(msg, timeout, lane)`
+  takes the request as a whole, `to` included, its empty `from` filled in,
+  each attempt with an id of its own:
   the addressed form, and `query(msg, connection, ...)` prefers a
   connection, see [above](#lanes-pinning-and-addressed-queries). `received`,
   the last argument of every overload, is called on the io thread with each
@@ -598,7 +634,9 @@ client.shutdown();
   call it at once; replies are matched by the ids they reference. Called on
   the io thread, from a callback, it throws `std::logic_error` rather than
   deadlock. The callback form returns at once and runs the callback on the
-  io thread; after `shutdown()` it runs the callback at once, on the calling
+  io thread; an empty callback runs the query all the same, for a caller
+  who wants the request delivered and not the reply, its outcome going
+  nowhere. After `shutdown()` it runs the callback at once, on the calling
   thread, with `SHUT_DOWN`, so a callback must not query again then, nor
   take a lock its caller holds. A request that cannot be queued waits the
   way a message does (below), and the query ends `TIMED_OUT` when a
@@ -630,16 +668,19 @@ client.shutdown();
   flushing `send_all` whose copies all went with their connections returns
   0, even with a connection that came up since. After `shutdown()` every
   send throws `NotConnected`. The serialized forms, what the Python binding
-  uses, take a callback instead of the wait: `send_serialized(serialized,
-  lane, timeout, done)` and `send_all_serialized(serialized, timeout, done)`
-  return at once and call `done(written)` once on the io thread, 1 when the
-  message was written, the first copy for every connection, 0 when it was
-  given up on, and reported, or `shutdown()` came first;
-  `send_serialized_with_callback(serialized, all, timeout, done, lane)` is
-  the flushing send so, `done` hearing 1 once a copy is written, 0 when the
-  message was given up on, `timeout` passed or `shutdown()` came first.
-  `send_serialized_and_wait(serialized, all, timeout, lane, &not_connected)` and
-  `send_serialized_and_notify(serialized, all, timeout, done, lane)`, with
+  uses, take the message's id and type after its bytes, which a drop is
+  reported by, and a callback instead of the wait:
+  `send_serialized(serialized, id, type, lane, timeout, done)` and
+  `send_all_serialized(serialized, id, type, timeout, done)` return at once
+  and call `done(written)` once on the io thread, 1 when the message was
+  written, the first copy for every connection, 0 when it was given up on,
+  and reported, or `shutdown()` came first;
+  `send_serialized_with_callback(serialized, id, type, all, timeout, done,
+  lane)` is the flushing send so, `done` hearing 1 once a copy is written,
+  0 when the message was given up on, `timeout` passed or `shutdown()` came
+  first. `send_serialized_and_wait(serialized, id, type, all, timeout, lane,
+  &not_connected)` and `send_serialized_and_notify(serialized, id, type,
+  all, timeout, done, lane)`, with
   `done(written, not_connected)`, also say why a flushing send wrote nothing,
   as the synchronous client tells it at its deadline: its message given up
   on, a pinned lane's connection gone or a shutdown, or no connection live
@@ -648,18 +689,23 @@ client.shutdown();
   clients raise `NotConnected` for the one and `OperationTimedOut` for the
   other on it, and an asyncio layer awaits
   the second. All are safe from callbacks. A message over `MAX_MESSAGE_SIZE`
-  is refused where it is sent or queried, with `std::length_error`.
+  is refused where it is sent or queried, with `std::length_error`, a
+  query's request measured as the query may send it again.
   `new_message()` fills in id and from, and every send fills them in on a
   whole message that left them empty: every receiver drops a message
   without an id.
 - `connect(host, port, timeout)` connects as `SyncClient::connect()` does
-  and waits for the handshake: true once the connection is registered,
-  false as soon as it failed, or at `timeout`, the io thread trying again
-  every 3 s on its own. `disconnect(host, port)` drops the multiplexer as
+  and waits for the handshake: true once the connection is registered, at
+  once for one connected already, which it keeps, false as soon as it
+  failed, or at `timeout`, the io thread trying again every 3 s on its
+  own. `connect_all(addresses, timeout)` connects to every `(host, port)`
+  at once, each waited for against the same `timeout`, so a multiplexer
+  that never welcomes costs it once, not once for every address after
+  it, and returns how many are registered. `disconnect(host, port)` drops the multiplexer as
   `SyncClient::disconnect()` does, on the io thread, and returns once it
   is done, whether the client had it: `connections_count()` is down by
-  then, a query through the connection closed is sent again through
-  another, as for a lost connection, and a `connect()` still waiting for
+  then, a query through the connection closed goes on as after a lost
+  connection, and a `connect()` still waiting for
   that multiplexer returns false. Neither from callbacks, where they throw
   `std::logic_error` rather than deadlock; after `shutdown()` they throw
   `NotConnected`.
@@ -692,8 +738,10 @@ client.shutdown();
   with `set_search_policy()` says yes and dropped otherwise, never reach
   it.
   The late-reply rule binds the peers that send to this client: `references`
-  means "this is the reply", and what references a query this client has
-  seen answered (the last 1024) is dropped whatever its type, so a
+  means "this is the reply", and what references a query of this client
+  that has ended (for twice the longer of its timeout and 10 s after it
+  ended, 131072 queries at most; `forget_finished_ids()` forgets them at
+  once, for a test that measures the heap) is dropped whatever its type, so a
   follow-up that is not the reply must not reference the request; it is
   addressed to this peer with `to` and correlated in the payload
   ([semantics](semantics.md#delivery)).
@@ -732,7 +780,7 @@ Every client sends the same way, through one mechanism in the library
 |---|---|---|---|
 | `SyncClient::queue(msg, timeout, lane, done)`, `queue_all(msg, timeout, done)` | at once, a tracker, null when nothing may take it | held until one comes up, `timeout` at most, then dropped | the drop observer and `dropped()`; `done(0)` when given, `done(1)` once written; the tracker's `is_lost()` |
 | `ThreadedClient::send(msg)`, `send(msg, lane, done)`, `send_all(msg, done)` | at once | held, as above | the drop observer and `dropped()`; `done(0)` when given, `done(1)` once written |
-| `send_serialized(serialized, lane, timeout, done)`, `send_all_serialized(serialized, timeout, done)` | at once | held | `done(0)`, and the observer; `done(1)` once written |
+| `send_serialized(serialized, id, type, lane, timeout, done)`, `send_all_serialized(serialized, id, type, timeout, done)` | at once | held | `done(0)`, and the observer; `done(1)` once written |
 | `SyncClient::send(msg, timeout, lane)` | once written: the connection that wrote it | waits for one, `timeout` at most | `NotConnected` when nothing wrote it with no connection live, else `OperationTimedOut` |
 | `ThreadedClient::send(msg, timeout)`, `send_all(msg, timeout)` | 1 once written, the first copy for `send_all`; 0 at the timeout | waits | 0 |
 | `flush_all(timeout)` | `true` once everything sent before it was written; `false` once one was given up on, or at the timeout | waits | `false`, and the observer for which |
@@ -762,8 +810,10 @@ reasons, `multiplexer::DropReason` in `multiplexer/basic_client.h`:
 The observer runs inside whichever `SyncClient` call runs the loop when the
 drop happens, and on a `ThreadedClient`'s io thread, where it must return
 quickly; the `ThreadedClient` lets go of it when its io thread ends. Each
-drop is also logged, the first of a kind at once and the rest counted in a
-line a second. A message the library wrote is not dropped, whatever happens
+drop is also logged, the first of a kind at once, naming the message's id
+and type, and the rest counted in a line a second. The id and the type are
+those the message's frame was made with, a whole message's own or those
+given with its bytes: the library never parses a message for them. A message the library wrote is not dropped, whatever happens
 to it next: written means the kernel's buffer ([semantics](semantics.md)).
 
 ## Threads
@@ -781,8 +831,8 @@ parallel clients create one per thread, as the integration test roles do in
 with `shutdown()` or `close()`: the destructors of `Client` and
 `ThreadedClient` run `shutdown()`, writing what was sent first,
 `CLOSE_FLUSH_SECONDS` at most, and waiting for the multiplexers' side of
-the close, `CLOSE_READ_SECONDS` at most, and on `ThreadedClient` for a
-name lookup in progress, a
+the close, `CLOSE_READ_SECONDS` at most, and for a name lookup in
+progress, on either client and so in either server class, a
 `BaseThreadedMultiplexerServer`'s runs `close()`, too late for a
 subclass's handlers, so a subclass calls it in its own destructor, and a
 `BaseMultiplexerServer`'s client goes with it the same way. Nothing the
@@ -803,9 +853,13 @@ getters of the connections' state, `connections_count()`,
 `has_incoming_messages()` and `routing_acknowledged()`, which would answer
 with the parent's;
 `orphaned()` tells without throwing. `shutdown()` and the destructor close
-the child's copies of the descriptors, once, with `close(2)`, and leak the
-rest on purpose, so nothing sends a goodbye or a `shutdown(2)` on the
-parent's connection and asio never sees those descriptor numbers again. Of
+the child's copies of the descriptors, once, with `close(2)`: of every
+socket the client had open at the fork, those of connections still closing
+too, from a table the client keeps for this as its sockets open and close,
+never the lists of connections its thread may have been changing at the
+fork. They leak the rest on purpose, so nothing sends a goodbye or a
+`shutdown(2)` on the parent's connection and asio never sees those
+descriptor numbers again. Of
 a `BaseThreadedMultiplexerServer` inherited the same way, `close()`,
 `connect()`, `serve_forever()` and `pending()` throw, `stop()` only clears
 `working`, and the destructor lets go of the parent's workers without

@@ -109,10 +109,11 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 killer.join()
                 self.assertEqual(b"SLOW", reply.message)
                 self.assertLess(time.monotonic() - started, 6, "the locate phase, not a timeout")
-                # The fake saw the request once or twice: the client sends it
-                # again through the other multiplexer, but the fake's reply
-                # to the first, going back through the other multiplexer, may
-                # end the query first.
+                # The fake saw the request once or twice: the client locates
+                # it at once and sends the request a second and last time
+                # through the other multiplexer, but the fake's reply to the
+                # first, going back through the other multiplexer, may end
+                # the query first.
                 arrivals = peer.arrivals(REQUEST, matching=lambda m: m.message == b"slow")
                 self.assertIn(len(arrivals), (1, 2))
                 self.assertIs(victim, arrivals[0][1])
@@ -121,46 +122,64 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
             finally:
                 client.shutdown()
 
-    def test_a_reply_to_the_first_attempt_answers_after_a_resend(self):
-        """A typed query whose multiplexer dies under the wait is sent again
-        with a new id; the backend, busy two seconds with each attempt,
-        answers the first after the query's first stage ran out. That reply
-        answers the query, as a reply to any attempt does, rather than being
-        dropped while the search waits behind the resent request and times
-        out."""
+    @staticmethod
+    def kill_when_held(victim, holding: threading.Event, released: threading.Event) -> None:
+        """`victim` killed once the backend holds the request, which it then
+        answers: kill() returns once the process is gone, so the backend's
+        reply finds that connection closed and takes the other."""
+        holding.wait(30)
+        victim.kill()
+        released.set()
 
-        def slower(mxmsg):
-            """Two seconds for each "slower"."""
+    def test_a_lost_connection_searches_and_the_first_reply_answers(self):
+        """A typed query whose multiplexer dies under the wait is not sent
+        again: the request may have been routed first, as it was here, and
+        the query moves on to the search at once. The backend holds the
+        request until its multiplexer is killed, then answers it through the
+        other one, during the search, and that reply answers the query, as a
+        reply to the request does in every stage. The backend saw the request
+        once, where it got it a second time, resent at once. Ordered by
+        events: the kill waits for the backend to hold the request."""
+        holding, released = threading.Event(), threading.Event()
+
+        def held(mxmsg):
+            """Holds "slower" until the test has killed its multiplexer."""
             if mxmsg.message == b"slower":
-                time.sleep(2.0)
+                holding.set()
+                released.wait(30)
             return mxmsg.message.upper()
 
         with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
-            peer.on(REQUEST, slower, RESPONSE)
+            peer.on(REQUEST, held, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 lane = client.lane()
                 client.query(b"warm-up", REQUEST, multiplexer=lane)
                 victim = cluster.multiplexer_at(lane.connection.endpoint)
-                killer = threading.Timer(0.3, victim.kill)
+                killer = threading.Thread(target=self.kill_when_held, args=(victim, holding, released))
                 killer.start()
-                reply = client.query(b"slower", REQUEST, multiplexer=lane, timeout=1.5)
+                reply = client.query(b"slower", REQUEST, multiplexer=lane, timeout=30)
                 killer.join()
                 self.assertEqual(b"SLOWER", reply.message)
-                first = peer.arrivals(REQUEST, matching=lambda m: m.message == b"slower")[0][0]
-                self.assertEqual(first.id, reply.references, "the answer to the first attempt")
+                arrivals = peer.arrivals(REQUEST, matching=lambda m: m.message == b"slower")
+                self.assertEqual(arrivals[0][0].id, reply.references, "the answer to the request")
+                self.assertEqual(1, len(arrivals), "the request went out once, its reply ending the search")
             finally:
                 client.shutdown()
 
-    def test_a_resend_leaves_the_callers_message_as_it_was(self):
-        """_send_and_receive() sends a message whose connection died again,
-        with a new id; a MultiplexerMessage the caller passed in keeps its
-        own, since the caller may still hold it, to send again or to log."""
+    def test_a_lost_connection_is_not_connected_and_the_message_went_once(self):
+        """_send_and_receive() sends its message once: when the connection
+        that wrote it dies under the wait, it raises NotConnected, where it
+        sent the message again with a new id. A MultiplexerMessage the
+        caller passed in keeps its own."""
+
+        holding, released = threading.Event(), threading.Event()
 
         def held(mxmsg):
-            """A second for "held": its multiplexer dies meanwhile."""
+            """Holds "held" until the test has killed its multiplexer."""
             if mxmsg.message == b"held":
-                time.sleep(1.0)
+                holding.set()
+                released.wait(30)
             return mxmsg.message.upper()
 
         with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
@@ -172,13 +191,13 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
                 victim = cluster.multiplexer_at(lane.connection.endpoint)
                 mxmsg = client.client.new_message(message=b"held", type=REQUEST)
                 own = mxmsg.id
-                killer = threading.Timer(0.3, victim.kill)
+                killer = threading.Thread(target=self.kill_when_held, args=(victim, holding, released))
                 killer.start()
-                sent_ids = []
-                reply, _ = client.client._send_and_receive(mxmsg, multiplexer=lane, timeout=5, sent_ids=sent_ids)
+                attempts: dict = {}
+                with self.assertRaises(NotConnected):
+                    client.client._send_and_receive(mxmsg, multiplexer=lane, timeout=5, attempts=attempts)
                 killer.join()
-                self.assertEqual(b"HELD", reply.message)
-                self.assertEqual(2, len(sent_ids), "sent again once its multiplexer died")
+                self.assertEqual([own], list(attempts), "sent once")
                 self.assertEqual(own, mxmsg.id, "the caller's message, untouched")
             finally:
                 client.shutdown()

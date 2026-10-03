@@ -4,7 +4,9 @@ comes up, written then, or dropped and reported at its timeout, where
 the synchronous client raised NotConnected; a flushing send to every
 connection waits for one through a restart, and returns once the first
 copy is written; the messages a dead connection had not written wait for
-the next connection, where they were dropped with it; a dead
+the next connection, where they were dropped with it, each within its own
+timeout, so that one queued past it goes with the connection, where it
+had 10 s more whatever its own; a dead
 connection's copies of messages sent to every connection are dropped and
 reported, where they went to another connection, which then had two; and
 a flush under way when a connection dies does not wait for what the dead
@@ -21,6 +23,7 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import DropReason
 from multiplexer.testing import Cluster, FakePeer, wait_until
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import fill_frames, past_the_queue
 from multiplexer.testing.raw_peer import RawPeer
 from multiplexer.threaded_client import ThreadedClient
 
@@ -28,25 +31,6 @@ RULES = runfile("tests/testing.rules")  # the file the constants were generated 
 
 EVENT = types.PYTHON_TEST_REQUEST
 CHUNK = b"x" * (16 * 1024)
-
-
-def socket_buffers() -> int:
-    """What the two ends of a connection may buffer at most, the largest
-    the kernel allows each."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return buffers
-
-
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer and twice the queue."""
-    return 2 * socket_buffers() // size + 2 * 1024
 
 
 class Drops:
@@ -151,11 +135,10 @@ class FlushingToAllTest(unittest.TestCase):
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
                 cluster.mx[1].pause()
-                chunk = b"x" * (256 * 1024)
                 started = time.monotonic()
                 try:
-                    for _ in range(60):  # 15 MB: more than the frozen one's socket takes
-                        client.send_message(chunk, type=EVENT, multiplexer=Client.ALL, flush=True, timeout=30)
+                    for payload in fill_frames():  # more than the frozen one's sockets take
+                        client.send_message(payload, type=EVENT, multiplexer=Client.ALL, flush=True, timeout=30)
                     self.assertLess(time.monotonic() - started, 30, "no send waited for its timeout")
                 finally:
                     cluster.mx[1].resume()
@@ -169,16 +152,17 @@ class DeadConnectionTest(unittest.TestCase):
     def test_its_unwritten_messages_wait_for_the_next_connection(self) -> None:
         """Frozen, filled and killed, then started again: what the client
         still held for it, queued or waiting for room, is held for the next
-        connection and written to it, nothing reported dropped, where all of
-        it was dropped with the connection. What was in the dead process's
-        socket is gone unreported: written, as far as any library can tell."""
+        connection, within its own timeout, a minute here, and written to
+        it, nothing reported dropped, where all of it was dropped with the
+        connection. What was in the dead process's socket is gone
+        unreported: written, as far as any library can tell."""
         drops = Drops()
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as receiver:
             client = Client(cluster.endpoints, type=peers.WEBSITE, on_drop=drops)
             try:
                 cluster.mx[0].pause()
-                for _ in range(frames_to_fill(len(CHUNK))):
-                    client.send_message(CHUNK, type=EVENT)
+                for payload in past_the_queue(CHUNK):
+                    client.send_message(payload, type=EVENT, timeout=60)
                 cluster.mx[0].kill()
                 cluster.mx[0].start()
                 cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
@@ -187,6 +171,30 @@ class DeadConnectionTest(unittest.TestCase):
                 receiver.wait_for(EVENT, count=1024, timeout=60)  # at least the queue's worth arrived
             finally:
                 client.shutdown()
+
+    def test_a_message_queued_past_its_timeout_goes_with_its_connection(self) -> None:
+        """Frozen, its sockets full, then killed with nothing else up: a
+        message that waited in the dead connection's queue past its own
+        timeout goes with the connection, reported CONNECTION_LOST at once,
+        where a queued message had 10 s from the failover whatever its own,
+        so that a send that had given up on it could see it written later;
+        those with time left wait for the next connection. Sent with no
+        time at all, timeout 0, the message is past its timeout from the
+        start, queued since the queue had room. The threaded client's io
+        thread hears of it at once; every client shares the outbox."""
+        drops = Drops()
+        with Cluster(1, rules=RULES) as cluster:
+            client = ThreadedClient(cluster.endpoints, type=peers.TEST_ACTIVE_CLIENT, on_drop=drops)
+            try:
+                cluster.mx[0].pause()
+                for payload in fill_frames():  # the sockets, and a few in the queue
+                    client.send_message(payload, type=EVENT, timeout=60)
+                late = client.send_message(b"late", type=EVENT, timeout=0)
+                cluster.mx[0].kill()
+                # 5 s at most: less than the 10 s from the failover it tells apart.
+                self.assertEqual([(late, DropReason.CONNECTION_LOST)], drops.wait_for(late, timeout=5))
+            finally:
+                client.shutdown(0)
 
 
 class FlushDuringFailoverTest(unittest.TestCase):
@@ -199,7 +207,6 @@ class FlushDuringFailoverTest(unittest.TestCase):
         first reads again, the flush ends, everything it waited for
         written, where it waited for those handed over as well and ran out
         of time on the third."""
-        chunk = b"x" * max(16 * 1024, 2 * socket_buffers() // 1024)  # a dead queue's 1024 outweigh the buffers
         with Cluster(3, rules=RULES) as cluster:
             client = ThreadedClient(cluster.endpoints, type=peers.TEST_ACTIVE_CLIENT)
             try:
@@ -214,8 +221,8 @@ class FlushDuringFailoverTest(unittest.TestCase):
                 waited, dying, taking = lanes
                 try:
                     waited.pause()
-                    for _ in range(frames_to_fill(len(chunk))):
-                        client.send_message(chunk, type=EVENT, multiplexer=lanes[waited], timeout=120)
+                    for payload in fill_frames():  # past the sockets: some wait for the flush
+                        client.send_message(payload, type=EVENT, multiplexer=lanes[waited], timeout=120)
                     flushed: list[bool] = []
                     ended = threading.Event()
 
@@ -226,8 +233,10 @@ class FlushDuringFailoverTest(unittest.TestCase):
                     client._flush_all_and_notify(60, heard)  # posted ahead of what follows, which it does not wait for
                     dying.pause()
                     taking.pause()
-                    for _ in range(frames_to_fill(len(chunk))):
-                        client.send_message(chunk, type=EVENT, multiplexer=lanes[dying], timeout=120)
+                    # Twice the fill: what the dying one's sockets leave over
+                    # outweighs what the third's take, so that some of it waits.
+                    for payload in fill_frames() + fill_frames():
+                        client.send_message(payload, type=EVENT, multiplexer=lanes[dying], timeout=120)
                     dying.kill()
                     wait_until(lambda: client.connections_count() == 2, 30, "the dead connection gone")
                     waited.resume()
@@ -274,8 +283,8 @@ class AllCopiesTest(unittest.TestCase):
             try:
                 cluster.mx[1].pause()
                 sent = {
-                    client.send_message(CHUNK, type=EVENT, multiplexer=ThreadedClient.ALL)
-                    for _ in range(frames_to_fill(len(CHUNK)))
+                    client.send_message(payload, type=EVENT, multiplexer=ThreadedClient.ALL)
+                    for payload in past_the_queue(CHUNK)
                 }
                 cluster.mx[1].kill()
                 # False when the dead connection's copies were given up on while it

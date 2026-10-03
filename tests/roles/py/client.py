@@ -29,8 +29,11 @@ answered_lock = threading.Lock()
 answered = 0  # queries answered so far, across workers, for --memory-every
 
 
-def count_answered(args: argparse.Namespace) -> None:
-    """One more query answered; emit a memory event every --memory-every."""
+def count_answered(args: argparse.Namespace, client: Any) -> None:
+    """One more query answered; emit a memory event every --memory-every,
+    `client`, when it is a ThreadedClient, forgetting its finished queries'
+    ids first: kept a while by design and bounded, they are no leak
+    (docs/semantics.md)."""
     global answered
     if not args.memory_every:
         return
@@ -38,6 +41,8 @@ def count_answered(args: argparse.Namespace) -> None:
         answered += 1
         count = answered
     if count % args.memory_every == 0:
+        if isinstance(client, common.threaded_client.ThreadedClient):
+            client.forget_finished_ids()
         common.memory_event(count)
 
 
@@ -101,7 +106,7 @@ def run_sequential(worker: int, args: argparse.Namespace, queries: list[Query], 
                 responses += 1
             else:
                 errors += 1
-            count_answered(args)
+            count_answered(args, client)
     report_done(worker, responses, errors, client)
 
 
@@ -114,7 +119,7 @@ def run_async(worker: int, args: argparse.Namespace, queries: list[Query], clien
     def on_result(round_: int, index: int, type_: int, started: float, result: Any) -> None:
         """The callback: report, then let the issuing loop go on."""
         key = "responses" if report_result(worker, round_, index, type_, started, result) else "errors"
-        count_answered(args)
+        count_answered(args, client)
         with lock:
             state[key] += 1
             state["in_flight"] -= 1
@@ -188,7 +193,7 @@ def run_workers(args: argparse.Namespace, queries: list[Query]) -> None:
             """Report one reply from the inbox; True for a response."""
             round_, index, type_, started, result = item
             replied = report_result(worker, round_, index, type_, started, result)
-            count_answered(args)
+            count_answered(args, client)
             return replied
 
         for round_ in range(args.count):

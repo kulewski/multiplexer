@@ -3,8 +3,9 @@
 A query is a request that expects exactly one answer: `SyncClient.query()`
 in Python, `SyncClient::query()` in C++. Almost always it is one message out and one
 message back. If the backend that took the request fails, the client finds
-another one and asks again. The three pictures below show the normal case, the
-recovery, and what happens when no backend of the right type exists at all.
+another one and asks again, once. The three pictures below show the normal case, the
+recovery, and what happens when no backend of the right type exists at all;
+[every way a stage ends](#every-way-a-stage-ends) lists the rest.
 
 The pictures use the healthy deployment: the client is connected to both
 multiplexers, and so is every backend. Every arrow is drawn in every frame; the
@@ -476,7 +477,7 @@ graph LR
 
 ### 4. Every multiplexer says no
 
-Each answers the search with `DELIVERY_ERROR`. Once every connection the search went through has said no, the query fails: `OperationFailed` in Python, right away rather than after a timeout. A multiplexer that has just restarted and has no backend of the type back yet says no the same way, which is why a restart of the only multiplexer can fail a request in flight, and a restart of one of several cannot.
+Each answers the search with `DELIVERY_ERROR`. Once every connection the search went through has said no, the query fails: `OperationFailed` in Python, right away rather than after a timeout, since nobody took the request either. A request that had timed out or lost its connection instead may still be with a backend, and the query would wait out the stage for its late reply first. A multiplexer that has just restarted and has no backend of the type back yet says no the same way, which is why a restart of the only multiplexer can fail a request in flight, and a restart of one of several cannot.
 
 ```mermaid
 graph LR
@@ -623,7 +624,7 @@ graph LR
 
 ### 4. One multiplexer says no, the other delivers
 
-Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the `PING` to instance 2. Every connection failing would end the query with `OperationFailed`, at once: the instance is gone.
+Multiplexer 1 answers with `DELIVERY_ERROR`; multiplexer 2 hands the `PING` to instance 2. Every connection failing would end the query with `OperationFailed`, at once: the instance is gone, and never had the request. Had the first stage lost its connection instead, the request might have reached the instance before that, and the query would wait until its timeout for that late reply, `OperationTimedOut` without it.
 
 ```mermaid
 graph LR
@@ -732,7 +733,7 @@ graph LR
 
 ### 7. Instance 2 answers
 
-The reply ends the query. Nothing within the timeout is `OperationTimedOut`; a `DELIVERY_ERROR` for the repeated request, the instance leaving between the `PING` and the request, is `OperationFailed`.
+The reply ends the query. Nothing within the timeout is `OperationTimedOut`; a `DELIVERY_ERROR` for the repeated request, the instance leaving between the `PING` and the request, is `OperationFailed`, unless the first attempt may still be answered, as after a lost connection, when the query waits until its timeout for that reply. So does a repeated request whose own connection is lost: the request never goes out a third time.
 
 ```mermaid
 graph LR
@@ -766,13 +767,85 @@ graph LR
   style B2 fill:#fde8e8,stroke:#d62828,stroke-width:2px
 ```
 
+## Every way a stage ends
+
+The pictures show the common paths; this is all of them, the same in
+every client, `SyncClient`, `ThreadedClient` and `AsyncClient`, in Python
+and C++. A query has three stages at most and never goes back one, and its
+request goes out at most twice, at the first stage and the third. A typed
+query gives each stage its own `timeout`; an addressed query has one
+deadline for all three. A reply to either attempt ends the query at any
+stage. A late reply may come when the first stage ended in a way that may
+have left the request with a backend: its time ran out, or its connection
+was lost.
+
+| Stage | How it ends | What follows |
+|---|---|---|
+| 1. The request, through one connection: routed by its type, or `to` the instance with a delivery error asked for | the reply | the query's answer |
+| | `DELIVERY_ERROR` | stage 2; no late reply can come |
+| | its time runs out | for a typed query, stage 2, and a late reply may come; for an addressed one, whose one deadline has passed, `OperationTimedOut` |
+| | its connection is lost | stage 2 at once, nothing sent again; a late reply may come |
+| | no connection is live | a wait for one, within the stage's time, and the request goes out once; `NotConnected` when none comes |
+| 2. The search, a `BACKEND_FOR_PACKET_SEARCH` through every connection, or, for an addressed query, the locate, a `PING` to the instance through every connection | a `PING` | stage 3 |
+| | a late reply | the query's answer |
+| | nobody: every multiplexer answers `DELIVERY_ERROR` | `OperationFailed`, or, when a late reply may come, a wait for it until the stage's time runs out, `OperationTimedOut` without it |
+| | its time runs out | `OperationTimedOut` |
+| | a connection it went through is lost | no answer: the copy it carried may have been routed, and a `PING` may still come back another way, so the search waits on for the others and its time; but see below for a backend behind several multiplexers |
+| | no connection is live | a wait for one, within the stage's time, and the search goes out; `NotConnected` when none comes |
+| 3. The request again, with a fresh id, `to` the instance whose `PING` came first, through the connection that `PING` came on | the reply | the query's answer |
+| | `DELIVERY_ERROR` | `OperationFailed`, or, when a late reply may come, a wait for it until the stage's time runs out, `OperationTimedOut` without it |
+| | its connection is lost | a wait for a reply to either attempt until the stage's time runs out, `OperationTimedOut` without it; never a stage back |
+| | its time runs out | `OperationTimedOut` |
+| | no connection is live | a wait for one, within the stage's time, and the request goes out again, once; `NotConnected` when none comes |
+
+The search is one message, under one id, on every connection, and a
+backend behind several multiplexers takes the first copy that reaches it,
+drops the others as repeats, and answers through the multiplexer the
+first copy came from. Its `PING` comes back another way only when its own
+connection to that multiplexer is gone by the time it answers, as when
+the multiplexer died: the answer then takes another of its connections.
+When only the client's connection to that multiplexer breaks, the
+multiplexer living on, the `PING` is lost, no other copy will be
+answered, and the search runs out of time: `OperationTimedOut`, the
+backend alive all along. The query is not sent again for it; a caller
+that retries finds the backend through the connections it has.
+
+Every client reads what comes back to a query by one table, whatever the
+stage: by what the message answers, one of the query's two attempts or
+its search, and what it is.
+
+| It answers | It is | What it means |
+|---|---|---|
+| an attempt, the request or the request sent again | a reply: any type but `DELIVERY_ERROR` and `REQUEST_RECEIVED` | the query's answer |
+| | `DELIVERY_ERROR` | nobody has that attempt: it is struck off, and it ends the stage only when it is the stage's own, the request in stage 1, the request sent again in stage 3; in the wait for a late reply, it ends the wait once no attempt is left |
+| | `REQUEST_RECEIVED` | a backend has it: `on_received` hears which, and nothing else changes |
+| the search, or the locating `PING` | `PING` | in stage 2, the instance found, to which stage 3 goes; later, nothing |
+| | `DELIVERY_ERROR` | in stage 2, nobody behind the multiplexer it came through, counted once for each connection the search went through, and nobody anywhere once every one of them has said so; later, nothing |
+| | anything else | nothing |
+| nothing the query sent | anything | not the query's: what the client does with any other message, `on_message` in the threaded and asyncio clients, `handle_drop()` in the Python `SyncClient`, a log line in the C++ one |
+
+A wait for a late reply waits for the attempts a backend may have: the
+request, unless it drew a `DELIVERY_ERROR`, and the request sent again,
+when its connection was lost; one the client gave up on, never written,
+is left out. A `DELIVERY_ERROR` for one of them, at any stage, says
+nobody has it, and once none is left the wait ends, `OperationFailed`. A
+request whose stage ran out of time while it waited unwritten on its
+connection is an attempt all the same: it may be written later, and its
+reply answers the query at any stage.
+
+Through a pinned lane a lost connection is `NotConnected` at any stage
+instead, the late wait's included, and the search goes through the
+lane's one connection.
+
 Where this lives: `Client::_query` and `Client::_query_addressed` in
 `multiplexer/client.cc`, `Client.query` in `multiplexer/mxclient.py`, and
 the state machine of `multiplexer/threaded_client.cc` for the threaded and
-asyncio clients; the search is routed in `Server::_handle_meta_message` in
-`multiplexer/server.h`. Scenarios `query_one.py`, `round_robin.py`,
-`backend_dies.py`, `two_mx_backends_on_each.py` and `unrouted_type.py`
-under `tests/scenarios/` exercise the typed pictures;
+asyncio clients, what comes back read by `Client::_await`, `Client.__await`
+and `ThreadedClient::Core::_advance`. The search is routed in
+`Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
+`query_one.py`, `round_robin.py`, `backend_dies.py`,
+`two_mx_backends_on_each.py` and `unrouted_type.py` under
+`tests/scenarios/` exercise the typed pictures;
 `multiplexer/testing/lanes_test.py` and `multiplexer/threaded_lanes_test.py`
 the addressed one.
 

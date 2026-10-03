@@ -143,13 +143,18 @@ class ClientRole : public mxcontrol::Task {
   }
 
   // Counts answered queries across workers and emits a memory event every
-  // --memory-every of them.
-  void count_answered() {
+  // --memory-every of them, `client`, the ThreadedClient that answered,
+  // forgetting its finished queries' ids first: kept a while by design and
+  // bounded, they are no leak (docs/semantics.md).
+  void count_answered(ThreadedClient* client = nullptr) {
     if (!memory_every_) {
       return;
     }
     long answered = ++answered_;
     if (answered % memory_every_ == 0) {
+      if (client) {
+        client->forget_finished_ids();
+      }
       emit(memory_event(answered));
     }
   }
@@ -259,7 +264,7 @@ class ClientRole : public mxcontrol::Task {
         } else {
           ++errors;
         }
-        count_answered();
+        count_answered(client.get());
         continue;
       }
       {
@@ -272,7 +277,7 @@ class ClientRole : public mxcontrol::Task {
           [&, query, started, worker_index](const ThreadedClient::Result& result) {
             // On the io thread: report, then let the worker issue the next one.
             bool replied = report_outcome(worker_index, query, result, ms_since(started));
-            count_answered();
+            count_answered(client.get());
             std::lock_guard<std::mutex> lock(mutex);
             (replied ? responses : errors) += 1;
             --in_flight;

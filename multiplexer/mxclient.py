@@ -138,6 +138,37 @@ def stamped(mxmsg: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], 
     return filled
 
 
+def whole(mxmsg: MultiplexerMessage, fields: dict, instance_id: int, fresh_id: Callable[[], int]) -> MultiplexerMessage:
+    """A whole MultiplexerMessage as a send takes it: the message itself,
+    stamped(); `fields`, message fields given beside it, are a TypeError,
+    since nothing of the message is changed."""
+    if fields:
+        raise TypeError(
+            "a whole MultiplexerMessage is sent as it is: set its fields, not %s" % ", ".join(sorted(fields))
+        )
+    return stamped(mxmsg, instance_id, fresh_id)
+
+
+def as_reply(mxmsg: MultiplexerMessage, request: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], int]):
+    """A copy of `mxmsg` with its empty fields filled in as a reply to
+    `request`: id and from, as stamped() fills them, and to, references and
+    workflow from the request. What every server class does with a whole
+    message given as the reply, as C++ Request::reply does."""
+    reply = MultiplexerMessage()
+    reply.CopyFrom(mxmsg)
+    if not reply.id:
+        reply.id = fresh_id()
+    if not getattr(reply, "from"):
+        setattr(reply, "from", instance_id)  # a keyword; from_ only reads
+    if not reply.to:
+        reply.to = request.from_
+    if not reply.references:
+        reply.references = request.id
+    if not reply.workflow:
+        reply.workflow = request.workflow
+    return reply
+
+
 def dict_message(m, all_fields=False, recursive=False):
     """
     Operation reverse to make_message.
@@ -164,6 +195,87 @@ def parse_message(type, buffer):
     t = type()
     t.ParseFromString(buffer)
     return t
+
+
+# A synchronous query's stages, as __await reads what ends each.
+_REQUEST, _SEARCH, _DIRECT, _LATE = "request", "search", "direct", "late"
+# How a stage's wait ended, as Client::Outcome in client.cc: an answer, a
+# delivery error for the stage's own attempt, the search's PING, nobody
+# anywhere, or in the late wait no attempt left, or the watched connection
+# lost.
+_ANSWER, _REFUSED, _FOUND, _NOBODY, _LOST = "answer", "refused", "found", "nobody", "lost"
+
+
+class _Ledger(object):
+    """What a synchronous query sent, for __await to read what comes back
+    by the table every client follows (docs/query.md), as Client::Ledger
+    in client.cc: its attempts, the request and the request sent again, by
+    id in the order sent, those struck off, refused by a delivery error or
+    found given up on as the late wait begins, and its search, or locating
+    PING, with the connections it went through that have not said nobody
+    yet."""
+
+    __slots__ = ["attempts", "struck", "search_id", "searched"]
+
+    def __init__(self) -> None:
+        """Nothing sent yet."""
+        object.__init__(self)
+        self.attempts: dict[int, _mxclient.Attempt] = {}
+        self.struck: set[int] = set()
+        self.search_id = 0
+        self.searched: list[ConnectionWrapper] = []
+
+    @property
+    def last(self) -> int:
+        """The id of the attempt sent last, 0 before the first."""
+        return next(reversed(self.attempts), 0)
+
+    def any_left(self) -> bool:
+        """Whether an attempt is left that a backend may have: one not struck off."""
+        return any(attempt_id not in self.struck for attempt_id in self.attempts)
+
+    def strike_given_up(self) -> None:
+        """Strikes off the attempts the client gave up on, or never placed:
+        nobody can have them."""
+        self.struck.update(attempt_id for attempt_id, attempt in self.attempts.items() if attempt.given_up)
+
+    def answered(self, connection: ConnectionWrapper) -> bool:
+        """The search's "nobody" from `connection`: struck off the
+        connections it waits for; False when it waited for none from there."""
+        for index, searched in enumerate(self.searched):
+            if searched.is_same_connection(connection):
+                del self.searched[index]
+                return True
+        return False
+
+
+def _check_size_sent_again(request: MultiplexerMessage) -> None:
+    """ValueError, before anything goes out, when the request sent again, a
+    copy of `request` with an id of its own, for a typed query the `to` of
+    the backend found, and a delivery error asked for, would be over
+    MAX_MESSAGE_SIZE: measured at its largest, as every client measures it
+    (check_size_sent_again in client.cc). `request` is as it was afterwards."""
+    largest = 2**64 - 1
+    id_, had_to, to = request.id, request.HasField("to"), request.to
+    asked, asked_value = request.HasField("report_delivery_error"), request.report_delivery_error
+    request.id = largest
+    if not to:
+        request.to = largest
+    request.report_delivery_error = True
+    size = request.ByteSize()
+    request.id = id_
+    if had_to:
+        request.to = to
+    else:
+        request.ClearField("to")
+    if asked:
+        request.report_delivery_error = asked_value
+    else:
+        request.ClearField("report_delivery_error")
+    if size > _mxclient.MAX_MESSAGE_SIZE:
+        raise ValueError(
+            "a message of %d bytes, over the limit of %d (MAX_MESSAGE_SIZE)" % (size, _mxclient.MAX_MESSAGE_SIZE)
+        )
 
 
 class TimeoutTicker(object):
@@ -346,7 +458,7 @@ class Client(_mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: "int | None" = ...,
         timeout: float = ...,
         to: int = ...,
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
@@ -359,7 +471,7 @@ class Client(_mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: "int | None" = ...,
         timeout: float = ...,
         to: int = ...,
         multiplexer: "int | Lane | ConnectionWrapper" = ...,
@@ -371,7 +483,7 @@ class Client(_mxclient.Client):
     def query(
         self,
         message: Any,
-        type: int,
+        type: "int | None" = None,
         timeout: float = DEFAULT_TIMEOUT,
         to: int = 0,
         multiplexer: "int | Lane | ConnectionWrapper" = ONE,
@@ -381,13 +493,24 @@ class Client(_mxclient.Client):
     ) -> "MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]":
         """Send a request and return its reply, a MultiplexerMessage.
 
+        The request is `message` itself when it is a whole
+        MultiplexerMessage, typed by its own `type` and addressed by its own
+        `to`, an empty id and from filled in; `type=` or `to=` beside it is
+        a TypeError. Else it is built from the payload, bytes, str or a
+        protocol buffer message, and `type`, which it needs, and `to`.
+
         The request goes through one connection. If it comes back as a
-        DELIVERY_ERROR, or no reply arrives within `timeout` seconds, every
-        connection is asked (BACKEND_FOR_PACKET_SEARCH) for a backend that
-        handles `type`; the first one to answer gets the request again,
-        addressed directly, with a fresh `timeout`. Raises OperationTimedOut
-        when a stage runs out of time, OperationFailed when no backend can be
-        found, NotConnected when there is no live connection.
+        DELIVERY_ERROR, no reply arrives within `timeout` seconds, or the
+        connection is lost under the wait, every connection is asked
+        (BACKEND_FOR_PACKET_SEARCH) for a backend that handles `type`; the
+        first one to answer gets the request again, addressed directly, with
+        a fresh `timeout`, its second and last time out. A query never goes
+        back a stage, and a reply to either attempt answers it. Raises
+        OperationTimedOut when a stage runs out of time, OperationFailed
+        when no backend can be found and nobody took the request (one that
+        timed out or went with its connection may still be answered, and is
+        waited for), NotConnected when there is no live connection;
+        docs/query.md lists every way a stage ends.
 
         With `to`, the instance id of a peer, the request is addressed: only
         that peer ever gets it. If a multiplexer reports the peer is not
@@ -395,8 +518,10 @@ class Client(_mxclient.Client):
         with a PING addressed to it on every connection (answered as long as
         the peer lives, by the server classes, ThreadedClient and AsyncClient
         whatever their search policy, never by a SyncClient), and the request
-        goes again through the connection that found it. A peer nobody has is
-        OperationFailed; one `timeout` covers the three stages.
+        goes again, its second and last time, through the connection that
+        found it. A peer nobody has is OperationFailed, unless a request it
+        may have taken, after a lost connection, can still be answered, which
+        the query then waits for; one `timeout` covers the three stages.
 
         `multiplexer` is ONE, a Lane from lane() or a ConnectionWrapper: with
         a lane the request goes through the lane's connection and the lane
@@ -413,173 +538,267 @@ class Client(_mxclient.Client):
         backend, the same or another. Nothing about the query changes for
         it; one that raises has its traceback printed.
         """
-        assert not isinstance(message, MultiplexerMessage)
+        request = self.__request(message, type, to)
+        _check_size_sent_again(request)
         # Held for the query's duration, where the acknowledgements are met;
         # whatever was there before is back afterwards.
         previous, self.__on_received = self.__on_received, on_received
         try:
-            if to:
-                response, connwrap = self.__query_addressed(message, type, timeout, to, multiplexer)
+            if request.to:
+                response, connwrap = self.__query_addressed(request, timeout, multiplexer)
             else:
-                response, connwrap = self.__query_typed(message, type, timeout, multiplexer)
+                response, connwrap = self.__query_typed(request, timeout, multiplexer)
         finally:
             self.__on_received = previous
         return (response, connwrap) if with_connection else response
 
-    def __query_typed(self, message, type, timeout, multiplexer):
-        """The three stages of a typed query, docs/query.md; the same as
-        Client::_query in client.cc."""
+    def __request(self, message: Any, type: "int | None", to: int) -> MultiplexerMessage:
+        """A query's request, a message of its own that the stages may set
+        fields of: a copy of `message` when it is a whole MultiplexerMessage,
+        an empty from filled in and an id of its own, as every attempt gets,
+        so that one message may be queried again and again; else one built
+        from the payload, `type` and `to`. TypeError for `type` or `to`
+        beside a whole message, and for a payload without its type."""
+        if isinstance(message, MultiplexerMessage):
+            if type is not None or to:
+                raise TypeError(
+                    "a whole MultiplexerMessage is the request itself: set its type and to, not type= or to="
+                )
+            request = MultiplexerMessage()
+            request.CopyFrom(message)
+            request.id = self.random()
+            if not getattr(request, "from"):
+                setattr(request, "from", self.instance_id)  # a keyword; from_ only reads
+            return request
+        if type is None:
+            raise TypeError("a query of a payload needs its type")
+        return self.new_message(type=type, message=message, to=to)
+
+    def __again(self, request: MultiplexerMessage, to: int) -> MultiplexerMessage:
+        """The request again, its last time out: a copy with a fresh id, `to`
+        the instance found, and a delivery error asked for, which says that
+        instance is gone; every other field the request's."""
+        again = MultiplexerMessage()
+        again.CopyFrom(request)
+        again.id = self.random()
+        again.to = to
+        again.report_delivery_error = True
+        return again
+
+    def __query_typed(self, query, timeout, multiplexer):
+        """The three stages of a typed query, docs/query.md, `query` the
+        request; the same as Client::_query in client.cc, every stage's wait
+        reading what comes back by the one table every client follows
+        (__await)."""
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
-        query = self.new_message(type=type, message=message)
-        # Every id the request goes out under, the first and each resend
-        # after a lost connection: a reply to any of them answers the query.
-        attempts = []
-        # Whether a backend may have the request and answer it late: False
-        # only when its one attempt drew a delivery error, nobody taking it.
-        taken = True
-        # Stage 1: the request through one connection. A reply ends it here.
+        ledger = _Ledger()
+        # Stage 1: the request through one connection. A reply ends the
+        # query here; a delivery error says nobody took it; its time running
+        # out, or its connection lost, leaves it with a backend perhaps,
+        # routed before the connection went, its reply able to come back
+        # another way.
+        ticker = TimeoutTicker(timeout)
         try:
-            response, connwrap = self._send_and_receive(
-                query,
-                multiplexer=lane if lane is not None else Client.ONE,
-                timeout=timeout,
-                ignore_types=(types.REQUEST_RECEIVED,),
-                sent_ids=attempts,
-            )
-            if response.type != types.DELIVERY_ERROR:
-                self.__adopt(lane, connwrap)
-                return response, connwrap
-            taken = len(attempts) > 1  # an attempt that went with its connection may have reached a backend
+            used = self.__send_attempt(query, ticker, None, lane, ledger)
+            outcome, answer = self.__await(ledger, ticker, _REQUEST, used, lane)
+            if outcome == _ANSWER:
+                self.__adopt(lane, answer[1])
+                return answer
         except OperationTimedOut:
             pass
 
-        # Stage 2: ask every multiplexer who has a backend for this type. The
-        # search is routed by the request type's own rule with whom forced to
-        # ALL, so every live backend answers with a PING. One DELIVERY_ERROR
-        # per connection means nobody has one. Through a pinned lane the one
+        # Stage 2: ask every multiplexer who has a backend for this type, at
+        # once. The request is not sent again: it goes out at most twice,
+        # and a query never goes back a stage. The search is routed by the
+        # request type's own rule with whom forced to ALL, so every live
+        # backend answers with a PING. Through a pinned lane the one
         # multiplexer behind it is asked instead.
         search = BackendForPacketSearch()
-        search.packet_type = type
+        search.packet_type = query.type
         mxmsg = self.new_message(message=search, type=types.BACKEND_FOR_PACKET_SEARCH)
-        pinned = lane is not None and lane.pinned
-        response, connwrap = self._send_and_receive(
-            mxmsg,
-            accept_ids=attempts,
-            ignore_ids=[mxmsg.id],
-            multiplexer=lane if pinned else Client.ALL,
-            timeout=timeout,
-            handle_delivery_errors=not pinned,
-            ignore_types=(types.REQUEST_RECEIVED,),
-        )
-
-        if response.type == types.DELIVERY_ERROR:
-            # Every multiplexer reported no backend of this type, so the one
-            # that took the request is gone too: nothing can answer any more.
-            raise OperationFailed
-        if response.references in attempts:
-            self.__adopt(lane, connwrap)
-            return response, connwrap
-
-        self._check_type(response, types.PING)
+        ticker = TimeoutTicker(timeout)
+        pinned_connection = self.__send_search(mxmsg, ticker, lane, ledger)
+        outcome, answer = self.__await(ledger, ticker, _SEARCH, pinned_connection, lane)
+        if outcome not in (_ANSWER, _FOUND):
+            # Nobody has a backend of this type: only a backend that may have
+            # taken the request can still answer it, and the stage waits for
+            # that.
+            outcome, answer = _ANSWER, self.__late(ledger, ticker, lane)
+        if outcome == _ANSWER:
+            self.__adopt(lane, answer[1])
+            return answer
 
         # Stage 3: the request again, to the backend that answered first, by
         # instance id and through the connection its PING came on, asking for
-        # a delivery error, which says that backend is gone. A late reply to
-        # an earlier attempt is still accepted; late PINGs from other
-        # backends are ignored.
-        direct_query = self.new_message(to=response.from_, message=message, type=type, report_delivery_error=True)
-        assert direct_query.type == type
-        assert type
+        # a delivery error, which says that backend is gone.
+        ping, ping_connection = answer
+        direct_query = self.__again(query, ping.from_)
         ticker = TimeoutTicker(timeout)
-        response, connwrap = self._send_and_receive(
-            direct_query,
-            accept_ids=attempts,
-            ignore_ids=[mxmsg.id],
-            multiplexer=connwrap,
-            lane=lane,
-            timeout_ticker=ticker,
-            ignore_types=(types.REQUEST_RECEIVED,),
-        )
+        used = self.__send_attempt(direct_query, ticker, ping_connection, lane, ledger)
+        outcome, answer = self.__await(ledger, ticker, _DIRECT, used, lane)
+        if outcome != _ANSWER:
+            # The backend found is gone, or the direct request's connection
+            # went under it: a reply can come only to an attempt a backend
+            # may have, and nothing goes out again.
+            answer = self.__late(ledger, ticker, lane)
+        self.__adopt(lane, answer[1])
+        return answer
 
-        if response.type == types.DELIVERY_ERROR:
-            if not taken:
-                # Nobody took the request, and the backend that answered the
-                # search is gone: nothing can answer any more.
-                raise OperationFailed
-            # The backend that answered the search is gone, but one took the
-            # request and may still answer it: the stage waits on for that reply.
-            response, connwrap = self._receive(
-                attempts,
-                ignore_ids=[mxmsg.id, direct_query.id],
-                ignore_types=(types.REQUEST_RECEIVED,),
-                timeout_ticker=ticker,
-            )
-            if response.type == types.DELIVERY_ERROR:
-                raise OperationFailed
-        self.__adopt(lane, connwrap)
-        return response, connwrap
-
-    def __query_addressed(self, message, type, timeout, to, multiplexer):
+    def __query_addressed(self, request, timeout, multiplexer):
         """An addressed query, docs/query.md "An addressed query"; the same
         as Client::_query_addressed in client.cc. One deadline for the
         three stages: the request, the PING that locates the addressee when
         a multiplexer said it is not behind it or the connection died, the
-        request again through the connection that found it."""
+        request again through the connection that found it, its second and
+        last time out; `request` its request, addressed by its `to`."""
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
         ticker = TimeoutTicker(timeout)
-        request = self.new_message(type=type, message=message, to=to, report_delivery_error=True)
-        attempts = []  # every id the request goes out under; a reply to any of them answers
-        response, connwrap = self._send_and_receive(
-            request,
-            multiplexer=lane if lane is not None else Client.ONE,
-            timeout_ticker=ticker,
-            ignore_types=(types.REQUEST_RECEIVED,),
-            sent_ids=attempts,
-        )
-        if response.type != types.DELIVERY_ERROR:
-            self.__adopt(lane, connwrap)
-            return response, connwrap
+        to = request.to
+        request.report_delivery_error = True  # "not behind this multiplexer" must come back as a message
+        ledger = _Ledger()
+        used = self.__send_attempt(request, ticker, None, lane, ledger)
+        outcome, answer = self.__await(ledger, ticker, _REQUEST, used, lane)
+        if outcome == _ANSWER:
+            self.__adopt(lane, answer[1])
+            return answer
 
         # Locate: a PING addressed to the instance, with delivery errors
-        # requested, so that a multiplexer without the instance says so.
+        # requested, so that a multiplexer without the instance says so. The
+        # request is not sent again on a lost connection: it goes out at most
+        # twice, and a query never goes back a stage.
         mxmsg = self.new_message(message=b"", type=types.PING, to=to, report_delivery_error=True)
-        pinned = lane is not None and lane.pinned
-        response, connwrap = self._send_and_receive(
-            mxmsg,
-            accept_ids=attempts,
-            ignore_ids=[mxmsg.id],
-            multiplexer=lane if pinned else Client.ALL,
-            timeout_ticker=ticker,
-            handle_delivery_errors=not pinned,
-            ignore_types=(types.REQUEST_RECEIVED,),
-        )
-        if response.type == types.DELIVERY_ERROR:
-            raise OperationFailed  # no multiplexer has the instance
-        if response.references in attempts:
-            self.__adopt(lane, connwrap)
-            return response, connwrap  # a late reply to the request after all
-        self._check_type(response, types.PING)
+        pinned_connection = self.__send_search(mxmsg, ticker, lane, ledger)
+        outcome, answer = self.__await(ledger, ticker, _SEARCH, pinned_connection, lane)
+        if outcome not in (_ANSWER, _FOUND):
+            # No multiplexer has the instance: a request it may have taken
+            # can still be answered, and the query waits for that reply.
+            outcome, answer = _ANSWER, self.__late(ledger, ticker, lane)
+        if outcome == _ANSWER:
+            self.__adopt(lane, answer[1])
+            return answer
 
         # The request again, a fresh id, through the connection the answer
         # came on; the lane adopts it.
-        again = self.new_message(type=type, message=message, to=to, report_delivery_error=True)
-        response, connwrap = self._send_and_receive(
-            again,
-            accept_ids=attempts,
-            ignore_ids=[mxmsg.id],
-            multiplexer=connwrap,
-            lane=lane,
-            timeout_ticker=ticker,
-            ignore_types=(types.REQUEST_RECEIVED,),
-        )
-        if response.type == types.DELIVERY_ERROR:
+        again = self.__again(request, to)
+        used = self.__send_attempt(again, ticker, answer[1], lane, ledger)
+        outcome, answer = self.__await(ledger, ticker, _DIRECT, used, lane)
+        if outcome != _ANSWER:
+            # The addressee is gone, or the request's connection went under
+            # it: the query waits for a reply to an attempt it may still have.
+            answer = self.__late(ledger, ticker, lane)
+        self.__adopt(lane, answer[1])
+        return answer
+
+    def __send_attempt(self, mxmsg, ticker, preferred, lane, ledger):
+        """Sends one attempt of a query, the request or the request sent
+        again, through one connection, `preferred` while it is live, waiting
+        for a connection if none is; the same as Client::_send_attempt in
+        client.cc. The ledger records it before the send, its tracker once
+        it is placed: a send that runs out of time leaves the message
+        queued, to be written later, and a reply to it still answers.
+        Returns the connection that wrote it."""
+        attempt = ledger.attempts[mxmsg.id] = _mxclient.Attempt()
+        return self.send_one(mxmsg.SerializeToString(), mxmsg.id, mxmsg.type, preferred, lane, ticker(), attempt)
+
+    def __send_search(self, mxmsg, ticker, lane, ledger):
+        """Sends the search, or the locating PING: a copy on every live
+        connection, waiting for one when none is, or through a pinned lane
+        its one connection; the same as Client::_send_search in client.cc.
+        The copies wait for room, or for a connection, as long as the stage
+        has left and a moment more. The ledger records its id and the
+        connections it went through. Returns the pinned lane's connection,
+        None without one."""
+        ledger.search_id = mxmsg.id
+        raw = mxmsg.SerializeToString()
+        if lane is not None and lane.pinned:
+            used = self.send_one(raw, mxmsg.id, mxmsg.type, None, lane, ticker())
+            ledger.searched = [used]
+            return used
+        # Waits for a connection when none is live.
+        ledger.searched = self._schedule_search(raw, mxmsg.id, mxmsg.type, ticker())
+        return None
+
+    def __await(
+        self,
+        ledger: _Ledger,
+        ticker: TimeoutTicker,
+        stage: str,
+        watch: "ConnectionWrapper | None",
+        lane: "Lane | None",
+    ) -> "tuple[str, tuple[MultiplexerMessage, ConnectionWrapper]]":
+        """Waits for what ends a query's stage, reading each message by the
+        one table every client follows (docs/query.md), as ThreadedClient
+        does; the same as Client::_await in client.cc. A reply to any
+        attempt is the answer; a delivery error for an attempt strikes it
+        off, and ends the stage only when it is the stage's own, the last
+        attempt sent in the request's stage or the direct request's, the
+        late wait ending once no attempt is left; in the search's stage a
+        PING for it is the instance found, and a delivery error for it is
+        nobody behind the connection it came on, counted once per connection
+        the search went through, nobody anywhere once every one of them has
+        said so. Anything else for the search is nothing, an
+        acknowledgement goes to the query's on_received, and what answers
+        nothing the query sent to handle_drop(). With `watch`, an attempt's
+        connection or a pinned lane's, its loss ends the wait, NotConnected
+        through a pinned lane, which is what the pin means. Returns (how it
+        ended, (message, connection)), for a loss an empty message and the
+        connection lost; OperationTimedOut when `ticker` runs out."""
+        accept_ids = [*ledger.attempts, *([ledger.search_id] if stage == _SEARCH else [])]
+        ignore_ids = [ledger.search_id] if ledger.search_id else []  # the search's late answers
+        while ticker.permit():
+            if watch is None:
+                mxmsg, connwrap = self.__receive_message(timeout=ticker())
+            else:
+                got = self.read_raw_message_watching(ticker(), watch)
+                if got is None:
+                    if lane is not None and lane.pinned:
+                        raise NotConnected()
+                    log(WARNING, MEDIUMVERBOSITY, text="connection lost while waiting for a reply to %d" % ledger.last)
+                    return _LOST, (MultiplexerMessage(), watch)
+                mxmsg, connwrap = self.__parse_incoming(got)
+            if mxmsg.type == types.REQUEST_RECEIVED:
+                self.__acknowledged(mxmsg, accept_ids, ignore_ids)
+                continue
+            if mxmsg.references in ledger.attempts:
+                if mxmsg.type != types.DELIVERY_ERROR:
+                    return _ANSWER, (mxmsg, connwrap)
+                ledger.struck.add(mxmsg.references)  # nobody has it
+                if stage in (_REQUEST, _DIRECT) and mxmsg.references == ledger.last:
+                    return _REFUSED, (mxmsg, connwrap)
+                if stage == _LATE and not ledger.any_left():
+                    return _NOBODY, (mxmsg, connwrap)
+                continue  # an earlier attempt's: struck off, and the stage goes on
+            if stage == _SEARCH and mxmsg.references == ledger.search_id:
+                if mxmsg.type == types.PING:
+                    return _FOUND, (mxmsg, connwrap)
+                if mxmsg.type == types.DELIVERY_ERROR and ledger.answered(connwrap) and not ledger.searched:
+                    return _NOBODY, (mxmsg, connwrap)
+                continue
+            if mxmsg.references not in ignore_ids:
+                self.handle_drop(mxmsg, connwrap)
+        raise OperationTimedOut()
+
+    def __late(
+        self, ledger: _Ledger, ticker: TimeoutTicker, lane: "Lane | None"
+    ) -> "tuple[MultiplexerMessage, ConnectionWrapper]":
+        """The query's last wait: a reply to an attempt a backend may still
+        have, one placed and neither refused nor given up on, until `ticker`
+        runs out; none left, nothing can answer any more, OperationFailed.
+        The same as Client::_late in client.cc, which says why the trackers
+        are read once, as the wait begins, and why a pinned lane's lost
+        connection is NotConnected."""
+        ledger.strike_given_up()
+        if not ledger.any_left():
             raise OperationFailed
-        self.__adopt(lane, connwrap)
-        return response, connwrap
+        watch = lane.connection if lane is not None and lane.pinned else None
+        outcome, answer = self.__await(ledger, ticker, _LATE, watch, lane)
+        if outcome != _ANSWER:
+            raise OperationFailed  # the last attempt a backend might have had drew a delivery error
+        return answer
 
     @staticmethod
     def __adopt(lane, connwrap):
@@ -597,11 +816,12 @@ class Client(_mxclient.Client):
         ignore_types=(),
         timeout_ticker=None,
         lane=None,
-        sent_ids=None,
+        attempts=None,
         **kwargs,
     ):
-        """Send `message` once and wait for a reply that references it: the
-        step query() takes at each of its stages.
+        """Send `message` once and return the first message that references
+        it, a DELIVERY_ERROR included, which a query reads by its stages
+        instead (query()): how a test sees a request's own answer.
 
         Returns (reply, connection). No search and no retry: raises
         OperationTimedOut after `timeout` seconds, or when `timeout_ticker`,
@@ -609,13 +829,16 @@ class Client(_mxclient.Client):
         further ids a reply may reference, `ignore_ids` and `ignore_types`
         are skipped silently, other unexpected messages go to handle_drop().
         `multiplexer` may be a Lane; `lane` is one to update while
-        `multiplexer` names a connection to prefer.
+        `multiplexer` names a connection to prefer. With
+        `multiplexer=Client.ALL` and `handle_delivery_errors`, one
+        DELIVERY_ERROR per copy is taken before the last is returned.
 
-        A message whose connection dies under the wait is sent again
-        through another, as a copy with a fresh id; a MultiplexerMessage
-        passed in is never changed, so its id is only the first attempt's.
-        `sent_ids`, a list, gets every id the message went out under, and
-        the reply's `references` names the one it answers.
+        A message is sent once and a MultiplexerMessage passed in is never
+        changed. When the connection that wrote it dies under the wait, it
+        is not sent again, having perhaps been routed first: NotConnected.
+        `attempts`, a dict, gets the message by its id before it is sent,
+        an Attempt that learns its tracker once it is placed: a send that
+        runs out of time leaves the message queued, to be written later.
         """
         if timeout_ticker is None:
             timeout_ticker = TimeoutTicker(timeout)
@@ -624,7 +847,7 @@ class Client(_mxclient.Client):
             lane = kwargs.pop("multiplexer")
         if multiplexer is not Client.ALL:
             return self.__send_and_receive_one(
-                message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, sent_ids, **kwargs
+                message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, attempts, **kwargs
             )
 
         id, tracker = self.__schedule_all(message, timeout_ticker(), **kwargs)
@@ -652,49 +875,42 @@ class Client(_mxclient.Client):
         raise OperationTimedOut
 
     def __send_and_receive_one(
-        self, message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, sent_ids, **kwargs
+        self, message, accept_ids, ignore_ids, ignore_types, timeout_ticker, lane, attempts, **kwargs
     ):
-        """The single-connection case of _send_and_receive, the same as
-        Client::_send_and_receive_one in client.h: if the connection used dies
-        before the reply arrives, or none is live, keep running the loop so
-        the reconnect timers fire, and send again with a fresh id; through a
-        pinned lane there is no other connection, so the loss is NotConnected."""
+        """The single-connection case of _send_and_receive: sent once,
+        waiting for a connection if none is live, and a reply waited for. If
+        the connection that wrote it dies before the reply arrives, it is
+        not sent again, having perhaps been routed first: NotConnected."""
         preferred = kwargs.pop("multiplexer", None)
         if preferred is Client.ONE:
             preferred = None
         kwargs.pop("flush", None)
-        mxmsg = message if isinstance(message, MultiplexerMessage) else self.new_message(message=message, **kwargs)
-        while True:
-            used = self.send_one(mxmsg.SerializeToString(), preferred, lane, timeout_ticker())
-            if sent_ids is not None:
-                sent_ids.append(mxmsg.id)
-            preferred = None
-            accept_ids = [mxmsg.id, *accept_ids]
-            while timeout_ticker.permit():
-                got = self.read_raw_message_watching(timeout_ticker(), used)
-                if got is None:
-                    break  # the connection died: send again
-                mxmsg_in, connwrap = self.__parse_incoming(got)
-                if mxmsg_in.type in ignore_types:
-                    self.__acknowledged(mxmsg_in, accept_ids, ignore_ids)
-                    continue
-                if mxmsg_in.references in accept_ids:
-                    return mxmsg_in, connwrap
-                if mxmsg_in.references not in ignore_ids:
-                    self.handle_drop(mxmsg_in, connwrap)
-            if not timeout_ticker.permit():
-                raise OperationTimedOut()
-            if lane is not None and lane.pinned:
+        if isinstance(message, MultiplexerMessage):
+            mxmsg = whole(message, kwargs, self.instance_id, self.random)
+        else:
+            mxmsg = self.new_message(message=message, **kwargs)
+        attempt = None
+        if attempts is not None:
+            attempt = attempts[mxmsg.id] = _mxclient.Attempt()
+        used = self.send_one(
+            mxmsg.SerializeToString(), mxmsg.id, mxmsg.type, preferred, lane, timeout_ticker(), attempt
+        )
+        accept_ids = [mxmsg.id, *accept_ids]
+        while timeout_ticker.permit():
+            got = self.read_raw_message_watching(timeout_ticker(), used)
+            if got is None:
+                if lane is None or not lane.pinned:
+                    log(WARNING, MEDIUMVERBOSITY, text="connection lost while waiting for a reply to %d" % mxmsg.id)
                 raise NotConnected()
-            log(
-                WARNING,
-                MEDIUMVERBOSITY,
-                text="connection lost while waiting for a reply to %d; sending again" % mxmsg.id,
-            )
-            if mxmsg is message:  # the caller's own: a copy goes again, and theirs keeps its id
-                mxmsg = MultiplexerMessage()
-                mxmsg.CopyFrom(message)
-            mxmsg.id = self.random()
+            mxmsg_in, connwrap = self.__parse_incoming(got)
+            if mxmsg_in.type in ignore_types:
+                self.__acknowledged(mxmsg_in, accept_ids, ignore_ids)
+                continue
+            if mxmsg_in.references in accept_ids:
+                return mxmsg_in, connwrap
+            if mxmsg_in.references not in ignore_ids:
+                self.handle_drop(mxmsg_in, connwrap)
+        raise OperationTimedOut()
 
     def __acknowledged(self, mxmsg, accept_ids, ignore_ids):
         """A skipped message that is a REQUEST_RECEIVED (notify_start())
@@ -728,14 +944,22 @@ class Client(_mxclient.Client):
         ignore_types=(),
         timeout=DEFAULT_TIMEOUT,
         timeout_ticker=None,
+        watch=None,
     ):
         """Wait for a reply that references one of `accept_ids`, as
-        _send_and_receive() does, without sending anything."""
+        _send_and_receive() does, without sending anything. With `watch`, a
+        connection, NotConnected as soon as it is gone."""
         if timeout_ticker is None:
             timeout_ticker = TimeoutTicker(timeout)
 
         while timeout_ticker.permit():
-            mxmsg, connwrap = self.__receive_message(timeout=timeout_ticker())
+            if watch is None:
+                mxmsg, connwrap = self.__receive_message(timeout=timeout_ticker())
+            else:
+                got = self.read_raw_message_watching(timeout_ticker(), watch)
+                if got is None:
+                    raise NotConnected()
+                mxmsg, connwrap = self.__parse_incoming(got)
             if mxmsg.type in ignore_types:
                 self.__acknowledged(mxmsg, accept_ids, ignore_ids)
                 continue
@@ -759,15 +983,16 @@ class Client(_mxclient.Client):
     def send_message(self, message, **kwargs) -> int:
         """Send a message on one or more connections and return its id.
 
-        `message` is a MultiplexerMessage, an empty id and from filled in,
-        or a payload (bytes, str, or a protocol buffer message) wrapped into
-        a new one built from the remaining kwargs (`type`, `to`, `references`, `workflow`, ...).
-        Keyword-only options: `multiplexer` is Client.ONE (default),
-        Client.ALL, a ConnectionWrapper (that connection while it is live;
-        a reply goes back the way the request came) or a Lane from lane()
-        (the lane's connection, which the lane replaces on a failover, or
-        keeps for good and raises NotConnected for when pinned); `embed`
-        wraps `message` without looking at its type.
+        `message` is a whole MultiplexerMessage, sent as it is, an empty id
+        and from filled in, or a payload (bytes, str, or a protocol buffer
+        message) wrapped into a new one built from the remaining kwargs
+        (`type`, `to`, `references`, `workflow`, ...); those beside a whole
+        message are a TypeError. Keyword-only options: `multiplexer` is
+        Client.ONE (default), Client.ALL, a ConnectionWrapper (that
+        connection while it is live; a reply goes back the way the request
+        came) or a Lane from lane() (the lane's connection, which the lane
+        replaces on a failover, or keeps for good and raises NotConnected
+        for when pinned).
 
         Without `flush` it returns at once: the message is queued, waits
         for room on a full connection, or, with no connection live, is held
@@ -790,9 +1015,7 @@ class Client(_mxclient.Client):
             raise NotConnected()
         return mxmsg_id
 
-    def __send_message(
-        self, message, embed=False, multiplexer=ONE, flush=False, timeout=DEFAULT_TIMEOUT, callback=None, **kwargs
-    ):
+    def __send_message(self, message, multiplexer=ONE, flush=False, timeout=DEFAULT_TIMEOUT, callback=None, **kwargs):
         """The body of send_message(): wrap, serialize and send as every
         client does (BasicClient::send in C++): placed on a connection, or
         held until one comes up, within `timeout`. With `flush`, wait until
@@ -803,20 +1026,21 @@ class Client(_mxclient.Client):
         while this client was idle is retired, never written into. Returns
         (id, taken), taken False when nothing may take the message: a
         pinned lane whose connection is gone, or the client shut down."""
-        if embed or not isinstance(message, MultiplexerMessage):
-            mxmsg = self.new_message(message=message, **kwargs)
+        if isinstance(message, MultiplexerMessage):
+            mxmsg = whole(message, kwargs, self.instance_id, self.random)
         else:
-            mxmsg = stamped(message, self.instance_id, self.random)
+            mxmsg = self.new_message(message=message, **kwargs)
 
-        # Serialized once here; the C++ side wraps the bytes in a frame and
-        # queues that same frame on every connection chosen.
+        # Serialized once here; the C++ side wraps the bytes in a frame, with
+        # the id and the type a drop is reported by, and queues that same
+        # frame on every connection chosen.
         raw = mxmsg.SerializeToString()
 
         if multiplexer is Client.ALL:
             if flush and callback is None:
-                self.send_all_and_wait(raw, timeout)
+                self.send_all_and_wait(raw, mxmsg.id, mxmsg.type, timeout)
                 return (mxmsg.id, True)
-            return (mxmsg.id, self.send(raw, True, None, timeout, callback))
+            return (mxmsg.id, self.send(raw, mxmsg.id, mxmsg.type, True, None, timeout, callback))
         if multiplexer is not Client.ONE and not isinstance(multiplexer, (ConnectionWrapper, Lane)):
             raise NotImplementedError("selecting multiplexer with %r is not supported" % multiplexer)
         lane = multiplexer if isinstance(multiplexer, Lane) else None
@@ -824,21 +1048,21 @@ class Client(_mxclient.Client):
             raise NotConnected()
         if flush and callback is None:
             preferred = multiplexer if isinstance(multiplexer, ConnectionWrapper) else None
-            self.send_one(raw, preferred, lane, timeout)
+            self.send_one(raw, mxmsg.id, mxmsg.type, preferred, lane, timeout)
             return (mxmsg.id, True)
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # that connection while it lives, another once it is gone
-        return (mxmsg.id, self.send(raw, False, lane, timeout, callback))
+        return (mxmsg.id, self.send(raw, mxmsg.id, mxmsg.type, False, lane, timeout, callback))
 
-    def __schedule_all(self, message, timeout, embed=False, multiplexer=None, flush=False, **kwargs):
+    def __schedule_all(self, message, timeout, multiplexer=None, flush=False, **kwargs):
         """_send_and_receive's request to ALL: a copy on every live connection
         now, and (id, how many), 0 with none live, for its delivery error
         count."""
-        if embed or not isinstance(message, MultiplexerMessage):
-            mxmsg = self.new_message(message=message, **kwargs)
+        if isinstance(message, MultiplexerMessage):
+            mxmsg = whole(message, kwargs, self.instance_id, self.random)
         else:
-            mxmsg = stamped(message, self.instance_id, self.random)
-        return (mxmsg.id, self._schedule_all(mxmsg.SerializeToString(), timeout))
+            mxmsg = self.new_message(message=message, **kwargs)
+        return (mxmsg.id, self._schedule_all(mxmsg.SerializeToString(), mxmsg.id, mxmsg.type, timeout))
 
     def flush_all(self, timeout=DEFAULT_TIMEOUT):
         """Run the loop until every message sent before the call has left its

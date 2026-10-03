@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <list>
 #include <memory>
 #include <string>
@@ -49,9 +50,12 @@ class ThreadedClient::Core {
   std::uint32_t peer_type() const { return peer_type_; }
   std::uint64_t random64();  // thread-safe
   bool connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT);
+  unsigned int connect_all(const std::vector<std::pair<std::string, std::uint16_t>>& addresses,
+                           float timeout = DEFAULT_TIMEOUT);
   bool disconnect(const std::string& host, std::uint16_t port);
   unsigned int connections_count();
   std::size_t watched_ids();
+  void forget_finished_ids();
   std::uint64_t retries();
   std::size_t waiting_queries();
   std::size_t waiting_messages();
@@ -63,13 +67,16 @@ class ThreadedClient::Core {
   unsigned int send(const MultiplexerMessage& msg, LanePtr lane, float timeout);
   unsigned int send(const MultiplexerMessage& msg, const ConnectionWrapper& connection, float timeout);
   unsigned int send_all(const MultiplexerMessage& msg, float timeout);
-  void send_serialized(std::string serialized, LanePtr lane, float timeout, SendCallback done);
-  void send_all_serialized(std::string serialized, float timeout, SendCallback done);
-  unsigned int send_serialized_and_wait(std::string serialized, bool all, float timeout, LanePtr lane,
-                                        bool* not_connected);
-  void send_serialized_with_callback(std::string serialized, bool all, float timeout, SendCallback done,
-                                     LanePtr lane = LanePtr());
-  void send_serialized_and_notify(std::string serialized, bool all, float timeout, FlushedCallback done, LanePtr lane);
+  void send_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, LanePtr lane, float timeout,
+                       SendCallback done);
+  void send_all_serialized(std::string serialized, std::uint64_t id, std::uint32_t type, float timeout,
+                           SendCallback done);
+  unsigned int send_serialized_and_wait(std::string serialized, std::uint64_t id, std::uint32_t type, bool all,
+                                        float timeout, LanePtr lane, bool* not_connected);
+  void send_serialized_with_callback(std::string serialized, std::uint64_t id, std::uint32_t type, bool all,
+                                     float timeout, SendCallback done, LanePtr lane = LanePtr());
+  void send_serialized_and_notify(std::string serialized, std::uint64_t id, std::uint32_t type, bool all, float timeout,
+                                  FlushedCallback done, LanePtr lane);
   MultiplexerMessage new_message(std::uint32_t type, const std::string& payload);
   void query(const std::string& payload, std::uint32_t type, Callback callback, float timeout = DEFAULT_TIMEOUT,
              LanePtr lane = LanePtr(), ReceivedCallback received = ReceivedCallback());
@@ -122,6 +129,7 @@ class ThreadedClient::Core {
   // flush_all() and connect(); see the .cc.
   bool _begin_flush_all(float timeout, const FlushCallback& done);
   void _end_flush(const std::shared_ptr<FlushWait>& wait, bool flushed) MX_RUN_ON(io_thread_);
+  std::future<bool> _start_connect(const std::string& host, std::uint16_t port, float timeout);
   void _end_connect(const std::shared_ptr<ConnectWaiter>& waiter, bool up) MX_RUN_ON(io_thread_);
 
   void _io_thread_main();
@@ -139,14 +147,20 @@ class ThreadedClient::Core {
   void _on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
 
   void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
-  void _wait_for_connection(const InFlightPtr& in_flight) MX_RUN_ON(io_thread_);
+  void _wait_for_connection(const InFlightPtr& in_flight, int resume) MX_RUN_ON(io_thread_);
   void _restart_waiting_queries() MX_RUN_ON(io_thread_);
   void _clear_out_waiting() MX_RUN_ON(io_thread_);
   void _advance(InFlightPtr in_flight, const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
   void _acknowledged(const InFlightPtr& in_flight, const MultiplexerMessage& msg) MX_RUN_ON(io_thread_);
-  void _search(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
+  void _search(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
   void _direct(InFlightPtr in_flight, const IncomingMessage& ping) MX_RUN_ON(io_thread_);
+  void _send_direct(InFlightPtr in_flight, const ConnectionWrapper& preferred, bool keep_deadline)
+      MX_RUN_ON(io_thread_);
   bool _answered(const InFlightPtr& in_flight, const ConnectionWrapper& connection) MX_RUN_ON(io_thread_);
+  void _nobody(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
+  void _wait_late(InFlightPtr in_flight, bool direct) MX_RUN_ON(io_thread_);
+  void _refused(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
+  void _follow_handover(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _lost(InFlightPtr in_flight) MX_RUN_ON(io_thread_);
   void _arm(InFlightPtr in_flight, float timeout) MX_RUN_ON(io_thread_);
   float _stage_timeout(const InFlightPtr& in_flight) const MX_RUN_ON(io_thread_);
@@ -154,7 +168,7 @@ class ThreadedClient::Core {
       MX_RUN_ON(io_thread_);
   void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage* reply) MX_RUN_ON(io_thread_);
   void _track(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
-  void _remember_finished(std::uint64_t id) MX_RUN_ON(io_thread_);
+  void _remember_finished(std::uint64_t id, std::chrono::steady_clock::time_point until) MX_RUN_ON(io_thread_);
   void _on_unmatched(const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
 
   const std::uint32_t peer_type_;
@@ -172,12 +186,16 @@ class ThreadedClient::Core {
   // Every query, tracked by id or waiting, in the order they started; a
   // query keeps its place, so that its end takes it out in O(1).
   std::list<InFlightPtr> in_flight_ MX_GUARDED_BY(io_thread_);
-  // The ids of recently finished queries, so that a late reply to one is
-  // recognised and dropped instead of reaching on_message: a bounded ring,
-  // small because a late reply arrives within a timeout of its query, and
-  // one that slips through only costs on_message an unexpected message.
-  static const std::size_t REMEMBERED_FINISHED_IDS = 1024;
-  std::deque<std::uint64_t> finished_order_ MX_GUARDED_BY(io_thread_);
+  // The ids of finished queries, so that a late reply to one is recognised
+  // and dropped instead of reaching on_message, where a threaded server
+  // would queue it as a request: each kept until its reply can no longer
+  // be expected, twice the longer of its query's timeout and
+  // DEFAULT_TIMEOUT after the query ended, in the order they ended, and
+  // at most FINISHED_IDS_KEPT of them, the oldest going first, which
+  // bounds the memory, about 64 bytes an id.
+  static const std::size_t FINISHED_IDS_KEPT = 1 << 17;
+  std::deque<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> finished_order_
+      MX_GUARDED_BY(io_thread_);  // each id and until when it is kept
   std::unordered_set<std::uint64_t> finished_ids_ MX_GUARDED_BY(io_thread_);
   // The caller's callbacks, released once nothing can call them any more
   // (_release_callbacks).

@@ -266,7 +266,7 @@ def control(client, action: "RecordingControl.Action", timeout: float = 5.0, **f
     mxmsg = client.new_message(message=request.SerializeToString(), type=RECORDING_CONTROL)
     # A copy on every live connection now, and one status expected from each;
     # with none live, nothing to wait for.
-    expected = client._schedule_all(mxmsg.SerializeToString(), timeout)
+    expected = client._schedule_all(mxmsg.SerializeToString(), mxmsg.id, mxmsg.type, timeout)
     if not expected:
         raise NotConnected()
     request_id = mxmsg.id
