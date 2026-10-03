@@ -56,8 +56,10 @@ welcome long after it connected, its reconnect going on only inside its
 next call. One whose host or network is gone is closed after 90 s.
 
 The `id` is the peer's own choice. Two connections announcing the same id
-from the same host replace each other, the newer one winning; from different
-hosts the second is refused. [Connecting to a multiplexer](handshake.md)
+from the same host replace each other, the newer one winning, and from
+different hosts the second is refused; whatever the hosts, the second
+replaces a first whose socket is gone, and is refused when its own socket is
+gone, reset before its welcome was read. [Connecting to a multiplexer](handshake.md)
 draws the exchange.
 
 ## Heartbeats

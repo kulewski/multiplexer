@@ -755,7 +755,9 @@ on](#messages-the-library-gives-up-on).
   `shutdown()` it calls `callback` at once, on the calling thread, with
   `NotConnected`, so a callback must not query again then, nor take a
   lock its caller holds. The blocking form raises `RuntimeError` when
-  called from a callback, where it would block the io thread.
+  called from a callback, where it would block the io thread. A query
+  waits for the io thread as a send does (below), and its first stage's
+  time starts when the io thread takes it up.
 - `send_message(message, type=..., multiplexer=ONE|ALL|lane|connection,
   flush=False, timeout=10, callback=None)` queues an event on one connection, on all of
   them, on a lane's or on a connection's, and returns its message id at
@@ -767,7 +769,12 @@ on](#messages-the-library-gives-up-on).
   connection comes up or has room, within `timeout`, and is dropped and
   reported after that: with `ALL` a full connection gets its copy as soon
   as it has room, and a lane waits for room on its own connection while
-  that lives.
+  that lives. The io thread takes sends and queries in the order they
+  were made, from a queue of its own that has no bound, so a program that
+  sends faster than the io thread places what it sends holds the
+  difference in memory; `timeout` counts from the call, and a message the
+  io thread reaches with its time up is placed only where a connection has
+  room for it then, and dropped and reported otherwise.
   Through a pinned lane whose connection is gone, and after `shutdown()`,
   it raises `NotConnected` at once. With `flush=True` it waits until the
   message reached the socket, for `ALL` until one copy did, a connection
@@ -1273,9 +1280,16 @@ class SearchTest(unittest.TestCase):
   such as `rules reloaded from`; `endpoint` is its `(host, port)`, and
   `cluster.multiplexer_at(endpoint)` is the `Mx` at the `(host, port)` a
   lane's or a reply's connection names.
-  The logs and files go to Bazel's outputs directory under `bazel test`;
-  outside Bazel to `$MX_TEST_OUTPUT` when set, or to one temporary
-  directory per process, removed when the process exits.
+  The logs and files go to Bazel's outputs directory under `bazel test`,
+  or to `$TEST_TMPDIR` when set, as `make check-py` sets it; else to a
+  directory of the process's own under `$MX_TEST_OUTPUT`, kept, when that
+  is set, or to one temporary directory per process, removed when the
+  process exits. A multiplexer's first `start()` drops an earlier run's
+  log and recording; a restart appends to both. A process the test leaves
+  running is ended when the test process exits, and, through a pipe each
+  is given (`MX_TEST_PARENT_FD`), when it is killed: `mxcontrol`, the
+  shipped roles and every program built on `lib/program.h` watch it and
+  end as `SIGTERM` ends them.
 - `FakePeer(cluster, peer_type, name=None, endpoints=None)` is a scripted
   backend on its own thread, connected to every multiplexer of the
   cluster or to the `endpoints` given, for a peer that is behind one
@@ -1301,7 +1315,8 @@ class SearchTest(unittest.TestCase):
   there, `start()` returns once it is connected, `stop()` asks it to leave
   and re-raises what `serve_forever()` raised, a handler's exception only
   when the backend's `on_handler_exception()` returns `False`; `backend`
-  is the instance.
+  is the instance. One whose `connect()` raised, or built after `stop()`
+  or after a `start()` that ran out of time, is closed rather than served.
 - `TestClient(cluster, peer_type)` sends and queries from the test:
   `send(payload, type, to=0, flush=True, multiplexer=ONE)` returns the
   message id, `query(payload, type, timeout=10, to=0, multiplexer=ONE,

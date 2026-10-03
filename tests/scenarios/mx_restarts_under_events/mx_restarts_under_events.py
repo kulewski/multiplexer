@@ -27,8 +27,6 @@ class MxRestartsUnderEvents(unittest.TestCase):
                 cfg.lang("event_backend"),
                 mx=cluster.addresses,
                 type=C.peers.TEST_EVENT_BACKEND,
-                until=EVENTS,
-                **{"for": 60},
             )
             backend.wait_for("connected", connections=1)
             client = spawn(
@@ -39,8 +37,9 @@ class MxRestartsUnderEvents(unittest.TestCase):
                 interval=INTERVAL,
                 send=[(C.types.TEST_EVENT, "e%d" % index) for index in range(EVENTS)],
             )
-            client.wait_for("sent", timeout=30)
-            client.wait_for("sent", timeout=30)
+            self.assertGreaterEqual(
+                len(client.wait_for_count("sent", 2, timeout=30)), 2, "two events before the restart"
+            )
             cluster.mx[0].restart()
             self.assertEqual(0, client.wait(timeout=120))
             self.assertEqual([], client.events_of("error"), "no send fails across the restart")
@@ -48,6 +47,10 @@ class MxRestartsUnderEvents(unittest.TestCase):
             self.assertEqual(EVENTS, len(sent))
             self.assertTrue(all(event["is_sent"] for event in sent), sent)
             self.assertEqual(1, client.events_of("done")[0]["connections"])
+            # The backend is stopped once the last event, the latest to
+            # arrive, is in: the sender's end says it was written, not that
+            # it was delivered.
+            backend.wait_for("received", payload="e%d" % (EVENTS - 1))
             self.assertEqual(0, backend.stop())
             received = [event["payload"] for event in backend.events_of("received")]
             self.assertGreaterEqual(len(received), 3, "events after both peers reconnected must arrive: %s" % received)

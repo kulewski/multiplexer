@@ -641,7 +641,8 @@ client.shutdown();
   take a lock its caller holds. A request that cannot be queued waits the
   way a message does (below), and the query ends `TIMED_OUT` when a
   connection was live but had no room in time, `NOT_CONNECTED` when none
-  was.
+  was. A query waits for the io thread as a send does (below), and its
+  first stage's timer starts when the io thread takes it up.
 - `send(msg)` and `send_all(msg)` queue a message on one or every connection
   and return at once; the io thread writes it right after. A message that
   cannot be queued yet, no connection being live or the connections' queues
@@ -650,7 +651,13 @@ client.shutdown();
   and reported after that (see [Messages the library gives up
   on](#messages-the-library-gives-up-on)): `send_all` gives every live
   connection its copy, a full one as soon as it has room, and a lane waits
-  for room on its own connection while that lives. `send(msg, lane)` and
+  for room on its own connection while that lives. The io thread takes
+  sends and queries in the order they were made, from a queue of its own
+  that has no bound, so a program that sends faster than the io thread
+  places what it sends holds the difference in memory; a message's time
+  counts from the call, and one the io thread reaches with its time up is
+  placed only where a connection has room for it then, and dropped and
+  reported otherwise. `send(msg, lane)` and
   `send(msg, connection)` choose the connection. `send(msg, lane, done)`,
   `send(msg, connection, done)` and `send_all(msg, done)` call
   `done(written)` once on the io thread, 1 when the message was written, the

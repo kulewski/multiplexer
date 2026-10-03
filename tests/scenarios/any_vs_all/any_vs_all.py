@@ -22,13 +22,16 @@ class AnyVsAll(unittest.TestCase):
                     mx=cluster.addresses,
                     name="event_backend%d" % i,
                     type=C.peers.TEST_EVENT_BACKEND,
-                    **{"for": 3},
                 )
                 l.wait_for("connected", connections=cfg.mx)
                 event_backends.append(l)
 
-            sends = [(C.types.TEST_EVENT, "all%d" % i) for i in range(N)]
-            sends += [(C.types.TEST_EVENT_ANY, "any%d" % i) for i in range(N)]
+            # The ALL events go last. The multiplexer forwards the event
+            # client's events in the order it sent them, so a backend that
+            # has the last one has every ANY event routed to it too, a copy
+            # routed by mistake included, and is stopped only then.
+            sends = [(C.types.TEST_EVENT_ANY, "any%d" % i) for i in range(N)]
+            sends += [(C.types.TEST_EVENT, "all%d" % i) for i in range(N)]
             event_client = spawn(
                 "event_client",
                 cfg.lang("event_client"),
@@ -40,7 +43,8 @@ class AnyVsAll(unittest.TestCase):
             self.assertEqual(2 * N, len(event_client.events_of("sent")))
 
             for l in event_backends:
-                self.assertEqual(0, l.wait())
+                l.wait_for("received", type=C.types.TEST_EVENT, payload="all%d" % (N - 1))
+                self.assertEqual(0, l.stop())
             for l in event_backends:
                 got = [r["payload"] for r in l.events_of("received", type=C.types.TEST_EVENT)]
                 self.assertEqual(["all%d" % i for i in range(N)], got)

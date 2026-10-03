@@ -177,6 +177,7 @@ CC_TEST_SRCS := \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
+  multiplexer/live_id_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
   multiplexer/query_stages_test.cc \
@@ -185,6 +186,7 @@ CC_TEST_SRCS := \
   multiplexer/recording_session_test.cc \
   multiplexer/routing_index_test.cc \
   multiplexer/rules_check_interval_test.cc \
+  multiplexer/server_release_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
   multiplexer/zero_nan_timeout_test.cc \
@@ -238,12 +240,14 @@ PY_TEST_FILES := \
   multiplexer/sync_waits_test.py \
   multiplexer/testing/cluster_exit_test.py \
   multiplexer/testing/fakes_test.py \
+  multiplexer/testing/harness_test.py \
   multiplexer/testing/lanes_test.py \
   multiplexer/testing/private_network_test.py \
   multiplexer/threaded_client_py_test.py \
   multiplexer/threaded_lanes_test.py \
   multiplexer/threaded_sends_test.py \
   multiplexer/threaded_server_test.py \
+  multiplexer/unrouted_records_test.py \
   multiplexer/unrouted_test.py \
   multiplexer/whole_message_test.py \
   multiplexer/zero_nan_timeout_test.py \

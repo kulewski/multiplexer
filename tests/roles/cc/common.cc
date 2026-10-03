@@ -3,6 +3,7 @@
 
 #include <google/protobuf/text_format.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
@@ -31,9 +32,57 @@ void emit(const Event& event) {
   std::cout << line << "\n" << std::flush;
 }
 
+namespace {
+// Whether `data` is UTF-8 as the text format reads a string field back:
+// what Python's parser of the event line accepts.
+bool valid_utf8(const std::string& data) {
+  std::size_t index = 0;
+  while (index < data.size()) {
+    const unsigned char lead = static_cast<unsigned char>(data[index]);
+    std::size_t length = 0;
+    std::uint32_t point = 0;
+    if (lead < 0x80) {
+      length = 1;
+      point = lead;
+    } else if ((lead & 0xE0) == 0xC0) {
+      length = 2;
+      point = lead & 0x1F;
+    } else if ((lead & 0xF0) == 0xE0) {
+      length = 3;
+      point = lead & 0x0F;
+    } else if ((lead & 0xF8) == 0xF0) {
+      length = 4;
+      point = lead & 0x07;
+    } else {
+      return false;
+    }
+    if (index + length > data.size()) {
+      return false;
+    }
+    for (std::size_t next = 1; next < length; ++next) {
+      const unsigned char byte = static_cast<unsigned char>(data[index + next]);
+      if ((byte & 0xC0) != 0x80) {
+        return false;
+      }
+      point = (point << 6) | (byte & 0x3F);
+    }
+    // Not the shortest form, a surrogate, or past the last code point.
+    static const std::uint32_t least[] = {0, 0, 0x80, 0x800, 0x10000};
+    if (point < least[length] || (point >= 0xD800 && point <= 0xDFFF) || point > 0x10FFFF) {
+      return false;
+    }
+    index += length;
+  }
+  return true;
+}
+}  // namespace
+
+// The payload itself when it is short and UTF-8, as the Python roles give
+// it; only its size otherwise, since a line with bytes that are not UTF-8
+// would not parse back and the event would be lost.
 void set_payload(Event& event, const std::string& data) {
   event.set_size(data.size());
-  if (data.size() <= 256) {
+  if (data.size() <= 256 && valid_utf8(data)) {
     event.set_payload(data);
   }
 }

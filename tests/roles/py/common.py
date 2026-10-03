@@ -1,6 +1,7 @@
 """Shared pieces of the Python roles: argument parsing, Event lines, signals."""
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -42,8 +43,43 @@ def emit(event: str, **fields: Any) -> None:
         sys.stdout.flush()
 
 
+def end_with_the_harness() -> None:
+    """Under the test harness, which hands every process it starts the read
+    end of a pipe only it writes to, named by MX_TEST_PARENT_FD: end as
+    SIGTERM ends this role once the pipe reaches its end, which is when the
+    test process is gone, however it died, as lib/program.h has the C++
+    processes do. The variable is cleared and the descriptor kept from the
+    role's own children, which could take an unrelated descriptor of that
+    number for it."""
+    named = os.environ.pop("MX_TEST_PARENT_FD", None)
+    if named is None:
+        return
+    descriptor = int(named)
+    try:
+        os.set_inheritable(descriptor, False)
+    except OSError:
+        return  # not open: nothing to watch
+
+    def watch() -> None:
+        """Reads the pipe until its end, then SIGTERM to this process."""
+        while True:
+            try:
+                if not os.read(descriptor, 1):
+                    break
+            except InterruptedError:
+                continue
+            except OSError:
+                return
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=watch, name="end-with-the-harness", daemon=True).start()
+
+
 def parser(description: str) -> argparse.ArgumentParser:
-    """An argument parser with the options every role takes: --mx, --type, --name."""
+    """An argument parser with the options every role takes: --mx, --type,
+    --name; every role makes one first, which is where it starts ending
+    with the harness (end_with_the_harness)."""
+    end_with_the_harness()
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--mx", action="append", required=True, help="host:port, repeatable")
     p.add_argument("--type", type=int, required=True, help="peer type id")
@@ -79,9 +115,15 @@ def typed_payloads(items: list[str] | None) -> list[tuple[int, bytes]]:
 
 
 def payload_summary(data: bytes) -> dict[str, Any]:
-    """Short, JSON-safe description of a payload."""
+    """Short description of a payload: itself when it is short and UTF-8,
+    else its size and SHA-256, as the C++ roles give it, but for the hash,
+    which they leave out: bytes changed to make them text would read as
+    another payload."""
     if len(data) <= 256:
-        return {"payload": data.decode("utf-8", "replace"), "size": len(data)}
+        try:
+            return {"payload": data.decode("utf-8"), "size": len(data)}
+        except UnicodeDecodeError:
+            pass
     import hashlib
 
     return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}

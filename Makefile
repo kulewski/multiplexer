@@ -243,7 +243,7 @@ check-cc: $(CC_TEST_BINS)
 # under Bazel, through TEST_SRCDIR, pointed at a runfiles tree made of links.
 RUNFILES := $(BUILD)/runfiles
 check-py: python $(PY_TESTS) $(MXCONTROL)
-	@rm -rf $(RUNFILES) && mkdir -p $(RUNFILES)/mx/mxcontrol $(RUNFILES)/mx/tests $(BUILD)/tmp
+	@rm -rf $(RUNFILES) $(BUILD)/tmp && mkdir -p $(RUNFILES)/mx/mxcontrol $(RUNFILES)/mx/tests $(BUILD)/tmp
 	@ln -s $(abspath $(MXCONTROL)) $(RUNFILES)/mx/mxcontrol/mxcontrol
 	@ln -s $(abspath multiplexer.rules) $(RUNFILES)/mx/multiplexer.rules
 	@ln -s $(abspath tests/testing.rules) $(RUNFILES)/mx/tests/testing.rules

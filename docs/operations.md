@@ -271,8 +271,9 @@ is served, and a backend of either server class refuses what reaches it
 once its drain is over or it is closing, with `DELIVERY_ERROR`, so that
 costs a retry rather than a timeout. A backend that dies without draining costs its
 clients a timeout per request it held. [How a backend leaves](leaving.md)
-draws the three phases and the routing flags; a recording notes each skip
-as `NOT_ACCEPTED`.
+draws the three phases and the routing flags; a recording notes each peer
+a fan-out skips as `NOT_ACCEPTED`, and a request no peer takes as one
+`NOT_ACCEPTED` for its type.
 
 ## Debug symbols
 
@@ -437,7 +438,13 @@ exit status 1, `recording.read()` by raising `TruncatedRecording`. A
 `RoutedMessage` says whether it was `DELIVERED` or why not:
 `NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`, `QUEUE_FULL`, or
 `NOT_ACCEPTED` for a peer whose routing turned the path off ([how a
-backend leaves](leaving.md)). A `PeerEvent` marks a peer
+backend leaves](leaving.md)). A rule that queued a message nowhere has a
+record of its own, recipient 0, with the peer type and whether the sender
+was told, saying why for the type as a whole, as the log line does:
+`NO_RECIPIENT` when nobody of the type is connected, `QUEUE_FULL` when
+every peer that takes the message has its queue full, `NOT_ACCEPTED` when
+none takes it; a fan-out (`whom: ALL`) records each peer it passed over
+besides. A `PeerEvent` marks a peer
 arriving, leaving, or changing its routing. A rules file put in use while
 the session is open ([changing the rules](#changing-the-rules)) leaves a
 `rules` record with the new fingerprint, from which the numbers are the

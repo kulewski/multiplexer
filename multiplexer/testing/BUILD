@@ -34,6 +34,16 @@ py_test(
 )
 
 py_test(
+    name = "harness_test",
+    size = "medium",
+    srcs = ["harness_test.py"],
+    deps = [
+        ":testing",
+        "//multiplexer:recording",
+    ],
+)
+
+py_test(
     name = "lanes_test",
     size = "medium",
     srcs = ["lanes_test.py"],

@@ -460,6 +460,31 @@ cc_test(
 )
 
 cc_test(
+    name = "server_release_test",
+    size = "small",
+    srcs = ["server_release_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":server",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "live_id_test",
+    size = "small",
+    srcs = ["live_id_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":connections_manager",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "connect_again_test",
     size = "small",
     srcs = ["connect_again_test.cc"],
@@ -1355,6 +1380,20 @@ py_test(
         ":multiplexer_constants",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "unrouted_records_test",
+    size = "medium",
+    srcs = ["unrouted_records_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":recording",
+        ":recording_py_proto",
         "//multiplexer/testing",
     ],
 )

@@ -55,6 +55,21 @@ class AddressedQueryTest(unittest.TestCase):
         self.first.stop()
         self.second.stop()
 
+    def assert_only_markers_reach(self, *fakes: FakePeer) -> None:
+        """Each of `fakes` received nothing but a marker the client sends it
+        now through every multiplexer: each multiplexer forwards in order,
+        so a message it routed to one of them by mistake arrived before the
+        marker that came that way, and the markers' arrival, not a moment's
+        wait, says the check comes late enough. connect() returns the
+        client's live connection to each multiplexer."""
+        connections = [self.client.client.connect(endpoint) for endpoint in self.cluster.endpoints]
+        for fake in fakes:
+            assert fake.backend is not None
+            for connection in connections:
+                self.client.send(b"marker", RESPONSE, to=fake.backend.conn.instance_id, multiplexer=connection)
+            fake.wait_for(RESPONSE, count=len(connections), matching=lambda mxmsg: mxmsg.message == b"marker")
+            self.assertEqual([b"marker"] * len(connections), [mxmsg.message for mxmsg in fake.received])
+
     def test_only_the_addressee_gets_an_addressed_query(self):
         """Ten queries addressed to the second fake are answered by it; the
         first, of the same type, never sees one."""
@@ -64,18 +79,16 @@ class AddressedQueryTest(unittest.TestCase):
                 (RESPONSE, b"N%d" % index, self.second.instance_id), (reply.type, reply.message, reply.from_)
             )
         self.assertEqual(10, len(self.second.messages(REQUEST)))
-        self.assertEqual([], self.first.received)
+        self.assert_only_markers_reach(self.first)
 
     def test_an_instance_that_left_is_a_failure_not_a_detour(self):
-        """Addressed to an instance nobody has: OperationFailed within a
-        fraction of the timeout, and no instance of the type sees a request."""
+        """Addressed to an instance nobody has: OperationFailed, which only
+        the delivery errors bring, a query that ran out of its time raising
+        OperationTimedOut, and no instance of the type sees a request."""
         gone = random.getrandbits(63) | 1
-        started = time.monotonic()
         with self.assertRaises(OperationFailed):
             self.client.query(b"lost", REQUEST, to=gone, timeout=10)
-        self.assertLess(time.monotonic() - started, 3, "a delivery error, not a timeout")
-        self.assertEqual([], self.first.received)
-        self.assertEqual([], self.second.received)
+        self.assert_only_markers_reach(self.first, self.second)
 
     def test_the_reply_and_the_connection_come_back_together(self):
         """with_connection=True returns the connection the reply came through,

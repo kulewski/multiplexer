@@ -156,6 +156,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // connected as, a type a rule only names never entering it. For tests;
   // on the io thread.
   std::size_t peer_types_indexed() const { return connections_by_type_.size(); }
+  // How many connections are accepted and not ended yet, registered or
+  // not. For tests; on the io thread.
+  std::size_t accepted_count() const { return accepted_.size(); }
 
   // Port the acceptor is bound to; meaningful when constructed with port 0.
   unsigned short local_port() const { return acceptor_.local_endpoint().port(); }
@@ -316,6 +319,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   enum Unrouted : unsigned int { NONE_PRESENT, ROUTING_OFF, ALL_FULL };
   Unrouted _unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const;
   std::string _unrouted_text(Unrouted why, std::uint32_t peer_type) const;
+  // How a recording says it: NO_RECIPIENT, NOT_ACCEPTED or QUEUE_FULL.
+  static RoutedMessage::Disposition _unrouted_disposition(Unrouted why);
 
   // What drops_ tells apart, besides the three above: the kinds of line
   // about a message that went nowhere (LogSummary::Kind::reason).

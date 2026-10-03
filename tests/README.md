@@ -16,8 +16,9 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   package any workspace that depends on `@mx` can import: `Cluster(n)`
   starts n multiplexers on ephemeral ports through `--address 127.0.0.1:0
   --port-file`, `spawn(role, lang, ...)` launches a role and collects its
-  Event events, `Role.wait_for(event, **fields)` waits for one,
-  `Role.wait_for_count(event, n)` and `wait_for_total(roles, event, n)`
+  Event events, `Role.wait_for(event, **fields)` waits for one, the
+  first the role ever printed, so a second wait for the same returns at
+  once, `Role.wait_for_count(event, n)` and `wait_for_total(roles, event, n)`
   return the events once n have arrived (a count of another process's
   events, taken right after the client finished, may otherwise miss lines
   still in the pipe), `Cluster.wait_for_peer(type)` and
@@ -148,14 +149,18 @@ that role, so `spawn(role, cfg.lang(role), ...)` runs it like a shipped
 role. The contract is the command line and the events:
 
 - Options: `--mx host:port` for every multiplexer (repeated), `--type N`
-  for the peer type, `--name` for a label the events may carry; then
+  for the peer type, `--name` for a label the events may carry, the
+  role's name (`spawn(..., name=...)`, or one the harness makes); then
   whatever `spawn(..., option=value)` adds, one `--option value` each (see
   `_argv` in `multiplexer/testing/__init__.py`). `--drain-file PATH` is
   passed only with `spawn(..., drain_file=True)`.
 - Events: one `Event` (`multiplexer/events.proto`) per line of
   stdout in protocol buffer text format, `event: "connected" instance_id: 7
   connections: 1`, and any fields of the message. A line that is not an
-  Event is kept as a `stdout` event. The harness waits for `connected`
+  Event is kept as a `stdout` event; one that starts as an Event and does
+  not parse, a string field with bytes that are not UTF-8 say, fails the
+  next wait on the role. A `match` may name any field, `name` too:
+  `wait_for("connected", name="backend-1")`. The harness waits for `connected`
   with `connections` equal to the number of multiplexers; the other names
   are yours.
 - Exit: on `SIGTERM`, with 0 within 10 s, or by the signal if the binary

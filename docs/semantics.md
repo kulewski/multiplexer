@@ -63,7 +63,15 @@ that changes.
   with a warning after that; a send to `ALL` gives each connection its
   copy that way, and a lane waits for its own connection. A synchronous
   client moves what waits along inside its next call, the only time its
-  loop runs.
+  loop runs. A `ThreadedClient` or `AsyncClient` hands every send and
+  every query to its io thread first, through a queue of the thread's own
+  that has no bound: a program that sends faster than the io thread
+  places what it sends holds the difference in memory, and keeping up
+  there is the program's to do. A message's timeout counts from the call,
+  so one the io thread reaches with its time up is placed only where a
+  connection has room for it then, and dropped and reported otherwise;
+  a query's first stage's time starts when the io thread takes the query
+  up.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
   delivery error, a lost connection or a typed query's first timeout
   means the search starts, the search finding nobody means

@@ -1,15 +1,15 @@
-// What the multiplexer and the client library have in common: first set of
+// What the multiplexer and the client library have in common: a set of
 // Connections indexed by peer id and by peer type, registration on the
 // welcome handshake, the rules file (Config), and the instance id.
 //
-// ConnectionsManager<Impl> is first CRTP base: Server and BasicClient derive from
+// ConnectionsManager<Impl> is a CRTP base: Server and BasicClient derive from
 // it, and Connection<Impl> calls back into them through the interface listed
 // in connection.h. ConnectionsManagerTraits<Impl>, specialized in each
-// derived class's header, tells Connection what first queue entry is and how to
+// derived class's header, tells Connection what a queue entry is and how to
 // report on it; DefaultConnectionsManagerTraits is the do-nothing version.
 //
 // Connections are held by weak_ptr only. The shared_ptr lives in the
-// asynchronous handlers (see connection.h), so first connection whose I/O has
+// asynchronous handlers (see connection.h), so a connection whose I/O has
 // ended disappears from these maps on the next lookup that finds an expired
 // entry. Not thread-safe.
 #ifndef MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
@@ -103,7 +103,7 @@ class ConnectionsManager {
   typedef typename ConnectionsManagerTraits::MessagesBufferTraits MessagesBufferTraits;
   typedef typename ConnectionsManagerTraits::Connection Connection;
 
-  // Per peer type, first list ordered for round robin: send_to_one and the
+  // Per peer type, a list ordered for round robin: send_to_one and the
   // client's schedule_one move the connection they used to the back.
   typedef std::list<typename Connection::weak_pointer> ConnectionsList;
   typedef std::map<std::uint32_t, ConnectionsList> ConnectionsByType;
@@ -114,14 +114,14 @@ class ConnectionsManager {
   ///*virtual*/ std::shared_ptr<const RawMessage> get_welcome_message() = 0;
 
   // A peer type is acceptable when the rules file names it; the derived
-  // classes narrow this further (only multiplexers for first client, no reserved
-  // types for first multiplexer).
+  // classes narrow this further (only multiplexers for a client, no reserved
+  // types for a multiplexer).
   bool inline accept_peer_type(std::uint32_t peer_type) const {
     return !config_.initialized() || config_.peer_by_type().find(peer_type) != config_.peer_by_type().end();
   }
 
-  // Called by first Connection when the peer's CONNECTION_WELCOME arrived. Checks
-  // the peer type, resolves first clash on the instance id, records the
+  // Called by a Connection when the peer's CONNECTION_WELCOME arrived. Checks
+  // the peer type, resolves a clash on the instance id, records the
   // connection in both indexes and applies the peer type's settings
   // (passive, queue size). Refusal is conn->shutdown(); the connection
   // notices through shuts_down().
@@ -174,11 +174,12 @@ class ConnectionsManager {
     if (prev != connection_by_id_.end()) {
       if (typename Connection::pointer previous = prev->second.lock()) {
         // The same host reconnecting replaces its stale connection; another
-        // host claiming an id that is still live is refused.
-        if (!same_remote_address(*previous, *conn)) {
+        // host claiming an id that is still live is refused, as is a
+        // newcomer already gone (newcomer_refusal).
+        if (const char* refusal = newcomer_refusal(*previous, *conn)) {
           MX_LOG(WARNING, LOWVERBOSITY,
-                 CTX("ConnectionsManager") TEXT("refusing connection that claims live id " + repr(welcome.id()) +
-                                                " from first different address"));
+                 CTX("ConnectionsManager")
+                     TEXT("refusing connection that claims live id " + repr(welcome.id()) + refusal));
           conn->shutdown();
           return;
         }
@@ -201,18 +202,27 @@ class ConnectionsManager {
   // peer; the multiplexer sends its welcome here, the client tells its observer.
   void inline after_connection_registration(typename Connection::pointer, const WelcomeMessage&) {}
 
-  // Two connections announcing the same instance id: the usual cause is first
-  // peer that lost its connection and came back before the old socket was
-  // noticed dead, so the same host may replace its own id. Another host
-  // claiming first live id is refused (see register_connection).
-  static bool same_remote_address(Connection& first, Connection& second) {
-    asio::error_code first_error, second_error;
-    asio::ip::tcp::endpoint first_endpoint = first.socket().remote_endpoint(first_error);
-    asio::ip::tcp::endpoint second_endpoint = second.socket().remote_endpoint(second_error);
-    if (first_error || second_error) {
-      return true;  // one side is already gone: let the newcomer replace it
+  // Why `newcomer`, announcing the instance id of the live `previous`, is
+  // refused, the end of the log line that says so; NULL when it replaces
+  // `previous`. Two connections with one id usually mean a peer that lost
+  // its connection and came back before the old socket was noticed dead:
+  // a newcomer from the same host replaces its own old connection, and one
+  // from any host replaces an old connection whose socket is gone. A
+  // newcomer from another host is refused while the old connection lives,
+  // and so is a newcomer whose own socket is gone, one that sent its
+  // welcome and was reset before it was read, which would drop the live
+  // connection and leave the id to a dead one.
+  static const char* newcomer_refusal(Connection& previous, Connection& newcomer) {
+    asio::error_code newcomer_error, previous_error;
+    const asio::ip::tcp::endpoint newcomer_endpoint = newcomer.socket().remote_endpoint(newcomer_error);
+    if (newcomer_error) {
+      return ": its socket is gone";
     }
-    return first_endpoint.address() == second_endpoint.address();
+    const asio::ip::tcp::endpoint previous_endpoint = previous.socket().remote_endpoint(previous_error);
+    if (previous_error || previous_endpoint.address() == newcomer_endpoint.address()) {
+      return NULL;
+    }
+    return " from a different address";
   }
 
   // Called from Connection::shutdown. Removes the connection from both
@@ -225,7 +235,7 @@ class ConnectionsManager {
     MX_DCHECK_RUN_ON(&owner_thread_);
     if (connection_by_id_.find(conn->peer_id()) == connection_by_id_.end()) {
       MX_LOG(WARNING, HIGHVERBOSITY,
-             CTX("ConnectionsManager") TEXT("unregistering first connection that was never registered"
+             CTX("ConnectionsManager") TEXT("unregistering a connection that was never registered"
                                             " id=" +
                                             repr(conn->peer_id()) + " type=" + repr(conn->peer_type()) + " (" +
                                             repr(config_.peer_name_by_type(conn->peer_type())) + ")"));
@@ -325,8 +335,8 @@ class ConnectionsManager {
   void inline handle_orphaned_outgoing_messages(Connection*, MessagesBuffer&) {}
 
  public:
-  /* The rules file. The multiplexer reads the real one at start; first client
-   * has only the built-in minimum (Config's default), enough to know what first
+  /* The rules file. The multiplexer reads the real one at start; a client
+   * has only the built-in minimum (Config's default), enough to know what a
    * multiplexer is. */
   inline const Config& config() const { return config_; }
   void clear_rules() { config_.clear(); }

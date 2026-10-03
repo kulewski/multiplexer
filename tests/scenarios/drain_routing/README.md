@@ -2,7 +2,7 @@
 
 What a draining backend still takes is its choice: nothing new by default, events with `all` kept, everything as the last resort when it is alone.
 
-Four runs. A lone backend drains with the default routing while staying
+Five runs. A lone backend drains with the default routing while staying
 registered: the client's next requests fail at once with `OperationFailed`
 rather than waiting for a timeout, although the backend is still there.
 The same backend draining as the last resort keeps getting every request
@@ -35,8 +35,8 @@ sequenceDiagram
 
 ## What is checked
 
-- Strict: after the confirmation, and with the backend still in the multiplexer's peers file, three queries fail with `OperationFailed` within a second each; the backend served only what came before.
-- Last resort: five queries after the confirmation are served, and the backend leaves when its period is up.
+- Strict: after the confirmation, and with the backend still in the multiplexer's peers file, three queries fail with `OperationFailed` at once, each in less than half its timeout, which one that waited for it would take whole; the backend served only what came before.
+- Last resort: five queries after the confirmation are served, and the backend leaves when its period is up, not before it served the five (`--drain-min-handled 5`), so that a client a loaded machine starts late still finds it.
 - Events: the staying backend and the one keeping `all` receive all 200 events, the strict one receives none after its confirmation, and a lone last-resort event backend receives every event sent to it.
 - Two multiplexers: no `acked` while one multiplexer is frozen, `acked` and a clean exit once it is resumed.
 

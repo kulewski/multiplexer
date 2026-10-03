@@ -99,20 +99,23 @@ _process_output: tuple[int, str] | None = None  # outside Bazel: (the owning pid
 
 
 def output_dir() -> str:
-    """Where logs and events go: Bazel's undeclared outputs directory, its
-    temporary directory, or $MX_TEST_OUTPUT when set, all kept; else, outside
-    Bazel, one temporary directory for the process, removed when the process
-    exits, by that process only, not by a forked child."""
-    directory = (
-        os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
-        or os.environ.get("TEST_TMPDIR")
-        or os.environ.get("MX_TEST_OUTPUT")
-    )
+    """Where logs and events go: Bazel's undeclared outputs directory or its
+    temporary directory, which make check-py sets and empties, kept; with
+    $MX_TEST_OUTPUT set, a directory of the process's own in it, kept, so
+    that two test processes, or two runs, never share a file; else one
+    temporary directory for the process, removed when the process exits, by
+    that process only, not by a forked child."""
+    directory = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR") or os.environ.get("TEST_TMPDIR")
     if not directory:
         global _process_output
         if _process_output is None or _process_output[0] != os.getpid():
-            _process_output = (os.getpid(), tempfile.mkdtemp(prefix="mxtest-"))
-            atexit.register(_remove_output, *_process_output)
+            shared = os.environ.get("MX_TEST_OUTPUT")
+            if shared:
+                os.makedirs(shared, exist_ok=True)
+                _process_output = (os.getpid(), tempfile.mkdtemp(prefix="mxtest-", dir=shared))
+            else:
+                _process_output = (os.getpid(), tempfile.mkdtemp(prefix="mxtest-"))
+                atexit.register(_remove_output, *_process_output)
         directory = _process_output[1]
     os.makedirs(directory, exist_ok=True)
     return directory
@@ -123,6 +126,58 @@ def _remove_output(owner: int, directory: str) -> None:
     forked child is the one exiting."""
     if os.getpid() == owner:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+_parent_watch: tuple[int, int] | None = None  # (the owning pid, the read end children are given)
+_write_ends: list[int] = []  # held open for the life of the process that made the pipe
+
+
+def _watch_fd() -> int:
+    """The read end of a pipe whose write end only this process holds,
+    which every multiplexer and role it starts is given as
+    MX_TEST_PARENT_FD: the child sees the pipe's end when this process is
+    gone, however it died, and ends itself as SIGTERM ends it
+    (lib/program.h, tests/roles/py/common.py), so that nothing runs on.
+    Made once per process, a forked child's its own, which also arranges
+    for every child still running at a normal exit to be ended
+    (_end_children_at_exit)."""
+    global _parent_watch
+    if _parent_watch is None or _parent_watch[0] != os.getpid():
+        read_end, write_end = os.pipe()  # neither inherited, but the read end passed by name
+        _write_ends.append(write_end)
+        _parent_watch = (os.getpid(), read_end)
+        atexit.register(_end_children_at_exit, os.getpid())
+    return _parent_watch[1]
+
+
+def _child_env(native: bool) -> dict[str, str]:
+    """child_env() for a multiplexer or a role, with the pipe it watches
+    (_watch_fd), which its Popen passes as pass_fds."""
+    env = child_env(native=native)
+    env["MX_TEST_PARENT_FD"] = str(_watch_fd())
+    return env
+
+
+def _end_children_at_exit(owner: int) -> None:
+    """At exit: every multiplexer and role this process started that still
+    runs is asked to end (SIGTERM, and SIGCONT for a frozen one) and killed
+    when it has not within 5 s: a test that died before its Cluster stopped
+    them, or that ran them without one, leaves nothing running. Not in a
+    forked child, whose parent's children they are."""
+    if os.getpid() != owner:
+        return
+    running = [mx.proc for mx in Mx._all if mx.proc is not None and mx.proc.poll() is None]
+    running += [role.proc for role in Role._all if role.proc.poll() is None]
+    for proc in running:
+        proc.terminate()
+        proc.send_signal(signal.SIGCONT)
+    deadline = time.monotonic() + 5
+    for proc in running:
+        try:
+            proc.wait(max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(5)
 
 
 def cpu_seconds(pid: int) -> float:
@@ -236,6 +291,8 @@ class Mx:
     Cluster to report (unclean_ends()); kill() and expect_exit() say the
     test ends the process itself."""
 
+    _all: ClassVar[list["Mx"]] = []  # every one started, for the end of the process (_end_children_at_exit)
+
     def __init__(
         self,
         index: int,
@@ -280,6 +337,7 @@ class Mx:
         # The processes that did not end cleanly, one line each with the
         # end of the log, until the Cluster takes them (unclean_ends).
         self._unclean: list[str] = []
+        self._started = False  # a first start drops an earlier run's log and recording; a restart keeps them
         stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
         self.log_path = stem + ".log"
         self.port_file = stem + ".port"
@@ -308,15 +366,22 @@ class Mx:
         """Start the process and wait until it has written its port file, so
         that `address` names the port it actually listens on. A peers file
         from an earlier run goes first: a restarted multiplexer has no peers
-        until they reconnect, and a wait must not read the old list."""
+        until they reconnect, and a wait must not read the old list. The
+        first start also drops what an earlier run left in its log and its
+        recording; a restart appends to both, the recording after the new
+        process's header. A process that does not report its port within
+        `timeout` is killed before the RuntimeError."""
         self._note_own_end()  # a process that died on its own is reported, though another replaces it
         self._ended_by, self._exit_expected = None, False
+        first, self._started = not self._started, True
+        if self not in Mx._all:
+            Mx._all.append(self)
         if os.path.exists(self.port_file):
             os.unlink(self.port_file)
         if os.path.exists(self.peers_file):
             os.unlink(self.peers_file)
-        if self.record and os.path.exists(self.record_file):
-            os.unlink(self.record_file)  # a previous test's recording; the file is appended to
+        if self.record and first and os.path.exists(self.record_file):
+            os.unlink(self.record_file)  # an earlier run's; the multiplexer appends to the file
         command = [
             _runnable_mxcontrol(),
             "run_multiplexer",
@@ -345,19 +410,29 @@ class Mx:
         if self.logging_fd is not None:
             command += ["--logging-fd", str(self.logging_fd)]
             passed = (self.logging_fd,)
-        self._log = open(self.log_path, "ab")
+        env = _child_env(native=True)
+        self._log = open(self.log_path, "wb" if first else "ab")
         self.proc = subprocess.Popen(
-            command, stdout=self._log, stderr=self._log, env=child_env(native=True), pass_fds=passed
+            command, stdout=self._log, stderr=self._log, env=env, pass_fds=passed + (_watch_fd(),)
         )
         deadline = time.monotonic() + timeout
         while not os.path.exists(self.port_file):
             if self.proc.poll() is not None:
+                self._ended_by = "itself"
+                self._log.close()
                 raise RuntimeError(
                     "mx%d exited with %d before listening:\n%s"
                     % (self.index, self.proc.returncode, tail(self.log_path))
                 )
             if time.monotonic() > deadline:
-                raise RuntimeError("mx%d did not report its port within %ss" % (self.index, timeout))
+                self._ended_by = "kill"
+                self.proc.kill()
+                self.proc.wait(5)
+                self._log.close()
+                raise RuntimeError(
+                    "mx%d did not report its port within %ss and was killed:\n%s"
+                    % (self.index, timeout, tail(self.log_path))
+                )
             time.sleep(0.02)
         with open(self.port_file) as port_file:
             self.address = port_file.read().strip()
@@ -400,13 +475,16 @@ class Mx:
     def kill(self) -> None:
         """End the process at once (SIGKILL), for scenarios that simulate a
         crash rather than a shutdown; the Cluster does not report the end
-        of a process killed this way. Nothing happens if it is not
-        running."""
+        of a process killed this way. Its peers file goes with it, which
+        the dead process left listing its peers. Nothing happens if it is
+        not running."""
         if self.proc is not None and self.proc.poll() is None:
             self._ended_by = "kill"
             self.proc.kill()
             self.proc.wait(5)
             self._log.close()
+            if os.path.exists(self.peers_file):
+                os.unlink(self.peers_file)
 
     def expect_exit(self) -> None:
         """Say that the test ends the running process itself, by other means
@@ -484,7 +562,10 @@ class Mx:
 
     def connected_peers(self) -> list[tuple[int, str, int]]:
         """(instance id, peer type name, peer type) for every peer registered
-        on this multiplexer right now, from its peers file."""
+        on this multiplexer right now, from its peers file; none while the
+        process is not running, whatever a file it left says."""
+        if not self.running:
+            return []
         try:
             with open(self.peers_file) as peers:
                 lines = peers.read().splitlines()
@@ -634,8 +715,15 @@ class Cluster:
             time.sleep(0.02)
 
     def __enter__(self) -> "Cluster":
-        for multiplexer in self.mx:
-            multiplexer.start()
+        """Start every multiplexer; when one fails, stop those started and
+        raise what it raised, since the block, and so __exit__, never runs."""
+        try:
+            for multiplexer in self.mx:
+                multiplexer.start()
+        except BaseException:
+            for multiplexer in self.mx:
+                multiplexer.stop()
+            raise
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -649,6 +737,13 @@ class Cluster:
             problem = role._stop_checked()
             if problem:
                 unclean.append(problem)
+        # Every role that ended, killed or left to exit too, lets go of its
+        # files; the test keeps what it holds of them, its events.
+        for role in Role._all:
+            if role.proc.poll() is not None:
+                role._reader.join(5)
+                role._stderr.close()
+        Role._all = [role for role in Role._all if role.proc.poll() is None]
         for multiplexer in self.mx:
             multiplexer.stop()
             unclean += multiplexer.unclean_ends()
@@ -703,10 +798,13 @@ class Role:
         # repository ships take --drain-file; a binary of your own gets it
         # only when asked, drain_file=True.
         self.drain_file = os.path.join(output_dir(), self.name + ".drain")
+        if os.path.exists(self.drain_file):
+            os.unlink(self.drain_file)  # an earlier run's, which would have the role leave at once
         if drain_file is None:
             drain_file = role == "backend" and lang in ("py", "cc")
         if drain_file:
             argv = argv + ["--drain-file", self.drain_file]
+        argv = argv + ["--name", self.name]  # the label its events carry, in the role contract
         self.argv = executable + argv
         self.events: list[Event] = []
         self._eof = False
@@ -717,7 +815,11 @@ class Role:
         self.events_path = os.path.join(output_dir(), self.name + ".events.txt")
         self._events_file = open(self.events_path, "w")
         self.proc = subprocess.Popen(
-            self.argv, stdout=subprocess.PIPE, stderr=self._stderr, env=child_env(native=(lang == "cc"))
+            self.argv,
+            stdout=subprocess.PIPE,
+            stderr=self._stderr,
+            env=_child_env(native=(lang == "cc")),
+            pass_fds=(_watch_fd(),),
         )
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
@@ -747,12 +849,26 @@ class Role:
     def parse_event(line: str) -> Event:
         """An Event line as a dict of the fields it set, with Python values
         (ints stay ints); a line that is not an Event becomes a "stdout"
-        event so nothing is lost."""
+        event so nothing is lost, and one that starts as an Event and does
+        not parse, an "unparsed" event with the error, which fails every
+        wait (wait_for, wait_for_count) rather than have the event it was
+        silently missed."""
         try:
             message = text_format.Parse(line, events_pb2.Event())
-        except text_format.ParseError:
+        except text_format.ParseError as error:
+            if line.startswith("event:"):
+                return {"event": "unparsed", "line": line, "error": str(error)}
             return {"event": "stdout", "line": line}
         return {descriptor.name: value for descriptor, value in message.ListFields()}
+
+    def _raise_unparsed(self) -> None:
+        """RuntimeError naming the first Event line that did not parse, if
+        one came; with the condition held."""
+        for event in self.events:
+            if event.get("event") == "unparsed":
+                raise RuntimeError(
+                    "%s printed an event the harness cannot parse (%s): %s" % (self.name, event["error"], event["line"])
+                )
 
     def _read(self) -> None:
         """The reader thread: one Event per stdout line into `events`, also
@@ -768,6 +884,7 @@ class Role:
             with self._cond:
                 self.events.append(event)
                 self._cond.notify_all()
+        self.proc.stdout.close()
         self._events_file.close()
         with self._cond:
             self._eof = True
@@ -778,12 +895,13 @@ class Role:
         """Whether `event` is a `name` event whose fields include `match`."""
         return event.get("event") == name and all(event.get(key) == value for key, value in match.items())
 
-    def events_of(self, name: str, **match: Any) -> list[Event]:
-        """Every `name` event seen so far whose fields include `match`."""
+    def events_of(self, name: str, /, **match: Any) -> list[Event]:
+        """Every `name` event seen so far whose fields include `match`,
+        which may name any field of an Event, `name` included."""
         with self._cond:
             return [event for event in self.events if self._matches(event, name, match)]
 
-    def wait_for_count(self, name: str, count: int, timeout: float = 5, **match: Any) -> list[Event]:
+    def wait_for_count(self, name: str, /, count: int, timeout: float = 5, **match: Any) -> list[Event]:
         """The `name` events whose fields include `match`, once at least
         `count` have arrived, the process has exited, or `timeout` passed.
         For counting this process's events right after another process
@@ -794,19 +912,23 @@ class Role:
         deadline = time.monotonic() + timeout
         with self._cond:
             while True:
+                self._raise_unparsed()
                 found = [event for event in self.events if self._matches(event, name, match)]
                 remaining = deadline - time.monotonic()
                 if len(found) >= count or self._eof or remaining <= 0:
                     return found
                 self._cond.wait(min(remaining, 0.5))
 
-    def wait_for(self, name: str, timeout: float = 15, **match: Any) -> Event:
+    def wait_for(self, name: str, /, timeout: float = 15, **match: Any) -> Event:
         """Block until a `name` event with fields `match` has arrived and
-        return it. Raises if the process exits first or `timeout` passes,
-        with the last events and stderr in the message."""
+        return it: the first such event the role ever printed, so a second
+        wait for the same returns at once; wait_for_count() waits for the
+        next. Raises if the process exits first or `timeout` passes, with
+        the last events and stderr in the message."""
         deadline = time.monotonic() + timeout
         with self._cond:
             while True:
+                self._raise_unparsed()
                 for event in self.events:
                     if self._matches(event, name, match):
                         return event
@@ -896,6 +1018,8 @@ class Role:
         if self.proc.poll() is None:
             self.proc.kill()
             self.proc.wait(5)
+        self._reader.join(5)
+        self._stderr.close()
         return self.proc.returncode
 
     @property
@@ -936,7 +1060,7 @@ def mxcontrol(*args: str, timeout: float = 30, expect: int | None = 0) -> subpro
     return result
 
 
-def wait_for_total(roles: Iterable[Role], name: str, count: int, timeout: float = 5, **match: Any) -> int:
+def wait_for_total(roles: Iterable[Role], name: str, /, count: int, timeout: float = 5, **match: Any) -> int:
     """The number of `name` events with fields `match` across `roles`, once
     at least `count` have arrived or `timeout` passed: Role.wait_for_count
     for a count split between processes in an unknown way, such as queries

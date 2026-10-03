@@ -80,9 +80,16 @@ class RawPeer:
         return mxmsg
 
     def receive_type(self, type_: int, timeout: float = 10) -> MultiplexerMessage:
-        """Skip messages of other types (heartbeats) until one of `type_` arrives."""
+        """Skip messages of other types (heartbeats) until one of `type_`
+        arrives, within `timeout` in all: TimeoutError once it passed,
+        however many other messages came meanwhile, where each one, a
+        heartbeat every 3 s, gave the wait its whole timeout again."""
+        deadline = time.monotonic() + timeout
         while True:
-            mxmsg = self.receive(timeout)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("no message of type %d within %ss" % (type_, timeout))
+            mxmsg = self.receive(left)
             if mxmsg.type == type_:
                 return mxmsg
 

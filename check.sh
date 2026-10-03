@@ -34,7 +34,7 @@ python3 docs/check_mermaid.py          # renders every Mermaid block with mermai
 bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 bazel build --config=clang //...
 bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
-bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test
+bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test //multiplexer:server_release_test
 ./examples/test_all.sh
 # Type checking last, after a build in the default configuration: pyright
 # reads the stubs from bazel-bin (pyproject.toml), and that symlink follows

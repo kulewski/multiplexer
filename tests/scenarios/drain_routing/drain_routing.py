@@ -18,6 +18,8 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
+LONG_TIMEOUT = 60  # seconds, a query's timeout where a check says it failed at once
+
 
 def request_types(backend_events: list) -> list:
     """The request events among a role's events."""
@@ -64,11 +66,15 @@ class DrainRouting(unittest.TestCase):
             self.assertEqual((3, 0), tuple(map(len, self.ask(cluster, 3))))
             backend.request_drain()
             backend.wait_for("acked")
-            responses, errors = self.ask(cluster, 3)
+            # A query that waited for its timeout took all of it; one that
+            # failed at once a small part of it, however loaded the machine.
+            responses, errors = self.ask(cluster, 3, timeout=LONG_TIMEOUT)
             self.assertIn(instance_id, [peer_id for peer_id, _, _ in cluster.mx[0].connected_peers()], "still there")
             self.assertEqual([], responses, "nobody takes the request by the rules, and there is no last resort")
             self.assertEqual(["OperationFailed"] * 3, [error["kind"] for error in errors])
-            self.assertLess(max(error["ms"] for error in errors), 1000, "at once, not after a timeout")
+            self.assertLess(
+                max(error["ms"] for error in errors), LONG_TIMEOUT * 1000 / 2, "at once, not after a timeout"
+            )
             self.assertEqual(3, len(backend.events_of("request")), "it served only what came before")
             backend.kill()  # its rule never lets it leave
 
@@ -88,7 +94,11 @@ class DrainRouting(unittest.TestCase):
 
     def test_a_lone_backend_draining_as_the_last_resort_keeps_serving(self):
         with Cluster(1) as cluster:
-            backend = self.backend(cluster, "last-resort", drain_seconds=3, drain_routing="last_resort")
+            # Not before it served the five: a client that a loaded machine
+            # starts late would otherwise find the period over.
+            backend = self.backend(
+                cluster, "last-resort", drain_seconds=3, drain_routing="last_resort", drain_min_handled=5
+            )
             backend.request_drain()
             backend.wait_for("acked")
             responses, errors = self.ask(cluster, 5)
@@ -99,6 +109,11 @@ class DrainRouting(unittest.TestCase):
     def test_an_event_backend_draining_gets_no_more_events_unless_all_is_kept(self):
         cfg = harness.CONFIG
         with Cluster(1) as cluster:
+            # The two that get every event leave after the last, and are
+            # waited for, not stopped: a SIGTERM can find a Python role
+            # that is leaving on its own past its handler, and kill it. The
+            # strict one, whose share ends when its drain takes effect, is
+            # stopped after the checks.
             strict = spawn(
                 "event_backend",
                 cfg.lang("event_backend"),
@@ -106,7 +121,6 @@ class DrainRouting(unittest.TestCase):
                 type=C.peers.TEST_EVENT_BACKEND,
                 name="strict",
                 drain_file=True,
-                **{"for": 60},
             )
             keeping = spawn(
                 "event_backend",
@@ -116,7 +130,7 @@ class DrainRouting(unittest.TestCase):
                 name="keeping",
                 drain_file=True,
                 drain_routing="all",
-                **{"for": 60},
+                until=200,
             )
             staying = spawn(
                 "event_backend",
@@ -124,7 +138,7 @@ class DrainRouting(unittest.TestCase):
                 mx=cluster.addresses,
                 type=C.peers.TEST_EVENT_BACKEND,
                 name="staying",
-                **{"for": 60},
+                until=200,
             )
             for backend in (strict, keeping, staying):
                 backend.wait_for("connected", connections=1)
@@ -150,8 +164,9 @@ class DrainRouting(unittest.TestCase):
             self.assertEqual([], [event for event in after if event["event"] == "received"], "none after confirmation")
             self.assertLess(len(strict.events_of("received")), 200)
             self.assertIn(acked_keeping, keeping.events)
-            for backend in (strict, keeping, staying):
-                self.assertEqual(0, backend.stop())
+            self.assertEqual(0, strict.stop())
+            for backend in (keeping, staying):
+                self.assertEqual(0, backend.wait(), "it leaves on its own after the last event")
 
     def test_a_lone_event_backend_draining_as_the_last_resort_keeps_receiving(self):
         cfg = harness.CONFIG
@@ -164,7 +179,7 @@ class DrainRouting(unittest.TestCase):
                 name="lone",
                 drain_file=True,
                 drain_routing="last_resort",
-                **{"for": 60},
+                until=50,  # every one: it leaves after the last
             )
             lone.wait_for("connected", connections=1)
             lone.request_drain()
@@ -178,7 +193,7 @@ class DrainRouting(unittest.TestCase):
             )
             self.assertEqual(0, sender.wait(timeout=30))
             self.assertEqual(50, len(lone.wait_for_count("received", 50, timeout=15)), "nobody else could take them")
-            self.assertEqual(0, lone.stop())
+            self.assertEqual(0, lone.wait(), "it leaves on its own after the last event")
 
 
 if __name__ == "__main__":

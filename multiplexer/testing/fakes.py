@@ -32,11 +32,13 @@ Matcher = Callable[[MultiplexerMessage], bool]
 
 
 class Served(Protocol):
-    """What BackendThread drives: connect(), serve_forever(poll=..., drain_seconds=...) until stop()."""
+    """What BackendThread drives: connect(), serve_forever(poll=..., drain_seconds=...) until stop(); close()
+    for one it does not serve."""
 
     def connect(self) -> None: ...
     def serve_forever(self, *, poll: float, drain_seconds: float) -> None: ...
     def stop(self) -> None: ...
+    def close(self) -> None: ...
 
 
 ServedT = TypeVar("ServedT", bound=Served)
@@ -67,12 +69,18 @@ class BackendThread(Generic[ServedT]):
         self.backend: ServedT | None = None
         self.error: BaseException | None = None
         self._built = threading.Event()
+        # stop(), or a start() that ran out of time, came first: a backend
+        # built after it is closed rather than served.
+        self._lock = threading.Lock()
+        self._stop_requested = False
         self._thread = threading.Thread(target=self._run, name=name or "mx-backend", daemon=True)
 
     def start(self, timeout: float = 15) -> "BackendThread":
         """Start the thread and wait until the backend is built and connected."""
         self._thread.start()
         if not self._built.wait(timeout):
+            with self._lock:
+                self._stop_requested = True  # the thread closes what it builds yet
             raise TimeoutError("the backend was not built within %ss" % timeout)
         if self.backend is None:
             assert self.error is not None
@@ -80,18 +88,31 @@ class BackendThread(Generic[ServedT]):
         return self
 
     def _run(self) -> None:
-        """The thread: build, connect, announce, serve, keep what went wrong."""
+        """The thread: build, connect, announce, serve, keep what went wrong.
+        A backend whose connect() raised, or built after stop() or a
+        start() that ran out of time, is closed, its connections with it,
+        rather than left registered and perhaps serving."""
+        backend = None
         try:
             backend = self.factory()
             backend.connect()  # what serve_forever() would do first; a test may send as soon as start() returns
         except BaseException as error:  # reported by start()
             self.error = error
+            if backend is not None:
+                backend.close()
             self._built.set()
             return
-        self.backend = backend
+        with self._lock:
+            stop_requested = self._stop_requested
+            if not stop_requested:
+                self.backend = backend
+        if stop_requested:
+            backend.close()
+            self._built.set()
+            return
         self._built.set()
         try:
-            self.backend.serve_forever(poll=self.poll, drain_seconds=self.drain_seconds)
+            backend.serve_forever(poll=self.poll, drain_seconds=self.drain_seconds)
         except BaseException as error:  # reported by stop()
             self.error = error
 
@@ -101,9 +122,13 @@ class BackendThread(Generic[ServedT]):
         return self._thread.is_alive()
 
     def stop(self, timeout: float = 10) -> None:
-        """Ask the backend to leave, join the thread, re-raise what serving raised."""
-        if self.backend is not None:
-            self.backend.stop()
+        """Ask the backend to leave, join the thread, re-raise what serving
+        raised; a backend not built yet is closed once it is."""
+        with self._lock:
+            self._stop_requested = True
+            backend = self.backend
+        if backend is not None:
+            backend.stop()
         self._thread.join(timeout)
         if self._thread.is_alive():
             raise TimeoutError("the backend thread did not stop within %ss" % timeout)

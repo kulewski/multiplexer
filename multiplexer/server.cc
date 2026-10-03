@@ -201,11 +201,17 @@ void keep_alive(asio::ip::tcp::socket& socket) {
 }
 }  // namespace
 
+// The handler holds the Server weakly, as its timers do: one released
+// after stop() while the loop runs has its aborted accept's handler find
+// nothing, where it touched the freed Server.
 void Server::_start_accept() {
   Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
-  acceptor_.async_accept(new_connection->socket(), [this, new_connection](const asio::error_code& error) {
-    _handle_accept(new_connection, error);
-  });
+  acceptor_.async_accept(new_connection->socket(),
+                         [weak = weak_pointer(shared_from_this()), new_connection](const asio::error_code& error) {
+                           if (pointer self = weak.lock()) {
+                             self->_handle_accept(new_connection, error);
+                           }
+                         });
 }
 
 void Server::_handle_accept(Connection::pointer new_connection, const asio::error_code& error) {
@@ -684,9 +690,25 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
     if (rule.report_delivery_error()) {
       meta_handler.failed(rule, peer_type);
     }
-    _record(meta_handler, 0, peer_type, RoutedMessage::NO_RECIPIENT, rule.report_delivery_error());
+    // One record for the rule, no recipient, saying why it queued the
+    // message nowhere, as its log line does (_unrouted), and whether the
+    // sender was told; whom: ALL recorded each peer it passed over besides.
+    const bool by_any = meta_handler.search || rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY;
+    _record(meta_handler, 0, peer_type, _unrouted_disposition(_unrouted(rule, by_any)), rule.report_delivery_error());
   }
   return scheduled;
+}
+
+RoutedMessage::Disposition Server::_unrouted_disposition(Unrouted why) {
+  switch (why) {
+    case NONE_PRESENT:
+      return RoutedMessage::NO_RECIPIENT;
+    case ROUTING_OFF:
+      return RoutedMessage::NOT_ACCEPTED;
+    case ALL_FULL:
+      break;
+  }
+  return RoutedMessage::QUEUE_FULL;
 }
 
 // whom: ALL. Every live connection of the type that takes the path gets

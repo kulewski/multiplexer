@@ -5,6 +5,7 @@ PYTHON_TEST_REQUEST, WEBSITE is the passive peer type a synchronous client
 needs.
 """
 
+import threading
 import time
 import unittest
 
@@ -134,17 +135,23 @@ class FakePeerTest(unittest.TestCase):
             peer.stop()
 
     def test_direct_send_by_instance_id(self):
-        """TestClient.send(to=) addresses one peer by its instance id."""
+        """TestClient.send(to=) addresses one peer by its instance id. The
+        other gets nothing: a marker sent to it after the direct message,
+        through the one multiplexer, arrives behind anything the direct
+        message would have brought it, so its arrival, not a moment's wait,
+        says the check comes late enough."""
         with (
             FakePeer(self.cluster, peers.PYTHON_TEST_SERVER) as first,
             FakePeer(self.cluster, peers.PYTHON_TEST_SERVER) as second,
             TestClient(self.cluster, peers.WEBSITE) as client,
         ):
             self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER, count=2)
-            assert second.backend is not None
+            assert first.backend is not None and second.backend is not None
             client.send(b"direct", types.PYTHON_TEST_RESPONSE, to=second.backend.conn.instance_id)
             self.assertEqual(b"direct", second.wait_for(types.PYTHON_TEST_RESPONSE)[0].message)
-            self.assertEqual([], first.received)
+            client.send(b"marker", types.PYTHON_TEST_RESPONSE, to=first.backend.conn.instance_id)
+            first.wait_for(types.PYTHON_TEST_RESPONSE, matching=lambda mxmsg: mxmsg.message == b"marker")
+            self.assertEqual([b"marker"], [mxmsg.message for mxmsg in first.received])
 
 
 class ThreadedTestClientTest(unittest.TestCase):
@@ -183,28 +190,37 @@ class ThreadedTestClientTest(unittest.TestCase):
         """The fake answers after the query gave up: the late reply
         references a query the client has seen end, so the client drops it,
         as a production ThreadedClient does and TestClient would not. A
-        follow-up addressed to the client with no `references` arrives."""
+        follow-up addressed to the client with no `references` arrives. The
+        fake holds the request until the query has ended, the query's own
+        deadline being what makes the reply late, and sends the follow-up
+        when a marker comes after it: through the one multiplexer, behind
+        the late reply, so that once the follow-up is there the late reply
+        has had its turn. Ordered, not timed: no sleep stands in for either."""
+        released = threading.Event()
         with (
             FakePeer(self.cluster, peers.PYTHON_TEST_SERVER) as peer,
             ThreadedTestClient(self.cluster, peers.PYTHON_TEST_CLIENT) as client,
         ):
 
-            def slowly(mxmsg):
-                time.sleep(1.5)
+            def answer(mxmsg):
+                """The query: the late reply once the query ended. The marker: the follow-up."""
+                if mxmsg.message == b"ping":
+                    released.wait(30)
+                    return b"too late"
                 backend = peer.backend
                 assert backend is not None
                 backend.send_message(
                     message=b"follow-up", type=types.PYTHON_TEST_RESPONSE, to=mxmsg.from_, references=0, flush=True
                 )
-                return b"too late"
+                return None
 
-            peer.on(types.PYTHON_TEST_REQUEST, slowly, types.PYTHON_TEST_RESPONSE)
+            peer.on(types.PYTHON_TEST_REQUEST, answer, types.PYTHON_TEST_RESPONSE)
             with self.assertRaises((OperationTimedOut, OperationFailed)):
                 client.query(b"ping", types.PYTHON_TEST_REQUEST, timeout=0.3)
+            released.set()
+            client.send(b"marker", types.PYTHON_TEST_REQUEST)
             (follow_up,) = client.wait_for(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"follow-up")
             self.assertEqual(0, follow_up.references)
-            peer.wait_for(types.PYTHON_TEST_REQUEST)
-            time.sleep(0.5)  # the late reply, if it were going to arrive, has had time to
             self.assertEqual(
                 [], client.messages(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"too late")
             )

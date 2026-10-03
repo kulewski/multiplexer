@@ -97,8 +97,10 @@ message RoutedMessage {
     NO_RECIPIENT = 2;   // nobody of the type, or the `to` instance, is connected
     UNKNOWN_TYPE = 3;   // the type has no entry in the rules file
     NO_RULE = 4;        // the type has an entry but no routing rule, and no `to`
-    QUEUE_FULL = 5;     // the recipient's outgoing queue was full
-    NOT_ACCEPTED = 6;   // the recipient takes no message by this path (its Routing), and others of its type did
+    QUEUE_FULL = 5;     // the recipient's outgoing queue was full; in a rule's record, that of every peer
+                        // of the type that takes the message
+    NOT_ACCEPTED = 6;   // the recipient takes no message by this path (its Routing); in a rule's record,
+                        // no peer of the type does
   }
   // The envelope, as received.
   optional uint64 id = 1;
@@ -109,7 +111,10 @@ message RoutedMessage {
   optional string workflow = 6;
   optional uint32 from_peer_type = 7;   // the type of the peer whose connection it arrived on
   // The recipient as routing resolved it: an instance id for a delivery,
-  // the intended instance id or peer type for a failure.
+  // the intended instance id or peer type for a failure. A rule that
+  // queued the message nowhere has a record of its own, recipient 0 and
+  // the peer type, whose disposition says why for the type as a whole:
+  // NO_RECIPIENT, QUEUE_FULL or NOT_ACCEPTED.
   optional uint64 recipient = 8;
   optional uint32 recipient_peer_type = 9;
   optional Disposition disposition = 10;

@@ -168,7 +168,7 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 | `--max-seconds N` | `start`: close the session after this long |
 | `--stay` | `start`: keep running and start the session, once each, on every multiplexer it reaches that is not recording, whatever sessions it had before: a replica that comes back, under its old address or a new one of its name, or one reached later; stop every session on SIGINT or SIGTERM. One whose session of this run ended, at its cap or by a stop, or that refused it, is not started again |
 | `--out FILE` | `tap`: append the records to this file instead of stdout |
-| `--timeout S` | seconds to wait for connections and answers; default 5 |
+| `--timeout S` | seconds to wait for connections and answers; default 5. The wait for answers ends then, however much else still arrives; a multiplexer that has not answered by then is said not to have, exit 1 |
 
 One line per multiplexer comes back, `multiplexer <id>: recording <path>
 (<records> records, <bytes> bytes, label <label>)`, or `not recording`,
@@ -221,7 +221,7 @@ mxcontrol rules reload|status -M HOST:PORT [-M ...] [--timeout S]
 | Option | Effect |
 |---|---|
 | `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach; repeatable; a host name resolves to every address it has, one connection each |
-| `--timeout S` | seconds to wait for connections and answers; default 5 |
+| `--timeout S` | seconds to wait for connections and answers; default 5. The wait for answers ends then, however much else still arrives; a multiplexer that has not answered by then is said not to have, exit 1 |
 
 It connects as the reserved `RULES_CONTROLLER` type, which every
 multiplexer accepts. One line per multiplexer comes back: `multiplexer

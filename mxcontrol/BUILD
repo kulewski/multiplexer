@@ -261,6 +261,18 @@ py_test(
 )
 
 py_test(
+    name = "answer_deadline_test",
+    size = "medium",
+    srcs = ["answer_deadline_test.py"],
+    data = [":mxcontrol"],
+    deps = [
+        "//multiplexer:multiplexer_constants",
+        "//multiplexer:multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "streamlogs_test",
     size = "medium",
     srcs = ["streamlogs_test.py"],

@@ -123,10 +123,15 @@ int RulesControlTask::run() {
   std::set<std::uint64_t> answered;
   const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + mx::from_seconds(timeout_);
   while (answered.size() < expected) {
+    // Past the deadline the wait ends, whatever still arrives: a message
+    // that is no answer keeps nothing going.
     const float remaining = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) {
+      break;
+    }
     std::pair<std::shared_ptr<MultiplexerMessage>, multiplexer::ConnectionWrapper> incoming;
     try {
-      incoming = client.receive_message(remaining > 0 ? remaining : 0.01f);
+      incoming = client.receive_message(remaining);
     } catch (const Client::OperationTimedOut&) {
       break;
     } catch (const Client::NotConnected&) {

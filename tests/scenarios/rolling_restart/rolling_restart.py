@@ -106,7 +106,6 @@ class RollingRestart(unittest.TestCase):
                 cfg.lang("backend"),
                 mx=cluster.addresses,
                 type=C.peers.TEST_EVENT_BACKEND,
-                **{"for": 60},
             )
             backend.wait_for("connected", connections=MULTIPLEXERS)
             sender = spawn(
@@ -118,18 +117,23 @@ class RollingRestart(unittest.TestCase):
                 send=[(C.types.TEST_EVENT, "e%d" % index) for index in range(QUERIES)],
             )
             for multiplexer in cluster.mx:
-                sender.wait_for("sent", timeout=60)
+                seen = len(sender.events_of("sent"))  # a send of its own before each restart
+                self.assertGreater(len(sender.wait_for_count("sent", seen + 1, timeout=60)), seen)
                 multiplexer.restart()
                 time.sleep(BETWEEN_RESTARTS)
             self.assertEqual(0, sender.wait(timeout=120))
             self.assertEqual([], sender.events_of("error"), "no send fails during the rolling restart")
             self.assertEqual(QUERIES, len(sender.events_of("sent")))
             self.assertEqual(MULTIPLEXERS, sender.events_of("done")[0]["connections"])
+            # Events sent through a multiplexer the backend had not rejoined yet
+            # are dropped by design; the vast majority must arrive. They are
+            # waited for before the backend is stopped: the sender's end says
+            # its events were written, not that they were delivered.
+            least = QUERIES - 3 * 3
+            backend.wait_for_count("received", least, timeout=60)
             self.assertEqual(0, backend.stop())
             received = backend.events_of("received")
-            # Events sent through a multiplexer the backend had not rejoined yet
-            # are dropped by design; the vast majority must arrive.
-            self.assertGreaterEqual(len(received), QUERIES - 3 * 3, "received only %d of %d" % (len(received), QUERIES))
+            self.assertGreaterEqual(len(received), least, "received only %d of %d" % (len(received), QUERIES))
 
 
 if __name__ == "__main__":
