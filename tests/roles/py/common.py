@@ -14,6 +14,7 @@ from multiplexer import servers as servers  # re-exported for roles
 from multiplexer import threaded_client as threaded_client  # re-exported for roles
 from multiplexer import threaded_server as threaded_server  # re-exported for roles
 from multiplexer import events_pb2
+from multiplexer.endpoints import Endpoint, parse_endpoint
 from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.mxclient import NotConnected as NotConnected  # re-exported for roles
 from multiplexer.mxclient import OperationFailed as OperationFailed  # re-exported for roles
@@ -81,19 +82,15 @@ def parser(description: str) -> argparse.ArgumentParser:
     with the harness (end_with_the_harness)."""
     end_with_the_harness()
     p = argparse.ArgumentParser(description=description)
-    p.add_argument("--mx", action="append", required=True, help="host:port, repeatable")
+    p.add_argument("--mx", action="append", required=True, help="host:port or [IPv6 address]:port, repeatable")
     p.add_argument("--type", type=int, required=True, help="peer type id")
     p.add_argument("--name", default="", help="label used in events")
     return p
 
 
-def endpoints(args: argparse.Namespace) -> list[tuple[str, int]]:
+def endpoints(args: argparse.Namespace) -> list[Endpoint]:
     """The --mx addresses as (host, port) pairs."""
-    result = []
-    for address in args.mx:
-        host, port = address.rsplit(":", 1)
-        result.append((host, int(port)))
-    return result
+    return [parse_endpoint(address) for address in args.mx]
 
 
 def kv_ints(items: list[str] | None) -> dict[int, int]:

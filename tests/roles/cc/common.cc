@@ -10,6 +10,7 @@
 
 #include "lib/memory.h"
 #include "lib/repr.h"
+#include "multiplexer/endpoint.h"
 
 namespace mxtestroles {
 
@@ -107,7 +108,7 @@ void install_signal_handlers() {
 }
 
 void CommonOptions::add(mx::options::Options& options) {
-  options.add("mx", &mx, "host:port of a multiplexer, repeatable");
+  options.add("mx", &mx, "host:port or [IPv6 address]:port of a multiplexer, repeatable");
   options.add("type", &type, "peer type id").required();
   options.add("name", &name, "", "label used in events");
 }
@@ -115,9 +116,7 @@ void CommonOptions::add(mx::options::Options& options) {
 multiplexer::backend::MultiplexerAddresses CommonOptions::addresses() const {
   multiplexer::backend::MultiplexerAddresses addresses;
   for (size_t index = 0; index < mx.size(); ++index) {
-    std::string::size_type colon = mx[index].rfind(':');
-    addresses.push_back(
-        std::make_pair(mx[index].substr(0, colon), mx::from_string<std::uint16_t>(mx[index].substr(colon + 1))));
+    addresses.push_back(multiplexer::parse_endpoint(mx[index]));
   }
   return addresses;
 }

@@ -5,7 +5,12 @@
 Run one multiplexer per host you want to survive losing, each with the same
 rules file, each on its own address. They do not know about each other. Give
 every backend and every client the full list of addresses; the libraries
-connect to all of them and keep reconnecting to any that go away.
+connect to all of them and keep reconnecting to any that go away. List each
+multiplexer once: two entries that reach one, two spellings of its address
+(`localhost` and `127.0.0.1`) or a balancer in front of several, give a peer
+two connections to it that replace each other at every reconnect, losing
+what was queued on the one replaced; the client logs a WARNING naming the
+two entries the first time.
 
 A request uses one connection and falls back to the others; an event sent
 through one connection reaches every backend if every backend is connected
@@ -84,7 +89,9 @@ spec:
 ```
 
 Peers in the same namespace get `mx-0.mx:1980,mx-1.mx:1980,mx-2.mx:1980`;
-from another namespace the names carry it, `mx-0.mx.<namespace>:1980`. A
+from another namespace the names carry it, `mx-0.mx.<namespace>:1980`. On
+an IPv6 or dual-stack cluster the multiplexer listens on `"[::]:1980"`
+instead, every IPv6 address and, as Linux maps it, every IPv4 one. A
 rolling update of the StatefulSet restarts the pods one at a time and
 waits for each to be ready, which is the procedure under "Restarting one"
 below; with the peers on all three, it costs nothing. Scaling up is one
@@ -106,6 +113,14 @@ recording nobody keeps or a `volumeClaimTemplate` for one somebody does.
 ```
 mxcontrol run_multiplexer --address 10.0.0.1:1980 --rules /etc/mx/deployment.rules
 ```
+
+The address is an IP address and a port; an IPv6 one goes in brackets,
+`--address [2001:db8::1]:1980`, and `[::]:1980` listens on every IPv6
+address and, where the system maps IPv4 onto IPv6 sockets, as Linux does
+by default, on every IPv4 one too ([addresses](mxcontrol.md#addresses)).
+A peer that takes the addresses as text reads them the same way with
+`parse_endpoint()` ([C++](api_cpp.md#addresses-as-text),
+[Python](api_python.md#addresses-as-text)).
 
 It has no other dependencies: no state directory, no companion process. Run
 it under your process supervisor. On `SIGTERM` it stops accepting, sends

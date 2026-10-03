@@ -45,13 +45,13 @@ from multiplexer.mxclient import (
     stamped,
     whole,
 )
+from multiplexer.endpoints import Endpoint as Endpoint  # (host, port), defined there since it has text forms too
 from multiplexer.multiplexer_constants import types
 import multiplexer.protocolbuffers  # the read-only aliases of the sender's former names
 
 DEFAULT_TIMEOUT = _native.DEFAULT_TIMEOUT
 
 
-Endpoint = tuple[str, int]
 QueryResult = "MultiplexerMessage | Exception"
 _ThreadedClientT = TypeVar("_ThreadedClientT", bound="ThreadedClient")
 

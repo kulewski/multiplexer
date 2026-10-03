@@ -160,6 +160,11 @@ INDEX = [
     ),
     ("Registering an mxcontrol subcommand", "mxcontrol/tasks_holder.h", "`REGISTER_MXCONTROL_SUBCOMMAND`"),
     (
+        "An address as text, host:port or [IPv6 address]:port, read and written",
+        "multiplexer/endpoint.h",
+        "`parse_endpoint`, `format_endpoint`; `multiplexer/endpoints.py` for Python; `Task::parse_options` checks -M",
+    ),
+    (
         "mxcontrol reaching every replica behind a name, one back under a new address, and letting an old one go",
         "mxcontrol/every_address.h",
         "`EveryAddress::connect`, `refresh`, `drop_gone`; `tests/fake_dns` moves a name in a test",

@@ -37,8 +37,9 @@ namespace mxcontrol {
 // still under way, whose answer then changes nothing.
 class EveryAddress {
  public:
-  // `addresses` as -M gives them, host:port, an empty host meaning
-  // 127.0.0.1; `client` runs on `io_service`.
+  // `addresses` as -M gives them and Task::parse_options() checked them,
+  // host:port or [IPv6 address]:port, an empty host meaning 127.0.0.1;
+  // `client` runs on `io_service`.
   EveryAddress(multiplexer::Client& client, asio::io_service& io_service, const std::vector<std::string>& addresses);
   ~EveryAddress();  // lets go of a lookup under way
 

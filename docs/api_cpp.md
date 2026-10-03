@@ -100,7 +100,8 @@ client.shutdown();
   that share one service are all driven from one thread, the thread
   that owns them.
 - `connect(host, port, timeout = 10)` connects, performs the handshake and
-  returns a `ConnectionWrapper`. `host` is an address or a name; a name is
+  returns a `ConnectionWrapper`. `host` is an address, IPv4 or IPv6
+  without brackets (`::1`), or a name; a name is
   resolved inside the library, on every attempt, and each address it has
   is tried in turn, for 5 s at most (`CONNECT_ATTEMPT_SECONDS`), so that
   one that drops the attempt holds up the others no longer, and a
@@ -826,6 +827,23 @@ and type, and the rest counted in a line a second. The id and the type are
 those the message's frame was made with, a whole message's own or those
 given with its bytes: the library never parses a message for them. A message the library wrote is not dropped, whatever happens
 to it next: written means the kernel's buffer ([semantics](semantics.md)).
+
+## Addresses as text
+
+A program that reads multiplexer addresses from its command line or its
+configuration reads them with `multiplexer::parse_endpoint()` and writes
+them with `multiplexer::format_endpoint()`, in
+[multiplexer/endpoint.h](../multiplexer/endpoint.h), Bazel target
+`@mx//multiplexer:endpoint`: `host:port`, or `[address]:port` for an IPv6
+address, the way [mxcontrol](mxcontrol.md#addresses) and the Python
+library take them. `parse_endpoint(text)` returns the `(host, port)` pair
+`connect()` takes, an IPv6 address without its brackets, the host empty
+for `:1980` for the caller to fill in; `parse_endpoint(text, 1980)` lets
+the port be left out. A malformed text throws `std::invalid_argument`
+saying why: an IPv6 address out of brackets, since `::1:1980` could be
+either, brackets around anything else, a port that is not a number from
+0 to 65535. `format_endpoint(host, port)` puts an IPv6 address in
+brackets.
 
 ## Threads
 

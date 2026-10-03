@@ -17,6 +17,20 @@ mxcontrol <general options> <command> <command options>
 `mxcontrol help` lists the commands; `mxcontrol help <command>` prints that
 command's options. Every command exits with 0 on success.
 
+## Addresses
+
+Every command writes an address the same way: `HOST:PORT`, or
+`[ADDRESS]:PORT` for an IPv6 address, as URLs have it, since the address
+has colons of its own: `127.0.0.1:1980`, `mx.svc:1980`, `[::1]:1980`. An
+IPv6 address out of brackets is refused rather than guessed at:
+`::1:1980` could be either. So are brackets around anything else and a
+port that is not a number from 0 to 65535. A malformed address is a
+malformed command line, as an unknown option is: the command exits with 1
+and says why, before it listens or connects to anything. The port file
+and the log lines write an address the same way; the client libraries
+read and write it with `parse_endpoint()` and `format_endpoint()`
+([C++](api_cpp.md#addresses-as-text), [Python](api_python.md#addresses-as-text)).
+
 ## General options
 
 | Option | Effect |
@@ -43,8 +57,8 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 |---|---|---|
 | `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md), read at start and again whenever it changes |
 | `--rules-check-interval S` | 2 | seconds between reads of the rules file, 0.01 at least, a shorter one refused as a malformed command line; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
-| `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on; `HOST` alone keeps port 1980 |
-| `--port-file PATH` | none | after binding, write `host:port` to this file, atomically |
+| `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on, `[ADDRESS]:PORT` for an IPv6 one ([addresses](#addresses)); `HOST` or `[ADDRESS]` alone keeps port 1980 |
+| `--port-file PATH` | none | after binding, write the address with the port bound, `host:port` or `[address]:port`, to this file, atomically |
 | `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, written at start and rewritten atomically after a change, at most once every 10 ms |
 | `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording) |
 | `--record-payload-bytes N` | 0 (whole payloads) | keep only the first N bytes of each recorded payload |
@@ -52,10 +66,15 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--allow-tap` | off | let peers receive every record over their connection |
 | `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0 stops at once |
 
-`--address` takes an IP address, not a host name. With port 0 the system picks
-a free port; together with `--port-file` that lets a test or a supervisor
-learn where the multiplexer listens without guessing, which is how the
-integration tests start theirs.
+`--address` takes an IP address, not a host name, which would leave the
+multiplexer listening on one of the addresses the name has. `0.0.0.0`
+listens on every IPv4 address; `[::]` on every IPv6 one and, where the
+system maps IPv4 onto an IPv6 socket, as Linux does unless
+`net.ipv6.bindv6only` is set, on every IPv4 one too, one socket for both
+([ipv6_dual_stack](../tests/scenarios/ipv6_dual_stack/README.md)). With
+port 0 the system picks a free port; together with `--port-file` that
+lets a test or a supervisor learn where the multiplexer listens without
+guessing, which is how the integration tests start theirs.
 
 The multiplexer runs until it gets `SIGINT` or `SIGTERM`. Then it closes
 the listening socket, and every connection that has not introduced itself
@@ -160,7 +179,7 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 
 | Option | Effect |
 |---|---|
-| `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach; repeatable; a host name resolves to every address it has, one connection each |
+| `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach ([addresses](#addresses)); repeatable; an empty host means `127.0.0.1`; a host name resolves to every address it has, one connection each |
 | `--type N` | the peer type to connect as; default the reserved `RECORDING_CONTROLLER`, which needs no rules entry |
 | `--label NAME` | `start`: the session's name in the file name; letters, digits, `-`, `_`; default `session` |
 | `--payload-bytes N` | `start`, `tap`: keep only the first N bytes of each payload; 0 keeps all |
@@ -222,7 +241,7 @@ mxcontrol rules reload|status -M HOST:PORT [-M ...] [--timeout S]
 
 | Option | Effect |
 |---|---|
-| `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach; repeatable; a host name resolves to every address it has, one connection each |
+| `-M`, `--multiplexer HOST:PORT` | a multiplexer to reach ([addresses](#addresses)); repeatable; an empty host means `127.0.0.1`; a host name resolves to every address it has, one connection each |
 | `--timeout S` | seconds to wait for connections and answers; default 5. The wait for answers ends then, however much else still arrives; a multiplexer that has not answered by then is said not to have, exit 1 |
 
 It connects as the reserved `RULES_CONTROLLER` type, which every
@@ -251,11 +270,11 @@ mxcontrol streamlogs [--multiplexer [HOST]:PORT ...] [--chunksize N] [--timeout 
 Reads a binary log stream, as written by `--logging-file`, from stdin, and
 sends it as `LOGS_STREAM` messages through every listed multiplexer, `N`
 entries per message, 32 by default and 0 for everything in one message. It
-connects as the peer type `LOG_STREAMER`. `--multiplexer` may be repeated;
-the host defaults to `127.0.0.1`. It exits with 0 at the end of stdin,
-however long the stream; one that breaks off, an entry cut short or
-garbled, is sent up to there, logged as an error, and the command exits
-with 1.
+connects as the peer type `LOG_STREAMER`. `--multiplexer` may be repeated
+([addresses](#addresses)); an empty host means `127.0.0.1`. It exits with
+0 at the end of stdin, however long the stream; one that breaks off, an
+entry cut short or garbled, is sent up to there, logged as an error, and
+the command exits with 1.
 
 It never waits for a multiplexer, so that the program whose log it reads,
 which blocks writing into the pipe once nobody reads it, never waits

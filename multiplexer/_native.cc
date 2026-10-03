@@ -40,6 +40,7 @@ using Callable = pybind11::function;
 #include "lib/type_utils.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/client.h"
+#include "multiplexer/endpoint.h"
 #include "multiplexer/threaded_client.h"
 
 namespace multiplexer {
@@ -656,7 +657,26 @@ struct PythonThreadedClient {
 static void test_connection_wrapper(multiplexer::ConnectionWrapper /*wrap*/) {}
 
 PYBIND11_MODULE(_native, module) {
-  module.def("should_log", &mx::logging::impl::should_log, pybind11::arg("level"), pybind11::arg("verbosity"));
+  // multiplexer/endpoint.h, for multiplexer/endpoints.py; std::invalid_argument arrives as ValueError.
+  module.def("parse_endpoint", &multiplexer::parse_endpoint, pybind11::arg("text"),
+             pybind11::arg("default_port") = pybind11::none());
+  module.def("format_endpoint", &multiplexer::format_endpoint, pybind11::arg("host"), pybind11::arg("port"));
+  // A Python level or verbosity is any int: one past the verbosity table,
+  // which MX_LOG's constants never are, would read past it in a release
+  // build, where impl::should_log's check is compiled out. ValueError
+  // instead, which mxlog.should_log() turns into False, saying why.
+  module.def(
+      "should_log",
+      [](unsigned int level, unsigned int verbosity) {
+        if (level > mx::logging::consts::MAX_LEVEL || verbosity > mx::logging::consts::MAX_VERBOSITY) {
+          throw pybind11::value_error(
+              "level " + std::to_string(level) + ", verbosity " + std::to_string(verbosity) +
+              ": a level is DEBUG to CRITICAL, 1 to " + std::to_string(mx::logging::consts::MAX_LEVEL) +
+              ", a verbosity ZEROVERBOSITY to CHATTERBOX, 0 to " + std::to_string(mx::logging::consts::MAX_VERBOSITY));
+        }
+        return mx::logging::impl::should_log(level, verbosity);
+      },
+      pybind11::arg("level"), pybind11::arg("verbosity"));
   module.def("current_timestamp", &mx::logging::impl::current_timestamp);
   module.def("set_logging_file", &mx::logging::set_logging_file, pybind11::arg("path"));
   module.def(

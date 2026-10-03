@@ -54,7 +54,7 @@ struct CommonOptions {
 
   void add(mx::options::Options& options);
   std::unique_ptr<Client> connect() const;
-  // The --mx addresses as (host, port) pairs, for a backend that connects itself.
+  // The --mx addresses as (host, port) pairs (multiplexer/endpoint.h), for a role that connects by hand.
   multiplexer::backend::MultiplexerAddresses addresses() const;
   // The "connected" event with instance_id, connections and name filled in.
   Event connected_event(Client& client) const;

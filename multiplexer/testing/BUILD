@@ -17,6 +17,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//multiplexer:clients",
+        "//multiplexer:endpoints",
         "//multiplexer:events_py_proto",
         "//multiplexer:multiplexer_constants",
         "//multiplexer:multiplexer_py_proto",

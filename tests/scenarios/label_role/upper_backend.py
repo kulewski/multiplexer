@@ -12,6 +12,7 @@ import sys
 
 from google.protobuf import text_format
 
+from multiplexer.endpoints import parse_endpoint
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer import events_pb2
 from tests.testing_constants import types
@@ -38,7 +39,7 @@ def main() -> None:
     parser.add_argument("--type", type=int, required=True)
     parser.add_argument("--name", default="")
     args = parser.parse_args()
-    addresses = [(host, int(port)) for host, port in (address.rsplit(":", 1) for address in args.mx)]
+    addresses = [parse_endpoint(address) for address in args.mx]
     backend = Upper(addresses, type=args.type)
     signal.signal(signal.SIGTERM, lambda *_: backend.stop())
     backend.connect()  # the harness waits for this event's connection count before it sends

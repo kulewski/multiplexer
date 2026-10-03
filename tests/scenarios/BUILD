@@ -146,6 +146,19 @@ LANGS = [
     ]
 ]
 
+# A multiplexer on [::]: a backend over IPv6, clients over IPv4 and IPv6.
+[
+    mx_integration_test(
+        name = "ipv6_dual_stack_%s" % lang,
+        roles = {
+            "backend": lang,
+            "client": lang,
+        },
+        scenario = "ipv6_dual_stack/ipv6_dual_stack.py",
+    )
+    for lang in LANGS
+]
+
 [
     mx_integration_test(
         name = "event_all_backends_%s_%s" % (event_backend, event_client),
@@ -560,6 +573,7 @@ py_binary(
     srcs = ["label_role/upper_backend.py"],
     main = "label_role/upper_backend.py",
     deps = [
+        "//multiplexer:endpoints",
         "//multiplexer:servers",
         "//multiplexer/testing",
         "//tests:testing_constants",

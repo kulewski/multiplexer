@@ -148,7 +148,9 @@ A value in `roles` may be the label of a binary instead of `"py"` or
 that role, so `spawn(role, cfg.lang(role), ...)` runs it like a shipped
 role. The contract is the command line and the events:
 
-- Options: `--mx host:port` for every multiplexer (repeated), `--type N`
+- Options: `--mx host:port` for every multiplexer (repeated), an IPv6
+  address in brackets, `[::1]:1980`, as `parse_endpoint()` reads it
+  (`multiplexer.endpoints`, `multiplexer/endpoint.h`), `--type N`
   for the peer type, `--name` for a label the events may carry, the
   role's name (`spawn(..., name=...)`, or one the harness makes); then
   whatever `spawn(..., option=value)` adds, one `--option value` each (see
@@ -177,7 +179,7 @@ shipped client roles.
 
 | Role | Options | Events |
 |---|---|---|
-| all | `--mx host:port` (repeatable), `--type N`, `--name` | `connected {instance_id, connections}` |
+| all | `--mx host:port` or `--mx [IPv6 address]:port` (repeatable), `--type N`, `--name` | `connected {instance_id, connections}` |
 | `backend` | `--serves REQ=RESP`, `--behaviour upper\|echo\|drop\|raise\|sleep:MS`, `--crash-after N`, `--memory-every N`, `--drain-seconds S`, `--drain-file PATH` (the harness passes one; `Role.request_drain()` creates it), `--drain-min-handled N`, `--drain-routing FLAGS` (the `Routing` flags kept on while draining, a comma-separated subset of `any`, `all`, `last_resort`; none by default), `--threaded` (the same on `BaseThreadedMultiplexerServer`, the handler on a worker thread), `--exit-on-exception` | `request {type, id, sender, size}`, `crash`, `draining {drain_seconds}`, `acked {ms}` (every multiplexer has the drain routing in effect), `handler_exception {kind, handled}`, `stopped {handled}` |
 | `client` | `--query TYPE:payload`, `--count`, `--parallel`, `--timeout`, `--payload-size`, `--sleep-before`, `--sleep-between`, `--threaded`, `--async N`, `--workers N`, `--memory-every N` | `response {round, index, type, sender, payload\|size, ms}`, `error {kind, ms}`, `done` |
 | `event_client` | `--send TYPE:payload`, `--to ID`, `--all`, `--no-flush`, `--interval`, `--linger` | `sent {type, id, ...}`, `done` |

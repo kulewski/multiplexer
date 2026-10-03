@@ -16,6 +16,7 @@
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
 #include "lib/seconds.h"
+#include "multiplexer/endpoint.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/outbox.h"
 
@@ -281,6 +282,31 @@ void BasicClient::connection_closed(Connection* conn) {
 // reads on to its multiplexer's end, closed by shutdown() or disconnect()
 // or after a failed write, joins those closing: the loop runs it while a
 // shutdown waits for them, and a new owner thread takes it with them.
+void BasicClient::register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  // Multiplexer ids are random, one per process: a target whose last
+  // welcome came from the same id reaches this multiplexer too. Its
+  // connection is often gone already, the multiplexer having replaced it
+  // with this one as this one welcomed, and comes back at its reconnect.
+  const Target& target = conn->managers_private_data().target;
+  for (const std::pair<const Target, std::uint64_t>& reached : reached_by_target_) {
+    if (reached.second != welcome.id() || reached.first == target) {
+      continue;
+    }
+    const std::pair<Target, Target> said(std::minmax(reached.first, target));
+    if (one_multiplexer_said_.insert(said).second) {
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("BasicClient") TEXT("multiplexer " + repr(welcome.id()) + " is reached through two targets, " +
+                                     format_endpoint(said.first.first, said.first.second) + " and " +
+                                     format_endpoint(said.second.first, said.second.second) +
+                                     ": list it once; while both are listed, their connections replace or refuse "
+                                     "each other at every reconnect, and what was queued on one replaced is lost"));
+    }
+  }
+  reached_by_target_[target] = welcome.id();
+  Base::register_connection(conn, welcome);
+}
+
 void BasicClient::connection_destroyed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
@@ -304,7 +330,7 @@ void BasicClient::connection_destroyed(Connection* conn) {
     // observer runs, so that nothing the observer does can skip it
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("BasicClient") TEXT("scheduling reconnecting after " + repr(AUTO_RECONNECT_TIME) + " seconds to " +
-                                   target.first + ":" + repr(target.second)));
+                                   format_endpoint(target.first, target.second)));
     TimerPointer timer(new Timer(io_service_, std::chrono::seconds(AUTO_RECONNECT_TIME)));
     reconnect_timers_.emplace(timer, target);
     timer->async_wait([self = this->shared_from_this(), timer, target](const asio::error_code& error) {
@@ -336,7 +362,7 @@ void BasicClient::reconnect_after_timeout(TimerPointer timer, Target target, con
     }
   } else {
     MX_LOG(ERROR, HIGHVERBOSITY,
-           CTX("BasicClient") TEXT("auto reconnect to " + target.first + ":" + repr(target.second) +
+           CTX("BasicClient") TEXT("auto reconnect to " + format_endpoint(target.first, target.second) +
                                    " cancelled by error " + repr(error)));
   }
 }
@@ -458,9 +484,10 @@ bool BasicClient::_disconnect(const Target& target) {
     had = true;
   }
   first_connection_over_.erase(target);  // a later connect() is a first connection again
+  reached_by_target_.erase(target);
   if (had) {
     MX_LOG(INFO, MEDIUMVERBOSITY,
-           CTX("BasicClient") TEXT("disconnecting from " + target.first + ":" + repr(target.second)));
+           CTX("BasicClient") TEXT("disconnecting from " + format_endpoint(target.first, target.second)));
   }
   if (conn) {
     conn->close_gracefully(CLOSE_READ_SECONDS);  // among those closing then, see connection_destroyed
@@ -495,7 +522,7 @@ void BasicClient::_resolved(Connection::pointer conn, const asio::error_code& er
   const Target& target = conn->managers_private_data().target;
   if (error || candidates.empty()) {
     MX_LOG(WARNING, MEDIUMVERBOSITY,
-           CTX("BasicClient") TEXT(target.first + ":" + repr(target.second) + " does not resolve" +
+           CTX("BasicClient") TEXT(format_endpoint(target.first, target.second) + " does not resolve" +
                                    (error ? ": " + error.message() : std::string()) + "; trying again later"));
     conn->shutdown();  // arms the reconnect timer, which resolves again
     return;

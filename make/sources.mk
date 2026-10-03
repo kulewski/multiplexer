@@ -21,6 +21,7 @@ LIB_SRCS := \
   multiplexer/client.cc \
   multiplexer/connections_manager.cc \
   multiplexer/descriptor_table.cc \
+  multiplexer/endpoint.cc \
   multiplexer/io/raw_message.cc \
   multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
@@ -106,6 +107,7 @@ HEADERS := \
   multiplexer/constants_writer.h \
   multiplexer/defaults.h \
   multiplexer/descriptor_table.h \
+  multiplexer/endpoint.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
   multiplexer/log_summary.h \
@@ -135,6 +137,7 @@ PROTOS := \
 PY_FILES := \
   multiplexer/aio.py \
   multiplexer/clients.py \
+  multiplexer/endpoints.py \
   multiplexer/mxclient.py \
   multiplexer/mxcontrol.py \
   multiplexer/mxlog/__init__.py \
@@ -181,6 +184,8 @@ CC_TEST_SRCS := \
   multiplexer/disconnected_record_test.cc \
   multiplexer/drop_names_test.cc \
   multiplexer/duplicate_after_drop_test.cc \
+  multiplexer/duplicate_target_test.cc \
+  multiplexer/endpoint_test.cc \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
@@ -215,6 +220,7 @@ PY_TEST_FILES := \
   multiplexer/drop_lines_test.py \
   multiplexer/drop_reports_test.py \
   multiplexer/end_calls_test.py \
+  multiplexer/endpoints_test.py \
   multiplexer/forced_frames_test.py \
   multiplexer/foreign_lane_test.py \
   multiplexer/fork_test.py \

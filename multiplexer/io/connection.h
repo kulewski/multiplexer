@@ -32,6 +32,7 @@
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <exception>
 #include <list>
@@ -587,12 +588,26 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         [self = this->shared_from_this()](const asio::error_code& error) { self->_require_heartbit_soon(error); });
   }
 
+  // Whether the drop's wait that just ran out is one to act on: the timer
+  // still due, not re-armed by a frame read since, and the peer active.
+  // A frame read in the same pass of the loop as the wait's expiry, ahead
+  // of this handler, re-arms the timer, and that cannot take back a wait
+  // the pass already collected, nor can the cancel that turning passive
+  // makes: the wait then runs as if it had come due. A synchronous client,
+  // which runs the loop only inside its calls, met that at every call
+  // after a stall of its multiplexer, whose frames since then waited in
+  // the socket and were read in the pass that ran the expired wait, and it
+  // shut down a connection that was fine.
+  bool _drop_wait_due() const {
+    return !is_passive_ && require_heartbit_timer_.expiry() <= std::chrono::steady_clock::now();
+  }
+
   void _require_heartbit_soon(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
     // First phase of the drop: nothing arrived for the prepare interval. Wait
     // once more before really closing, so that a short stall on a busy peer
     // does not cost it the connection.
-    if (error == asio::error::operation_aborted || shuts_down_) {
+    if (error == asio::error::operation_aborted || shuts_down_ || !_drop_wait_due()) {
       return;
     }
     _do_later(require_heartbit_timer_, NO_HEARTBIT_SO_REALLY_DROP_INTERVAL,
@@ -601,7 +616,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
   void _require_heartbit_now(const asio::error_code& error) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == asio::error::operation_aborted || shuts_down_) {
+    if (error == asio::error::operation_aborted || shuts_down_ || !_drop_wait_due()) {
       return;
     }
     // TODO logger.error << "no received messages for " <<

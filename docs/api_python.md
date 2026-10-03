@@ -229,7 +229,9 @@ the time and their peer types are ordinary ones.
   the client sent are not counted. Kept after `shutdown()`, so that a
   server's close says what it dropped, as in C++.
 - `connect((host, port), timeout=10)` connects to one more multiplexer as
-  the constructor does and returns its `ConnectionWrapper`, live or not:
+  the constructor does and returns its `ConnectionWrapper`, live or not
+  (an IPv6 address without brackets, `("::1", 1980)`, as everywhere a
+  `(host, port)` is taken; [addresses as text](#addresses-as-text)):
   the library goes on trying. A multiplexer the client has a connection
   to, live or on its way, keeps it: connecting to it again returns that
   connection. `disconnect((host, port))` drops one given
@@ -1081,6 +1083,31 @@ second. A message the library wrote is not dropped, whatever happens to it
 next: written means the kernel's buffer, and a multiplexer that dies before
 reading it takes it along unreported ([semantics](semantics.md)).
 
+## Addresses as text
+
+A program that reads multiplexer addresses from its command line or its
+configuration reads them with `parse_endpoint()` and writes them with
+`format_endpoint()`, from `multiplexer.endpoints`: `host:port`, or
+`[address]:port` for an IPv6 address, the way [mxcontrol](mxcontrol.md#addresses)
+and the C++ library take them; the two functions are the C++ ones. `Endpoint`
+is the `(host, port)` every client and server class takes, also importable
+from `multiplexer.threaded_client`, as before.
+
+```python
+from multiplexer.endpoints import format_endpoint, parse_endpoint
+
+endpoints = [parse_endpoint(text) for text in os.environ["MX_ADDRESSES"].split(",")]
+parse_endpoint("[::1]:1980")         # ("::1", 1980): no brackets, as connect() takes it
+parse_endpoint("10.0.0.1", 1980)     # ("10.0.0.1", 1980): the port may be left out
+format_endpoint(("::1", 1980))       # "[::1]:1980"
+```
+
+`parse_endpoint(text, default_port=None)` returns the host empty for
+`:1980`, for the caller to fill in, and refuses a malformed text with
+`ValueError` saying why: an IPv6 address out of brackets, since `::1:1980`
+could be either, brackets around anything else, a port that is not a
+number from 0 to 65535, a missing port without `default_port`.
+
 ## Lifetimes
 
 Every client and server holds connections, most an io thread too, and
@@ -1250,7 +1277,7 @@ class SearchTest(unittest.TestCase):
 ```
 
 - `Cluster(count, rules, record=False, record_payload_bytes=0,
-  rules_check_interval=None, drain_seconds=None)` starts `count`
+  rules_check_interval=None, drain_seconds=None, host="127.0.0.1")` starts `count`
   multiplexers on entering and, on leaving, stops every role process
   still running and then the multiplexers; the in-process peers,
   `FakePeer`, `BackendThread`, `TestClient` and `ThreadedTestClient`,
@@ -1276,7 +1303,10 @@ class SearchTest(unittest.TestCase):
   `rules_check_interval`, the seconds between their reads of it (their
   default when `None`, 0 never), and `Mx.reload_rules()` sends one
   `SIGHUP` instead; `drain_seconds` is their `--drain-seconds`, how long a
-  stop goes on sending what is queued (their default when `None`). The
+  stop goes on sending what is queued (their default when `None`); `host`
+  is the address they listen on, each on a port of its own: `"::1"` for
+  IPv6, `"::"` for every address, IPv6 and, as Linux maps it by default,
+  IPv4. The
   multiplexers run the binary `MXCONTROL` names when
   it is set, else the `mxcontrol` that came with the package, the wheel's
   or, under Bazel, `@mx//mxcontrol` in the runfiles; PATH is never

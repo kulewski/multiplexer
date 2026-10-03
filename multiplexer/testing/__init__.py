@@ -39,6 +39,7 @@ from typing import Any, Callable, ClassVar, Iterable
 from google.protobuf import text_format
 
 from multiplexer import events_pb2
+from multiplexer.endpoints import Endpoint, format_endpoint, parse_endpoint
 from multiplexer.mxcontrol import binary_path as _packaged_mxcontrol
 
 Event = dict[str, Any]
@@ -294,9 +295,12 @@ CONFIG: Config | None = None
 
 class Mx:
     """One multiplexer process, started on an ephemeral port unless told
-    otherwise. Its log goes to <prefix>mx<index>.log in the output
-    directory; a Cluster gives its multiplexers a prefix of their own,
-    c<n>-, so that two clusters alive at once never share a file.
+    otherwise: `address` is as run_multiplexer's --address takes it,
+    host:port or [IPv6 address]:port, and once started, as the process
+    reported it in its port file, the real port in it. Its log goes to
+    <prefix>mx<index>.log in the output directory; a Cluster gives its
+    multiplexers a prefix of their own, c<n>-, so that two clusters alive
+    at once never share a file.
 
     Every process it runs is expected to end at a stop() with exit code 0.
     One that ends otherwise, exits on its own or has to be killed when its
@@ -362,18 +366,18 @@ class Mx:
 
     @property
     def host(self) -> str:
-        """The host part of the address."""
-        return self.address.rsplit(":", 1)[0]
+        """The host part of the address, an IPv6 one without its brackets."""
+        return parse_endpoint(self.address)[0]
 
     @property
     def port(self) -> int:
         """The port part of the address; the real port once started."""
-        return int(self.address.rsplit(":", 1)[1])
+        return parse_endpoint(self.address)[1]
 
     @property
-    def endpoint(self) -> tuple[str, int]:
+    def endpoint(self) -> Endpoint:
         """(host, port), as the client libraries take it."""
-        return (self.host, self.port)
+        return parse_endpoint(self.address)
 
     def start(self, timeout: float = 15) -> "Mx":
         """Start the process and wait until it has written its port file, so
@@ -629,6 +633,12 @@ class Mx:
         return samples
 
 
+def _addresses(host: str) -> set[str]:
+    """The addresses `host` stands for: itself for an address, IPv4 or
+    IPv6, those it resolves to for a name."""
+    return {str(info[4][0]) for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)}
+
+
 class Cluster:
     """`count` independent multiplexers with the same rules file, which the
     test names: `rules` is a path, `runfile("my.rules")` under Bazel for
@@ -639,7 +649,10 @@ class Cluster:
     multiplexer reads the file again for a change (its default when None,
     0 never), for a scenario that edits a copy of it; `drain_seconds`,
     how long a stop goes on sending what is queued (its default when
-    None, 0 at once). Use as a context
+    None, 0 at once); `host`, the address every multiplexer listens on, on
+    a port of its own: 127.0.0.1 unless told, "::1" for IPv6, or "::" for
+    every address, IPv6 and, where the system maps it, as Linux does by
+    default, IPv4. Use as a context
     manager: entering starts the multiplexers, leaving stops every role
     that is still running and then them. The in-process peers of fakes.py
     are the test's to stop, inside the cluster's block, since they would
@@ -670,6 +683,7 @@ class Cluster:
         remote_recording: bool = False,
         rules_check_interval: float | None = None,
         drain_seconds: float | None = None,
+        host: str = "127.0.0.1",
     ):
         if rules is None:
             if CONFIG is None or not CONFIG.rules:
@@ -689,6 +703,7 @@ class Cluster:
             Mx(
                 index,
                 rules,
+                address=format_endpoint((host, 0)),
                 memory_log_every=memory_log_every,
                 record=record,
                 record_payload_bytes=record_payload_bytes,
@@ -793,18 +808,19 @@ class Cluster:
         """Every multiplexer's host:port, as the roles' --mx takes it."""
         return [multiplexer.address for multiplexer in self.mx]
 
-    def multiplexer_at(self, endpoint: tuple[str, int]) -> Mx:
+    def multiplexer_at(self, endpoint: Endpoint) -> Mx:
         """The Mx listening on `endpoint`, a (host, port) as a ConnectionWrapper
-        reports it; KeyError when none of this cluster does."""
+        reports it; KeyError when none of this cluster does. One listening
+        on every address, 0.0.0.0 or ::, listens on any host's."""
         for multiplexer in self.mx:
-            if multiplexer.port == endpoint[1] and socket.gethostbyname(multiplexer.host) == socket.gethostbyname(
-                endpoint[0]
+            if multiplexer.port == endpoint[1] and (
+                multiplexer.host in ("0.0.0.0", "::") or _addresses(multiplexer.host) & _addresses(endpoint[0])
             ):
                 return multiplexer
-        raise KeyError("no multiplexer of this cluster listens on %s:%s" % endpoint)
+        raise KeyError("no multiplexer of this cluster listens on %s" % format_endpoint(endpoint))
 
     @property
-    def endpoints(self) -> list[tuple[str, int]]:
+    def endpoints(self) -> list[Endpoint]:
         """Every multiplexer's (host, port), as the client libraries take it."""
         return [multiplexer.endpoint for multiplexer in self.mx]
 

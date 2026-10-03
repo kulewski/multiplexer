@@ -45,6 +45,10 @@ mxcontrol. It runs as `nonroot`, listens on 1980, and its command is
 /mxcontrol run_multiplexer --rules /etc/mx/multiplexer.rules --address 0.0.0.0:1980
 ```
 
+That is every IPv4 address; on an IPv6 network, or a dual-stack one, give
+the command with `--address [::]:1980` instead, every IPv6 address and,
+as Linux maps it, every IPv4 one ([addresses](mxcontrol.md#addresses)).
+
 A deployment mounts its own rules file over `/etc/mx/multiplexer.rules`
 and, for a recording directory or a log file, a writable volume:
 

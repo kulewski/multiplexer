@@ -627,6 +627,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     }
     return state;
   }
+  // ConnectionsManager hook, ahead of the base class's: a welcome on a
+  // connection of one target from the multiplexer another target's last
+  // welcome came from is one multiplexer reached through two targets, two
+  // spellings of one address or a balancer in front of several, whose
+  // connections then replace or refuse each other at every reconnect.
+  // Said once for the two, at WARNING, so that the list can be fixed; the
+  // base class then decides as for any peer.
+  void register_connection(Connection::pointer conn, const WelcomeMessage& welcome);
   void after_connection_registration(Connection::pointer conn, const WelcomeMessage&) {
     MX_DCHECK_RUN_ON(&owner_thread());
     // The multiplexer's welcome confirms the routing ours carried; a
@@ -1010,6 +1018,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // only those whose handshakes ended first. disconnect() forgets a
   // target, and a later connect() is a first connection again.
   std::set<Target> first_connection_over_;
+  // The multiplexer id each target's last welcome came from, and the pairs
+  // of targets found to reach one multiplexer, said once each
+  // (register_connection).
+  std::map<Target, std::uint64_t> reached_by_target_;
+  std::set<std::pair<Target, Target>> one_multiplexer_said_;
   std::vector<Connection::weak_pointer> closing_;  // reading to their end; see connection_destroyed()
   // Every connection made that still exists: one shut down lives on until
   // its last handler ran, and bind_to_current_thread() takes it along.

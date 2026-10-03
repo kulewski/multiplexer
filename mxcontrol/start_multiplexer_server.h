@@ -8,9 +8,10 @@ namespace mxcontrol {
 
 // run_multiplexer: run one multiplexer until SIGINT or SIGTERM. Options:
 // --rules (the rules file) and --rules-check-interval (how often it is
-// read again for a change; SIGHUP reads it now), --address host:port
-// (0.0.0.0:1980; port 0 picks a free port), --port-file (where to write
-// the bound address), --record
+// read again for a change; SIGHUP reads it now), --address host:port or
+// [IPv6 address]:port (0.0.0.0:1980; port 0 picks a free port; an IP
+// address, not a name), --port-file (where to write the bound address, in
+// the same form), --record
 // and --record-payload-bytes (a recording from the start), --recording-dir
 // and --allow-tap (recording sessions and taps peers may ask for),
 // --peers-file (the connected peers, rewritten on every change),
@@ -21,7 +22,8 @@ class StartMultiplexerServer : public Task {
   virtual int run();
   // The options, refused as a malformed line, with the usage, when the
   // rules check interval is one the server refuses
-  // (Server::rules_check_interval_refused).
+  // (Server::rules_check_interval_refused) or --address is not an IP
+  // address and a port (multiplexer/endpoint.h).
   virtual void parse_options(std::vector<std::string>& args);
   virtual std::string short_description() const { return "run a multiplexer"; }
   virtual std::string short_synopsis(const std::string& commandname) {
@@ -35,9 +37,14 @@ class StartMultiplexerServer : public Task {
                 "seconds between checks of the rules file for a change, which is then put in use "
                 "without a restart, 0.01 at least; 0 never checks (SIGHUP and `mxcontrol rules reload` "
                 "still do)");
-    options.add("address,M", &host_port_, "0.0.0.0:1980", "local address to listen on").positional("address");
+    options
+        .add("address,M", &host_port_, "0.0.0.0:1980",
+             "local address to listen on, host:port or [IPv6 address]:port, 1980 when the port is left out: "
+             "0.0.0.0 is every IPv4 address, [::] every IPv6 one and, where the system maps IPv4 onto it as "
+             "Linux does by default, every IPv4 one too")
+        .positional("address");
     options.add("port-file", &port_file_,
-                "once listening, write the bound address as host:port to this file "
+                "once listening, write the bound address as host:port, or [IPv6 address]:port, to this file "
                 "(use with --address host:0 to let the system pick a port)");
     options.add("memory-log-every", &memory_log_every_, 0,
                 "log the C heap in use after every N routed messages (soak tests)");
@@ -57,7 +64,9 @@ class StartMultiplexerServer : public Task {
   }
 
  private:
-  std::string host_port_;
+  std::string host_port_;  // --address as given
+  std::string host_;       // and as parse_options() read it
+  std::uint16_t port_ = 0;
   std::string rules_file_;
   float rules_check_interval_;
   std::string port_file_;

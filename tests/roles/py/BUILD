@@ -5,6 +5,7 @@ py_library(
     srcs = ["common.py"],
     deps = [
         "//multiplexer:clients",
+        "//multiplexer:endpoints",
         "//multiplexer:events_py_proto",
         "//multiplexer:multiplexer_constants",
         "//multiplexer:servers",

@@ -56,7 +56,8 @@ class RecordingControlTask : public Task {
   virtual void _initialize_options(mx::options::Options& options) {
     options.add("action", &action_, "start, stop, status or tap").positional("action");
     options.add("multiplexer,M", &multiplexers_,
-                "multiplexer address as host:port; a name resolves to every address; may be repeated");
+                "a multiplexer's address, host:port or [IPv6 address]:port, an empty host meaning 127.0.0.1; a name "
+                "stands for every address it resolves to; may be repeated");
     options.add("type", &peer_type_, multiplexer::RECORDING_CONTROLLER,
                 "peer type to connect as (default: the reserved recording controller)");
     options.add("label", &label_, "session", "start: the session's name in the file name");
@@ -108,7 +109,6 @@ class RecordingControlTask : public Task {
   int _tap(multiplexer::Client& client, EveryAddress& addresses);
 
   std::string action_;
-  std::vector<std::string> multiplexers_;
   std::uint32_t peer_type_;
   std::string label_;
   unsigned int payload_bytes_;

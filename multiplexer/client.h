@@ -38,6 +38,7 @@
 #include "lib/vector.h"
 #include "multiplexer/basic_client.h"
 #include "multiplexer/defaults.h"
+#include "multiplexer/endpoint.h"
 
 namespace multiplexer {
 
@@ -128,12 +129,12 @@ class Client : public ExceptionDefinitions {
   // it: connecting again returns that connection.
   ConnectionWrapper async_connect(const std::string& host, std::uint16_t port) {
     basic_client_->check_not_orphaned();
-    MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
+    MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + format_endpoint(host, port)));
     return basic_client_->async_connect(host, port);
   }
   ConnectionWrapper connect(const std::string& host, std::uint16_t port, float timeout = DEFAULT_TIMEOUT) {
     basic_client_->check_not_orphaned();
-    MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + host + ":" + repr(port)));
+    MX_LOG(INFO, MEDIUMVERBOSITY, CTX("multiplexer.client") TEXT("connecting to " + format_endpoint(host, port)));
     return basic_client_->connect(host, port, timeout);
   }
   // Drops the multiplexer given to connect() or async_connect() with this

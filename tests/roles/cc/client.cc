@@ -172,10 +172,8 @@ class ClientRole : public mxcontrol::Task {
   // A ThreadedClient connected to every --mx.
   std::unique_ptr<ThreadedClient> connect_threaded() const {
     std::unique_ptr<ThreadedClient> client(new ThreadedClient(common_.type));
-    for (size_t index = 0; index < common_.mx.size(); ++index) {
-      std::string::size_type colon = common_.mx[index].rfind(':');
-      client->connect(common_.mx[index].substr(0, colon),
-                      mx::from_string<std::uint16_t>(common_.mx[index].substr(colon + 1)));
+    for (const multiplexer::backend::MultiplexerAddress& address : common_.addresses()) {
+      client->connect(address.first, address.second);
     }
     return client;
   }

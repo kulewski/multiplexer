@@ -778,6 +778,40 @@ cc_test(
     ],
 )
 
+# A multiplexer's address as text, host:port or [IPv6 address]:port: for
+# every command line that takes one, and for the C++ examples.
+cc_library(
+    name = "endpoint",
+    srcs = ["endpoint.cc"],
+    hdrs = ["endpoint.h"],
+    visibility = ["//visibility:public"],
+)
+
+# Two targets that reach one multiplexer are said once, at WARNING.
+cc_test(
+    name = "duplicate_target_test",
+    size = "small",
+    srcs = ["duplicate_target_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":basic_client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "endpoint_test",
+    size = "small",
+    srcs = ["endpoint_test.cc"],
+    deps = [
+        ":endpoint",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "basic_client",
     srcs = [
@@ -789,6 +823,7 @@ cc_library(
     deps = [
         ":connections_manager",
         ":descriptor_table",
+        ":endpoint",
         ":log_summary",
         ":multiplexer_cc_constants",
         "//lib:fork",
@@ -810,6 +845,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":basic_client",
+        ":endpoint",
         ":multiplexer_cc_proto",
         "//lib:seconds",
         "//lib:vector",
@@ -845,6 +881,7 @@ pybind_extension(
     srcs = ["_native.cc"],
     deps = [
         ":client",
+        ":endpoint",
         ":threaded_client",
         "//lib:memory",
         "//lib:type_utils",
@@ -1410,6 +1447,21 @@ py_test(
     ],
 )
 
+# A synchronous client keeps its connection through a stall of its
+# multiplexer, whose frames since then wait for its next call; about 110 s.
+py_test(
+    name = "stalled_multiplexer_test",
+    size = "large",
+    srcs = ["stalled_multiplexer_test.py"],
+    tags = ["slow"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
 # A welcome long after the connection opened still registers; about 95 s.
 py_test(
     name = "late_welcome_test",
@@ -1789,6 +1841,26 @@ py_test(
     ],
 )
 
+# A multiplexer's address, (host, port), and as text: host:port, or
+# [IPv6 address]:port, the C++ endpoint library's through the extension.
+py_library(
+    name = "endpoints",
+    srcs = ["endpoints.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = [":_native"],
+)
+
+py_test(
+    name = "endpoints_test",
+    size = "small",
+    srcs = ["endpoints_test.py"],
+    deps = [
+        ":endpoints",
+        ":threaded_client_py",
+    ],
+)
+
 py_library(
     name = "threaded_client_py",
     srcs = ["threaded_client.py"],
@@ -1796,6 +1868,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":clients",
+        ":endpoints",
         ":multiplexer_constants",
         ":mxclient",
         ":protocolbuffers",

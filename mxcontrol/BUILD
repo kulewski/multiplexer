@@ -11,6 +11,7 @@ cc_library(
         "//lib:options",
         "//lib/logging",
         "//multiplexer:client",
+        "//multiplexer:endpoint",
         "@asio",
     ],
 )
@@ -23,6 +24,7 @@ cc_library(
     hdrs = ["every_address.h"],
     deps = [
         "//multiplexer:client",
+        "//multiplexer:endpoint",
         "@asio",
     ],
 )
@@ -67,6 +69,7 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
+        "//multiplexer:endpoint",
         "//multiplexer:recorder",
         "//multiplexer:server",
         "@asio",
@@ -233,6 +236,19 @@ py_test(
     data = [
         ":mxcontrol",
         "//:multiplexer.rules",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+# An address, host:port or [IPv6 address]:port, in every subcommand; a
+# malformed one a malformed command line.
+py_test(
+    name = "addresses_test",
+    size = "small",
+    srcs = ["addresses_test.py"],
+    data = [
+        ":mxcontrol",
         "//tests:testing.rules",
     ],
     deps = ["//multiplexer/testing"],

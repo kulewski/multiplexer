@@ -12,14 +12,20 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <tuple>
 
 #include "lib/repr.h"
+#include "multiplexer/endpoint.h"
 #include "multiplexer/recorder.h"
 #include "multiplexer/server.h"
 #include "mxcontrol/tasks_holder.h"
 
 namespace mxcontrol {
 namespace {
+
+// The port of an --address given without one.
+constexpr std::uint16_t DEFAULT_PORT = 1980;
 
 // Writes `address` to `path` atomically (temporary file plus rename), so a
 // reader never sees a partially written file.
@@ -105,36 +111,30 @@ void StartMultiplexerServer::parse_options(std::vector<std::string>& args) {
   if (!refused.empty()) {
     throw mx::options::Error("--rules-check-interval: " + refused);
   }
+  try {
+    std::tie(host_, port_) = multiplexer::parse_endpoint(host_port_, DEFAULT_PORT);
+  } catch (const std::invalid_argument& error) {
+    throw mx::options::Error(std::string("--address: ") + error.what());
+  }
+  // The acceptor binds an address: a name would have to pick one of those
+  // it resolves to, and the multiplexer would listen on that one only.
+  asio::error_code not_an_address;
+  asio::ip::make_address(host_, not_an_address);
+  if (not_an_address) {
+    throw mx::options::Error("--address: '" + host_port_ +
+                             "': not an IP address; 0.0.0.0 listens on every IPv4 one, [::] on every one");
+  }
 }
 
 int StartMultiplexerServer::run() {
-  using mx::repr;
-  using std::string;
-
   // A log reader that goes away, the other end of --logging-fd or of
   // stderr, must not take the broker down with it: its writes fail with
   // EPIPE instead, and the binary stream is dropped (lib/logging). The other
   // commands keep the default, so that `mxcontrol ... | head` ends quietly.
   std::signal(SIGPIPE, SIG_IGN);
 
-  string host = host_port_;
-  std::uint16_t port = 1980;
-
-  string::size_type colonpos = host_port_.find(':');
-  Assert(colonpos < host_port_.size() || colonpos == string::npos);
-
-  if (colonpos < host_port_.size()) {
-    // port specified
-    Assert(host_port_[colonpos] == ':');
-    string(&host_port_[0], &host_port_[colonpos]).swap(host);
-    string portstring(&host_port_[0] + colonpos + 1, &host_port_[0] + host_port_.size());
-    AssertMsg(portstring.find(':') == string::npos, "Invalid address spec: two colons");
-    port = mx::from_string<std::uint16_t>(portstring);
-  }
-
-  // TODO support for name resolving (e.g. host = "localhost" by default)
   asio::io_service io_service;
-  multiplexer::Server::pointer server = multiplexer::Server::Create(io_service, host, port);
+  multiplexer::Server::pointer server = multiplexer::Server::Create(io_service, host_, port_);
   // The signals first, before anything a supervisor might react to: SIGTERM
   // and SIGINT shut the server down, so the process exits with 0; SIGHUP
   // reloads the rules, and must not end the process from the moment it
@@ -174,10 +174,10 @@ int StartMultiplexerServer::run() {
     server->set_peers_file(peers_file_);
   }
   server->start();
-  port = server->local_port();
-  MX_LOG(INFO, LOWVERBOSITY, TEXT("starting MX server on " + host + ":" + repr(port)));
+  const std::string bound = multiplexer::format_endpoint(host_, server->local_port());
+  MX_LOG(INFO, LOWVERBOSITY, TEXT("starting MX server on " + bound));
   if (!port_file_.empty()) {
-    write_port_file(port_file_, host + ":" + repr(port));
+    write_port_file(port_file_, bound);
   }
 
   // A bug in one connection's handler must not take the whole broker down:

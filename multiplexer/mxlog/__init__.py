@@ -53,7 +53,10 @@ __all__ = [
 
 @never_throw(default=False)
 def should_log(level: int, verbosity: int) -> bool:
-    """Whether an entry at `level` with `verbosity` would be emitted."""
+    """Whether an entry at `level` with `verbosity` would be emitted; False,
+    with the reason on stderr, for a level that is not DEBUG to CRITICAL or
+    a verbosity that is not ZEROVERBOSITY to CHATTERBOX, logging.WARNING's
+    30 say."""
     assert isinstance(level, int)
     assert isinstance(verbosity, int)
     return _logging.should_log(level, verbosity)

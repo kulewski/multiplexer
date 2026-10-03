@@ -75,13 +75,13 @@ class RulesControlTask : public Task {
   virtual void _initialize_options(mx::options::Options& options) {
     options.add("action", &action_, "reload or status").positional("action");
     options.add("multiplexer,M", &multiplexers_,
-                "multiplexer address as host:port; a name resolves to every address; may be repeated");
+                "a multiplexer's address, host:port or [IPv6 address]:port, an empty host meaning 127.0.0.1; a name "
+                "stands for every address it resolves to; may be repeated");
     options.add("timeout", &timeout_, 5.0, "seconds to wait for connections and answers");
   }
 
  private:
   std::string action_;
-  std::vector<std::string> multiplexers_;
   float timeout_;
 };
 

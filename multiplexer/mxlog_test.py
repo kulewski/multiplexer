@@ -33,6 +33,22 @@ class LoggingTest(unittest.TestCase):
                 mxlogging.log_exception(text="caught on purpose")
         self.assertNotIn("Ignored.", captured.getvalue(), "never_throw swallowed a failure inside the logger")
 
+    def test_a_level_or_verbosity_past_the_table_is_refused(self):
+        # A Python level is any int, logging.WARNING's 30 say: the binding
+        # read the verbosity table past its end with it, in a release build,
+        # where the C++ check is compiled out.
+        from multiplexer import _native
+
+        for level, verbosity in ((30, mxlogging.LOWVERBOSITY), (mxlogging.CRITICAL + 1, 0), (1, 5)):
+            with self.subTest(level=level, verbosity=verbosity):
+                with self.assertRaisesRegex(ValueError, "a level is DEBUG to CRITICAL"):
+                    _native.should_log(level, verbosity)
+        self.assertIs(True, _native.should_log(mxlogging.CRITICAL, mxlogging.ZEROVERBOSITY))
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            self.assertIs(False, mxlogging.should_log(30, mxlogging.LOWVERBOSITY))
+        self.assertIn("ValueError: level 30, verbosity 1", captured.getvalue())
+
 
 class VerbosityEnvironmentTest(unittest.TestCase):
     """MX_LOG_VERBOSITY is read when the extension loads, so a fresh
@@ -125,6 +141,34 @@ class StreamingTest(unittest.TestCase):
         self.assertEqual(1, len(parent), stderr)
         self.assertEqual(1, len(worker), "the worker's entry reached no streamer, or both")
         self.assertNotEqual(parent, worker)
+
+    def test_the_streamer_is_given_each_address_as_mxcontrol_reads_it(self):
+        # An IPv6 address in brackets, a name as it is, for the streamer's
+        # client to look up at every connection attempt. The child looked
+        # every host up itself, once and for IPv4 only, so an IPv6 address
+        # ended it before it started.
+        directory = tempfile.mkdtemp(dir=os.environ.get("TEST_TMPDIR"))
+        streamer = os.path.join(directory, "streamer")
+        with open(streamer, "w") as script_file:
+            script_file.write('#!/bin/sh\nprintf "%s\\n" "$@" > "$0.args"\nexec cat > /dev/null\n')
+        os.chmod(streamer, 0o755)
+        script = (
+            "import sys\n"
+            "from multiplexer.mxlog.streaming import enable_single_thread_log_streaming\n"
+            "addresses = [('::1', 1980), ('127.0.0.1', 1981), ('mx.example.com', 1982)]\n"
+            "enable_single_thread_log_streaming(addresses, mxcontrol=sys.argv[1])\n"
+        )
+        # stderr is read to its end, which waits for the streamer as well
+        result = subprocess.run([sys.executable, "-c", script, streamer], capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(os.path.exists(streamer + ".args"), "no streamer started: " + result.stderr)
+        with open(streamer + ".args") as args:
+            self.assertEqual(
+                ["streamlogs"]
+                + ["--multiplexer", "[::1]:1980", "--multiplexer", "127.0.0.1:1981"]
+                + ["--multiplexer", "mx.example.com:1982", "--chunksize", "16"],
+                args.read().splitlines(),
+            )
 
     def test_a_process_with_stdin_closed_streams(self):
         # The pipe's reading end took descriptor 0, and the streamer, which

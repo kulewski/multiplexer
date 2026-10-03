@@ -8,9 +8,9 @@ The mxcontrol is the one that came with the package unless one is named.
 """
 
 import os
-import socket
 
 import multiplexer.mxlog
+from multiplexer.endpoints import Endpoint, format_endpoint
 from multiplexer.mxcontrol import binary_path
 
 __all__ = ["enable_single_thread_log_streaming"]
@@ -19,12 +19,19 @@ logging_fd_set_from_pid = None
 logging_fd = None
 
 
-def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str | None = None) -> None:
+def _spawn_streamer(multiplexer_addresses: list[Endpoint], mxcontrol: str | None = None) -> None:
     """Fork the `mxcontrol streamlogs` child and point our logging at the pipe to it."""
     global logging_fd_set_from_pid, logging_fd
 
     if mxcontrol is None:
         mxcontrol = binary_path()  # FileNotFoundError here, in the caller, when there is none
+    # Made here, so that the child only execs. A name goes as it is: the
+    # streamer's client looks it up at every connection attempt.
+    command = (
+        [mxcontrol, "streamlogs"]
+        + [e for endpoint in multiplexer_addresses for e in ["--multiplexer", format_endpoint(endpoint)]]
+        + ["--chunksize", "16"]
+    )
 
     logging_fd_set_from_pid = os.getpid()
 
@@ -55,22 +62,13 @@ def _spawn_streamer(multiplexer_addresses: list[tuple[str, int]], mxcontrol: str
                 # would start with no stdin and read nothing
                 os.set_inheritable(0, True)
 
-            command = (
-                [mxcontrol, "streamlogs"]
-                + [
-                    e
-                    for host, port in multiplexer_addresses
-                    for e in ["--multiplexer", "%s:%d" % (socket.gethostbyname(host), port)]
-                ]
-                + ["--chunksize", "16"]
-            )
             os.execvp(command[0], command)
         finally:
             os._exit(127)
 
 
 def enable_single_thread_log_streaming(
-    multiplexer_addresses: list[tuple[str, int]], mxcontrol: str | None = None
+    multiplexer_addresses: list[Endpoint], mxcontrol: str | None = None
 ) -> int | None:
     """Start streaming this process's log to the multiplexers, once per
     process (re-armed after a fork); returns the pipe's write end. Without

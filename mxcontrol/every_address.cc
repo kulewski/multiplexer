@@ -7,6 +7,10 @@
 #include <asio/ip/tcp.hpp>
 #include <iostream>
 #include <map>
+#include <string>
+#include <utility>
+
+#include "multiplexer/endpoint.h"
 
 namespace mxcontrol {
 
@@ -41,8 +45,8 @@ struct EveryAddress::State {
   // One -M address and the state of its lookups.
   struct Address {
     std::string text;                // as given
-    std::string host;                // empty when `text` is not host:port
-    std::string port;                // a number or a service name, as getaddrinfo takes it
+    std::string host;                // without brackets, 127.0.0.1 for an empty one
+    std::string port;                // the number, as getaddrinfo takes it
     bool literal = false;            // an address, not a name: it resolves to itself for good
     bool looking_up = false;         // a refresh's lookup is under way
     bool failing = false;            // its last lookup failed, which was said
@@ -126,14 +130,12 @@ EveryAddress::EveryAddress(multiplexer::Client& client, asio::io_service& io_ser
   for (const std::string& text : addresses) {
     State::Address address;
     address.text = text;
-    const std::string::size_type colon = text.rfind(':');
-    if (colon != std::string::npos) {
-      address.host = colon ? text.substr(0, colon) : "127.0.0.1";
-      address.port = text.substr(colon + 1);
-      asio::error_code not_an_address;
-      asio::ip::make_address(address.host, not_an_address);
-      address.literal = !not_an_address;
-    }
+    const std::pair<std::string, std::uint16_t> endpoint = multiplexer::parse_endpoint(text);
+    address.host = endpoint.first.empty() ? "127.0.0.1" : endpoint.first;
+    address.port = std::to_string(endpoint.second);
+    asio::error_code not_an_address;
+    asio::ip::make_address(address.host, not_an_address);
+    address.literal = !not_an_address;
     state_->addresses.push_back(address);
   }
 }
@@ -146,13 +148,15 @@ EveryAddress::~EveryAddress() {}
 unsigned int EveryAddress::connect(float timeout) {
   unsigned int reached = 0;
   for (State::Address& address : state_->addresses) {
-    if (address.host.empty()) {
-      std::cerr << "invalid multiplexer address " << address.text << " (host:port expected)\n";
-      continue;
-    }
     asio::error_code error;
+    // A name stands for the addresses this host can use, address_configured;
+    // a literal is itself, since with that flag glibc counts no loopback
+    // address as configured, so on a host with IPv4 and no IPv6 address but
+    // ::1, a container's say, [::1] was not found.
+    const asio::ip::resolver_base::flags how =
+        address.literal ? asio::ip::resolver_base::numeric_host : asio::ip::resolver_base::address_configured;
     const asio::ip::tcp::resolver::results_type results =
-        state_->resolver.resolve(address.host, address.port, asio::ip::resolver_base::address_configured, error);
+        state_->resolver.resolve(address.host, address.port, how, error);
     if (error) {
       std::cerr << "cannot resolve " << address.text << ": " << error.message() << "\n";
       address.failing = true;  // said: a refresh says it again only once it has resolved since
@@ -180,7 +184,7 @@ unsigned int EveryAddress::connect(float timeout) {
 void EveryAddress::refresh() {
   for (std::size_t index = 0; index < state_->addresses.size(); ++index) {
     State::Address& address = state_->addresses[index];
-    if (address.host.empty() || address.literal || address.looking_up) {
+    if (address.literal || address.looking_up) {
       continue;
     }
     address.looking_up = true;

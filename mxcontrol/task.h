@@ -31,7 +31,9 @@ class Task {
   virtual ~Task() {}
 
   /*
-   * call parse_options before calling run()
+   * call parse_options before calling run(); an --multiplexer address
+   * that is not host:port or [IPv6 address]:port (multiplexer/endpoint.h)
+   * is a malformed line, as an unknown option is
    */
   virtual void parse_options(std::vector<std::string>& args);
 
@@ -60,13 +62,14 @@ class Task {
   /*
    * For subcommands that are themselves peers: adds the repeatable
    * --multiplexer option, and _multiplexer_client() then returns a Client
-   * connected to every address given.
+   * connected to every address given. A subcommand that declares the
+   * option itself, with help of its own, fills multiplexers_ too.
    */
   void _add_multiplexer_client_options(mx::options::Options&);
 
   // The --multiplexer addresses as (host, port), 127.0.0.1 for an empty
-  // host; a malformed one is logged and left out. A subcommand that must
-  // reach every replica behind a name connects with EveryAddress
+  // host, as parse_options() checked them. A subcommand that must reach
+  // every replica behind a name connects with EveryAddress
   // (every_address.h) instead.
   std::vector<std::pair<std::string, std::uint16_t>> _multiplexer_addresses() const;
 
@@ -95,6 +98,9 @@ class Task {
     return *io_service_;
   }
 
+  // --multiplexer, as given.
+  std::vector<std::string> multiplexers_;
+
  private:
   void __create_multiplexer_client(std::uint32_t peer_type);
 
@@ -103,8 +109,6 @@ class Task {
 
   std::shared_ptr<asio::io_service> io_service_;
   std::unique_ptr<multiplexer::Client> multiplexer_client_;
-
-  std::vector<std::string> multiplexers_;
 };  // class Task
 };  // namespace mxcontrol
 
