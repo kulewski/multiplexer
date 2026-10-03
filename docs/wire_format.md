@@ -28,7 +28,7 @@ the protocol:
 | Field | Number | Role |
 |---|---|---|
 | `id` | 1 | required in practice: a receiver drops a message without one, and uses it to drop a copy it has already seen. A client that sends a request again, to the backend its search found, gives that attempt a new id and accepts a reply to either |
-| `from` | 2 | the sender's instance id; the multiplexer sends delivery errors to it |
+| `sender` | 2 | the sender's instance id; the multiplexer sends delivery errors to it; named `from` up to 2.3.1, the same number |
 | `to` | 3 | an instance id; when set the multiplexer delivers there and consults no rule |
 | `type` | 4 | the message type; decides routing and, below 100, protocol meaning |
 | `message` | 5 | the payload, opaque bytes |
@@ -42,7 +42,7 @@ the protocol:
 
 The peer's first frame must be a message of type `CONNECTION_WELCOME` (2)
 whose payload is a `WelcomeMessage` with the peer's `type` and its `id`, the
-instance id it will use as `from`. Any other first message closes the
+instance id it will use as `sender`. Any other first message closes the
 connection, as does a peer type absent from the rules file or one of the
 reserved 99, the two controllers apart (`RULES_CONTROLLER` always,
 `RECORDING_CONTROLLER` when remote recording is on). The multiplexer registers the connection, then answers with its own
@@ -89,7 +89,7 @@ not answer a `PING`.
 | `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake; the optional `routing` (a `Routing`: `any`, `all`, `last_resort`) says which rule-routed paths reach the peer, applied before anything is routed to it |
 | `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type whose routing takes requests (`any`), or to the last resorts when none does; each backend answers with a `PING` referencing the search's id, addressed to the client and carrying the search's payload back, or, when that echo would be over `MAX_MESSAGE_SIZE`, with a `BACKEND_ERROR` saying so |
 | `HEARTBIT` (4) | empty | keep-alive, ignored |
-| `DELIVERY_ERROR` (5) | `DeliveryError` | the multiplexer, to a message's `from`, when nobody received it: `packet_id` names the message; `failed_type` lists the peer types with no receiver, or `failed_to` the missing instance id, or `is_known_type` false for an unknown type; `original_message` is included only if the rule asked for it, and left out, `original_message_omitted` set, when the report would be over `MAX_MESSAGE_SIZE`. `references` is the failed message's id |
+| `DELIVERY_ERROR` (5) | `DeliveryError` | the multiplexer, to a message's `sender`, when nobody received it: `packet_id` names the message; `failed_type` lists the peer types with no receiver, or `failed_to` the missing instance id, or `is_known_type` false for an unknown type; `original_message` is included only if the rule asked for it, and left out, `original_message_omitted` set, when the report would be over `MAX_MESSAGE_SIZE`. `references` is the failed message's id |
 | `RECORDING_CONTROL` (6) | `RecordingControl` | a peer, without `to`, asking the multiplexer it is connected to for START, STOP, STATUS, TAP or UNTAP of its recording ([operations](operations.md#recording-on-demand-over-the-protocol)); START refused unless the multiplexer allows file sessions (`--recording-dir`), TAP unless it allows taps (`--allow-tap`); STATUS and STOP carried out on any, a STOP closing a `--record` session too |
 | `RECORDING_STATUS` (7) | `RecordingStatus` | the multiplexer's answer, `references` the request's id, `error` set when it was refused |
 | `RECORDING_RECORD` (8) | `Record` | the multiplexer, to every peer that tapped in, one per record, `multiplexer_id` set |

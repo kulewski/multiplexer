@@ -54,7 +54,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
-#include <fstream>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -65,6 +64,7 @@
 
 #include "multiplexer/client.h"
 #include "multiplexer/connections_manager.h"
+#include "multiplexer/in_process_multiplexer.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/threaded_client.h"
 
@@ -73,6 +73,8 @@ using multiplexer::IncomingMessage;
 using multiplexer::MultiplexerMessage;
 using multiplexer::RawMessage;
 using multiplexer::ThreadedClient;
+using multiplexer::testing::FILL_FRAMES;
+using multiplexer::testing::fill_size;
 namespace types = multiplexer::types;
 namespace peers = multiplexer::peers;
 
@@ -192,11 +194,11 @@ class StandIn {
     return write_frame(fd, *std::unique_ptr<RawMessage>(RawMessage::FromMessage(msg))) == 0;
   }
 
-  // A message of `type` from `from` to the client, answering `references`.
-  MultiplexerMessage answer(std::uint32_t type, std::uint64_t from, std::uint64_t references) {
+  // A message of `type` from `sender` to the client, answering `references`.
+  MultiplexerMessage answer(std::uint32_t type, std::uint64_t sender, std::uint64_t references) {
     MultiplexerMessage msg;
     msg.set_id(++ids_);
-    msg.set_from(from);
+    msg.set_sender(sender);
     msg.set_to(client_.load());
     msg.set_type(type);
     msg.set_references(references);
@@ -260,7 +262,7 @@ class StandIn {
       _end();
       return;
     }
-    client_ = theirs.from();
+    client_ = theirs.sender();
     {
       std::unique_lock<std::mutex> lock(mutex_);
       fd_ = fd;
@@ -361,7 +363,7 @@ IncomingMessage ask(Kind kind, const std::vector<StandIn*>& stand_ins, float tim
     }
     MultiplexerMessage request;
     request.set_id(client.random64());
-    request.set_from(client.instance_id());
+    request.set_sender(client.instance_id());
     request.set_type(types::PYTHON_TEST_REQUEST);
     request.set_message("question");
     request.set_to(to);
@@ -410,7 +412,7 @@ class Asker {
       }
       MultiplexerMessage event;
       event.set_id(sync_->random64());
-      event.set_from(sync_->instance_id());
+      event.set_sender(sync_->instance_id());
       event.set_type(types::TEST_EVENT);
       event.set_message(payload);
       sync_->queue(event, multiplexer::DEFAULT_TIMEOUT, lane);
@@ -427,7 +429,7 @@ class Asker {
     }
     MultiplexerMessage request;
     request.set_id(sync_->random64());
-    request.set_from(sync_->instance_id());
+    request.set_sender(sync_->instance_id());
     request.set_type(types::PYTHON_TEST_REQUEST);
     request.set_message("question");
     request.set_to(to);
@@ -441,19 +443,6 @@ class Asker {
   std::unique_ptr<Client> sync_;
   std::unique_ptr<ThreadedClient> threaded_;
 };
-
-// How many frames of `size` bytes a multiplexer that reads nothing does
-// not take: the most the two sockets may buffer, and some.
-int frames_past_the_sockets(std::size_t size) {
-  std::size_t buffers = 0;
-  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
-    std::ifstream limits(path);
-    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
-    limits >> least >> initial >> largest;
-    buffers += largest;
-  }
-  return static_cast<int>(2 * buffers / size) + 64;
-}
 
 // A multiplexer of the test's own that the client connects to three
 // times, one connection after another, on one thread: the first takes the
@@ -553,7 +542,7 @@ class ThreeConnections {
     if (then_end) {
       ::shutdown(fd, SHUT_RDWR);  // the end behind the welcome, the corked segment sent with it
     }
-    *client = theirs.from();
+    *client = theirs.sender();
     return fd;
   }
 
@@ -574,11 +563,11 @@ class ThreeConnections {
     }
   }
 
-  // A message of `type` from `from` to `client`, answering `references`.
-  void _write(int fd, std::uint32_t type, std::uint64_t from, std::uint64_t client, std::uint64_t references) {
+  // A message of `type` from `sender` to `client`, answering `references`.
+  void _write(int fd, std::uint32_t type, std::uint64_t sender, std::uint64_t client, std::uint64_t references) {
     MultiplexerMessage msg;
     msg.set_id(++ids_);
-    msg.set_from(from);
+    msg.set_sender(sender);
     msg.set_to(client);
     msg.set_type(type);
     msg.set_references(references);
@@ -884,7 +873,7 @@ TEST_P(QueryStages, ARequestWhoseSendRanOutOfTimeIsStillAnAttempt) {
   Asker asker(GetParam());
   ASSERT_TRUE(asker.connect(first));
   multiplexer::LanePtr lane = std::make_shared<multiplexer::Lane>();
-  asker.queue_events(frames_past_the_sockets(64 * 1024), 64 * 1024, lane);
+  asker.queue_events(FILL_FRAMES, fill_size(), lane);  // past the sockets of a multiplexer that reads nothing
   ASSERT_TRUE(asker.connect(second));
   std::future<std::string> nobody = std::async(std::launch::async, [&first, &second] {
     MultiplexerMessage msg;
@@ -933,7 +922,7 @@ TEST_P(QueryStages, ARequestItsSendGaveUpIsStruckOffTheLateWait) {
   Asker asker(GetParam());
   ASSERT_TRUE(asker.connect(first));
   multiplexer::LanePtr lane = std::make_shared<multiplexer::Lane>();
-  asker.queue_events(frames_past_the_sockets(64 * 1024), 64 * 1024, lane);
+  asker.queue_events(FILL_FRAMES, fill_size(), lane);  // past the sockets of a multiplexer that reads nothing
   // The connection's queue full, at 1024 messages: what follows waits for room.
   asker.queue_events(1024 + 64, 16, lane);
   ASSERT_TRUE(asker.connect(second));
@@ -981,7 +970,7 @@ TEST_P(QueryStages, AnAddressedQueryWaitingForRoomAtItsDeadlineTimesOut) {
   Asker asker(GetParam());
   ASSERT_TRUE(asker.connect(only));
   multiplexer::LanePtr lane = std::make_shared<multiplexer::Lane>();
-  asker.queue_events(frames_past_the_sockets(64 * 1024), 64 * 1024, lane);
+  asker.queue_events(FILL_FRAMES, fill_size(), lane);  // past the sockets of a multiplexer that reads nothing
   // The connection's queue full, at 1024 messages: what follows waits for room.
   asker.queue_events(1024 + 64, 16, lane);
   EXPECT_THROW(asker.ask(1, lane, BACKEND), Client::OperationTimedOut);
@@ -1228,14 +1217,14 @@ TEST(QueryStagesSync, ASearchCopyWaitsForRoomNoLongerThanItsStage) {
   multiplexer::LanePtr lane = std::make_shared<multiplexer::Lane>();
   // The sockets full, then the connection's queue, at 1024: what follows
   // waits for room. A minute each, so that none of them is given up here.
-  const std::string chunk(64 * 1024, 'x');
-  const int events = frames_past_the_sockets(chunk.size()) + 1024 + 64;
+  const std::string fill(fill_size(), 'f');
+  const int events = FILL_FRAMES + 1024 + 64;
   for (int index = 0; index < events; ++index) {
     MultiplexerMessage event;
     event.set_id(client.random64());
-    event.set_from(client.instance_id());
+    event.set_sender(client.instance_id());
     event.set_type(types::TEST_EVENT);
-    event.set_message(index < frames_past_the_sockets(chunk.size()) ? chunk : std::string(16, 'x'));
+    event.set_message(index < FILL_FRAMES ? fill : std::string(16, 'x'));
     client.queue(event, 60, lane);
   }
   ASSERT_TRUE(client.connect("127.0.0.1", second.port, 5));
@@ -1340,9 +1329,9 @@ TEST(QueryStagesThreaded, AnUnwrittenRequestHandedOverIsFollowedNotSentAgain) {
   ThreadedClient client(peers::WEBSITE);
   ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
   multiplexer::LanePtr lane(new multiplexer::Lane());
-  const std::string chunk(64 * 1024, 'x');
-  for (int index = frames_past_the_sockets(chunk.size()); index > 0; --index) {
-    client.send(client.new_message(types::TEST_EVENT, chunk), lane);
+  const std::string fill(fill_size(), 'f');
+  for (int index = FILL_FRAMES; index > 0; --index) {  // past the sockets of a multiplexer that reads nothing
+    client.send(client.new_message(types::TEST_EVENT, fill), lane);
   }
   MultiplexerMessage question = client.new_message(types::PYTHON_TEST_REQUEST, "question");
   client.query(question, [&done](const ThreadedClient::Result& result) { done.set_value(result); }, 60, lane);
@@ -1373,9 +1362,9 @@ TEST(QueryStagesThreaded, AnUnwrittenRequestHandedOverIsFollowedNotSentAgain) {
 // that stage's end, 60 s on.
 bool hold_the_request(ThreadedClient& client, StandIn& stalled, std::promise<ThreadedClient::Result>& done) {
   multiplexer::LanePtr lane(new multiplexer::Lane());
-  const std::string chunk(64 * 1024, 'x');
-  for (int index = frames_past_the_sockets(chunk.size()); index > 0; --index) {
-    client.send(client.new_message(types::TEST_EVENT, chunk), lane);
+  const std::string fill(fill_size(), 'f');
+  for (int index = FILL_FRAMES; index > 0; --index) {  // past the sockets of a multiplexer that reads nothing
+    client.send(client.new_message(types::TEST_EVENT, fill), lane);
   }
   client.query(
       client.new_message(types::PYTHON_TEST_REQUEST, "question"),

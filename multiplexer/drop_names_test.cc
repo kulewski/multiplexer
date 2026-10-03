@@ -77,7 +77,7 @@ std::set<std::uint64_t> ids_of(const std::set<Named>& names) {
 MultiplexerMessage whole(multiplexer::Client& client, std::uint32_t type) {
   MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(type);
   return msg;
 }

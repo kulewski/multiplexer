@@ -115,7 +115,7 @@ int RulesControlTask::run() {
   control.set_action(reload ? RulesControl::RELOAD : RulesControl::STATUS);
   MultiplexerMessage request;
   request.set_id(client.random64());
-  request.set_from(client.instance_id());
+  request.set_sender(client.instance_id());
   request.set_type(multiplexer::RULES_CONTROL);
   control.SerializeToString(request.mutable_message());
   client.schedule_all(request);

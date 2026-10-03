@@ -100,7 +100,7 @@ struct Broadcast {
   void send(const std::string& payload) {
     MultiplexerMessage msg;
     msg.set_id(sender.random64());
-    msg.set_from(sender.instance_id());
+    msg.set_sender(sender.instance_id());
     msg.set_type(types::TEST_EVENT);
     msg.set_message(payload);
     sender.send(msg, 30);
@@ -136,7 +136,7 @@ std::unique_ptr<Client> tapping(InProcessMultiplexer& mx, unsigned int payload_l
   control.set_payload_limit(payload_limit);
   MultiplexerMessage msg;
   msg.set_id(tap->random64());
-  msg.set_from(tap->instance_id());
+  msg.set_sender(tap->instance_id());
   msg.set_type(multiplexer::RECORDING_CONTROL);
   control.SerializeToString(msg.mutable_message());
   tap->send(msg, 5);

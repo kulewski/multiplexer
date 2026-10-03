@@ -177,7 +177,7 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   if (last_mxmsg) {
     kwargs.set_default("workflow", last_mxmsg->workflow());
     kwargs.set_default("references", last_mxmsg->id());
-    kwargs.set_default("to", last_mxmsg->from());
+    kwargs.set_default("to", last_mxmsg->sender());
     kwargs.set_default("multiplexer", last_connwrap);
   } else {
     kwargs.set_default("workflow", std::string());  // read unchecked below, as every default is
@@ -191,10 +191,10 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
   if (!kwargs.unsafe_is<const MultiplexerMessage*>("message")) {
     // Construct new MultiplexerMessage using some info from kwargs.
     _mxmsg.reset(new MultiplexerMessage());
-    // id and from: the server drops messages without a sender, and replies
+    // id and sender: the server drops messages without one, and replies
     // are matched by the id they reference (same as the Python client does)
     _mxmsg->set_id(conn->random64());
-    _mxmsg->set_from(conn->instance_id());
+    _mxmsg->set_sender(conn->instance_id());
 
     // set message
     if (kwargs.unsafe_is<std::string>("message")) {
@@ -221,11 +221,11 @@ std::any BaseMultiplexerServer::send_message(Kwargs kwargs) {
 
   } else if (last_mxmsg) {
     // The reply: those of its fields that are empty filled in from the
-    // request, as the threaded server's Request::reply does; its id and from
+    // request, as the threaded server's Request::reply does; its id and sender
     // too, as every send fills them.
     _mxmsg.reset(new MultiplexerMessage(*kwargs.get<const MultiplexerMessage*>("message")));
     if (!_mxmsg->to()) {
-      _mxmsg->set_to(last_mxmsg->from());
+      _mxmsg->set_to(last_mxmsg->sender());
     }
     if (!_mxmsg->references()) {
       _mxmsg->set_references(last_mxmsg->id());
@@ -327,10 +327,10 @@ void BaseMultiplexerServer::_echo(const char* what) {
   const MultiplexerMessage& mxmsg = *last_mxmsg;
   MultiplexerMessage echo;
   echo.set_id(conn->random64());
-  echo.set_from(conn->instance_id());
+  echo.set_sender(conn->instance_id());
   echo.set_message(mxmsg.message());
   echo.set_type(types::PING);
-  echo.set_to(mxmsg.from());
+  echo.set_to(mxmsg.sender());
   echo.set_references(mxmsg.id());
   echo.set_workflow(mxmsg.workflow());
   if (echo.ByteSizeLong() > MAX_MESSAGE_SIZE) {

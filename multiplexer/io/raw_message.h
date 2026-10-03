@@ -82,10 +82,18 @@ class RawMessage {
     switch_to_writing();
   }
 
-  // `mxmsg` serialized into a frame, with its id and type.
+  // `mxmsg` serialized into a frame, with its id and type. One protobuf
+  // will not serialize, over 2 GiB, raises std::length_error as one over
+  // MAX_MESSAGE_SIZE does, its size measured: protobuf leaves the string
+  // empty, which went out as a frame with no body, and the multiplexer
+  // closed the connection.
   static RawMessage* FromMessage(const MultiplexerMessage& mxmsg) {
     std::string serialized;
-    mxmsg.SerializeToString(&serialized);
+    if (!mxmsg.SerializeToString(&serialized)) {
+      check_message_size(mxmsg.ByteSizeLong());
+      throw std::length_error("a message protobuf could not serialize, of " + std::to_string(mxmsg.ByteSizeLong()) +
+                              " bytes");
+    }
     return new RawMessage(&serialized, mxmsg.id(), mxmsg.type());
   }
 

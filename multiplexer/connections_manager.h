@@ -90,7 +90,7 @@ template <typename ConnectionsManagerImplementation>
 class ConnectionsManager {
  protected:
   // The instance id is drawn once here; it is what the peer announces in its
-  // welcome and what `from` and `to` fields refer to.
+  // welcome and what `sender` and `to` fields refer to.
   ConnectionsManager(asio::io_service& io_service) : io_service_(io_service), instance_id_(random_()) {
     MX_LOG(DEBUG, HIGHVERBOSITY,
            CTX("ConnectionsManager") TEXT("created new ConnectionsManager with id " + repr(instance_id_)));

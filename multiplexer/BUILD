@@ -199,8 +199,10 @@ genrule(
     # consumed as @mx; both are derived from where this package sits.
     cmd = "root=$(location Multiplexer.proto); root=$${root%multiplexer/Multiplexer.proto}; root=$${root%/}; " +
           "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS) && " +
-          # multiplexer/protocolbuffers.py adds `from_`, the `from` field under a name Python allows.
-          "sed -i 's/^class MultiplexerMessage(.*/&\\n    from_: int/' $(location Multiplexer_pb2.pyi)",
+          # multiplexer/protocolbuffers.py keeps `from_`, a read-only alias of `sender`, the field named
+          # `from` up to 2.3.1.
+          "sed -i 's/^class MultiplexerMessage(.*/&\\n    @property\\n    def from_(self) -> int: ...  " +
+          "# deprecated: the field is sender/' $(location Multiplexer_pb2.pyi)",
     tools = ["//:protoc"],
 )
 
@@ -460,6 +462,17 @@ cc_test(
 )
 
 cc_test(
+    name = "oversized_message_test",
+    size = "small",
+    srcs = ["oversized_message_test.cc"],
+    deps = [
+        ":multiplexer_cc_proto",
+        "//multiplexer/io:raw_message",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "server_release_test",
     size = "small",
     srcs = ["server_release_test.cc"],
@@ -527,10 +540,11 @@ cc_test(
 
 cc_test(
     name = "query_stages_test",
-    size = "small",
+    size = "medium",
     srcs = ["query_stages_test.cc"],
     deps = [
         ":client",
+        ":in_process_multiplexer",
         ":multiplexer_cc_constants",
         ":threaded_client",
         "@com_google_googletest//:gtest_main",
@@ -539,7 +553,7 @@ cc_test(
 
 py_test(
     name = "query_stages_py_test",
-    size = "small",
+    size = "medium",
     srcs = ["query_stages_test.py"],
     main = "query_stages_test.py",
     deps = [
@@ -782,7 +796,10 @@ py_library(
     name = "protocolbuffers",
     srcs = ["protocolbuffers.py"],
     imports = [".."],
-    deps = [":multiplexer_py_proto"],
+    deps = [
+        ":multiplexer_py_proto",
+        ":recording_py_proto",
+    ],
 )
 
 py_library(
@@ -1395,6 +1412,30 @@ py_test(
         ":recording",
         ":recording_py_proto",
         "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "callback_errors_test",
+    size = "small",
+    srcs = ["callback_errors_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":threaded_client_py",
+    ],
+)
+
+py_test(
+    name = "sender_field_test",
+    size = "small",
+    srcs = ["sender_field_test.py"],
+    deps = [
+        ":clients",
+        ":events_py_proto",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":recording_py_proto",
+        ":threaded_client_py",
     ],
 )
 

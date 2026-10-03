@@ -33,7 +33,7 @@ the first backend that answers. The caller sees a slow call instead of an
 error, which is the right outcome for a pool of interchangeable workers.
 
 **Can I send a request to one particular backend?**
-Yes: `query(..., to=instance_id)`, the id from an earlier reply's `from_`.
+Yes: `query(..., to=instance_id)`, the id from an earlier reply's `sender`.
 Only that instance gets it; if it is gone the call fails with
 `OperationFailed` rather than going to another instance, and if it merely
 sits behind another multiplexer the client finds it. What the id names is
@@ -66,10 +66,14 @@ the type number alone. Most peers put protocol buffers in the payload, and
 the rules file is a protocol buffer in text format, but that is a habit, not
 a requirement.
 
-**Why is `from` called `from_` in Python?**
-`from` is a keyword. The generated protocol buffer class has the field under
-its real name, reachable with `getattr`; the library adds `from_` as a
-property so that code reads normally.
+**What became of `from` and `from_`?**
+The sender's field was named `from` up to 2.3.1, a keyword in Python, where
+the library gave it a read-only alias, `from_`, and setting it took
+`setattr`. It is `sender` now, in every language, under the same field
+number, so that the wire and every recording are unchanged. For a release,
+`from_` and `getattr(message, "from")` still read it in Python, and
+`new_message()` still takes a sender as `from` or `from_`, each with a
+`DeprecationWarning`.
 
 **What is a good message size?**
 Anything up to 128 MiB is accepted, and a 1 MiB message is exercised by the

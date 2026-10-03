@@ -45,7 +45,7 @@ struct ThreadedClient::Core::InFlight {
   // The request's tracker and the direct request's, kept for the late
   // wait: an attempt the client gave up on, reading LOST, went nowhere.
   BasicClient::BasicScheduledMessageTracker request_state, direct_state;
-  MultiplexerMessage prototype;  // the request; id and from set per attempt
+  MultiplexerMessage prototype;  // the request; id and sender set per attempt
   float timeout = 0;
   // An addressed query's one deadline across its stages; a typed query
   // arms each stage with `timeout`.
@@ -339,7 +339,7 @@ void ThreadedClient::Core::_guarded(F function, D description) {
 
 // A message as a log line names it.
 static std::string describe(const MultiplexerMessage& msg) {
-  return "message #" + repr(msg.id()) + " of type " + repr(msg.type()) + " from " + repr(msg.from());
+  return "message #" + repr(msg.id()) + " of type " + repr(msg.type()) + " from " + repr(msg.sender());
 }
 
 template <typename F>
@@ -419,7 +419,7 @@ std::uint64_t ThreadedClient::Core::random64() {
 MultiplexerMessage ThreadedClient::Core::new_message(std::uint32_t type, const std::string& payload) {
   MultiplexerMessage msg;
   msg.set_id(random64());
-  msg.set_from(instance_id_);
+  msg.set_sender(instance_id_);
   msg.set_type(type);
   msg.set_message(payload);
   return msg;
@@ -1077,9 +1077,9 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
     basic_client_->check_ours(lane);  // here, not on the io thread
   }
   InFlightPtr in_flight(new InFlight());
-  in_flight->prototype = msg;  // the request itself, an empty from filled in; each attempt gets an id of its own
-  if (!msg.from()) {
-    in_flight->prototype.set_from(instance_id_);
+  in_flight->prototype = msg;  // the request itself, an empty sender filled in; each attempt gets an id of its own
+  if (!msg.sender()) {
+    in_flight->prototype.set_sender(instance_id_);
   }
   if (msg.to()) {
     in_flight->prototype.set_report_delivery_error(true);  // "not behind this multiplexer" must come back
@@ -1330,13 +1330,13 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
     // that would be over MAX_MESSAGE_SIZE is answered with BACKEND_ERROR
     // saying so, rather than not at all.
     MultiplexerMessage pong = new_message(types::PING, msg.message());
-    pong.set_to(msg.from());
+    pong.set_to(msg.sender());
     pong.set_references(msg.id());
     if (pong.ByteSizeLong() > MAX_MESSAGE_SIZE) {
       pong = new_message(types::BACKEND_ERROR,
                          std::string("the echo of a ") + (msg.type() == types::PING ? "PING" : "search") + " of " +
                              repr(msg.message().size()) + " bytes would be over MAX_MESSAGE_SIZE");
-      pong.set_to(msg.from());
+      pong.set_to(msg.sender());
       pong.set_references(msg.id());
     }
     std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(pong));
@@ -1594,7 +1594,7 @@ void ThreadedClient::Core::_acknowledged(const InFlightPtr& in_flight, const Mul
   if (!in_flight->received || std::find(searches.begin(), searches.end(), msg.references()) != searches.end()) {
     return;
   }
-  _guarded([&] { in_flight->received(msg.from()); },
+  _guarded([&] { in_flight->received(msg.sender()); },
            [&] { return "the on_received of a query of type " + repr(in_flight->prototype.type()); });
 }
 
@@ -1769,7 +1769,7 @@ void ThreadedClient::Core::_wait_late(InFlightPtr in_flight, bool direct) {
 // The search found the instance that sent `ping`: the direct request goes
 // to it, through the connection the PING came on.
 void ThreadedClient::Core::_direct(InFlightPtr in_flight, const IncomingMessage& ping) {
-  in_flight->direct_to = ping.third->from();
+  in_flight->direct_to = ping.third->sender();
   in_flight->direct_id = random64();  // kept by a direct request that waits for a connection
   _send_direct(in_flight, ping.second, /*keep_deadline=*/false);
 }

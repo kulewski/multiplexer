@@ -131,7 +131,7 @@ class SlowBackend : public BaseMultiplexerServer {
   mutable std::atomic<int> handled_when_drained{-1};  // -1 until the drain ended
   mutable std::atomic<bool> waiting_when_drained{false};
   Flood* flood = nullptr;                                     // set before serving
-  std::uint64_t instance_id() const { return instance_id_; }  // the `from` of its refusals, after close() too
+  std::uint64_t instance_id() const { return instance_id_; }  // the `sender` of its refusals, after close() too
 
  protected:
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
@@ -329,7 +329,7 @@ struct Serving {
 std::uint64_t request(multiplexer::Client& client, const std::string& payload) {
   multiplexer::MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
   msg.set_message(payload);
   client.flush(client.schedule_one(msg), 5);
@@ -393,7 +393,7 @@ TEST(ServeThread, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   multiplexer::MultiplexerMessage ping;
   ping.set_id(client.random64());
-  ping.set_from(client.instance_id());
+  ping.set_sender(client.instance_id());
   ping.set_to(backend.conn_for_test()->instance_id());
   ping.set_type(multiplexer::types::PING);
   ping.set_message(std::string(multiplexer::MAX_MESSAGE_SIZE - ping.ByteSizeLong() - 16, 'p'));
@@ -441,7 +441,7 @@ TEST(ServeThread, ASearchIsAnsweredWithItsPayloadEchoed) {
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
   multiplexer::MultiplexerMessage search;
   search.set_id(client.random64());
-  search.set_from(client.instance_id());
+  search.set_sender(client.instance_id());
   search.set_to(backend.conn_for_test()->instance_id());
   search.set_type(multiplexer::types::BACKEND_FOR_PACKET_SEARCH);
   search.set_message("what the searcher sent");
@@ -865,7 +865,7 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
   for (int index = 0; index < 12; ++index) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
-    msg.set_from(client.instance_id());
+    msg.set_sender(client.instance_id());
     msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
     msg.set_message("r" + std::to_string(index));
     sent.insert(msg.id());
@@ -890,7 +890,7 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
       }
       if (got.first->type() != multiplexer::types::DELIVERY_ERROR) {
         ++responses;
-      } else if (got.first->from() == backend.instance_id()) {
+      } else if (got.first->sender() == backend.instance_id()) {
         ++refused_by_backend;
       } else {
         ++refused_by_multiplexer;
@@ -992,7 +992,7 @@ TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
   for (int index = 0; index < 12; ++index) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
-    msg.set_from(client.instance_id());
+    msg.set_sender(client.instance_id());
     msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
     msg.set_message("r" + std::to_string(index));
     sent.insert(msg.id());
@@ -1063,7 +1063,7 @@ TEST(ServeThread, ADrainUnderAFloodEnds) {
   while (flood.wait_to_send(flood_until)) {  // as fast as the lockstep lets it, until the backend has left
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
-    msg.set_from(client.instance_id());
+    msg.set_sender(client.instance_id());
     msg.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
     msg.set_message("f" + std::to_string(sent.size()));
     sent.insert(msg.id());

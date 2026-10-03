@@ -183,7 +183,7 @@ std::string send_marker(InProcessMultiplexer& mx) {
   sender.wait_for_connection(sender.connect("127.0.0.1", mx.port, 5), 5);
   MultiplexerMessage marker;
   marker.set_id(sender.random64());
-  marker.set_from(sender.instance_id());
+  marker.set_sender(sender.instance_id());
   marker.set_to(CLAIMED_ID);
   marker.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
   marker.set_message("to whoever has the id");

@@ -26,7 +26,7 @@ class EventBackendServer : public multiplexer::backend::BaseMultiplexerServer {
     Event received = event("received");
     received.set_type(mxmsg.type());
     received.set_id(mxmsg.id());
-    received.set_from_(mxmsg.from());
+    received.set_sender(mxmsg.sender());
     received.set_to(mxmsg.to());
     set_payload(received, mxmsg.message());
     emit(received);

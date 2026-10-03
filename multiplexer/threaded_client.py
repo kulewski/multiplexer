@@ -41,11 +41,12 @@ from multiplexer.mxclient import (
     OperationTimedOut,
     UsedAfterFork,
     make_message,
+    renamed_sender,
     stamped,
     whole,
 )
 from multiplexer.multiplexer_constants import types
-import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
+import multiplexer.protocolbuffers  # the read-only aliases of the sender's former names
 
 DEFAULT_TIMEOUT = _native.DEFAULT_TIMEOUT
 
@@ -110,7 +111,7 @@ class ThreadedClient:
 
     @property
     def instance_id(self) -> int:
-        """This peer's instance id, the `from` of everything it sends."""
+        """This peer's instance id, the `sender` of everything it sends."""
         return self._native.instance_id()
 
     @property
@@ -219,10 +220,11 @@ class ThreadedClient:
         return Lane(connection, pinned) if connection is not None else Lane(pinned)
 
     def new_message(self, **kwargs: Any) -> MultiplexerMessage:
-        """A MultiplexerMessage with id and from filled in; `message` may be
+        """A MultiplexerMessage with id and sender filled in; `message` may be
         bytes, str or a protocol buffer message."""
         kwargs.setdefault("id", self.random())
-        kwargs.setdefault("from", self.instance_id)
+        renamed_sender(kwargs)
+        kwargs.setdefault("sender", self.instance_id)
         if "message" in kwargs:
             if isinstance(kwargs["message"], str):
                 kwargs["message"] = kwargs["message"].encode("utf-8")
@@ -240,7 +242,7 @@ class ThreadedClient:
         **kwargs: Any,
     ) -> int:
         """Send an event and return its message id. `message` is a
-        MultiplexerMessage, an empty id and from filled in, or a payload
+        MultiplexerMessage, an empty id and sender filled in, or a payload
         wrapped with the remaining kwargs, such as type= and to=. It goes on one connection, or on every one
         with multiplexer=ALL, on a Lane's connection (the lane taking the
         connection chosen when it has none or lost its own, unless pinned),
@@ -392,7 +394,7 @@ class ThreadedClient:
     ) -> Any:
         """Send a request: `message` itself when it is a whole
         MultiplexerMessage, typed by its own `type` and addressed by its own
-        `to`, an empty id and from filled in, `type=` or `to=` beside it a
+        `to`, an empty id and sender filled in, `type=` or `to=` beside it a
         TypeError; else one built from the payload, bytes, str or a protocol
         buffer message, and `type`, which it needs, and `to`. Without
         `callback`, block and return the reply,
@@ -427,8 +429,8 @@ class ThreadedClient:
         be quick, with the instance id of each backend that acknowledges
         the request with REQUEST_RECEIVED (notify_start()): once, normally,
         or again when a retry reached a backend, the same or another.
-        Nothing about the query changes for it; one that raises has its
-        traceback printed."""
+        Nothing about the query changes for it; what it raises goes to
+        sys.unraisablehook, as every callback's does."""
         if multiplexer is ThreadedClient.ALL:
             raise ValueError("a query goes through one connection; multiplexer=ALL is for events")
         lane = multiplexer if isinstance(multiplexer, Lane) else None

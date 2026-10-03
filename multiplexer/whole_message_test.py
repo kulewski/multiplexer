@@ -54,7 +54,7 @@ class WholeMessageTest(unittest.TestCase):
         self.assertEqual(bare.message, received.message)
         self.assertNotEqual(0, sent)
         self.assertEqual(sent, received.id)
-        self.assertEqual(sender, getattr(received, "from"))
+        self.assertEqual(sender, received.sender)
         self.assertEqual(0, bare.id)
 
     def test_every_client_fills_in_the_id_and_the_sender(self) -> None:
@@ -90,7 +90,7 @@ class WholeMessageTest(unittest.TestCase):
                 sent, sender, built = asyncio.run(send())
                 self.check(receiver, bare(b"async"), sent, sender)
                 self.assertNotEqual(0, built.id)
-                self.assertEqual(sender, getattr(built, "from"))
+                self.assertEqual(sender, built.sender)
             finally:
                 receiver.close()
 

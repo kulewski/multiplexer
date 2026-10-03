@@ -115,7 +115,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     MultiplexerMessage mxmsg;
     mxmsg.set_id(0);
     mxmsg.set_type(types::HEARTBIT);
-    mxmsg.set_from(manager->instance_id());
+    mxmsg.set_sender(manager->instance_id());
     heartbit_message_.reset(RawMessage::FromMessage(mxmsg));
     heartbit_message_->mark_own();
   }

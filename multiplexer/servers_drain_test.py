@@ -178,7 +178,7 @@ class ServersDrainTest(unittest.TestCase):
                 sent.discard(reply.references)
                 if reply.type != types.DELIVERY_ERROR:
                     responses += 1
-                elif reply.from_ == server.instance_id:
+                elif reply.sender == server.instance_id:
                     refused_by_backend += 1
                 else:
                     refused_by_multiplexer += 1

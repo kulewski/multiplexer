@@ -73,13 +73,13 @@ class Flooding:
         try:
             self.connection, _ = self.listener.accept()
             self.connection.settimeout(BOUND)
-            controller = getattr(self._frame(), "from")
+            controller = self._frame().sender
             welcome = MultiplexerMessage(
                 id=1,
                 type=types.CONNECTION_WELCOME,
                 message=WelcomeMessage(type=peers.MULTIPLEXER, id=self.id).SerializeToString(),
             )
-            setattr(welcome, "from", self.id)
+            welcome.sender = self.id
             self.connection.sendall(frame(welcome.SerializeToString()))
             threading.Thread(target=self._drain, daemon=True).start()
             ids = itertools.count(2)
@@ -87,7 +87,7 @@ class Flooding:
                 batch = b""
                 for _ in range(BATCH):
                     mxmsg = MultiplexerMessage(id=next(ids), to=controller, type=types.TEST_EVENT, message=b"x")
-                    setattr(mxmsg, "from", self.id)
+                    mxmsg.sender = self.id
                     batch += frame(mxmsg.SerializeToString())
                 self.connection.sendall(batch)
                 self.written += BATCH

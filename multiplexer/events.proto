@@ -20,7 +20,7 @@ message Event {
     optional uint32 query_type = 5;
     optional uint32 type = 6;
     optional uint64 id = 7;
-    optional uint64 from_ = 8;
+    optional uint64 sender = 8;
     optional uint64 to = 9;
     optional uint64 references = 10;
 

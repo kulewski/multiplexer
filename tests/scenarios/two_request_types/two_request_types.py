@@ -46,9 +46,9 @@ class TwoRequestTypes(unittest.TestCase):
             self.assertEqual(0, client.wait())
             self.assertEqual([], client.events_of("error"))
             for r in client.events_of("response", query_type=C.types.TEST_REQUEST_A):
-                self.assertEqual((a_id, "ABC"), (r["from_"], r["payload"]))
+                self.assertEqual((a_id, "ABC"), (r["sender"], r["payload"]))
             for r in client.events_of("response", query_type=C.types.TEST_REQUEST_B):
-                self.assertEqual((b_id, "abc"), (r["from_"], r["payload"]))
+                self.assertEqual((b_id, "abc"), (r["sender"], r["payload"]))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_A)))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_B)))
             self.assertEqual(3, len(a.wait_for_count("request", 3)))

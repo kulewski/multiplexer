@@ -258,7 +258,7 @@ void Server::_accept_later() {
 void Server::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
                             std::shared_ptr<MultiplexerMessage> msg) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  if (msg->from() == instance_id_) {
+  if (msg->sender() == instance_id_) {
     MX_LOG(ERROR, MEDIUMVERBOSITY,
            CTX("multiplexer.server") TEXT("received message from self") FLOW(msg->workflow())
                SKIPFILEIF(!(msg->logging_method() & multiplexer::LoggingMethod::FILE)));
@@ -311,7 +311,7 @@ void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage&
   if (mx::logging::impl::should_log(DEBUG, CHATTERBOX)) {
     MultiplexerMessage envelope;
     envelope.set_id(msg.id());
-    envelope.set_from(msg.from());
+    envelope.set_sender(msg.sender());
     envelope.set_to(msg.to());
     envelope.set_type(msg.type());
     envelope.set_timestamp(msg.timestamp());
@@ -395,17 +395,17 @@ void Server::_handle_delivery_errors(MessageMetaHandler& meta_handler) {
              TEXT("errors when delivering " + repr(meta_handler.msg.id()))
                  SKIPFILEIF(!(meta_handler.msg.logging_method() & multiplexer::LoggingMethod::FILE)));
 
-  if (!meta_handler.msg.from()) {  // sanity check
+  if (!meta_handler.msg.sender()) {  // sanity check
     return;
   }
-  if (meta_handler.msg.from() == instance_id_) {  // sanity check
+  if (meta_handler.msg.sender() == instance_id_) {  // sanity check
     return;
   }
 
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random_());
-  mxmsg.set_from(instance_id_);
-  mxmsg.set_to(meta_handler.msg.from());
+  mxmsg.set_sender(instance_id_);
+  mxmsg.set_to(meta_handler.msg.sender());
   mxmsg.set_report_delivery_error(false);
   mxmsg.set_type(types::DELIVERY_ERROR);
   meta_handler.delivery_error_message->SerializeToString(mxmsg.mutable_message());
@@ -1024,7 +1024,7 @@ void Server::_handle_rules_control(MessageMetaHandler& meta_handler) {
       case RulesLoad::LOADED:
         MX_LOG(INFO, LOWVERBOSITY,
                CTX("multiplexer.server")
-                   TEXT("rules reloaded at the request of peer " + repr(meta_handler.msg.from())));
+                   TEXT("rules reloaded at the request of peer " + repr(meta_handler.msg.sender())));
         status.set_reloaded(true);
         break;
       case RulesLoad::UNCHANGED:
@@ -1299,7 +1299,7 @@ std::string Server::_tap_record(Record& record) {
 MultiplexerMessage Server::_tap_frame(std::uint64_t peer_id) {
   MultiplexerMessage frame;
   frame.set_id(random_());
-  frame.set_from(instance_id_);
+  frame.set_sender(instance_id_);
   frame.set_to(peer_id);
   frame.set_type(RECORDING_RECORD);
   return frame;
@@ -1361,13 +1361,14 @@ void Server::_handle_recording_control(MessageMetaHandler& meta_handler) {
                                &error)) {
             status.set_error(error);
           } else {
-            MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT("recording started by peer " + repr(msg.from())));
+            MX_LOG(INFO, LOWVERBOSITY,
+                   CTX("multiplexer.server") TEXT("recording started by peer " + repr(msg.sender())));
           }
         }
         break;
       }
       case RecordingControl::STOP:
-        stop_recording("stopped by peer " + repr(msg.from()));
+        stop_recording("stopped by peer " + repr(msg.sender()));
         break;
       case RecordingControl::STATUS:
         break;
@@ -1382,7 +1383,7 @@ void Server::_handle_recording_control(MessageMetaHandler& meta_handler) {
           tap.dropped = 0;
           taps_.push_back(tap);
           MX_LOG(INFO, LOWVERBOSITY,
-                 CTX("multiplexer.server") TEXT("peer " + repr(msg.from()) + " taps the recording"));
+                 CTX("multiplexer.server") TEXT("peer " + repr(msg.sender()) + " taps the recording"));
         }
         break;
       case RecordingControl::UNTAP:
@@ -1421,8 +1422,8 @@ void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
                     const ::google::protobuf::Message& payload) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random_());
-  mxmsg.set_from(instance_id_);
-  mxmsg.set_to(meta_handler.msg.from());
+  mxmsg.set_sender(instance_id_);
+  mxmsg.set_to(meta_handler.msg.sender());
   mxmsg.set_type(type);
   mxmsg.set_references(meta_handler.msg.id());
   mxmsg.set_workflow(meta_handler.msg.workflow());

@@ -195,7 +195,7 @@ class ThreadedClient : public ExceptionDefinitions {
   std::size_t waiting_queries();
   std::size_t waiting_messages();
 
-  // Sending. The message must carry its id and from; new_message() fills
+  // Sending. The message must carry its id and sender; new_message() fills
   // those in. send() queues it on one live connection (round robin),
   // send_all() on every one, and both return at once: the write happens on
   // the io thread right after, so they are safe from callbacks. A message
@@ -276,7 +276,7 @@ class ThreadedClient : public ExceptionDefinitions {
   // holds. The blocking form throws std::logic_error when called on the
   // io thread, that is from a callback, where it would deadlock. The
   // message forms take the request as a whole, `to` included, and set its
-  // id and from per attempt; an addressed one locates its addressee with a
+  // id and sender per attempt; an addressed one locates its addressee with a
   // PING addressed to it. With a lane the request goes through the lane's
   // connection and the lane adopts the connection the reply came through, a
   // pinned lane allowing no other; with a connection, through that one

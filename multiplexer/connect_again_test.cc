@@ -32,7 +32,7 @@ namespace {
 MultiplexerMessage event(Client& client, const std::string& payload) {
   MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(types::TEST_UNROUTED);
   msg.set_report_delivery_error(false);
   msg.set_message(payload);

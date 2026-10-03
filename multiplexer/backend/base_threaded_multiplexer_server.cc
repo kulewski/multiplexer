@@ -31,11 +31,11 @@ void Request::reply(MultiplexerMessage msg) {
   if (!msg.id()) {
     msg.set_id(client_->random64());
   }
-  if (!msg.from()) {
-    msg.set_from(client_->instance_id());
+  if (!msg.sender()) {
+    msg.set_sender(client_->instance_id());
   }
   if (!msg.to()) {
-    msg.set_to(mxmsg().from());
+    msg.set_to(mxmsg().sender());
   }
   if (!msg.references()) {
     msg.set_references(mxmsg().id());

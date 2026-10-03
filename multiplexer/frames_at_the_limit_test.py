@@ -133,7 +133,7 @@ class FramesAtTheLimitTest(unittest.TestCase):
                 self.assertTrue(seen[0].routed.truncated)
                 self.assertLess(len(seen[0].routed.payload), len(big.message))
                 frame = MultiplexerMessage(id=2**64 - 1, to=2**64 - 1, type=RECORDING_RECORD)
-                setattr(frame, "from", seen[0].multiplexer_id)
+                frame.sender = seen[0].multiplexer_id
                 frame.message = seen[0].SerializeToString()
                 self.assertLessEqual(frame.ByteSize(), MAX_MESSAGE_SIZE, "the tap's frame within the limit")
                 longer = Record()

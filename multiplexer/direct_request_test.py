@@ -78,12 +78,12 @@ class DirectStage:
             if mxmsg.type == type_ and mxmsg.to == to:
                 return mxmsg
 
-    def _write(self, type_: int, from_: int, references: int, payload: bytes = b"late") -> None:
-        """A message of `type_` from `from_` to the client, answering `references`."""
+    def _write(self, type_: int, sender: int, references: int, payload: bytes = b"late") -> None:
+        """A message of `type_` from `sender` to the client, answering `references`."""
         assert self.connection is not None
         self.ids += 1
         mxmsg = MultiplexerMessage(id=self.ids, to=self.client_id, type=type_, references=references, message=payload)
-        setattr(mxmsg, "from", from_)
+        mxmsg.sender = sender
         self.connection.sendall(frame(mxmsg.SerializeToString()))
 
     def _script(self) -> None:
@@ -95,7 +95,7 @@ class DirectStage:
             welcome = WelcomeMessage(type=peers.MULTIPLEXER, id=self.ID).SerializeToString()
             self._write(types.CONNECTION_WELCOME, self.ID, 0, welcome)
             request = self._next(types.PYTHON_TEST_REQUEST, 0)
-            self.client_id = getattr(request, "from")
+            self.client_id = request.sender
             if not self.taken:
                 self._write(types.DELIVERY_ERROR, self.ID, request.id)
             search = self._next(types.BACKEND_FOR_PACKET_SEARCH, 0)

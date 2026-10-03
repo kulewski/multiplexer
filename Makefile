@@ -110,11 +110,12 @@ $(GEN)/%.pb.cc $(GEN)/%.pb.h $(GEN)/%_pb2.py $(GEN)/%_pb2.pyi: %.proto
 	@mkdir -p $(GEN)
 	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<
 
-# multiplexer/protocolbuffers.py adds `from_`, the `from` field under a name Python allows.
+# multiplexer/protocolbuffers.py keeps `from_`, a read-only alias of `sender`, the field named `from` up
+# to 2.3.1.
 $(GEN)/multiplexer/Multiplexer_pb2.pyi: multiplexer/Multiplexer.proto
 	@mkdir -p $(GEN)
 	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<
-	sed -i 's/^class MultiplexerMessage(.*/&\n    from_: int/' $@
+	sed -i 's/^class MultiplexerMessage(.*/&\n    @property\n    def from_(self) -> int: ...  # deprecated: the field is sender/' $@
 
 $(TYPE_IDS_H): multiplexer/mxlog/type_id_constants.txt multiplexer/mxlog/gen_type_id_constants.py
 	@mkdir -p $(dir $@)

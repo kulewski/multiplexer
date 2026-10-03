@@ -61,7 +61,7 @@ std::string RecordingControlTask::_describe(const RecordingStatus& status, bool 
 std::uint64_t RecordingControlTask::_send(Client& client, const RecordingControl& control) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(client.random64());
-  mxmsg.set_from(client.instance_id());
+  mxmsg.set_sender(client.instance_id());
   mxmsg.set_type(multiplexer::RECORDING_CONTROL);
   control.SerializeToString(mxmsg.mutable_message());
   client.schedule_all(mxmsg);
@@ -71,7 +71,7 @@ std::uint64_t RecordingControlTask::_send(Client& client, const RecordingControl
 void RecordingControlTask::_send(Client& client, const RecordingControl& control, ConnectionWrapper connection) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(client.random64());
-  mxmsg.set_from(client.instance_id());
+  mxmsg.set_sender(client.instance_id());
   mxmsg.set_type(multiplexer::RECORDING_CONTROL);
   control.SerializeToString(mxmsg.mutable_message());
   client.schedule_one(mxmsg, connection, timeout_);

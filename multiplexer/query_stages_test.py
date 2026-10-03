@@ -46,6 +46,7 @@ from multiplexer.Multiplexer_pb2 import MultiplexerMessage, WelcomeMessage
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
+from multiplexer.testing.buffers import fill_frames
 from multiplexer.testing.raw_peer import HEADER, frame
 
 BACKEND = 0xBAC  # the instance a search finds, or an addressed query asks
@@ -101,7 +102,7 @@ class StandIn:
         try:
             self.connection, _ = self.listener.accept()
             self.connection.settimeout(60)  # a client that never ends fails the test rather than hangs it
-            self.client_id = getattr(self._frame(), "from")
+            self.client_id = self._frame().sender
             welcome = WelcomeMessage(type=peers.MULTIPLEXER, id=self.id).SerializeToString()
             self.write(self._message(types.CONNECTION_WELCOME, self.id, 0, welcome), welcomed=True)
             self.welcomed.set()
@@ -135,16 +136,16 @@ class StandIn:
         except queue.Empty:
             return None
 
-    def _message(self, type_: int, from_: int, references: int, payload: bytes = b"late") -> MultiplexerMessage:
-        """A message of `type_` from `from_` to the client, answering `references`."""
+    def _message(self, type_: int, sender: int, references: int, payload: bytes = b"late") -> MultiplexerMessage:
+        """A message of `type_` from `sender` to the client, answering `references`."""
         self.ids += 1
         mxmsg = MultiplexerMessage(id=self.ids, to=self.client_id, type=type_, references=references, message=payload)
-        setattr(mxmsg, "from", from_)
+        mxmsg.sender = sender
         return mxmsg
 
-    def answer(self, type_: int, from_: int, references: int) -> MultiplexerMessage:
-        """A message of `type_` from `from_` to the client, answering `references`."""
-        return self._message(type_, from_, references)
+    def answer(self, type_: int, sender: int, references: int) -> MultiplexerMessage:
+        """A message of `type_` from `sender` to the client, answering `references`."""
+        return self._message(type_, sender, references)
 
     def write(self, mxmsg: MultiplexerMessage, welcomed: bool = False) -> bool:
         """`mxmsg` to the client: False when it could not be written."""
@@ -238,7 +239,7 @@ class ThreeConnections:
         connection, _ = self.listener.accept()
         connection.settimeout(60)  # a client that never ends fails the test rather than hangs it
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 1 if then_end else 0)
-        self.client_id = getattr(self._frame(connection), "from")
+        self.client_id = self._frame(connection).sender
         welcome = WelcomeMessage(type=peers.MULTIPLEXER, id=self.id).SerializeToString()
         connection.sendall(frame(self._message(types.CONNECTION_WELCOME, self.id, 0, welcome).SerializeToString()))
         if then_end:
@@ -274,34 +275,21 @@ class ThreeConnections:
         except (OSError, ConnectionError):
             return None
 
-    def _message(self, type_: int, from_: int, references: int, payload: bytes = b"late") -> MultiplexerMessage:
-        """A message of `type_` from `from_` to the client, answering `references`."""
+    def _message(self, type_: int, sender: int, references: int, payload: bytes = b"late") -> MultiplexerMessage:
+        """A message of `type_` from `sender` to the client, answering `references`."""
         self.ids += 1
         mxmsg = MultiplexerMessage(id=self.ids, to=self.client_id, type=type_, references=references, message=payload)
-        setattr(mxmsg, "from", from_)
+        mxmsg.sender = sender
         return mxmsg
 
-    def _write(self, connection: socket.socket, type_: int, from_: int, references: int) -> None:
-        """A message of `type_` from `from_` to the client on `connection`, answering `references`."""
-        connection.sendall(frame(self._message(type_, from_, references).SerializeToString()))
+    def _write(self, connection: socket.socket, type_: int, sender: int, references: int) -> None:
+        """A message of `type_` from `sender` to the client on `connection`, answering `references`."""
+        connection.sendall(frame(self._message(type_, sender, references).SerializeToString()))
 
     def close(self) -> None:
         """The listener closed and the thread joined."""
         self.listener.close()
         self.thread.join(60)
-
-
-def frames_past_the_sockets(size: int) -> int:
-    """How many frames of `size` bytes a multiplexer that reads nothing does
-    not take: the most the two sockets may buffer, and some."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 64
 
 
 def in_thread(script: Callable[[], str], outcomes: list[str]) -> threading.Thread:
@@ -734,9 +722,8 @@ class QueryStagesTest(unittest.TestCase):
         outcomes: list[str] = []
         with SyncClient([("127.0.0.1", first.port)], type=peers.WEBSITE) as client:
             lane = client.lane()
-            chunk = b"x" * 65536
-            for _ in range(frames_past_the_sockets(len(chunk))):
-                client.send_message(chunk, type=types.TEST_EVENT, multiplexer=lane)
+            for payload in fill_frames():  # past the sockets of a multiplexer that reads nothing
+                client.send_message(payload, type=types.TEST_EVENT, multiplexer=lane)
             client.connect(("127.0.0.1", second.port))
             threads = [in_thread(nobody, outcomes), in_thread(answers, outcomes)]
             reply = client.query(b"question", types.PYTHON_TEST_REQUEST, timeout=3, multiplexer=lane)
@@ -786,9 +773,8 @@ class QueryStagesTest(unittest.TestCase):
 
             outcomes: list[str] = []
             lane = client.lane()
-            chunk = b"x" * 65536
-            for _ in range(frames_past_the_sockets(len(chunk))):
-                client.send_message(chunk, type=types.TEST_EVENT, multiplexer=lane)
+            for payload in fill_frames():  # past the sockets of a multiplexer that reads nothing
+                client.send_message(payload, type=types.TEST_EVENT, multiplexer=lane)
             for _ in range(1024 + 64):  # the connection's queue full, at 1024: what follows waits for room
                 client.send_message(b"x" * 16, type=types.TEST_EVENT, multiplexer=lane)
             client.connect(("127.0.0.1", second.port))
@@ -848,9 +834,8 @@ class QueryStagesTest(unittest.TestCase):
         self.addCleanup(only.close)
         with SyncClient([("127.0.0.1", only.port)], type=peers.WEBSITE) as client:
             lane = client.lane()
-            chunk = b"x" * 65536
-            for _ in range(frames_past_the_sockets(len(chunk))):
-                client.send_message(chunk, type=types.TEST_EVENT, multiplexer=lane)
+            for payload in fill_frames():  # past the sockets of a multiplexer that reads nothing
+                client.send_message(payload, type=types.TEST_EVENT, multiplexer=lane)
             for _ in range(1024 + 64):  # the connection's queue full, at 1024: what follows waits for room
                 client.send_message(b"x" * 16, type=types.TEST_EVENT, multiplexer=lane)
             with self.assertRaises(OperationTimedOut):

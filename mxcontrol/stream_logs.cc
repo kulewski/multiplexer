@@ -69,7 +69,7 @@ static void on_message(ThreadedClient& client, const IncomingMessage& incoming) 
     if (client.drop_lines().first({NO_LOG_RECEIVER, WARNING, 0, 0},
                                   [] { return std::string("no log receiver took the log stream"); })) {
       MX_LOG(WARNING, LogSummary::VERBOSITY,
-             TEXT("no log receiver took the log stream: multiplexer " + repr(msg.from()) + " had none for chunk #" +
+             TEXT("no log receiver took the log stream: multiplexer " + repr(msg.sender()) + " had none for chunk #" +
                   repr(msg.references())));
     }
     return;

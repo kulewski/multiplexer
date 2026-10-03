@@ -50,7 +50,7 @@ struct LogReceiverServer : public multiplexer::backend::BaseMultiplexerServer {
     google::protobuf::TextFormat::PrintToString(mxmsg, &tf);
     std::cout << tf << "\n";
 
-    send_message(Kwargs().set("message", std::string()).set("type", types::PING).set("to", mxmsg.from()));
+    send_message(Kwargs().set("message", std::string()).set("type", types::PING).set("to", mxmsg.sender()));
   }
 };
 

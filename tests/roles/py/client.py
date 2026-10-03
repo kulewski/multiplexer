@@ -70,7 +70,7 @@ def report_result(worker: int, round_: int, index: int, type_: int, started: flo
     emit(
         "response",
         type=result.type,
-        from_=result.from_,
+        sender=result.sender,
         references=result.references,
         **common.payload_summary(result.message),
         **fields,

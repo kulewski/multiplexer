@@ -14,7 +14,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <fstream>
 #include <future>
 #include <mutex>
 #include <string>
@@ -29,6 +28,8 @@
 using multiplexer::DropReason;
 using multiplexer::MultiplexerMessage;
 using multiplexer::ThreadedClient;
+using multiplexer::testing::FILL_FRAMES;
+using multiplexer::testing::fill_size;
 using multiplexer::testing::InProcessMultiplexer;
 
 namespace {
@@ -72,25 +73,11 @@ struct Drops {
 MultiplexerMessage unrouted(multiplexer::Client& client, const std::string& payload) {
   MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(multiplexer::types::TEST_UNROUTED);
   msg.set_report_delivery_error(false);
   msg.set_message(payload);
   return msg;
-}
-
-// How many messages of `size` bytes a frozen multiplexer's connection
-// cannot take: twice what the two sockets may buffer, the largest the
-// kernel allows each, and twice the queue. Past that, messages wait.
-int frames_to_fill(std::size_t size) {
-  std::size_t buffers = 0;
-  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
-    std::ifstream limits(path);
-    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
-    limits >> least >> initial >> largest;
-    buffers += largest;
-  }
-  return static_cast<int>(2 * buffers / size) + 2 * 1024;
 }
 
 }  // namespace
@@ -129,11 +116,13 @@ TEST(ZeroOrNanTimeout, ASyncSendToAFullConnectionIsDroppedAtOnce) {
   multiplexer::Client client(multiplexer::peers::WEBSITE);
   ASSERT_TRUE(client.wait_for_connection(client.connect("127.0.0.1", mx.port, 5), 5));
   client.set_drop_observer(drops.observer());
-  const std::string chunk(16 * 1024, 'x');
+  const std::string fill(fill_size(), 'f'), chunk(16 * 1024, 'x');
   {
     Freeze frozen(mx);
-    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-      client.schedule_one(unrouted(client, chunk));  // DEFAULT_TIMEOUT: past the queue, these wait for room
+    // The sockets full however far the kernel grew them, then twice the queue.
+    for (int index = 0; index < FILL_FRAMES + 2 * 1024; ++index) {
+      // DEFAULT_TIMEOUT: past the queue, these wait for room
+      client.schedule_one(unrouted(client, index < FILL_FRAMES ? fill : chunk));
     }
     ASSERT_EQ(0u, client.dropped());
     const MultiplexerMessage zero = unrouted(client, "zero");

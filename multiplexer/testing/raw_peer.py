@@ -42,10 +42,10 @@ class RawPeer:
         self.peer_type = peer_type
 
     def message(self, payload: bytes, type_: int, **fields: Any) -> MultiplexerMessage:
-        """A MultiplexerMessage from this peer: random id, `from` set,
+        """A MultiplexerMessage from this peer: random id, `sender` set,
         `fields` (to=, references=, ...) applied."""
         mxmsg = MultiplexerMessage(id=random.randint(1, 2**62), type=type_, message=payload, **fields)
-        setattr(mxmsg, "from", self.instance_id)
+        mxmsg.sender = self.instance_id
         return mxmsg
 
     def send(self, payload: bytes, type_: int, **fields: Any) -> int:

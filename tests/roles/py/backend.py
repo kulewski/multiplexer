@@ -85,7 +85,7 @@ class ThreadedBackend(Leaving, threaded_server.BaseThreadedMultiplexerServer):
         self.handled += 1
         if self.memory_every and self.handled % self.memory_every == 0:
             common.memory_event(self.handled)
-        emit("request", type=mxmsg.type, id=mxmsg.id, from_=mxmsg.from_, size=len(mxmsg.message))
+        emit("request", type=mxmsg.type, id=mxmsg.id, sender=mxmsg.sender, size=len(mxmsg.message))
         response_type = self.serves.get(mxmsg.type)
         if response_type is None:
             emit("unexpected", type=mxmsg.type, id=mxmsg.id)
@@ -146,7 +146,7 @@ class Backend(Leaving, servers.BaseMultiplexerServer):
         self.handled += 1
         if self.memory_every and self.handled % self.memory_every == 0:
             common.memory_event(self.handled)
-        emit("request", type=mxmsg.type, id=mxmsg.id, from_=mxmsg.from_, size=len(mxmsg.message))
+        emit("request", type=mxmsg.type, id=mxmsg.id, sender=mxmsg.sender, size=len(mxmsg.message))
         response_type = self.serves.get(mxmsg.type)
         if response_type is None:
             emit("unexpected", type=mxmsg.type, id=mxmsg.id)

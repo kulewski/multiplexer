@@ -42,7 +42,7 @@ class RawProtocol(unittest.TestCase):
                 [hashlib.sha256(every_byte).hexdigest(), hashlib.sha256(big).hexdigest()],
                 [r["sha256"] for r in received],
             )
-            self.assertTrue(all(r["from_"] == peer.instance_id for r in received))
+            self.assertTrue(all(r["sender"] == peer.instance_id for r in received))
 
 
 if __name__ == "__main__":

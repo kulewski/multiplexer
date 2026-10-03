@@ -41,9 +41,9 @@ void refuse(BasicClient& client, const IncomingMessage& incoming) {
   error.add_failed_type(client.client_type());
   MultiplexerMessage refusal;
   refusal.set_id(client.random64());
-  refusal.set_from(client.instance_id());
+  refusal.set_sender(client.instance_id());
   refusal.set_type(types::DELIVERY_ERROR);
-  refusal.set_to(msg.from());
+  refusal.set_to(msg.sender());
   refusal.set_references(msg.id());
   refusal.set_workflow(msg.workflow());
   error.SerializeToString(refusal.mutable_message());
@@ -242,14 +242,14 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   if (query.to()) {
     return _query_addressed(query, timeout, lane);
   }
-  // The request itself, an empty from filled in, and an id of its own, as
+  // The request itself, an empty sender filled in, and an id of its own, as
   // every attempt gets: ids belong to attempts, so that one message may be
   // queried again and again, which a receiver that drops a repeated id
   // would otherwise answer once.
   MultiplexerMessage request = query;
   request.set_id(random64());
-  if (!request.from()) {
-    request.set_from(instance_id());
+  if (!request.sender()) {
+    request.set_sender(instance_id());
   }
   check_size_sent_again(&request);
 
@@ -297,7 +297,7 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
   const IncomingMessage ping = outcome.message;
   MultiplexerMessage direct_query = request;
   direct_query.set_id(random64());
-  direct_query.set_to(ping.third->from());
+  direct_query.set_to(ping.third->sender());
   direct_query.set_report_delivery_error(true);
   timer = basic_client_->create_timer(timeout);
   const ConnectionWrapper used = _send_attempt(direct_query, *timer, ping.second, lane, &ledger);
@@ -329,8 +329,8 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
   std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
   MultiplexerMessage request = query;
   request.set_id(random64());  // the attempt's own, as every attempt gets
-  if (!request.from()) {
-    request.set_from(instance_id());
+  if (!request.sender()) {
+    request.set_sender(instance_id());
   }
   request.set_report_delivery_error(true);  // "not behind this multiplexer" must come back as a message
   check_size_sent_again(&request);
@@ -383,7 +383,7 @@ IncomingMessage Client::_query_addressed(const MultiplexerMessage& query, float 
 MultiplexerMessage Client::_locator_for(const MultiplexerMessage& query) {
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random64());
-  mxmsg.set_from(instance_id());
+  mxmsg.set_sender(instance_id());
   if (query.to()) {
     mxmsg.set_type(types::PING);
     mxmsg.set_to(query.to());
@@ -659,7 +659,7 @@ IncomingMessage Client::_receive(mx::SimpleTimer& timer, const std::vector<uint6
         // on_received hears which, and the query goes on as before, whatever
         // the callback does.
         try {
-          received_(mxmsg.from());
+          received_(mxmsg.sender());
         } catch (const std::exception& error) {
           MX_LOG(ERROR, LOWVERBOSITY,
                  CTX("SyncClient") TEXT(std::string("the on_received of a query threw: ") + error.what()));
@@ -672,8 +672,8 @@ IncomingMessage Client::_receive(mx::SimpleTimer& timer, const std::vector<uint6
     }
     if (ignore_id != mxmsg.references()) {
       MX_LOG(WARNING, HIGHVERBOSITY,
-             TEXT("message (id=" + repr(mxmsg.id()) + ", type=" + repr(mxmsg.type()) + ", from=" + repr(mxmsg.from()) +
-                  ", references=" + repr(mxmsg.references()) +
+             TEXT("message (id=" + repr(mxmsg.id()) + ", type=" + repr(mxmsg.type()) +
+                  ", sender=" + repr(mxmsg.sender()) + ", references=" + repr(mxmsg.references()) +
                   ") while waiting "
                   "for reply for " +
                   repr(accept_ids)));

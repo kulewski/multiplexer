@@ -45,7 +45,7 @@ class RoundRobin(unittest.TestCase):
 
             by_backend = {}
             for r in responses:
-                by_backend[r["from_"]] = by_backend.get(r["from_"], 0) + 1
+                by_backend[r["sender"]] = by_backend.get(r["sender"], 0) + 1
             self.assertEqual(ids, set(by_backend), "every backend answered something")
             self.assertGreaterEqual(min(by_backend.values()), QUERIES // 4, "split is roughly even: %r" % by_backend)
             for b in backends:

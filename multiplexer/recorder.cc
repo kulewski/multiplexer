@@ -44,7 +44,7 @@ void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t fr
                  unsigned int payload_limit) {
   RoutedMessage* routed = record.mutable_routed();
   routed->set_id(msg.id());
-  routed->set_from(msg.from());
+  routed->set_sender(msg.sender());
   if (msg.to()) {
     routed->set_to(msg.to());
   }

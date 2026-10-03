@@ -190,7 +190,7 @@ class Client : public ExceptionDefinitions {
     basic_client_->check_not_orphaned();
     return basic_client_->connections_count(true);
   }
-  std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }  // our `from`
+  std::uint64_t inline instance_id() const { return basic_client_->instance_id(); }  // our `sender`
   // See BasicClient::reconnects_pending(); for tests.
   std::size_t reconnects_pending() const { return basic_client_->reconnects_pending(); }
   // See BasicClient::dropped_while_closing().
@@ -371,7 +371,7 @@ class Client : public ExceptionDefinitions {
 
     MultiplexerMessage mxmsg;
     mxmsg.set_id(random64());
-    mxmsg.set_from(instance_id());
+    mxmsg.set_sender(instance_id());
     mxmsg.set_type(type);
     mxmsg.set_message(message);
     return _query(mxmsg, timeout, lane, received);

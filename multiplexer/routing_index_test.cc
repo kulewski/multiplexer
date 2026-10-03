@@ -30,7 +30,7 @@ std::size_t indexed(InProcessMultiplexer& mx) {
 multiplexer::MultiplexerMessage message(multiplexer::Client& client, std::uint32_t type) {
   multiplexer::MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(type);
   msg.set_message("x");
   return msg;

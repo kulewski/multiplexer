@@ -93,7 +93,7 @@ thread, a backend included; `AsyncClient` for asyncio.
 
 A backend on `SyncClient` is possible in a pinch: a loop of its own calls
 `receive_message()` and answers each request with `send_message(reply,
-type=..., to=request.from_, references=request.id)`. On its own it
+type=..., to=request.sender, references=request.id)`. On its own it
 answers neither the backend search nor a `PING`, so a typed request
 reaches it only through the rules, at a query's first attempt, never
 through the search that follows a delivery error, a timeout or a lost

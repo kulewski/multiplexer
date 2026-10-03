@@ -88,7 +88,7 @@ struct Behaviour {
     Event request = event("request");
     request.set_type(mxmsg.type());
     request.set_id(mxmsg.id());
-    request.set_from_(mxmsg.from());
+    request.set_sender(mxmsg.sender());
     request.set_size(mxmsg.message().size());
     emit(request);
 

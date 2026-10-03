@@ -288,7 +288,7 @@ struct Requester {
   multiplexer::MultiplexerMessage message(const std::string& payload, std::uint32_t type) {
     multiplexer::MultiplexerMessage msg;
     msg.set_id(client.random64());
-    msg.set_from(client.instance_id());
+    msg.set_sender(client.instance_id());
     msg.set_type(type);
     msg.set_message(payload);
     return msg;

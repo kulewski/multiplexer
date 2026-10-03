@@ -12,7 +12,6 @@
 
 #include <asio/ip/tcp.hpp>
 #include <atomic>
-#include <fstream>
 #include <future>
 #include <memory>
 #include <stdexcept>
@@ -28,6 +27,8 @@ using multiplexer::Client;
 using multiplexer::ConnectionWrapper;
 using multiplexer::MultiplexerMessage;
 using multiplexer::ThreadedClient;
+using multiplexer::testing::FILL_FRAMES;
+using multiplexer::testing::fill_size;
 using multiplexer::testing::InProcessMultiplexer;
 namespace peers = multiplexer::peers;
 namespace types = multiplexer::types;
@@ -63,25 +64,11 @@ unsigned short port_left_free() {
 MultiplexerMessage message(Client& client, std::uint32_t type, const std::string& payload) {
   MultiplexerMessage msg;
   msg.set_id(client.random64());
-  msg.set_from(client.instance_id());
+  msg.set_sender(client.instance_id());
   msg.set_type(type);
   msg.set_report_delivery_error(false);
   msg.set_message(payload);
   return msg;
-}
-
-// How many messages of `size` bytes a frozen multiplexer's connection
-// cannot take: twice what the two sockets may buffer, the largest the
-// kernel allows each, and twice the queue. Past that, messages wait.
-int frames_to_fill(std::size_t size) {
-  std::size_t buffers = 0;
-  for (const char* path : {"/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"}) {
-    std::ifstream limits(path);
-    std::size_t least = 0, initial = 0, largest = 8 << 20;  // a guess where /proc does not say
-    limits >> least >> initial >> largest;
-    buffers += largest;
-  }
-  return static_cast<int>(2 * buffers / size) + 2 * 1024;
 }
 
 }  // namespace
@@ -135,9 +122,11 @@ TEST(Disconnect, WhatALiveConnectionHadNotWrittenGoesToAnother) {
   const MultiplexerMessage last = message(client, types::PYTHON_TEST_REQUEST, "last");
   {
     Freeze frozen(dropped_mx);
-    const std::string chunk(16 * 1024, 'x');
-    for (int index = 0; index < frames_to_fill(chunk.size()); ++index) {
-      client.queue(message(client, types::TEST_UNROUTED, chunk), multiplexer::DEFAULT_TIMEOUT, lane);
+    const std::string fill(fill_size(), 'f'), chunk(16 * 1024, 'x');
+    // The sockets full however far the kernel grew them, then twice the queue.
+    for (int index = 0; index < FILL_FRAMES + 2 * 1024; ++index) {
+      const std::string& payload = index < FILL_FRAMES ? fill : chunk;
+      client.queue(message(client, types::TEST_UNROUTED, payload), multiplexer::DEFAULT_TIMEOUT, lane);
     }
     const Client::ScheduledMessageTracker tracker = client.queue(last, multiplexer::DEFAULT_TIMEOUT, lane);
     ASSERT_TRUE(tracker);

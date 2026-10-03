@@ -30,10 +30,10 @@ namespace {
 
 // A message nobody answers, asking for no delivery error, with its id and
 // sender.
-MultiplexerMessage message(std::uint64_t id, std::uint64_t from) {
+MultiplexerMessage message(std::uint64_t id, std::uint64_t sender) {
   MultiplexerMessage msg;
   msg.set_id(id);
-  msg.set_from(from);
+  msg.set_sender(sender);
   msg.set_type(types::PYTHON_TEST_REQUEST);
   msg.set_report_delivery_error(false);
   msg.set_message("foreign");

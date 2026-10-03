@@ -57,7 +57,7 @@ class BackendDies(unittest.TestCase):
             self.assertEqual(["Q%d" % i for i in range(QUERIES)], [r["payload"] for r in responses])
             late = [r for r in responses if r["round"] >= CRASH_AFTER * 2]
             self.assertTrue(
-                late and all(r["from_"] == survivor_id for r in late), "after the crash only the survivor answers"
+                late and all(r["sender"] == survivor_id for r in late), "after the crash only the survivor answers"
             )
 
 

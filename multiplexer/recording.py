@@ -221,12 +221,12 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
             )
         return line
     routed = record.routed
-    line = "%s routed %s type=%s id=%d from=%d (%s)" % (
+    line = "%s routed %s type=%s id=%d sender=%d (%s)" % (
         when,
         RoutedMessage.Disposition.Name(routed.disposition),
         type_name(routed.type, constants),
         routed.id,
-        getattr(routed, "from"),
+        routed.sender,
         peer_name(routed.from_peer_type, constants),
     )
     if routed.recipient or routed.recipient_peer_type:
@@ -247,7 +247,7 @@ def involves_peer(record: Record, peer_id: int) -> bool:
         return record.peer.peer_id == peer_id
     if record.HasField("routed"):
         routed = record.routed
-        return peer_id in (getattr(routed, "from"), routed.recipient, routed.to)
+        return peer_id in (routed.sender, routed.recipient, routed.to)
     return False
 
 

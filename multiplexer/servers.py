@@ -462,7 +462,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
         instance id, `references` the request's id, `workflow` the request's
         workflow, `multiplexer` the connection the request arrived on. A
         whole MultiplexerMessage as `message` goes with those of its fields
-        that are empty filled in so, its id and from too, as a threaded
+        that are empty filled in so, its id and sender too, as a threaded
         server's reply does; message fields beside it are a TypeError. Other
         kwargs are as for mxclient.Client.send_message. Outside
         handle_message(), from periodic_task() say, there are no defaults:
@@ -477,7 +477,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
             else:
                 kwargs.setdefault("references", self.last_mxmsg.id)
                 kwargs.setdefault("workflow", self.last_mxmsg.workflow)
-                kwargs.setdefault("to", self.last_mxmsg.from_)
+                kwargs.setdefault("to", self.last_mxmsg.sender)
         sent = self.conn.send_message(**kwargs)
         if handling:
             self._has_sent_response = True  # once it went: a send that raised is no answer

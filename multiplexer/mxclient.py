@@ -15,6 +15,7 @@ import atexit
 import math
 import time
 import traceback
+import warnings
 from typing import Any, Callable, ClassVar, Literal, overload
 
 import google.protobuf.message
@@ -36,7 +37,7 @@ from multiplexer._native import (
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
 from multiplexer.mxlog import HIGHVERBOSITY, MEDIUMVERBOSITY, WARNING, log
-import multiplexer.protocolbuffers  # registers MultiplexerMessage.from_
+import multiplexer.protocolbuffers  # the read-only aliases of the sender's former names
 
 # What this module is imported for: the client, its exceptions and handles,
 # the message helpers, the default timeout, and how long an end call writes
@@ -108,6 +109,17 @@ def make_message(_type, **kwargs):
     return message
 
 
+def renamed_sender(kwargs: dict) -> None:
+    """A sender given to new_message() under a name the field had, `from`
+    up to 2.3.1 or the `from_` alias, moved to `sender`, with a
+    DeprecationWarning; a `sender` given as well wins. For a release, as
+    the read aliases (protocolbuffers.py)."""
+    for former in ("from", "from_"):
+        if former in kwargs:
+            warnings.warn("%s= is the field sender now: pass sender=" % former, DeprecationWarning, stacklevel=3)
+            kwargs.setdefault("sender", kwargs.pop(former))
+
+
 def wait_seconds(seconds: float) -> float:
     """`seconds` as a Python wait takes them, read as mx::from_seconds reads
     every timeout in C++: at most MAX_SECONDS, math.inf too, since Python's
@@ -127,14 +139,14 @@ def stamped(mxmsg: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], 
     by `fresh_id` and an empty sender set to `instance_id`, as new_message()
     and a reply fill them, since every receiver drops a message without an
     id. The C++ clients frame it the same way (frame_stamped)."""
-    if mxmsg.id and getattr(mxmsg, "from"):
+    if mxmsg.id and mxmsg.sender:
         return mxmsg
     filled = MultiplexerMessage()
     filled.CopyFrom(mxmsg)
     if not filled.id:
         filled.id = fresh_id()
-    if not getattr(filled, "from"):
-        setattr(filled, "from", instance_id)  # a keyword; from_ only reads
+    if not filled.sender:
+        filled.sender = instance_id
     return filled
 
 
@@ -151,17 +163,17 @@ def whole(mxmsg: MultiplexerMessage, fields: dict, instance_id: int, fresh_id: C
 
 def as_reply(mxmsg: MultiplexerMessage, request: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], int]):
     """A copy of `mxmsg` with its empty fields filled in as a reply to
-    `request`: id and from, as stamped() fills them, and to, references and
+    `request`: id and sender, as stamped() fills them, and to, references and
     workflow from the request. What every server class does with a whole
     message given as the reply, as C++ Request::reply does."""
     reply = MultiplexerMessage()
     reply.CopyFrom(mxmsg)
     if not reply.id:
         reply.id = fresh_id()
-    if not getattr(reply, "from"):
-        setattr(reply, "from", instance_id)  # a keyword; from_ only reads
+    if not reply.sender:
+        reply.sender = instance_id
     if not reply.to:
-        reply.to = request.from_
+        reply.to = request.sender
     if not reply.references:
         reply.references = request.id
     if not reply.workflow:
@@ -423,7 +435,7 @@ class Client(_mxclient.Client):
                 id=mxmsg.id,
                 type=mxmsg.type,
                 to=mxmsg.to,
-                from_=mxmsg.from_,
+                sender=mxmsg.sender,
                 references=mxmsg.references,
                 len=len(mxmsg.message),
             ),
@@ -495,7 +507,7 @@ class Client(_mxclient.Client):
 
         The request is `message` itself when it is a whole
         MultiplexerMessage, typed by its own `type` and addressed by its own
-        `to`, an empty id and from filled in; `type=` or `to=` beside it is
+        `to`, an empty id and sender filled in; `type=` or `to=` beside it is
         a TypeError. Else it is built from the payload, bytes, str or a
         protocol buffer message, and `type`, which it needs, and `to`.
 
@@ -555,7 +567,7 @@ class Client(_mxclient.Client):
     def __request(self, message: Any, type: "int | None", to: int) -> MultiplexerMessage:
         """A query's request, a message of its own that the stages may set
         fields of: a copy of `message` when it is a whole MultiplexerMessage,
-        an empty from filled in and an id of its own, as every attempt gets,
+        an empty sender filled in and an id of its own, as every attempt gets,
         so that one message may be queried again and again; else one built
         from the payload, `type` and `to`. TypeError for `type` or `to`
         beside a whole message, and for a payload without its type."""
@@ -567,8 +579,8 @@ class Client(_mxclient.Client):
             request = MultiplexerMessage()
             request.CopyFrom(message)
             request.id = self.random()
-            if not getattr(request, "from"):
-                setattr(request, "from", self.instance_id)  # a keyword; from_ only reads
+            if not request.sender:
+                request.sender = self.instance_id
             return request
         if type is None:
             raise TypeError("a query of a payload needs its type")
@@ -634,7 +646,7 @@ class Client(_mxclient.Client):
         # instance id and through the connection its PING came on, asking for
         # a delivery error, which says that backend is gone.
         ping, ping_connection = answer
-        direct_query = self.__again(query, ping.from_)
+        direct_query = self.__again(query, ping.sender)
         ticker = TimeoutTicker(timeout)
         used = self.__send_attempt(direct_query, ticker, ping_connection, lane, ledger)
         outcome, answer = self.__await(ledger, ticker, _DIRECT, used, lane)
@@ -927,7 +939,7 @@ class Client(_mxclient.Client):
             and mxmsg.references not in ignore_ids
         ):
             try:
-                on_received(mxmsg.from_)
+                on_received(mxmsg.sender)
             except Exception:
                 traceback.print_exc()
 
@@ -972,9 +984,9 @@ class Client(_mxclient.Client):
                 log(
                     WARNING,
                     HIGHVERBOSITY,
-                    text="message (id=%d, type=%d, from=%d, references=%d) "
+                    text="message (id=%d, type=%d, sender=%d, references=%d) "
                     "while waiting for reply for %r"
-                    % (mxmsg.id, mxmsg.type, mxmsg.from_, mxmsg.references, accept_ids),
+                    % (mxmsg.id, mxmsg.type, mxmsg.sender, mxmsg.references, accept_ids),
                 )
                 self.handle_drop(mxmsg, connwrap)
 
@@ -984,7 +996,7 @@ class Client(_mxclient.Client):
         """Send a message on one or more connections and return its id.
 
         `message` is a whole MultiplexerMessage, sent as it is, an empty id
-        and from filled in, or a payload (bytes, str, or a protocol buffer
+        and sender filled in, or a payload (bytes, str, or a protocol buffer
         message) wrapped into a new one built from the remaining kwargs
         (`type`, `to`, `references`, `workflow`, ...); those beside a whole
         message are a TypeError. Keyword-only options: `multiplexer` is
@@ -1091,7 +1103,8 @@ class Client(_mxclient.Client):
 
         # defaults
         kwargs.setdefault("id", self.random())
-        kwargs.setdefault("from", self.instance_id)
+        renamed_sender(kwargs)
+        kwargs.setdefault("sender", self.instance_id)
 
         # special handling of some values
         if "message" in kwargs:

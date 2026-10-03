@@ -79,7 +79,7 @@ bool involves(const multiplexer::Record& record, std::uint64_t peer) {
     return record.peer().peer_id() == peer;
   }
   if (record.has_routed()) {
-    return record.routed().from() == peer || record.routed().recipient() == peer || record.routed().to() == peer;
+    return record.routed().sender() == peer || record.routed().recipient() == peer || record.routed().to() == peer;
   }
   return false;
 }
@@ -179,7 +179,7 @@ int DumpRecording::run() {
         const multiplexer::RoutedMessage& routed = record.routed();
         std::cout << "routed " << multiplexer::RoutedMessage::Disposition_Name(routed.disposition())
                   << " type=" << type_name(rules.get(), routed.type()) << " id=" << routed.id()
-                  << " from=" << routed.from() << " (" << peer_name(rules.get(), routed.from_peer_type()) << ")";
+                  << " sender=" << routed.sender() << " (" << peer_name(rules.get(), routed.from_peer_type()) << ")";
         if (routed.recipient() || routed.recipient_peer_type()) {
           std::cout << " -> " << routed.recipient() << " (" << peer_name(rules.get(), routed.recipient_peer_type())
                     << ")";

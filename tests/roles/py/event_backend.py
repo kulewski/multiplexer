@@ -27,7 +27,7 @@ class EventBackend(servers.BaseMultiplexerServer):
             "received",
             type=mxmsg.type,
             id=mxmsg.id,
-            from_=mxmsg.from_,
+            sender=mxmsg.sender,
             to=mxmsg.to,
             **common.payload_summary(mxmsg.message),
         )

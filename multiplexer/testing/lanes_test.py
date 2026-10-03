@@ -76,7 +76,7 @@ class AddressedQueryTest(unittest.TestCase):
         for index in range(10):
             reply = self.client.query(b"n%d" % index, REQUEST, to=self.second.instance_id)
             self.assertEqual(
-                (RESPONSE, b"N%d" % index, self.second.instance_id), (reply.type, reply.message, reply.from_)
+                (RESPONSE, b"N%d" % index, self.second.instance_id), (reply.type, reply.message, reply.sender)
             )
         self.assertEqual(10, len(self.second.messages(REQUEST)))
         self.assert_only_markers_reach(self.first)

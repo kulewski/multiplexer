@@ -79,14 +79,14 @@ class Recording(unittest.TestCase):
             request = [r for r in routed if r.id == request_id]
             self.assertEqual(1, len(request), "one delivery attempt for the request")
             self.assertEqual(RoutedMessage.DELIVERED, request[0].disposition)
-            self.assertEqual((client_id, C.peers.TEST_CLIENT), (getattr(request[0], "from"), request[0].from_peer_type))
+            self.assertEqual((client_id, C.peers.TEST_CLIENT), (request[0].sender, request[0].from_peer_type))
             self.assertEqual(
                 (backend_id, C.peers.TEST_BACKEND_A), (request[0].recipient, request[0].recipient_peer_type)
             )
             self.assertEqual(b"hello", request[0].payload)
             reply = [r for r in routed if r.references == request_id and r.type == C.types.TEST_RESPONSE]
             self.assertEqual(1, len(reply))
-            self.assertEqual((backend_id, client_id), (getattr(reply[0], "from"), reply[0].recipient))
+            self.assertEqual((backend_id, client_id), (reply[0].sender, reply[0].recipient))
             self.assertLess(
                 routed.index(request[0]), routed.index(reply[0]), "the request is recorded before its reply"
             )
@@ -104,7 +104,7 @@ class Recording(unittest.TestCase):
             self.assertTrue(errors, "the delivery error sent back is a routed message too")
             self.assertEqual(
                 {(records[0].header.multiplexer_id, C.peers.MULTIPLEXER)},
-                {(getattr(r, "from"), r.from_peer_type) for r in errors},
+                {(r.sender, r.from_peer_type) for r in errors},
                 "it is the multiplexer's own message, whichever connection carried it",
             )
 

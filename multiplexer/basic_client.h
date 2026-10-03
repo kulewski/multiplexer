@@ -68,15 +68,15 @@ class Client;
 template <typename FreshId>
 std::shared_ptr<const RawMessage> frame_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id,
                                                 FreshId fresh_id) {
-  if (msg.id() && msg.from()) {
+  if (msg.id() && msg.sender()) {
     return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
   }
   MultiplexerMessage stamped(msg);
   if (!stamped.id()) {
     stamped.set_id(fresh_id());
   }
-  if (!stamped.from()) {
-    stamped.set_from(instance_id);
+  if (!stamped.sender()) {
+    stamped.set_sender(instance_id);
   }
   return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(stamped));
 }
@@ -512,9 +512,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   void check_ours(const LanePtr& lane) const;
   void orphan_close_descriptors();
   // Makes the calling thread the owner of this client and of every
-  // connection it has, live or still connecting. For a client built on one
-  // thread and driven from another; BaseMultiplexerServer::serve_forever()
-  // calls it on entry. Only the debug-build thread checks care.
+  // connection it made that still exists: live, connecting, reading to its
+  // end, or shut down with handlers still to run. For a client built on
+  // one thread and driven from another; BaseMultiplexerServer::
+  // serve_forever() and ~Client call it. Only the debug-build thread
+  // checks care.
   void bind_to_current_thread();
   ConnectionWrapper async_connect(const Endpoint& peer_endpoint);                // an address: start connecting
   ConnectionWrapper async_connect(const std::string& host, std::uint16_t port);  // a name or an address
@@ -627,6 +629,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if (data.routing_in_welcome != routing_version_) {
       _send_routing(conn);
     }
+    // The queue took one until now: what waited on this connection for
+    // room moves in under the peer type's size, ahead of what waited for
+    // any connection, as no room event comes but for a queue that was full.
+    outgoing_queue_has_room(conn.get());
     _place_held();  // what waited for a connection goes out now, in order
     if (connection_observer_) {
       connection_observer_(_wrap(conn), true);
@@ -982,8 +988,12 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // shutdown() cancels, as disconnect() does its target's.
   ConnectionByTarget connection_by_target_;
   ReconnectTimers reconnect_timers_;
-  std::vector<Connection::weak_pointer> closing_;  // closed by shutdown() or disconnect(), reading to their end
-  std::uint64_t dropped_while_closing_ = 0;        // see dropped_while_closing()
+  std::vector<Connection::weak_pointer> closing_;  // reading to their end; see connection_destroyed()
+  // Every connection made that still exists: one shut down lives on until
+  // its last handler ran, and bind_to_current_thread() takes it along.
+  // Those gone are dropped as new ones are made.
+  std::vector<Connection::weak_pointer> made_;
+  std::uint64_t dropped_while_closing_ = 0;  // see dropped_while_closing()
   const unsigned int fork_generation_at_creation_;
   std::atomic<bool> orphan_descriptors_closed_{false};
   DescriptorTable descriptors_;  // every socket open, for a forked child to close

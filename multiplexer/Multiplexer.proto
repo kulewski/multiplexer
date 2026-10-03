@@ -86,9 +86,10 @@ message MultiplexerMessage {
     // generally required but see http://code.google.com/apis/protocolbuffers/docs/proto.html#simple
     optional uint64 id = 1;
 
-    // ID of the sender
-    // generally required
-    optional uint64 from = 2;
+    // The sender's instance id; generally required. Named `from` up to
+    // 2.3.1, a keyword in Python, under the same number, so that the wire
+    // and every recording are unchanged.
+    optional uint64 sender = 2;
 
     // send a message directly to a peer with ID `to'; overrides all rules, also `override_rrules'
     optional uint64 to = 3;

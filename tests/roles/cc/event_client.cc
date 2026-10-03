@@ -28,7 +28,7 @@ class EventClientRole : public mxcontrol::Task {
     for (size_t index = 0; index < sends.size(); ++index) {
       MultiplexerMessage message;
       message.set_id(client->random64());
-      message.set_from(client->instance_id());
+      message.set_sender(client->instance_id());
       message.set_type(sends[index].first);
       message.set_message(sends[index].second);
       if (to_) {

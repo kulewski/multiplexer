@@ -178,7 +178,7 @@ class ThreadedTestClientTest(unittest.TestCase):
             reply, connection = client.query(
                 b"ping", types.PYTHON_TEST_REQUEST, to=peer.instance_id, with_connection=True
             )
-            self.assertEqual(peer.instance_id, reply.from_)
+            self.assertEqual(peer.instance_id, reply.sender)
             self.assertTrue(connection)
             other.send(b"for you", types.PYTHON_TEST_RESPONSE, to=client.instance_id)
             (event,) = client.wait_for(types.PYTHON_TEST_RESPONSE, matching=lambda m: m.message == b"for you")
@@ -210,7 +210,7 @@ class ThreadedTestClientTest(unittest.TestCase):
                 backend = peer.backend
                 assert backend is not None
                 backend.send_message(
-                    message=b"follow-up", type=types.PYTHON_TEST_RESPONSE, to=mxmsg.from_, references=0, flush=True
+                    message=b"follow-up", type=types.PYTHON_TEST_RESPONSE, to=mxmsg.sender, references=0, flush=True
                 )
                 return None
 

@@ -140,16 +140,19 @@ class ForkTest(unittest.TestCase):
         self.mx.wait(10)
 
     def test_inherited_clients_are_orphans_and_the_parent_keeps_its_connections(self) -> None:
-        """Fork with a live Client and ThreadedClient; check both sides."""
-        sync = Client([self.endpoint], type=peers.WEBSITE)
-        threaded = ThreadedClient([self.endpoint], type=peers.WEBSITE)
+        """Fork with a live Client and ThreadedClient; check both sides. They
+        are held by a list only, which the child empties, so that dropping
+        them there frees them: held by this frame too, the drop freed
+        nothing, and its "ok" checked no teardown."""
+        clients = [Client([self.endpoint], type=peers.WEBSITE), ThreadedClient([self.endpoint], type=peers.WEBSITE)]
         os.environ["MX_FORK_TEST_ENDPOINT"] = "%s:%d" % self.endpoint
         read_end, write_end = os.pipe()
         pid = os.fork()
         if pid == 0:
             os.close(read_end)
-            self._child(sync, threaded, write_end)
+            self._child(clients, write_end)
         os.close(write_end)
+        sync, threaded = clients
         _, status = os.waitpid(pid, 0)
         report = os.read(read_end, 65536).decode()
         self.assertEqual(0, os.waitstatus_to_exitcode(status), report)
@@ -181,8 +184,10 @@ class ForkTest(unittest.TestCase):
         sync.shutdown()
 
     @staticmethod
-    def _child(sync: Client, threaded: ThreadedClient, write_end: int) -> None:
-        """The child's checks; reports one `name: outcome` per line and exits."""
+    def _child(clients: list, write_end: int) -> None:
+        """The child's checks on the SyncClient and the ThreadedClient in
+        `clients`, which it empties; reports one `name: outcome` per line
+        and exits."""
         report = []
 
         def attempt(name, call) -> None:
@@ -196,6 +201,7 @@ class ForkTest(unittest.TestCase):
                 report.append("%s: %s" % (name, type(error).__name__))
 
         try:
+            sync, threaded = clients
             host, port = os.environ["MX_FORK_TEST_ENDPOINT"].rsplit(":", 1)
             # The parent's multiplexer: dropped here, the connection the
             # parent checks after would be closed.
@@ -216,8 +222,13 @@ class ForkTest(unittest.TestCase):
             )
             attempt("threaded.connect", lambda threaded=threaded: threaded.connect(("127.0.0.1", 1), 0.1))
             attempt("threaded.disconnect", lambda threaded=threaded: threaded.disconnect(parents))
-            del sync, threaded  # the orphan teardown: must neither hang nor hurt the parent
-            report.append("dropped: ok")
+            # The orphan teardown, which must neither hang nor hurt the
+            # parent: the clients' last references go, and they are freed.
+            gone = [weakref.ref(sync), weakref.ref(threaded)]
+            del sync, threaded
+            clients.clear()
+            gc.collect()
+            report.append("dropped: %s" % ("ok" if all(client() is None for client in gone) else "still referenced"))
             fresh = ThreadedClient([parents], type=peers.WEBSITE)
             try:
                 fresh.query(b"x", type=types.PYTHON_TEST_REQUEST, timeout=5)

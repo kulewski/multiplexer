@@ -22,7 +22,7 @@ complete example is [examples/echo](../examples/echo).
 `multiplexer::MultiplexerMessage` is the generated protocol buffer class from
 [Multiplexer.proto](../multiplexer/Multiplexer.proto). The fields that matter
 are the same as in Python: `type`, `message` (a `std::string` of bytes),
-`id`, `from`, `to`, `references`, `workflow`. Setters are `set_type()`,
+`id`, `sender`, `to`, `references`, `workflow`. Setters are `set_type()`,
 `set_message()` and so on. `id` is drawn by the library per attempt: a query's
 request sent again, to the backend its search found, carries a new id,
 so a backend that must not do the same work twice keys on the payload, not
@@ -139,7 +139,7 @@ client.shutdown();
   on all of them, then the request again to the backend found, each stage
   with its own `timeout`; the request goes out at most twice, and the
   query never goes back a stage. `mxmsg` is the request itself, its empty
-  `from` filled in, each attempt with an id of its own, ids belonging to
+  `sender` filled in, each attempt with an id of its own, ids belonging to
   attempts, so that one message may be queried again and again; the
   request sent again is a copy of it, every field kept. A message with `to` set is an
   addressed query, with one `timeout` for its stages, see
@@ -256,7 +256,7 @@ client.shutdown();
   client given addresses never waits so.
 
 A message built by hand that has no id or sender gets them where it is
-sent: a fresh id, and the client's instance id as `from`. The receiving
+sent: a fresh id, and the client's instance id as `sender`. The receiving
 library drops a message without an id. `SyncClient`'s `queue()`,
 `queue_all()` and `schedule_*()` also take a frame, a
 `std::shared_ptr<const RawMessage>`, sent as it is:
@@ -624,7 +624,7 @@ client.shutdown();
   nobody holding the request), `NOT_CONNECTED` or `SHUT_DOWN`, and
   `check()` returns the reply or throws the exception `SyncClient::query`
   would have. The stages are `SyncClient`'s. `query(msg, timeout, lane)`
-  takes the request as a whole, `to` included, its empty `from` filled in,
+  takes the request as a whole, `to` included, its empty `sender` filled in,
   each attempt with an id of its own:
   the addressed form, and `query(msg, connection, ...)` prefers a
   connection, see [above](#lanes-pinning-and-addressed-queries). `received`,
@@ -698,7 +698,7 @@ client.shutdown();
   the second. All are safe from callbacks. A message over `MAX_MESSAGE_SIZE`
   is refused where it is sent or queried, with `std::length_error`, a
   query's request measured as the query may send it again.
-  `new_message()` fills in id and from, and every send fills them in on a
+  `new_message()` fills in id and sender, and every send fills them in on a
   whole message that left them empty: every receiver drops a message
   without an id.
 - `connect(host, port, timeout)` connects as `SyncClient::connect()` does

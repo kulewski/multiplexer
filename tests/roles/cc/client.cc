@@ -117,7 +117,7 @@ class ClientRole : public mxcontrol::Task {
   static void report_reply(int worker_index, const Query& query, const MultiplexerMessage& reply, double ms) {
     Event response = query_event("response", worker_index, query);
     response.set_type(reply.type());
-    response.set_from_(reply.from());
+    response.set_sender(reply.sender());
     response.set_references(reply.references());
     response.set_ms(ms);
     set_payload(response, reply.message());

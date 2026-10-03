@@ -98,7 +98,7 @@ struct Backend {
           }
           MultiplexerMessage reply =
               client.new_message(multiplexer::types::PYTHON_TEST_RESPONSE, incoming.third->message());
-          reply.set_to(incoming.third->from());
+          reply.set_to(incoming.third->sender());
           reply.set_references(incoming.third->id());
           client.send(reply, incoming.second);
         }) {

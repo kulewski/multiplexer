@@ -14,7 +14,7 @@ std::shared_ptr<const RawMessage> pack_welcome(const WelcomeMessage& welcome, st
   // pack it into MultiplexerMessage
   MultiplexerMessage msg;
   msg.set_id(0);
-  msg.set_from(instance_id);
+  msg.set_sender(instance_id);
   msg.set_type(types::CONNECTION_WELCOME);
   welcome.SerializeToString(msg.mutable_message());
 

@@ -121,7 +121,7 @@ class Request:
         buffer message) and the remaining fields, `type=` above all;
         `to`, `references`, `workflow` and `multiplexer` default to the
         request's. A whole MultiplexerMessage goes with those of its
-        fields that are empty filled in so, its id and from too, as the
+        fields that are empty filled in so, its id and sender too, as the
         C++ Request::reply does, and message fields beside it are a
         TypeError. The kwargs are
         ThreadedClient.send_message()'s, so `flush=True` waits for the
@@ -133,13 +133,13 @@ class Request:
         a requester built on ThreadedClient or AsyncClient drops what
         references a query it has seen answered. A follow-up that is not
         the reply, a stream of results after the answer for instance, goes
-        through self.server.send_message(..., to=request.mxmsg.from_) with
+        through self.server.send_message(..., to=request.mxmsg.sender) with
         no `references`, correlated in the payload."""
         kwargs.setdefault("multiplexer", self.connection)
         if isinstance(message, MultiplexerMessage):
             message = as_reply(message, self.mxmsg, self.client.instance_id, self.client.random)
         else:
-            kwargs.setdefault("to", self.mxmsg.from_)
+            kwargs.setdefault("to", self.mxmsg.sender)
             kwargs.setdefault("references", self.mxmsg.id)
             kwargs.setdefault("workflow", self.mxmsg.workflow)
         sent = self.client.send_message(message, **kwargs)

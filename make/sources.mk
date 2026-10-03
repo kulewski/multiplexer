@@ -180,6 +180,7 @@ CC_TEST_SRCS := \
   multiplexer/live_id_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
+  multiplexer/oversized_message_test.cc \
   multiplexer/query_stages_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/recording_copies_test.cc \
@@ -195,6 +196,7 @@ CC_TEST_SRCS := \
 PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/all_types_test.py \
+  multiplexer/callback_errors_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_again_test.py \
   multiplexer/connect_by_name_test.py \
@@ -233,6 +235,7 @@ PY_TEST_FILES := \
   multiplexer/report_loop_test.py \
   multiplexer/send_callbacks_test.py \
   multiplexer/send_reports_test.py \
+  multiplexer/sender_field_test.py \
   multiplexer/serve_thread_test.py \
   multiplexer/server_connect_test.py \
   multiplexer/server_replies_test.py \

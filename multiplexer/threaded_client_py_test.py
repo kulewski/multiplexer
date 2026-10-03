@@ -90,7 +90,7 @@ class ThreadedClientTest(unittest.TestCase):
         peer.send_message(message=b"for you", type=types.PYTHON_TEST_REQUEST, to=client.instance_id, flush=True)
         mxmsg = incoming.get(timeout=5)
         self.assertEqual(b"for you", mxmsg.message)
-        self.assertEqual(peer.instance_id, mxmsg.from_)
+        self.assertEqual(peer.instance_id, mxmsg.sender)
         client.shutdown()
         peer.shutdown()
 

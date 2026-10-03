@@ -102,9 +102,10 @@ message RoutedMessage {
     NOT_ACCEPTED = 6;   // the recipient takes no message by this path (its Routing); in a rule's record,
                         // no peer of the type does
   }
-  // The envelope, as received.
+  // The envelope, as received. `sender` was named `from` up to 2.3.1, the
+  // same number, so that a recording of either reads alike.
   optional uint64 id = 1;
-  optional uint64 from = 2;
+  optional uint64 sender = 2;
   optional uint64 to = 3;
   optional uint64 references = 4;
   optional uint32 type = 5;

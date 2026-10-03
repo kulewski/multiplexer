@@ -127,7 +127,7 @@ void BasicClient::_send_routing(Connection::pointer conn) {
   *control.mutable_routing() = routing_;
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random_());
-  mxmsg.set_from(instance_id_);
+  mxmsg.set_sender(instance_id_);
   mxmsg.set_type(PEER_CONTROL);
   control.SerializeToString(mxmsg.mutable_message());
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
@@ -206,9 +206,7 @@ void BasicClient::shutdown() {
     if (Connection::pointer conn = entry->second.lock()) {
       // this does modify connection_by_target_, so we have to use two
       // iterators
-      if (conn->close_gracefully(CLOSE_READ_SECONDS)) {
-        closing_.push_back(conn);
-      }
+      conn->close_gracefully(CLOSE_READ_SECONDS);  // among those closing then, see connection_destroyed
     }
   }
   _drop_outbox();  // what still waits goes nowhere now
@@ -264,10 +262,16 @@ void BasicClient::connection_closed(Connection* conn) {
 // the target is the client's: the connection was its target's, which
 // disconnect() takes out of the map before it closes the connection. The
 // timer fires only while some call runs the loop, so a passive client
-// reconnects during its next call at the earliest.
+// reconnects during its next call at the earliest. A connection that
+// reads on to its multiplexer's end, closed by shutdown() or disconnect()
+// or after a failed write, joins those closing: the loop runs it while a
+// shutdown waits for them, and a new owner thread takes it with them.
 void BasicClient::connection_destroyed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("BasicClient") TEXT("connection_destroyed(" + repr(conn) + ")"));
+  if (!conn->shuts_down()) {
+    closing_.push_back(conn->shared_from_this());
+  }
   _displace(conn);  // what waited for it goes to another after its queue, in handle_orphaned_outgoing_messages
   const Target target = conn->managers_private_data().target;
   Connection::pointer target_connection;
@@ -358,6 +362,10 @@ BasicClient::Connection::pointer BasicClient::_new_connection(const Target& targ
   new_connection->managers_private_data().target = target;
   new_connection->managers_private_data().owner = this;
   connection_by_target_.insert(std::make_pair(target, new_connection));
+  made_.erase(
+      std::remove_if(made_.begin(), made_.end(), [](const Connection::weak_pointer& made) { return made.expired(); }),
+      made_.end());
+  made_.push_back(new_connection);
   return new_connection;
 }
 
@@ -437,8 +445,8 @@ bool BasicClient::_disconnect(const Target& target) {
     MX_LOG(INFO, MEDIUMVERBOSITY,
            CTX("BasicClient") TEXT("disconnecting from " + target.first + ":" + repr(target.second)));
   }
-  if (conn && conn->close_gracefully(CLOSE_READ_SECONDS)) {
-    closing_.push_back(conn);  // reads to its end while the loop runs, which a shutdown waits for
+  if (conn) {
+    conn->close_gracefully(CLOSE_READ_SECONDS);  // among those closing then, see connection_destroyed
   }
   return had;
 }
@@ -518,17 +526,13 @@ void BasicClient::_close_socket(Connection& conn) {
   conn.socket().close(ignored);
 }
 
-// Those still closing too, whose handlers run on the new owner's calls.
+// Every connection that still exists: the targets', those closing, and
+// those shut down whose handlers have not all run, which run on the new
+// owner's calls and check its thread.
 void BasicClient::bind_to_current_thread() {
   bind_owner_to_current_thread();
-  for (ConnectionByTarget::iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
-       ++entry) {
-    if (Connection::pointer conn = entry->second.lock()) {
-      conn->bind_io_thread_to_current();
-    }
-  }
-  for (const Connection::weak_pointer& closing : closing_) {
-    if (Connection::pointer conn = closing.lock()) {
+  for (const Connection::weak_pointer& made : made_) {
+    if (Connection::pointer conn = made.lock()) {
       conn->bind_io_thread_to_current();
     }
   }

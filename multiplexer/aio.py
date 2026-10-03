@@ -203,11 +203,11 @@ class AsyncClient:
 
     @property
     def instance_id(self) -> int:
-        """This peer's instance id, the `from` of everything it sends."""
+        """This peer's instance id, the `sender` of everything it sends."""
         return self._threaded.instance_id
 
     def new_message(self, **kwargs: Any) -> MultiplexerMessage:
-        """A MultiplexerMessage with id and from filled in, as ThreadedClient.new_message() makes it."""
+        """A MultiplexerMessage with id and sender filled in, as ThreadedClient.new_message() makes it."""
         return self._threaded.new_message(**kwargs)
 
     @property
@@ -560,7 +560,7 @@ class AsyncClient:
             WARNING,
             LOWVERBOSITY,
             text="subscription %s %s raised %r on a message of type %d from %d"
-            % (role, getattr(function, "__qualname__", repr(function)), error, mxmsg.type, getattr(mxmsg, "from")),
+            % (role, getattr(function, "__qualname__", repr(function)), error, mxmsg.type, mxmsg.sender),
         )
 
     # Lifetime.

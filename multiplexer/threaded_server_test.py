@@ -18,11 +18,11 @@ import unittest
 from unittest import mock
 
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch, DeliveryError, MultiplexerMessage, Routing
-from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.clients import BackendError, Client
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing import BackendThread, Cluster, TestClient, wait_until
+from multiplexer.testing.buffers import fill_frames, past_the_queue
 from multiplexer.threaded_client import ThreadedClient
 import multiplexer.threaded_server as threaded_server
 from multiplexer.threaded_server import BaseThreadedMultiplexerServer, Request, _DropLines
@@ -32,31 +32,9 @@ RULES = runfile("tests/testing.rules")  # the file the constants were generated 
 
 REQUEST = types.PYTHON_TEST_REQUEST
 RESPONSE = types.PYTHON_TEST_RESPONSE
-
-
-def socket_buffers() -> int:
-    """What the two sockets of a connection may buffer, the largest the
-    kernel allows each."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return buffers
-
-
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer and twice the queue."""
-    return 2 * socket_buffers() // size + 2 * 1024
-
-
-def bytes_to_fill() -> int:
-    """More bytes than a frozen multiplexer's connection takes in: twice
-    what the two sockets may buffer, within what one message may carry."""
-    return min(2 * socket_buffers(), MAX_MESSAGE_SIZE // 2)
+FILLER_TIMEOUT = (
+    120  # seconds a message filling a connection may wait for room: none is given up on, however slow the fill
+)
 
 
 def shutting_down(client: ThreadedClient) -> bool:
@@ -485,21 +463,24 @@ class ThreadedServerTest(unittest.TestCase):
         """A reply still being written when close() begins reaches the
         requester: close() writes out what was sent before it, `timeout`
         seconds at most, and only then shuts the sockets. The multiplexer is
-        frozen while the reply, more than the two sockets between them hold,
-        is sent and close() begins, and runs again once the client's
-        shutdown is under way: the reply arrives after close() began, where
-        a close that shut the sockets at once cut it off. A short reply is
-        written before close() gets there, and passes either way."""
+        frozen while the reply, behind more than the two sockets between
+        them hold, events nobody takes, is sent and close() begins, and runs
+        again once the client's shutdown is under way: the reply arrives
+        after close() began, where a close that shut the sockets at once
+        cut it off. A reply with nothing before it is written before close()
+        gets there, and passes either way."""
         _, server = self.serve()
         with TestClient(self.cluster, peers.WEBSITE) as client:
             request = client.send(b"later", REQUEST)
             wait_until(lambda: server.kept, 10, "the request kept for a later answer")
             threaded = server.client  # the server's until close() is done
-            payload = b"r" * bytes_to_fill()
+            payload = b"r" * 1024
             closing = threading.Thread(target=server.close, args=(60,))  # a write-out deadline only a failure reaches
             multiplexer = self.cluster.mx[0]
             multiplexer.pause()
             try:
+                for filler in fill_frames():  # more than the sockets hold, ahead of the reply
+                    threaded.send_message(filler, type=types.TEST_UNROUTED, multiplexer=threaded.ONE)
                 server.kept[0].reply(payload, type=RESPONSE)
                 self.assertFalse(threaded.flush_all(0), "the reply written at once: nothing left for close()")
                 closing.start()
@@ -579,8 +560,8 @@ class ThreadedServerTest(unittest.TestCase):
             # The sockets' buffers, then the 1024 the queue holds, then the
             # rest waits for room behind them; the routing request comes
             # after all of it on the io thread, and finds the queue full.
-            for _ in range(frames_to_fill(len(chunk))):
-                server.client.send_message(chunk, type=9999, multiplexer=server.client.ONE)
+            for payload in past_the_queue(chunk):
+                server.client.send_message(payload, type=9999, multiplexer=server.client.ONE, timeout=FILLER_TIMEOUT)
             server.client.set_routing(Routing(any=False))
         finally:
             multiplexer.resume()
@@ -669,9 +650,9 @@ class ThreadedServerTest(unittest.TestCase):
             first = cluster.mx[0]
             first.pause()
             try:
-                for _ in range(1200):  # past the socket buffers, the rest queued
+                for payload in fill_frames():  # past the sockets, the rest queued
                     server.client.send_message(
-                        b"x" * 8192, type=9999, multiplexer=server.client.ALL, report_delivery_error=False
+                        payload, type=9999, multiplexer=server.client.ALL, report_delivery_error=False
                     )
                 closing = threading.Thread(target=lambda: server.close(10), daemon=True)
                 closing.start()
@@ -709,7 +690,7 @@ class ThreadedServerTest(unittest.TestCase):
         served, server = self.serve()
         with TestClient(self.cluster, peers.WEBSITE) as client:
             reply = client.query(b"who", REQUEST, to=server.instance_id)
-            self.assertEqual((b"WHO", server.instance_id), (reply.message, reply.from_))
+            self.assertEqual((b"WHO", server.instance_id), (reply.message, reply.sender))
         server.stop()
         wait_until(lambda: not served.running, 10, "serve_forever() returned")
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)

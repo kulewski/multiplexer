@@ -31,6 +31,7 @@ from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOu
 from multiplexer.mxlog import WARNING
 from multiplexer.testing import Cluster, FakePeer, TestClient
 from multiplexer.testing import runfile
+from multiplexer.testing.buffers import past_the_queue
 from multiplexer.threaded_client import BackendError
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
@@ -559,7 +560,7 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         assert backend is not None
 
         def event_then_reply(mxmsg) -> bytes:
-            backend.conn.send_message(b"before the reply", type=types.PYTHON_TEST_RESPONSE, to=getattr(mxmsg, "from"))
+            backend.conn.send_message(b"before the reply", type=types.PYTHON_TEST_RESPONSE, to=mxmsg.sender)
             return b"the reply"
 
         self.peer.on(types.PYTHON_TEST_REQUEST, event_then_reply, types.PYTHON_TEST_RESPONSE)
@@ -612,20 +613,6 @@ class AsyncClientTest(unittest.IsolatedAsyncioTestCase):
         self.client.messages()
 
 
-def frames_to_fill(size: int) -> int:
-    """How many messages of `size` bytes a frozen multiplexer's connection
-    cannot take: twice what the two sockets may buffer, the largest the
-    kernel allows each, and twice the queue."""
-    buffers = 0
-    for path in ("/proc/sys/net/ipv4/tcp_wmem", "/proc/sys/net/ipv4/tcp_rmem"):
-        try:
-            with open(path) as limits:
-                buffers += int(limits.read().split()[2])
-        except (OSError, IndexError, ValueError):
-            buffers += 8 << 20  # a guess where /proc does not say
-    return 2 * buffers // size + 2 * 1024
-
-
 class SendTest(unittest.IsolatedAsyncioTestCase):
     """Sends as on every client; a multiplexer per test, frozen when a test
     needs the client's connection full."""
@@ -650,8 +637,8 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
         self.cluster.mx[0].pause()
 
         async def fill():
-            for _ in range(frames_to_fill(len(self.CHUNK))):
-                await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+            for payload in past_the_queue(self.CHUNK):
+                await self.client.send_message(payload, type=types.PYTHON_TEST_REQUEST, timeout=60)
 
         await asyncio.wait_for(fill(), 30)
         self.cluster.mx[0].resume()
@@ -663,8 +650,8 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
         within its timeout raises OperationTimedOut, and flush_all() says
         False, for that send's message and those before it."""
         self.cluster.mx[0].pause()
-        for _ in range(frames_to_fill(len(self.CHUNK))):
-            await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+        for payload in past_the_queue(self.CHUNK):
+            await self.client.send_message(payload, type=types.PYTHON_TEST_REQUEST, timeout=60)
         with self.assertRaises(OperationTimedOut):
             await self.client.send_message(b"waits", type=types.PYTHON_TEST_REQUEST, flush=True, timeout=0.3)
         self.assertFalse(await self.client.flush_all(0.3))
@@ -683,8 +670,8 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.client.flush_all(10))
         self.assertEqual([(1, loop_thread)], heard)
         self.cluster.mx[0].pause()
-        for _ in range(frames_to_fill(len(self.CHUNK))):
-            await self.client.send_message(self.CHUNK, type=types.PYTHON_TEST_REQUEST, timeout=60)
+        for payload in past_the_queue(self.CHUNK):
+            await self.client.send_message(payload, type=types.PYTHON_TEST_REQUEST, timeout=60)
         await self.client.send_message(b"dropped", type=types.PYTHON_TEST_REQUEST, timeout=0.3, callback=callback)
         await self.client.flush_all(0.6)  # past the message's timeout, whose callback the loop got first
         self.assertEqual([(1, loop_thread), (0, loop_thread)], heard)

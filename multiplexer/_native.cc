@@ -169,16 +169,20 @@ static BasicClient::DropObserver drop_observer_for(pybind11::object callback) {
     try {
       (*held)(message_id, reason);
     } catch (pybind11::error_already_set& error) {
-      error.restore();
-      PyErr_Print();
+      error.discard_as_unraisable(*held);  // see python_callback
     }
   };
 }
 
 // A Python callable as a callback the library calls, a send's or a
-// flush's: with the GIL, on whatever thread the client's loop runs, an
-// exception printed rather than thrown into the loop, nothing once the
-// interpreter is leaving, and destroyed only with the GIL held.
+// flush's: with the GIL, on whatever thread the client's loop runs,
+// nothing once the interpreter is leaving, and destroyed only with the GIL
+// held. What it raises goes to sys.unraisablehook with the callable, as
+// CPython does with what it cannot raise anywhere, every callback here the
+// same: the default hook prints the traceback, and nothing keeps it.
+// PyErr_Print() exited the interpreter on SystemExit, from the io thread
+// too, and kept the exception in sys.last_exc, the callback's frames and
+// the client with it, until the next error printed.
 template <typename... Args>
 static std::function<void(Args...)> python_callback(pybind11::function callback) {
   std::shared_ptr<pybind11::function> held(new pybind11::function(callback), [](pybind11::function* function) {
@@ -198,8 +202,7 @@ static std::function<void(Args...)> python_callback(pybind11::function callback)
     try {
       (*held)(args...);
     } catch (pybind11::error_already_set& error) {
-      error.restore();
-      PyErr_Print();
+      error.discard_as_unraisable(*held);
     }
   };
 }
@@ -440,8 +443,7 @@ struct PythonThreadedClient {
       try {
         (*held)((pybind11::bytes)incoming.first->get_message(), incoming.second);
       } catch (pybind11::error_already_set& error) {
-        error.restore();
-        PyErr_Print();
+        error.discard_as_unraisable(*held);  // see python_callback
       }
     };
   }
@@ -479,8 +481,7 @@ struct PythonThreadedClient {
         // a cast to bool refused it; a __bool__ that raises raises here.
         return static_cast<bool>(pybind11::bool_((*held)()));
       } catch (pybind11::error_already_set& error) {
-        error.restore();
-        PyErr_Print();
+        error.discard_as_unraisable(*held);  // see python_callback
         return false;
       }
     };
@@ -632,10 +633,7 @@ struct PythonThreadedClient {
               (*held)(pybind11::none(), pybind11::none(), exception_for(result.outcome));
             }
           } catch (pybind11::error_already_set& error) {
-            // A callback that raises: print the Python traceback and go on,
-            // as a thread's uncaught exception would be printed.
-            error.restore();
-            PyErr_Print();
+            error.discard_as_unraisable(*held);  // see python_callback; the client goes on
           }
         },
         timeout, lane, received_for(on_received));

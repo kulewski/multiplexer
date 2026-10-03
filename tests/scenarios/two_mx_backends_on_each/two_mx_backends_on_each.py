@@ -43,7 +43,7 @@ class TwoMxBackendsOnEach(unittest.TestCase):
             responses = client.events_of("response")
             self.assertEqual(QUERIES, len(responses))
             for r in responses:
-                self.assertIn(r["from_"], ids)
+                self.assertIn(r["sender"], ids)
             handled = wait_for_total(backends, "request", QUERIES)
             self.assertEqual(QUERIES, handled)
 

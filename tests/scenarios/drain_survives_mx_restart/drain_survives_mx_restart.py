@@ -61,7 +61,7 @@ class DrainSurvivesMxRestart(unittest.TestCase):
             cluster.mx[0].restart()
             cluster.wait_for_peer(C.peers.TEST_BACKEND_A, count=2, timeout=15)  # both back, within 3 s
             responses = self.ask(cluster, 10)
-            self.assertEqual({staying.events_of("connected")[0]["instance_id"]}, {r["from_"] for r in responses})
+            self.assertEqual({staying.events_of("connected")[0]["instance_id"]}, {r["sender"] for r in responses})
             after = draining.events[draining.events.index(acked) + 1 :]
             self.assertEqual([], [event for event in after if event["event"] == "request"], "nothing after the restart")
             self.assertEqual(served_before, len(draining.events_of("request")))

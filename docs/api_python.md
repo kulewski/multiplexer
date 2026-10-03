@@ -39,7 +39,7 @@ touch:
 | `type` | the message type, a `types.*` constant |
 | `message` | the payload, bytes; the multiplexer never reads it |
 | `id` | random 64-bit id, set by the library; each attempt `query()` makes gets a new one, so the same request may reach a backend under different ids |
-| `from_` | the sender's instance id, set by the library; `from` is a Python keyword, so the library adds this property |
+| `sender` | the sender's instance id, set by the library; named `from`, a Python keyword, up to 2.3.1, read as `from_` then, which still reads it for a release, with a `DeprecationWarning` |
 | `to` | an instance id to deliver to directly, bypassing the rules; 0 means route by the rules |
 | `references` | the id of the message this one answers; `query()` matches replies by it |
 | `workflow` | opaque bytes copied from request to reply, for tracing |
@@ -114,7 +114,7 @@ the time and their peer types are ordinary ones.
   `MultiplexerMessage`. `message` is bytes, a `str` (encoded as UTF-8), or a
   protocol buffer message (serialized), with `type`, which it needs, and
   `to`; or a whole `MultiplexerMessage`, the request itself, typed by its
-  own `type` and addressed by its own `to`, its empty `from` filled in and
+  own `type` and addressed by its own `to`, its empty `sender` filled in and
   each attempt with an id of its own, so that one message may be queried
   again and again, `type=` or `to=` beside it a `TypeError`. The request goes through one
   connection; if it comes back as a delivery error, its connection is
@@ -145,7 +145,7 @@ the time and their peer types are ordinary ones.
   flush=False, timeout=10, callback=None)`: sends an event and returns its
   message id, as every client sends. `message` is a payload, wrapped with
   the keyword arguments, or a whole `MultiplexerMessage`, sent as it is,
-  whose empty `id` and `from` are filled in as `new_message()` fills them:
+  whose empty `id` and `sender` are filled in as `new_message()` fills them:
   every receiver drops a message without an id. Message fields beside a
   whole message, `type=`, `to=` and the like, are a `TypeError`.
   `multiplexer=SyncClient.ONE` uses one
@@ -316,7 +316,7 @@ and is served, and the server classes, `ThreadedClient` and `AsyncClient`
 all answer it whatever their search policy, so a backend that declines
 searches, saturated say, is found too, and so is a peer that serves no
 requests at all; `SyncClient` does not answer it.
-The instance id comes from a reply, `reply.from_`, or from the peer
+The instance id comes from a reply, `reply.sender`, or from the peer
 itself, `instance_id`. [How a query is answered](query.md#an-addressed-query)
 draws the stages.
 
@@ -373,7 +373,7 @@ carries `to`: keep the peer id beside it.
 | hard pin, fails loudly | `to=instance_id`, `OperationFailed` when the instance is gone | `lane(pinned=True)`, `NotConnected` when its connection is gone |
 | soft pin, follows a move | the locate phase of an addressed query | `lane()`, pinned late to its first connection, taking the next when it dies |
 | preferred only | | `multiplexer=connection` |
-| where the value comes from | `reply.from_`, `peer.instance_id` | `with_connection=True`, or the lane a query updated |
+| where the value comes from | `reply.sender`, `peer.instance_id` | `with_connection=True`, or the lane a query updated |
 
 `multiplexer=` on `query()` takes `ONE`, a lane or a connection, never
 `ALL`. The C++ forms are in [the C++ API](api_cpp.md#lanes-pinning-and-addressed-queries).
@@ -406,8 +406,8 @@ on `SyncClient`, on the calling thread inside `query()`, while the query
 waits, so it must not query or receive through that client, which could
 take the reply; on `ThreadedClient`, on the io thread, as every callback there,
 so it must be quick; on `AsyncClient`, on the loop that awaits the
-query, before the await resumes. One that raises has its traceback
-printed, and the query goes on. Only a backend that calls
+query, before the await resumes. What one raises goes to
+`sys.unraisablehook`, as every callback's does, and the query goes on. Only a backend that calls
 `notify_start()` is heard of: a callback that was never called says
 nothing about whether a backend has the request. The C++ form is in
 [the C++ API](api_cpp.md#knowing-a-backend-took-the-request).
@@ -657,7 +657,7 @@ through `self`.
   `request.connection` the connection it came on. `request.reply(message,
   type=..., **fields)` answers it, with `to`, `references`, `workflow` and
   the connection filled in from the request, the empty ones of a whole
-  `MultiplexerMessage` too, its id and from included, message fields
+  `MultiplexerMessage` too, its id and sender included, message fields
   beside it a `TypeError`, through its
   `ThreadedClient` from whichever thread calls it: a handler may hand the request to
   another thread and return, and the reply comes later. Such a request
@@ -668,7 +668,7 @@ through `self`.
   One reply per request: `reply()` sets `references`, and a requester
   built on `ThreadedClient` or `AsyncClient` drops what references a query
   it has seen answered, so a follow-up that is not the reply goes through
-  `self.send_message(..., to=request.mxmsg.from_)` with no `references`,
+  `self.send_message(..., to=request.mxmsg.sender)` with no `references`,
   correlated in the payload. `request.no_response()` says the message needs none, as an
   event; `request.report_error(message)` answers with `BACKEND_ERROR`;
   `request.notify_start()` sends `REQUEST_RECEIVED`;
@@ -840,8 +840,12 @@ on](#messages-the-library-gives-up-on).
   thread and must return quickly; they may call `query()` with a callback,
   `send_message()` without `flush` or with a callback, and `shutdown()`,
   which does not wait there, but not the blocking `query()`, a flushing
-  `send_message()` or `flush_all()`. A callback that raises has its
-  traceback printed, and the client goes on.
+  `send_message()` or `flush_all()`. What a callback raises goes to
+  `sys.unraisablehook` with the callback, as CPython does with what it
+  cannot raise anywhere: the default hook prints the traceback, and the
+  client goes on. `SystemExit` and `KeyboardInterrupt` too: neither ends
+  the program from there, nor does `sys.last_exc` keep the exception, and
+  with it the callback's frames and the client.
 - `shutdown(timeout=1)` fails every query in flight, writes what was sent
   before it, and what the io thread sends meanwhile, a server's refusal of
   what still arrives say, `timeout` seconds in all, as
@@ -862,7 +866,7 @@ on](#messages-the-library-gives-up-on).
   across a fork, where its calls raise `UsedAfterFork`
   ([fork](#threads-exit-and-fork)).
 
-The old two-client pattern, one client sending with `from` set to a
+The old two-client pattern, one client sending with `sender` set to a
 receiving client's id and a thread looping on the receiver, is what this
 replaces. [examples/echo/workers.py](../examples/echo/workers.py) shows
 several worker threads sharing one client, each taking its replies from
@@ -906,7 +910,7 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   `query()` and `send_message()` still work from other loops, so a
   program that must receive again makes a new client on a running loop.
 - `new_message(**fields)` builds a `MultiplexerMessage` with `id` and
-  `from` filled in, as on `ThreadedClient`.
+  `sender` filled in, as on `ThreadedClient`.
 - `disconnect((host, port))` drops a multiplexer given to the
   constructor, as `ThreadedClient.disconnect()` does, blocking the loop
   for the round trip to the io thread, as `connections_count()` does;

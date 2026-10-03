@@ -70,7 +70,7 @@ class Request {
   bool answered() const { return answered_; }
 
   // The reply: `payload` as a message of `type`, or a message you built,
-  // whose id and from are set and whose to, references and workflow are
+  // whose id and sender are set and whose to, references and workflow are
   // filled in when empty. One reply per request: `references` means "this
   // is the reply", and a requester built on ThreadedClient drops what
   // references a query it has seen answered; a follow-up that is not the

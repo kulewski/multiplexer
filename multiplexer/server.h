@@ -348,7 +348,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     // A message of the multiplexer's own, a DELIVERY_ERROR, is routed
     // through the connection of the peer it answers; it is still ours.
     const std::uint32_t from_peer_type =
-        meta_handler.msg.from() == instance_id_ ? peers::MULTIPLEXER : meta_handler.conn->peer_type();
+        meta_handler.msg.sender() == instance_id_ ? peers::MULTIPLEXER : meta_handler.conn->peer_type();
     Record record;
     recording::fill_routed(record, meta_handler.msg, from_peer_type, recipient, recipient_type, disposition,
                            error_reported, _payload_kept());

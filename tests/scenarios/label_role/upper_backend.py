@@ -28,7 +28,7 @@ class Upper(BaseMultiplexerServer):
     """Replies to every request with its payload in upper case."""
 
     def handle_message(self, mxmsg):
-        emit("request", type=mxmsg.type, id=mxmsg.id, from_=mxmsg.from_, size=len(mxmsg.message))
+        emit("request", type=mxmsg.type, id=mxmsg.id, sender=mxmsg.sender, size=len(mxmsg.message))
         self.send_message(message=mxmsg.message.upper(), type=types.TEST_RESPONSE, flush=True)
 
 
