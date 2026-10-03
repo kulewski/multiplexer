@@ -123,7 +123,7 @@ HEADERS := \
 
 # Every protocol buffer file, of the binaries and of the Python package.
 PROTOS := \
-  lib/logging/Logging.proto \
+  multiplexer/Logging.proto \
   multiplexer/Multiplexer.proto \
   multiplexer/Recording.proto \
   multiplexer/events.proto \
@@ -174,6 +174,8 @@ CC_TEST_SRCS := \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
   multiplexer/recorder_test.cc \
+  multiplexer/recording_copies_test.cc \
+  multiplexer/recording_session_test.cc \
   multiplexer/routing_index_test.cc \
   multiplexer/rules_check_interval_test.cc \
   multiplexer/soak_test.cc \
@@ -209,6 +211,7 @@ PY_TEST_FILES := \
   multiplexer/mxlog_test.py \
   multiplexer/negative_timeout_test.py \
   multiplexer/no_connection_test.py \
+  multiplexer/no_top_level_lib_test.py \
   multiplexer/outage_test.py \
   multiplexer/peers_file_test.py \
   multiplexer/pickle_failures_test.py \

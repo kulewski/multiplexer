@@ -17,7 +17,7 @@
 #include <string>
 #include <thread>
 
-#include "lib/logging/Logging.pb.h"
+#include "multiplexer/Logging.pb.h"
 
 namespace {
 

@@ -150,11 +150,43 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# LogEntry, which the C++ logging writes and LOGS_STREAM carries: a module
+# of the top-level package in Python, multiplexer.Logging_pb2, where a type
+# checker finds its stub as it finds every generated module's.
+genrule(
+    name = "logging_proto",
+    srcs = ["Logging.proto"],
+    outs = [
+        "Logging.pb.cc",
+        "Logging.pb.h",
+        "Logging_pb2.py",
+        "Logging_pb2.pyi",
+    ],
+    cmd = "root=$(location Logging.proto); root=$${root%multiplexer/Logging.proto}; root=$${root%/}; " +
+          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS)",
+    tools = ["//:protoc"],
+)
+
+cc_library(
+    name = "logging_cc_proto",
+    srcs = ["Logging.pb.cc"],
+    hdrs = ["Logging.pb.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//:protobuf_runtime"],
+)
+
+py_library(
+    name = "logging_py_proto",
+    srcs = ["Logging_pb2.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
 genrule(
     name = "multiplexer_proto",
     srcs = [
         "Multiplexer.proto",
-        "//lib/logging:Logging.proto",
+        "Logging.proto",
     ],
     outs = [
         "Multiplexer.pb.cc",
@@ -242,8 +274,8 @@ cc_library(
     hdrs = ["Multiplexer.pb.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":logging_cc_proto",
         "//:protobuf_runtime",
-        "//lib/logging:logging_cc_proto",
     ],
 )
 
@@ -252,7 +284,7 @@ py_library(
     srcs = ["Multiplexer_pb2.py"],
     imports = [".."],
     visibility = ["//visibility:public"],
-    deps = ["//lib/logging:logging_py_proto"],
+    deps = [":logging_py_proto"],
 )
 
 cc_library(
@@ -480,12 +512,41 @@ cc_test(
     ],
 )
 
+# A global operator new of its own counts the multiplexer's allocations:
+# a binary to itself.
+cc_test(
+    name = "recording_copies_test",
+    size = "small",
+    srcs = ["recording_copies_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":recording_cc_proto",
+        "//lib/protobuf:stream",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "recorder_test",
     size = "small",
     srcs = ["recorder_test.cc"],
     deps = [
         ":recorder",
+        "//lib/protobuf:stream",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "recording_session_test",
+    size = "small",
+    srcs = ["recording_session_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":server",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -830,6 +891,13 @@ py_test(
         ":servers",
         "//multiplexer/testing",
     ],
+)
+
+py_test(
+    name = "no_top_level_lib_test",
+    size = "small",
+    srcs = ["no_top_level_lib_test.py"],
+    deps = [":multiplexer_py_proto"],
 )
 
 py_test(

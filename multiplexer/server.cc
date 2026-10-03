@@ -7,11 +7,14 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -1083,10 +1086,11 @@ bool Server::start_recording(const std::string& path, const std::string& label, 
   session_.path = path;
   session_.started_us = now;
   session_.max_bytes = max_bytes;
+  const std::uint64_t session = ++sessions_;
   if (max_seconds) {
     session_timer_.expires_after(std::chrono::seconds(max_seconds));
-    session_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
-      _on_session_deadline(weak, error);
+    session_timer_.async_wait([weak = weak_pointer(shared_from_this()), session](const asio::error_code& error) {
+      _on_session_deadline(weak, session, error);
     });
   }
   _arm_recording_flush();
@@ -1110,11 +1114,14 @@ void Server::stop_recording(const std::string& reason) {
                                         repr(session_.records) + " records, " + repr(session_.bytes) + " bytes)"));
 }
 
-void Server::_on_session_deadline(weak_pointer server, const asio::error_code& error) {
+void Server::_on_session_deadline(weak_pointer server, std::uint64_t session, const asio::error_code& error) {
   if (error) {
     return;  // cancelled: the session ended first
   }
-  if (pointer self = server.lock()) {
+  // The session may have ended, and another begun, between the expiry and
+  // this call, the cancel then too late to recall it.
+  pointer self = server.lock();
+  if (self && self->sessions_ == session) {
     self->stop_recording("max_seconds reached");
   }
 }
@@ -1164,57 +1171,131 @@ void Server::_emit_peer_routing(const Connection& conn) {
   _emit(record);
 }
 
+unsigned int Server::_payload_kept() const {
+  unsigned int most = 0;
+  if (recorder_) {
+    if (!recorder_->payload_limit()) {
+      return 0;
+    }
+    most = recorder_->payload_limit();
+  }
+  for (const Tap& tap : taps_) {
+    if (!tap.payload_limit) {
+      return 0;
+    }
+    most = std::max(most, tap.payload_limit);
+  }
+  return most;
+}
+
+// Every sink is given the length of the payload it keeps: its limit, or
+// the whole payload for 0 or a limit the payload is within, and a tap no
+// more than its frame can carry. The distinct lengths are served longest
+// first, the payload cut in place from one to the next: the file session
+// at its length, by its stream, and the taps at each length from one
+// serialization. Only a tap's record carries the multiplexer's id.
 void Server::_emit(Record& record) {
   record.set_timestamp_us(recording::now_us());
-  if (recorder_) {
-    recorder_->write(record);
-    if (!recorder_->ok()) {
-      stop_recording("write failed");
-    } else if (session_.max_bytes && recorder_->bytes() >= session_.max_bytes) {
-      stop_recording("max_bytes reached");
+  for (Taps::size_type index = 0; index < taps_.size();) {
+    Connection::pointer connection = taps_[index].conn.lock();
+    if (connection && connection->living()) {
+      ++index;
+    } else {
+      taps_.erase(taps_.begin() + index);  // its peer is gone
     }
   }
-  if (taps_.empty()) {
+  const std::size_t payload = record.has_routed() ? record.routed().payload().size() : 0;
+  const auto kept = [payload](unsigned int limit) -> std::size_t { return limit && limit < payload ? limit : payload; };
+  std::vector<std::size_t> lengths;
+  const std::size_t session_length = recorder_ ? kept(recorder_->payload_limit()) : 0;
+  if (recorder_) {
+    lengths.push_back(session_length);
+  }
+  std::vector<std::size_t> tap_lengths;
+  for (const Tap& tap : taps_) {
+    tap_lengths.push_back(kept(tap.payload_limit));
+    lengths.push_back(tap_lengths.back());
+  }
+  std::sort(lengths.begin(), lengths.end(), std::greater<std::size_t>());
+  lengths.erase(std::unique(lengths.begin(), lengths.end()), lengths.end());
+  for (const std::size_t length : lengths) {
+    recording::cut_payload(record, length);
+    if (recorder_ && session_length == length) {
+      record.clear_multiplexer_id();
+      recorder_->write(record);
+      if (!recorder_->ok()) {
+        stop_recording("write failed");
+      } else if (session_.max_bytes && recorder_->bytes() >= session_.max_bytes) {
+        stop_recording("max_bytes reached");
+      }
+    }
+    std::string serialized;  // the taps' record at this length, made for the first of them
+    for (Taps::size_type index = 0; index < taps_.size(); ++index) {
+      if (tap_lengths[index] != length) {
+        continue;
+      }
+      if (serialized.empty()) {
+        serialized = _tap_record(record);
+      }
+      _stream(taps_[index], serialized);
+    }
+  }
+}
+
+// The record of a message near MAX_MESSAGE_SIZE would be over it in a
+// frame: its payload is cut to fit, and marked truncated, as a tap's own
+// limit cuts it. The frame is measured, never reckoned: the record is
+// serialized into the frame a tap gets, its id and addressee at their
+// largest, and protobuf says how big that is. One over the limit is cut,
+// a copy of it, so that a sink after the taps still has the record as it
+// was, by what it is over, and measured again, the truncated mark and the
+// shorter lengths changing the frame too, until it fits or has no payload
+// left; one that cannot fit even so, its workflow too big, _stream drops.
+std::string Server::_tap_record(Record& record) {
+  record.set_multiplexer_id(instance_id_);
+  MultiplexerMessage frame = _tap_frame(std::numeric_limits<std::uint64_t>::max());
+  frame.set_id(std::numeric_limits<std::uint64_t>::max());
+  record.SerializeToString(frame.mutable_message());
+  if (frame.ByteSizeLong() <= MAX_MESSAGE_SIZE || !record.has_routed()) {
+    return std::move(*frame.mutable_message());
+  }
+  Record cut(record);
+  for (;;) {
+    const std::size_t framed = frame.ByteSizeLong();
+    const std::size_t payload = cut.routed().payload().size();
+    if (framed <= MAX_MESSAGE_SIZE || !payload) {
+      return std::move(*frame.mutable_message());
+    }
+    const std::size_t over = framed - MAX_MESSAGE_SIZE;
+    recording::cut_payload(cut, payload > over ? payload - over : 0);
+    cut.SerializeToString(frame.mutable_message());
+  }
+}
+
+// The frame a tap's record goes out in, to `peer_id`, its message to be
+// set: a RECORDING_RECORD from this multiplexer, with an id of its own.
+MultiplexerMessage Server::_tap_frame(std::uint64_t peer_id) {
+  MultiplexerMessage frame;
+  frame.set_id(random_());
+  frame.set_from(instance_id_);
+  frame.set_to(peer_id);
+  frame.set_type(RECORDING_RECORD);
+  return frame;
+}
+
+// One that cannot fit even with its payload cut, its workflow too big, is
+// dropped, as one its queue refuses is.
+void Server::_stream(Tap& tap, const std::string& serialized) {
+  MultiplexerMessage mxmsg = _tap_frame(tap.peer_id);
+  mxmsg.set_message(serialized);
+  Connection::pointer connection = tap.conn.lock();
+  if (!connection || mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+    tap.dropped += 1;
     return;
   }
-  record.set_multiplexer_id(instance_id_);
-  for (Taps::size_type index = 0; index < taps_.size();) {
-    Tap& tap = taps_[index];
-    Connection::pointer connection = tap.conn.lock();
-    if (!connection || !connection->living()) {
-      taps_.erase(taps_.begin() + index);
-      continue;
-    }
-    MultiplexerMessage mxmsg;
-    mxmsg.set_id(random_());
-    mxmsg.set_from(instance_id_);
-    mxmsg.set_to(tap.peer_id);
-    mxmsg.set_type(RECORDING_RECORD);
-    if (tap.payload_limit && record.has_routed() && record.routed().payload().size() > tap.payload_limit) {
-      recording::truncate(record, tap.payload_limit).SerializeToString(mxmsg.mutable_message());
-    } else {
-      record.SerializeToString(mxmsg.mutable_message());
-    }
-    // The record of a message near MAX_MESSAGE_SIZE would be over it: the
-    // payload is cut to fit and marked truncated, as a tap's own payload
-    // limit cuts it. One that cannot fit even so, its workflow too big, is
-    // counted as dropped.
-    if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE && record.has_routed()) {
-      const std::size_t excess = mxmsg.ByteSizeLong() - MAX_MESSAGE_SIZE;
-      const std::size_t payload = record.routed().payload().size();
-      const std::size_t fit = payload > excess + 64 ? payload - excess - 64 : 1;  // room for the lengths' bytes
-      recording::truncate(record, static_cast<unsigned int>(fit)).SerializeToString(mxmsg.mutable_message());
-    }
-    if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE) {
-      tap.dropped += 1;
-      ++index;
-      continue;
-    }
-    std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
-    if (!connection->schedule(raw)) {
-      tap.dropped += 1;
-    }
-    ++index;
+  std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
+  if (!connection->schedule(raw)) {
+    tap.dropped += 1;
   }
 }
 

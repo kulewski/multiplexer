@@ -25,7 +25,12 @@ class ReceiveLogs : public Task {
  public:
   virtual int run();
   virtual std::string short_description() const { return "receive logs and print them on stdout"; }
-  virtual void print_help(std::ostream& out) { out << "Start a Multiplexer backend that does something with logs.\n"; }
+  virtual void print_help(std::ostream& out) {
+    out << "Connects as LOG_RECEIVER_EXAMPLE and prints every message it receives, in protobuf text\n"
+           "format, answering each with a PING: the smallest complete backend.\n"
+        << "\n"
+        << _options();
+  }
 
  protected:
   virtual void _initialize_options(mx::options::Options& options) { _add_multiplexer_client_options(options); }

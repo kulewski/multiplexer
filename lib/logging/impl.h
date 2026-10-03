@@ -18,10 +18,10 @@
 #include <string>
 
 #include "lib/assertion.h"
-#include "lib/logging/Logging.pb.h" /* generated */
 #include "lib/logging/log_tokens.h"
 #include "lib/preproc/common.h"
 #include "lib/release.h"
+#include "multiplexer/Logging.pb.h" /* generated */
 
 namespace mx {
 namespace logging {

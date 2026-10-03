@@ -1,48 +1,14 @@
-# C++ logging and the LogEntry protocol buffer.
-genrule(
-    name = "logging_proto",
-    srcs = ["Logging.proto"],
-    outs = [
-        "Logging.pb.cc",
-        "Logging.pb.h",
-        "Logging_pb2.py",
-        "Logging_pb2.pyi",
-    ],
-    # Include and output roots are the repository root, whether we are the
-    # main workspace or an external one; see multiplexer/BUILD.
-    cmd = "root=$(location Logging.proto); root=$${root%lib/logging/Logging.proto}; root=$${root%/}; " +
-          "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/../.. --python_out=$(RULEDIR)/../.. --pyi_out=$(RULEDIR)/../.. $(SRCS)",
-    tools = ["//:protoc"],
-)
-
-exports_files(
-    ["Logging.proto"],
-    visibility = ["//multiplexer:__pkg__"],
-)
-
-cc_library(
-    name = "logging_cc_proto",
-    srcs = ["Logging.pb.cc"],
-    hdrs = ["Logging.pb.h"],
-    visibility = ["//:__subpackages__"],
-    deps = ["//:protobuf_runtime"],
-)
-
-py_library(
-    name = "logging_py_proto",
-    srcs = ["Logging_pb2.py"],
-    visibility = ["//multiplexer:__pkg__"],
-)
+# C++ logging; its LogEntry protocol buffer is multiplexer/Logging.proto.
 
 cc_library(
     name = "impl",
     hdrs = ["impl.h"],
     deps = [
         ":log_tokens",
-        ":logging_cc_proto",
         "//lib:assert",
         "//lib:release",
         "//lib/preproc:common",
+        "//multiplexer:logging_cc_proto",
     ],
 )
 

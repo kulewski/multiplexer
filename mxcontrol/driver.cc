@@ -83,22 +83,26 @@ int run_tasks(int argc, char** argv) {
     mx::logging::set_logging_file(logging_file);
   }
 
-  // The cap on DEBUG entries; the other levels are always emitted. The
-  // option's default gives way to MX_LOG_VERBOSITY, applied when the
-  // library loaded; an explicit --verbosity wins over both.
+  // The cap on DEBUG entries; the other levels are always emitted. An
+  // explicit --verbosity wins. Without it the option's default is set and
+  // MX_LOG_VERBOSITY, applied when the library loaded, applied again on
+  // top, so that only what the variable names replaces it: a spec that
+  // names another level, INFO:LOW say, or one the library ignored as
+  // malformed, left DEBUG at the library's HIGHVERBOSITY.
   bool verbosity_known = false;
-  const char* from_environment = getenv(mx::logging::VERBOSITY_ENVIRONMENT_VARIABLE);
   for (unsigned int verbosity = 0; verbosity <= mx::logging::consts::MAX_VERBOSITY; ++verbosity) {
     if (verbosity_name == mx::logging::consts::logging_get_verbosity_name(verbosity)) {
-      if (general.given("verbosity") || !from_environment || !*from_environment) {
-        mx::logging::set_maximal_logging_verbosity(DEBUG, verbosity);
-      }
+      mx::logging::set_maximal_logging_verbosity(DEBUG, verbosity);
       verbosity_known = true;
     }
   }
   if (!verbosity_known) {
     cerr << argv[0] << ": unknown --verbosity " << verbosity_name << "\n";
     return EXIT_FAILURE;
+  }
+  const char* from_environment = getenv(mx::logging::VERBOSITY_ENVIRONMENT_VARIABLE);
+  if (!general.given("verbosity") && from_environment && *from_environment) {
+    mx::logging::apply_verbosity_spec(from_environment);  // a malformed one was said when the library loaded
   }
 
   // run the command

@@ -1,9 +1,9 @@
 // Structured logging: MX_LOG(level, verbosity, tokens...). Each entry is a
-// LogEntry protocol buffer (Logging.proto), written as text to stderr and,
-// when set_logging_fd/file was called, as a binary stream that mxcontrol
-// streamlogs can forward. The Python library logs through the same
-// functions via the _native binding, so both languages share one stream
-// and one filter.
+// LogEntry protocol buffer (multiplexer/Logging.proto), written as text to
+// stderr and, when set_logging_fd/file was called, as a binary stream that
+// mxcontrol streamlogs can forward. The Python library logs through the same
+// functions via the _native binding, so both languages share one stream and
+// one filter.
 //
 // Levels (DEBUG .. CRITICAL) and verbosities (ZERO .. CHATTERBOX) are
 // separate axes: set_maximal_logging_verbosity(level, verbosity) says how

@@ -35,14 +35,20 @@ void fill_rules(Record& record, const std::string& fingerprint, const std::strin
                 std::uint32_t peer_types);
 
 // One delivery attempt of `msg`: to `recipient` of `recipient_type` (either
-// may be 0 when routing found nobody), with the outcome. The whole payload
-// is kept; truncate() cuts it for a sink with a limit.
+// may be 0 when routing found nobody), with the outcome. The first
+// `payload_limit` bytes of the payload are copied into the record, all of
+// it for 0, `truncated` set when that cut it: the most any sink keeps, so
+// that what no sink keeps is never copied. cut_payload() cuts it further
+// for a sink with a smaller limit.
 void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t from_peer_type, std::uint64_t recipient,
-                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported);
+                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported,
+                 unsigned int payload_limit = 0);
 
-// `record` with its payload cut to `payload_limit` bytes (`truncated` set)
-// when it is a routed message longer than that; 0 means no limit.
-Record truncate(const Record& record, unsigned int payload_limit);
+// Cuts `record`'s payload to its first `length` bytes in place, setting
+// `truncated`, when it is a routed message longer than that: a string cut
+// keeps its storage, so nothing is copied, and a sink whose limit is
+// smaller than the one before it is served from the same record.
+void cut_payload(Record& record, std::size_t length);
 
 // Whether `label` may name a session: letters, digits, '-' and '_', one to
 // 64 characters, so that it is safe as part of a file name.
@@ -61,16 +67,22 @@ class Recorder {
   Recorder& operator=(const Recorder&) = delete;
 
  public:
-  // Opens `path` for appending. `payload_limit` bytes of each payload are
-  // kept, all of it when 0. ok() says whether the file could be opened.
+  // Opens `path` for appending, first cutting what follows the last whole
+  // record of a file that exists, a record a multiplexer that died left
+  // half written, which would make every record after it unreadable; a
+  // file that exists is so read once. `payload_limit` bytes of each
+  // payload are kept, all of it when 0. ok() says whether the file could be
+  // read and opened.
   Recorder(const std::string& path, unsigned int payload_limit);
   bool ok() const { return !failed_; }
 
   const std::string& path() const { return path_; }
   unsigned int payload_limit() const { return payload_limit_; }
-  // The file's size with what the buffer still holds, which reaches the
-  // file at the next flush.
-  std::uint64_t bytes() const { return bytes_; }
+  // What this recorder wrote, with what the buffer still holds, which
+  // reaches the file at the next flush: the bytes, as protobuf's output
+  // stream counted them, and the records. Of an appended file, only this
+  // session's.
+  std::uint64_t bytes() const { return stream_.bytes(); }
   std::uint64_t records() const { return records_; }
 
   // The first record: who wrote the file, with which rules, under which label.
@@ -88,11 +100,11 @@ class Recorder {
   void _fail();
 
   const std::string path_;
+  const std::int64_t cut_;  // bytes of a torn last record cut before the open; -1 when that failed
   std::ofstream out_;
   mx::protobuf::OstreamMessageOutputStream stream_;
   const unsigned int payload_limit_;
   bool failed_;
-  std::uint64_t bytes_;
   std::uint64_t records_;
 };
 

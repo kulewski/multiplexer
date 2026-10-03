@@ -40,7 +40,8 @@ void fill_rules(Record& record, const std::string& fingerprint, const std::strin
 }
 
 void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t from_peer_type, std::uint64_t recipient,
-                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported) {
+                 std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported,
+                 unsigned int payload_limit) {
   RoutedMessage* routed = record.mutable_routed();
   routed->set_id(msg.id());
   routed->set_from(msg.from());
@@ -63,16 +64,21 @@ void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t fr
   }
   routed->set_disposition(disposition);
   routed->set_error_reported(error_reported);
-  routed->set_payload(msg.message());
+  const std::string& payload = msg.message();
+  if (payload_limit && payload.size() > payload_limit) {
+    routed->set_payload(payload.data(), payload_limit);
+    routed->set_truncated(true);
+  } else {
+    routed->set_payload(payload);
+  }
 }
 
-Record truncate(const Record& record, unsigned int payload_limit) {
-  Record copy(record);
-  if (payload_limit && copy.has_routed() && copy.routed().payload().size() > payload_limit) {
-    copy.mutable_routed()->mutable_payload()->resize(payload_limit);
-    copy.mutable_routed()->set_truncated(true);
+void cut_payload(Record& record, std::size_t length) {
+  if (record.has_routed() && record.routed().payload().size() > length) {
+    RoutedMessage* routed = record.mutable_routed();
+    routed->mutable_payload()->resize(length);
+    routed->set_truncated(true);
   }
-  return copy;
 }
 
 bool valid_label(const std::string& label) {
@@ -107,16 +113,33 @@ std::string session_path(const std::string& dir, const std::string& label, std::
 
 }  // namespace recording
 
+namespace {
+// What follows the last whole record of the file at `path` cut, before
+// anything is appended: see mx::protobuf::cut_torn_tail.
+std::int64_t cut_torn_record(const std::string& path) {
+  Record scratch;
+  return mx::protobuf::cut_torn_tail(path, scratch);
+}
+}  // namespace
+
 Recorder::Recorder(const std::string& path, unsigned int payload_limit)
     : path_(path),
+      cut_(cut_torn_record(path)),
       out_(path.c_str(), std::ios::out | std::ios::app | std::ios::binary),
       stream_(&out_, false),
       payload_limit_(payload_limit),
-      failed_(!out_.good()),
-      bytes_(0),
+      failed_(cut_ < 0 || !out_.good()),
       records_(0) {
-  if (failed_) {
+  if (cut_ < 0) {
+    MX_LOG(ERROR, LOWVERBOSITY,
+           CTX("multiplexer.recorder") TEXT("cannot read " + path + " to find its last whole record; not recording"));
+  } else if (failed_) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.recorder") TEXT("cannot open " + path + "; not recording"));
+  } else if (cut_ > 0) {
+    MX_LOG(WARNING, LOWVERBOSITY,
+           CTX("multiplexer.recorder")
+               TEXT("cut " + mx::repr(cut_) + " bytes of a record left half written at the end of " + path +
+                    ", which a multiplexer that died left; appending after the last whole one"));
   }
 }
 
@@ -139,7 +162,9 @@ void Recorder::write(const Record& record) {
     return;
   }
   if (payload_limit_ && record.has_routed() && record.routed().payload().size() > payload_limit_) {
-    _write(recording::truncate(record, payload_limit_));
+    Record cut(record);  // one not cut to the limit yet: a copy cut, the caller's left as it is
+    recording::cut_payload(cut, payload_limit_);
+    _write(cut);
   } else {
     _write(record);
   }
@@ -161,7 +186,6 @@ void Recorder::_write(const Record& record) {
     _fail();
     return;
   }
-  bytes_ = static_cast<std::uint64_t>(out_.tellp());
   records_ += 1;
 }
 

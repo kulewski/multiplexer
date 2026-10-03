@@ -414,7 +414,11 @@ stream of length-prefixed `Record` protocol buffers
 carries the multiplexer's instance id and a fingerprint of the rules file, so a
 reader knows which numbering the types are in. Messages the protocol
 exchanges for itself, heartbeats and welcomes, are not routed and are not
-recorded.
+recorded. A file that exists is appended to, a restarted multiplexer's
+session after its own header: it is read once at start, and a record a
+multiplexer that died left half written at its end is cut, with a
+warning, so that every record after it reads; a status counts the bytes
+and records of this run.
 
 Read it with `mxcontrol dump_recording FILE --rules FILE` (names from the
 rules file, `--type` and `--peer` to filter), with
@@ -437,8 +441,13 @@ past one that differs from its constants. Read a recording with readers
 as new as the multiplexer that made it: an older one shows what it does
 not know as something it does, a `NOT_ACCEPTED` route as `DELIVERED` say.
 
-Recording costs one serialization and one buffered write per message and
-grows by the payloads. The file is opened, written and closed on the
+Recording costs one record per delivery attempt, so one per recipient: a
+broadcast to a hundred peers records its payload a hundred times. Of each
+payload a record copies only what the sink that keeps the most keeps, the
+file or a tap, and every other sink cuts that copy in place; each record
+is serialized and buffered once for the file, and once for the taps at
+each payload limit they have between them. The file grows by the
+payloads it keeps. The file is opened, written and closed on the
 multiplexer's io thread, the one that routes, with blocking calls, and a
 full buffer, or the flush once a second, waits for the disk there: record
 to local storage, since a slow or stalled file system, a network mount gone
@@ -507,10 +516,11 @@ a `RECORDING_RECORD` message (8) carrying the `Record`, with
 `multiplexer_id` set, until UNTAP or the connection ends. The tap's outgoing
 queue is the only buffer: a peer that reads too slowly loses records, which
 the multiplexer counts in the status as `dropped`, and routing is never
-held up. A tap costs one serialization and one queued frame per record for
-each tap. The record of a message near `MAX_MESSAGE_SIZE` would be over it,
-so its payload is cut to fit and marked `truncated`, as a tap's own payload
-limit cuts it.
+held up. A tap costs one queued frame per record, the record serialized
+once for every tap with the same payload limit. The record of a message
+near `MAX_MESSAGE_SIZE` would be over it, so its payload is cut to the
+longest that fits, as protobuf measures the tap's frame, and marked
+`truncated`, as a tap's own payload limit cuts it.
 
 **Several replicas.** Every multiplexer answers for itself, so a controller
 connects to each: `mxcontrol recording` takes `-M host:port` repeatedly and

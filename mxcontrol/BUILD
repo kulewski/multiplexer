@@ -211,6 +211,22 @@ maybe_strip_cc_binary(
 )
 
 py_test(
+    name = "verbosity_default_test",
+    size = "small",
+    srcs = ["verbosity_default_test.py"],
+    data = [":mxcontrol"],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
+    name = "help_test",
+    size = "small",
+    srcs = ["help_test.py"],
+    data = [":mxcontrol"],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
     name = "generate_rules_test",
     size = "small",
     srcs = ["generate_rules_test.py"],

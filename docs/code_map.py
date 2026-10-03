@@ -174,6 +174,11 @@ INDEX = [
     ("A peer without the library, for protocol tests", "multiplexer/testing/raw_peer.py", "`RawPeer`"),
     ("Recording routed messages", "multiplexer/recorder.h", "`Recorder`; `multiplexer/recording.py` reads"),
     (
+        "A record to the file and every tap, each payload cut to each limit without a copy",
+        "multiplexer/server.cc",
+        "`Server::_emit`, `_payload_kept`; `recording::fill_routed`, `cut_payload`",
+    ),
+    (
         "Recording sessions and taps asked for over the protocol",
         "multiplexer/server.cc",
         "`Server::_handle_recording_control`; `mxcontrol/recording_control.cc` asks",

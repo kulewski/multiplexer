@@ -92,8 +92,7 @@ GENERATE_CONSTANTS := $(BUILD)/bin/generate_constants
 # and __init__.py where Bazel needed none.
 PY_PACKAGE := $(patsubst %,$(PY)/%,$(PY_FILES)) $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PY)) \
               $(patsubst $(GEN)/%,$(PY)/%,$(GEN_PYI)) $(PY)/multiplexer/py.typed $(NATIVE_PYI) \
-              $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py \
-              $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py $(PY)/multiplexer/_native.so \
+              $(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py $(PY)/multiplexer/_native.so \
               $(PY)/multiplexer/bin/mxcontrol
 PY_TESTS := $(patsubst %,$(PY)/%,$(PY_TEST_FILES))
 
@@ -211,7 +210,7 @@ $(PY)/%.pyi: $(GEN)/%.pyi
 	@mkdir -p $(dir $@)
 	cp $< $@
 
-$(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py $(PY)/lib/__init__.py $(PY)/lib/logging/__init__.py:
+$(PY)/multiplexer/__init__.py $(PY)/multiplexer/util/__init__.py:
 	@mkdir -p $(dir $@)
 	touch $@
 
@@ -259,7 +258,7 @@ endif
 
 wheel: python
 	rm -rf $(BUILD)/wheel && mkdir -p $(BUILD)/wheel $(BUILD)/dist
-	cp -r $(PY)/multiplexer $(PY)/lib $(BUILD)/wheel/
+	cp -r $(PY)/multiplexer $(BUILD)/wheel/
 	find $(BUILD)/wheel -name '*_test.py' -delete
 	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so $(BUILD)/wheel/multiplexer/bin/mxcontrol
 	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@PROTOBUF_REQUIREMENT@/$(PROTOBUF_REQUIREMENT)/' make/setup.py \

@@ -4,15 +4,19 @@
 #ifndef MX_LIB_PROTOBUF_STREAM_H_
 #define MX_LIB_PROTOBUF_STREAM_H_
 
+#include <fcntl.h>
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/stubs/common.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <climits>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "lib/fd.h"
 #include "lib/logging/logging.h"
@@ -64,10 +68,16 @@ struct OstreamMessageOutputStream : MessageOutputStream {
 
   virtual bool write(const google::protobuf::Message& m) {
     google::protobuf::io::OstreamOutputStream oos(output_);
-    return Write(m, oos);
+    const bool written = Write(m, oos);
+    bytes_ += static_cast<std::uint64_t>(oos.ByteCount());  // the length and the message, as protobuf wrote them
+    return written;
   }
 
   virtual void flush() { output_->flush(); }
+
+  // How many bytes write() has handed the ostream, buffered ones included,
+  // as protobuf's output stream counted them.
+  std::uint64_t bytes() const { return bytes_; }
 
   ~OstreamMessageOutputStream() {
     if (own_ostream_) {
@@ -78,6 +88,7 @@ struct OstreamMessageOutputStream : MessageOutputStream {
  private:
   std::ostream* output_;
   bool own_ostream_;
+  std::uint64_t bytes_ = 0;
 };
 
 struct FileMessageOutputStream : MessageOutputStream {
@@ -143,6 +154,47 @@ struct FileMessageInputStream : MessageInputStream {
   std::unique_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
   bool failed_ = false;
 };
+
+// Cuts the file at `path` after its last whole message, `scratch` a
+// message of the type it holds, parsing each in turn: what a writer that
+// died left of a message it was writing goes, so that what is appended to
+// the file reads on. The bytes cut, 0 for none or for a file that does not
+// exist, -1 when the file could not be read or cut. Reads the whole file.
+inline std::int64_t cut_torn_tail(const std::string& path, google::protobuf::Message& scratch) {
+  util::Fd fd(::open(path.c_str(), O_RDWR | O_CLOEXEC), true);
+  if (fd.fd() < 0) {
+    return errno == ENOENT ? 0 : -1;
+  }
+  struct stat file;
+  if (::fstat(fd.fd(), &file) != 0) {
+    return -1;
+  }
+  google::protobuf::io::FileInputStream input(fd.fd());
+  std::int64_t whole = 0;  // where the last whole message ends
+  for (;;) {
+    {
+      // Destroyed before the count is taken, giving back what it read past the message.
+      google::protobuf::io::CodedInputStream coded(&input);
+      const void* data;
+      int size;
+      if (!coded.GetDirectBufferPointer(&data, &size)) {
+        if (input.GetErrno() != 0) {
+          return -1;
+        }
+        break;  // the end, after a whole message
+      }
+      if (!MessageInputStream::Read(scratch, coded)) {
+        break;  // a message cut short or garbled: the file is cut where it starts
+      }
+    }
+    whole = input.ByteCount();
+  }
+  const std::int64_t torn = static_cast<std::int64_t>(file.st_size) - whole;
+  if (torn > 0 && ::ftruncate(fd.fd(), static_cast<off_t>(whole)) != 0) {
+    return -1;
+  }
+  return torn > 0 ? torn : 0;
+}
 
 };  // namespace protobuf
 };  // namespace mx

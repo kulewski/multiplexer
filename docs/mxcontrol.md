@@ -24,7 +24,7 @@ command's options. Every command exits with 0 on success.
 | `--help` | print help for the command that follows |
 | `--logging-file PATH` | write the log as a binary stream of `LogEntry` records to this file |
 | `--logging-fd N` | write the same stream to an already open file descriptor instead |
-| `--verbosity NAME` | the most verbose `DEBUG` entries still emitted: `ZEROVERBOSITY` (none), `LOWVERBOSITY`, `MEDIUMVERBOSITY` (default), `HIGHVERBOSITY` or `CHATTERBOX`; the other levels are always emitted. The environment variable `MX_LOG_VERBOSITY` ([operations](operations.md#logs)) replaces the default; an explicit flag wins over it |
+| `--verbosity NAME` | the most verbose `DEBUG` entries still emitted: `ZEROVERBOSITY` (none), `LOWVERBOSITY`, `MEDIUMVERBOSITY` (default), `HIGHVERBOSITY` or `CHATTERBOX`; the other levels are always emitted. The environment variable `MX_LOG_VERBOSITY` ([operations](operations.md#logs)) replaces the default where it names `DEBUG`, or every level; one that names other levels only, or that does not parse, leaves it; an explicit flag wins over it |
 
 The log always goes to stderr as text as well, one entry per line: level,
 timestamp, pid, context, workflow id, text, and the source location.

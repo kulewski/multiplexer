@@ -17,7 +17,7 @@ cc_test(
     deps = [
         ":stream",
         "//lib/logging",
-        "//lib/logging:logging_cc_proto",
+        "//multiplexer:logging_cc_proto",
         "@com_google_googletest//:gtest_main",
     ],
 )

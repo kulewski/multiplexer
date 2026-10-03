@@ -6,7 +6,7 @@
 syntax = "proto2";  // labels and defaults: the original dialect, said explicitly since protoc warns otherwise
 
 package multiplexer;
-import "lib/logging/Logging.proto";
+import "multiplexer/Logging.proto";
 option optimize_for = SPEED;
 
 message MultiplexerPeerDescription {

@@ -54,17 +54,17 @@ run() {
 # The old protoc, an include path as the genrules give it for @mx, two files.
 out="$work/out1"
 run old -I external/mx --cpp_out="$out" --python_out="$out" --pyi_out="$out" \
-  external/mx/multiplexer/Multiplexer.proto external/mx/lib/logging/Logging.proto \
+  external/mx/multiplexer/Multiplexer.proto external/mx/multiplexer/Logging.proto \
   || fail "the wrapper failed in front of a protoc without --pyi_out"
 expected="-I
 external/mx
 --cpp_out=$out
 --python_out=$out
 external/mx/multiplexer/Multiplexer.proto
-external/mx/lib/logging/Logging.proto"
+external/mx/multiplexer/Logging.proto"
 [[ "$(cat "$work/calls" 2> /dev/null)" == "$expected" ]] \
   || fail "the call without --pyi_out and otherwise as given; it was: $(cat "$work/calls" 2> /dev/null)"
-for stub in multiplexer/Multiplexer_pb2.pyi lib/logging/Logging_pb2.pyi; do
+for stub in multiplexer/Multiplexer_pb2.pyi multiplexer/Logging_pb2.pyi; do
   grep -q '^def __getattr__(name: str) -> Any: \.\.\.$' "$out/$stub" 2> /dev/null || fail "a stub making every name Any at $stub"
 done
 

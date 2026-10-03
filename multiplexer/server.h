@@ -331,8 +331,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // A peer's copy its full queue refused; the line names the peer.
   void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection);
 
-  // Recording. A record is built once and goes to the file session and to
-  // every tap; nothing is built while neither exists.
+  // Recording. A record is built once per delivery attempt, one for each
+  // recipient of a message, and goes to the file session and to every
+  // tap; nothing is built while neither exists. Of the payload it copies
+  // what the sink that keeps the most keeps (_payload_kept), not more.
   void _record(const MessageMetaHandler& meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,
                RoutedMessage::Disposition disposition, bool error_reported) {
     if (!recorder_ && taps_.empty()) {
@@ -344,14 +346,24 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
         meta_handler.msg.from() == instance_id_ ? peers::MULTIPLEXER : meta_handler.conn->peer_type();
     Record record;
     recording::fill_routed(record, meta_handler.msg, from_peer_type, recipient, recipient_type, disposition,
-                           error_reported);
+                           error_reported, _payload_kept());
     _emit(record);
   }
+  // The most of a payload a sink keeps: the file session's limit or a
+  // tap's, the largest, 0 when one keeps all of it.
+  unsigned int _payload_kept() const;
   void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
   void _emit_peer_routing(const Connection& conn);
   // Stamps `record`, writes it to the file session, closing the session at
-  // its cap, and streams it to every tap.
+  // its cap, and streams it to every tap. A routed message's payload is cut
+  // in place for each sink's limit, the longest first, so that it is never
+  // copied, and the record serialized once for each length the taps keep.
   void _emit(Record& record);
+  // `record` serialized as the taps get it, stamped with this multiplexer's
+  // id, cut to fit a tap's frame within MAX_MESSAGE_SIZE when it would not:
+  // see the definition.
+  std::string _tap_record(Record& record);
+  MultiplexerMessage _tap_frame(std::uint64_t peer_id);
 
   // A peer receiving every record as RECORDING_RECORD messages.
   struct Tap {
@@ -361,6 +373,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     std::uint64_t dropped;  // records its full outgoing queue lost
   };
   typedef std::vector<Tap> Taps;
+  // One record, `serialized`, to `tap` as a RECORDING_RECORD message; one
+  // too big for MAX_MESSAGE_SIZE even so, or that its full outgoing queue
+  // refuses, is counted as dropped.
+  void _stream(Tap& tap, const std::string& serialized);
   Taps::iterator _find_tap(const Connection* conn);
   void _untap(const Connection* conn);
 
@@ -381,7 +397,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // Queues `payload` as a message of `type` on the sender's connection,
   // referencing the message being handled.
   void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload);
-  static void _on_session_deadline(weak_pointer server, const asio::error_code& error);
+  // The deadline of file session number `session`: stops it unless it
+  // ended already, its completion queued before a stop's cancel came.
+  static void _on_session_deadline(weak_pointer server, std::uint64_t session, const asio::error_code& error);
   // While a file session is open, what its buffer holds goes to the file
   // every RECORDING_FLUSH_INTERVAL, on the io thread that writes the
   // records: the file is at most about that much behind, and a multiplexer
@@ -444,6 +462,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   bool allow_tap_ = false;
   std::unique_ptr<Recorder> recorder_;
   Session session_;
+  std::uint64_t sessions_ = 0;  // file sessions started, the last one's number
   asio::steady_timer session_timer_;
   asio::steady_timer flush_timer_;  // the session's flush, armed while it is open
   Taps taps_;

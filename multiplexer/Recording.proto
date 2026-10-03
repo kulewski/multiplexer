@@ -59,8 +59,9 @@ message RecordingStatus {
   optional string path = 4;             // the open session's file, or the last one's
   optional string label = 5;
   optional uint64 started_us = 6;
-  optional uint64 bytes = 7;            // the file's size with what is buffered, which reaches it in about a second
-  optional uint64 records = 8;
+  optional uint64 bytes = 7;            // what the session wrote, what is buffered included, which reaches the
+                                        // file in about a second: of a --record file appended to, this run's
+  optional uint64 records = 8;          // the session's records, likewise
   optional string stopped = 9;          // why the last session ended, once it has
   optional uint32 taps = 10;            // peers receiving RECORDING_RECORD messages
   optional bool tapping = 11;           // the requester is one of them
