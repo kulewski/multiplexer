@@ -72,6 +72,11 @@ The multiplexer needs `protoc` and `libprotobuf` from the system, and C++17.
   smallest example of both routing modes: a write goes to every replica, a
   read to any one. Its walkthrough builds it line by line and walks through
   its test, the harness's showcase. A pip example.
+- [channels](channels/): a Django Channels channel layer on the multiplexer,
+  replacing Redis with one setting, and the Channels tutorial's chat on it:
+  a group send is an event to every process, a send to a channel is
+  addressed to the process that owns it. Its walkthrough builds the layer
+  line by line. A pip example too.
 - [inference](inference/): a Django web app asking a pool of PyTorch model
   workers, with the walkthrough notebook that builds it up and shows a
   worker die, a rolling restart and a multiplexer die. A pip example too.

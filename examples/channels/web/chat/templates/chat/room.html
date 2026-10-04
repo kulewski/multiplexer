@@ -1,0 +1,21 @@
+<!doctype html>
+<title>Room {{ room_name }}</title>
+<h1>Room {{ room_name }}</h1>
+<textarea id="log" cols="100" rows="20" readonly></textarea><br>
+<input id="line" size="100"> <button id="send">Send</button>
+<script>
+  const room = "{{ room_name|escapejs }}";
+  const log = document.querySelector("#log");
+  const line = document.querySelector("#line");
+  const socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/chat/" + room + "/");
+  socket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    log.value += data.message + "   [via gateway " + data.gateway + "]\n";
+    log.scrollTop = log.scrollHeight;
+  };
+  socket.onclose = () => { log.value += "the socket closed\n"; };
+  const send = () => { if (line.value) { socket.send(JSON.stringify({message: line.value})); line.value = ""; } };
+  document.querySelector("#send").onclick = send;
+  line.onkeyup = (event) => { if (event.key === "Enter") send(); };
+  line.focus();
+</script>
