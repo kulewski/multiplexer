@@ -1,0 +1,33 @@
+// The payloads of the audio example, between the gateway and the worker.
+// Compiled for Python once with `protoc --python_out=. --pyi_out=.
+// audio.proto`, the generated audio_pb2.py committed next to it, and for
+// C++ by the worker's Bazel build.
+syntax = "proto3";
+
+package audio;
+
+// AUDIO_FRAME: 480 samples of 16-bit little-endian PCM at 48 kHz, 10 ms,
+// from one participant, numbered so that the page plays each
+// participant's frames in order and a missing one as silence; the effect
+// the participant chose; and when the browser captured the frame, echoed
+// back for the latency meter.
+message AudioFrame {
+  uint32 participant = 1;
+  uint32 seq = 2;
+  string effect = 3;
+  bytes pcm = 4;
+  double captured_at = 5;
+}
+
+// AUDIO_PROCESSED: the same frame after the effect, thirty-two spectrum
+// bands from 60 Hz to 12 kHz as bytes for drawing, which worker did it
+// and how long it took.
+message AudioProcessed {
+  uint32 participant = 1;
+  uint32 seq = 2;
+  bytes pcm = 3;
+  bytes spectrum = 4;
+  string worker = 5;
+  uint32 micros = 6;
+  double captured_at = 7;
+}

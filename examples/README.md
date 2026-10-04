@@ -80,6 +80,14 @@ The multiplexer needs `protoc` and `libprotobuf` from the system, and C++17.
 - [inference](inference/): a Django web app asking a pool of PyTorch model
   workers, with the walkthrough notebook that builds it up and shows a
   worker die, a rolling restart and a multiplexer die. A pip example too.
+- [audio](audio/): an audio room, the first example of what the broker's
+  latency makes possible rather than a building block: the browser's
+  microphone as 10 ms frames over a WebSocket to a Django Channels gateway,
+  each frame one query to a C++ worker that applies an effect and measures
+  the spectrum, and the result an event to everyone in the room. A stream
+  sticks to one worker and moves when it dies or is restarted. The worker is
+  a Bazel workspace and the gateway a pip example, so `./test_all.sh` runs
+  the worker's tests always and the whole example with `EXAMPLES_PIP=1`.
 
 ## Adding an example
 

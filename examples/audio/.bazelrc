@@ -1,0 +1,6 @@
+# The example workspace's flags: C++17; optimized, since the worker is
+# measured; and the rules file the constants are generated from, so every
+# build of this workspace uses audio.rules.
+build --cxxopt=-std=c++17
+build -c opt
+build --@mx//:multiplexer_rules=//:audio.rules

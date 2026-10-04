@@ -10,6 +10,7 @@
 {
   "include": [
     "aio",
+    "audio",
     "cache",
     "channels",
     "echo",
@@ -30,6 +31,15 @@
   "pythonVersion": "3.10",
   "typeCheckingMode": "standard",
   "executionEnvironments": [
+    {
+      "root": "audio",
+      "extraPaths": [
+        "audio",
+        "audio/web",
+        "channels",
+        ".venv/mxtree"
+      ]
+    },
     {
       "root": "aio",
       "extraPaths": [
