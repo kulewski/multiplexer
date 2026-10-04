@@ -1,0 +1,66 @@
+// The payloads of the cache example. Compiled once with `protoc
+// --python_out=. --pyi_out=. cache.proto`; the generated cache_pb2.py is
+// committed next to it. Values are bytes: the replicas store what they
+// are given, and the Django backend pickles on its side.
+syntax = "proto3";
+
+package cache;
+
+// CACHE_GET and CACHE_DELETE: the key; a delete carries its stamp, as a
+// write does.
+message CacheKey {
+  string key = 1;
+  uint64 version = 2;
+  uint64 writer = 3;
+}
+
+// CACHE_SET and CACHE_ADD: a key, its value, when it expires as unix time,
+// 0 for never, and the write's stamp: the writer's clock in nanoseconds,
+// larger for each of its writes than for the one before, and the writer's
+// instance id for a tie. A replica applies a write only when its stamp is
+// newer than what the replica holds, so a copy that arrives late, however
+// late, never undoes a newer write; and a CACHE_ADD sent again by the
+// library, the same stamp, is known as the same add.
+message CacheEntry {
+  string key = 1;
+  bytes value = 2;
+  double expires = 3;
+  uint64 version = 4;
+  uint64 writer = 5;
+}
+
+// CACHE_CLEAR: its stamp; every write stamped before it is gone, even one
+// that arrives after it.
+message CacheClear {
+  uint64 version = 1;
+  uint64 writer = 2;
+}
+
+// CACHE_VALUE: what a replica found, and which replica it was.
+message CacheValue {
+  bool found = 1;
+  bytes value = 2;
+  string replica = 3;
+}
+
+// CACHE_RESULT: whether the replica that decided a CACHE_ADD applied it.
+message CacheResult {
+  bool done = 1;
+  string replica = 2;
+}
+
+// CACHE_STATS_REQUEST: an id the answers carry, since they are not replies.
+message CacheStatsRequest {
+  uint64 request_id = 1;
+}
+
+// CACHE_STATS: one replica's numbers.
+message CacheStats {
+  uint64 request_id = 1;
+  string replica = 2;
+  uint64 instance_id = 3;
+  uint64 entries = 4;
+  uint64 writes = 5;
+  uint64 reads = 6;
+  uint64 hits = 7;
+}
