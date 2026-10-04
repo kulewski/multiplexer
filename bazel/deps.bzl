@@ -16,7 +16,8 @@ runs first wins, ours or yours, in either order.
 What this repository needs from each: rules_python only for
 py_repositories() (the targets use Bazel's native py_* rules), so any
 rules_python from 0.1.0 on works, and mx_setup(python = False) skips the
-call when another ruleset already made it; standalone Asio for the io layer;
+call when another ruleset already made it, while a workspace without the
+Python package calls neither; standalone Asio for the io layer;
 pybind11 and pybind11_bazel for the Python extension; bazel_skylib
 for the build flags in the root BUILD. protoc and libprotobuf are not
 declared here: they come from the system by default, or from the targets
@@ -35,7 +36,9 @@ def mx_dependencies(python = True):
     workspace's own pin of any of them wins. `python = False` leaves out
     rules_python, pybind11 and pybind11_bazel, which only the Python
     extension needs: a C++-only consumer then fetches Asio and bazel_skylib
-    and nothing else. Pair it with mx_setup(python = False).
+    and nothing else, and calls no mx_setup(), which only sets up Python.
+    It builds the C++ targets, @mx//multiplexer:client and the backends;
+    tests/cc_only_consumer is such a workspace.
     """
     maybe(
         http_archive,

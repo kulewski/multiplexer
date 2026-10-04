@@ -1,0 +1,14 @@
+# A workspace that consumes the multiplexer as @mx from C++ alone, as a
+# C++-only program of yours would: mx_dependencies(python = False), which
+# declares no Python repository, and no mx_setup(), which only sets up
+# Python. check.sh builds it.
+workspace(name = "cc_only_consumer")
+
+local_repository(
+    name = "mx",
+    path = "../..",
+)
+
+load("@mx//bazel:deps.bzl", "mx_dependencies")
+
+mx_dependencies(python = False)

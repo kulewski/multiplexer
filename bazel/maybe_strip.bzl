@@ -13,8 +13,8 @@ action. The toolchain's own `strip` is used, so cross-compilation and custom
 toolchains work.
 """
 
-load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain", "use_cpp_toolchain")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "STRIP_ACTION_NAME")
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain", "use_cpp_toolchain")
 
 def _maybe_strip_impl(ctx):
     binary = ctx.attr.binary[DefaultInfo]

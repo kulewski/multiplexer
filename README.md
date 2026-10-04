@@ -328,7 +328,9 @@ mx_setup()
 
 Then depend on `@mx//multiplexer:clients` (`SyncClient`) or
 `@mx//multiplexer:servers` (`BaseMultiplexerServer`) from Python,
-`@mx//multiplexer:client` from C++; import and include paths are unchanged. [examples/](examples/) holds
+`@mx//multiplexer:client` from C++; import and include paths are unchanged.
+A workspace that uses C++ alone calls `mx_dependencies(python = False)`
+and no `mx_setup()`, and fetches no Python rules. [examples/](examples/) holds
 complete workspaces built that way, starting with [examples/echo](examples/echo).
 Your tests get `@mx//multiplexer/testing`: real multiplexers on ephemeral
 ports, scripted peers, and the macro this repository's own scenarios use

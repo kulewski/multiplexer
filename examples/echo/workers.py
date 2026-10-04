@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.threaded_client import ThreadedClient
 
@@ -22,7 +23,7 @@ print_lock = threading.Lock()
 
 def worker(name: str, client: ThreadedClient, jobs: list[str]) -> None:
     """One thread's life: ask for each job, work meanwhile, report replies."""
-    inbox = queue.Queue()  # replies land here, from the io thread
+    inbox: queue.Queue[MultiplexerMessage | Exception] = queue.Queue()  # replies land here, from the io thread
     pending = 0
     for job in jobs:
         client.query(job.encode(), type=types.ECHO_REQUEST, callback=inbox.put)
@@ -42,7 +43,7 @@ def worker(name: str, client: ThreadedClient, jobs: list[str]) -> None:
         pending -= 1
 
 
-def report(name: str, reply: object) -> None:
+def report(name: str, reply: MultiplexerMessage | Exception) -> None:
     """Print one reply, or the error a query ended with."""
     with print_lock:
         if isinstance(reply, Exception):

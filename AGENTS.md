@@ -7,7 +7,8 @@ is; this file is about working on it. `multiplexer/AGENTS.md` and
 
 Before opening files, read `docs/code_map.md`: one line per source file,
 generated from the file's own header comment, and an index of where each
-mechanism lives. `docs/recipes/` has step-by-step pages for the recurring
+mechanism lives; an example's own README says what its files are
+instead. `docs/recipes/` has step-by-step pages for the recurring
 tasks (a message type, a scenario, an `mxcontrol` subcommand, a default).
 `llms.txt` at the root lists every document in reading order.
 
@@ -45,9 +46,10 @@ bazel build //...                          # every configuration works without f
 bazel test //...                           # unit and integration tests
 bazel test --test_tag_filters=-slow //...  # the fast ones, a few seconds
 ./examples/test_all.sh                     # the example workspaces
-./format.sh                                # black, clang-format-18, buildifier, docs; --check also parses the YAML
+./examples/venv.sh                         # examples/.venv, with which check.sh runs the pip examples and their type check
+./format.sh                                # black, clang-format, buildifier, docs; --check also parses the YAML
 npx pyright                                # the Python package type-checked, after a build (stubs in bazel-bin)
-./format.sh --check                        # what CI runs
+./format.sh --check                        # what CI runs on every push, with the fast tests
 bazel build --config=clang //...           # clang thread-safety analysis (lib/thread_annotations.h)
 bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only
 bazel build --config=asan //...            # AddressSanitizer

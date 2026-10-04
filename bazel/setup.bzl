@@ -4,7 +4,9 @@ load("@pybind11_bazel//:python_configure.bzl", "python_configure")
 load("@rules_python//python:repositories.bzl", "py_repositories")
 
 def mx_setup(python = True):
-    """Runs the setup calls of the repositories mx_dependencies() declared.
+    """Runs the setup calls of the repositories mx_dependencies() declared,
+    all of them for Python: a C++-only workspace, mx_dependencies(python =
+    False), calls no mx_setup(), and loads nothing from this file.
 
     `python = False` skips rules_python's py_repositories(), for a workspace
     where another ruleset already ran it. The Python toolchain for the

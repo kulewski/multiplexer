@@ -1,0 +1,42 @@
+// Type checking of the examples: `npx pyright -p examples/pyrightconfig.json`,
+// which check.sh runs when examples/.venv exists (examples/venv.sh makes it,
+// examples/mxtree.sh the copy of the tree's package it resolves the library
+// from, since pyright merges no package across two roots inside an execution
+// environment). Each pip example resolves its own modules from its
+// directory, each Bazel example its constants from its copy, made once its
+// workspace is built. Generated modules are not checked. The check is
+// against Python 3.10, the oldest the library supports; the tests run on
+// the venv's own Python, which nothing holds to 3.10.
+{
+  "include": [
+    "aio",
+    "echo"
+  ],
+  "exclude": [
+    "**/bazel-*",
+    "**/.venv",
+    "**/__pycache__",
+    "**/*_pb2.py",
+    "**/*_pb2.pyi",
+    "**/multiplexer_constants.py",
+    "**/multiplexer_constants.pyi"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "standard",
+  "executionEnvironments": [
+    {
+      "root": "aio",
+      "extraPaths": [
+        ".venv/mxtree-aio"
+      ]
+    },
+    {
+      "root": "echo",
+      "extraPaths": [
+        ".venv/mxtree-echo"
+      ]
+    }
+  ]
+}

@@ -1,2 +1,3 @@
 # Example workspaces are separate Bazel workspaces; keep them out of //...
 examples
+tests/cc_only_consumer

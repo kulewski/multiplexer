@@ -1,0 +1,2 @@
+# C++17, as the multiplexer's own build uses.
+build --cxxopt=-std=c++17

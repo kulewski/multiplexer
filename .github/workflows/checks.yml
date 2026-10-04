@@ -1,0 +1,35 @@
+# On every push and pull request, two of the checks ./check.sh runs, each
+# a job of its own: ./format.sh --check, the formatting and the generated
+# files, with the tools pinned in requirements-dev.txt and
+# tools/dev_tools.sh, the ones a check on a developer's machine uses; and
+# the fast tests. The rest of ./check.sh, the Mermaid rendering, the
+# thread-safety analysis, the sanitizers and the example workspaces, runs
+# before a change goes in; release.yml runs every test at a tag, and
+# examples.yml the pip examples.
+name: checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # make/generate_sources.py asks Bazel for the Makefile's source lists,
+      # which configures the Python extension's headers: python3-dev.
+      - run: sudo apt-get install -y -qq python3-dev python3-venv
+      - run: ./format.sh --check
+
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
+      # Bazel's linux-sandbox gives each test a network of its own through an
+      # unprivileged user namespace, which Ubuntu 24.04's AppArmor withholds.
+      - run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - run: bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...

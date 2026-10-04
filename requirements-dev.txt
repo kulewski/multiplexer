@@ -1,10 +1,14 @@
-# The Python tools for working on the repository, never for building or
-# using it. ./format.sh and ./check.sh install them, at these versions, into
-# a virtual environment of their own, .tools/venv, the first time they run
-# and whenever this file changes (python3-venv and the network). What they
-# take from the system instead is in docs/building.md: clang-format-18,
-# buildifier, clang-18, and mermaid-cli through npx.
+# The tools for working on the repository, never for building or using it:
+# the Python ones, and clang-format, which PyPI carries as a wheel.
+# ./format.sh and ./check.sh install them, at these versions, into a virtual
+# environment of their own, .tools/venv, the first time they run and
+# whenever this file changes (python3-venv and the network), and
+# tools/dev_tools.sh puts buildifier beside them at the version it pins:
+# a check here and the one CI runs use the same tools. What they take from
+# the system instead is in docs/building.md: clang-18, and mermaid-cli
+# through npx.
 black[jupyter]==25.1.0
+clang-format==18.1.8
 pyright==1.1.414
 pyyaml==6.0.2
 ruff==0.16.10

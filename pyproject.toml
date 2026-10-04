@@ -29,7 +29,7 @@ allowed-unused-imports = ["multiplexer.protocolbuffers"]
 # extension, have stubs in bazel-bin after a build, hence the stubPath.
 [tool.pyright]
 include = ["multiplexer"]
-exclude = ["**/bazel-*", "build"]
+exclude = ["**/bazel-*", "build", "**/.venv"]
 stubPath = "bazel-bin"
 extraPaths = ["bazel-bin"]
 pythonVersion = "3.10"

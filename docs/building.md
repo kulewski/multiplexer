@@ -80,7 +80,10 @@ whichever the flags select.
 (debug info, no optimisation), `--config=release` (optimised, stripped
 binaries next to the ones with symbols), `--config=asan` and
 `--config=tsan` (the sanitizers), and `--config=clang` (the static
-thread-safety analysis). `./check.sh` runs what CI should.
+thread-safety analysis). `./check.sh` runs what a change is checked
+with; on every push and pull request, CI runs two of those checks,
+`./format.sh --check` and the fast tests
+([.github/workflows/checks.yml](../.github/workflows/checks.yml)).
 
 ## Without Bazel
 
@@ -132,26 +135,31 @@ examples, the sanitizer and analysis configurations. Those are Bazel's.
 ## Development tools
 
 Only for working on the repository, never for building it. The Python
-ones, black, ruff, pyright and PyYAML, are pinned in
+ones, black, ruff, pyright and PyYAML, and clang-format are pinned in
 [requirements-dev.txt](../requirements-dev.txt), and `./format.sh` and
 `./check.sh` install them into `.tools/venv` the first time they run and
-whenever that file changes, with `python3-venv` and the network. The rest
-come from the system: `clang-format-18` and `buildifier` for
-`./format.sh`; `clang-18` for the thread-safety analysis build
-(`--config=clang`); Node, whose `npx` runs mermaid-cli for the diagram check
-and on which pyright runs; Docker for [docker/check.sh](../docker/check.sh).
-The type check reads the stubs of the generated modules from `bazel-bin`
-(`stubPath` in `pyproject.toml`), where the build writes them next to the
-modules, and the stub of the native extension from `bazel build
-//multiplexer:_native_pyi`, which Bazel makes with pybind11-stubgen fetched
-as a wheel; Pylance in VS Code reads the same configuration, so a fresh
-checkout type-checks after one build. `make` writes the same stubs into
-`build/`, and `make wheel` ships them with a `py.typed` marker; the
-extension's stub needs `pybind11-stubgen` importable by `PYTHON` there and
-is left out with no other consequence when it is not, and the stubs of
-the protocol buffer modules need a `protoc` of 3.20 or newer, which
-Ubuntu 22.04's 3.12 is not, so a package built there has none of those
-either. Bazel builds with such a `protoc` too:
+whenever that file changes, with `python3-venv` and the network;
+[tools/dev_tools.sh](../tools/dev_tools.sh) fetches buildifier beside
+them, the release binary of the version it pins, checked against its
+digest. CI's formatting check runs with the same tools, so it agrees with
+`./format.sh --check` on any machine. The rest come from the system:
+`python3-venv` and `examples/venv.sh` for the virtual
+environment in which `./check.sh` runs the pip examples and their type
+check against the tree, skipped with a notice without it; `clang-18` for
+the thread-safety analysis build (`--config=clang`); Node, whose `npx`
+runs mermaid-cli for the diagram check and on which pyright runs; Docker for
+[docker/check.sh](../docker/check.sh). The type check reads the stubs of the
+generated modules from `bazel-bin` (`stubPath` in `pyproject.toml`), where
+the build writes them next to the modules, and the stub of the native
+extension from `bazel build //multiplexer:_native_pyi`, which Bazel makes
+with pybind11-stubgen fetched as a wheel; Pylance in VS Code reads the same
+configuration, so a fresh checkout type-checks after one build. `make`
+writes the same stubs into `build/`, and `make wheel` ships them with a
+`py.typed` marker; the extension's stub needs `pybind11-stubgen` importable
+by `PYTHON` there and is left out with no other consequence when it is not,
+and the stubs of the protocol buffer modules need a `protoc` of 3.20 or
+newer, which Ubuntu 22.04's 3.12 is not, so a package built there has none
+of those either. Bazel builds with such a `protoc` too:
 [bazel/system_protoc.sh](../bazel/system_protoc.sh), the default
 `//:protoc`, then leaves out the flag that asks for those stubs and writes
 in their place stubs that make every name of the module `Any`.

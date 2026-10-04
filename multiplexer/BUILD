@@ -1,7 +1,7 @@
 # The multiplexer, the C++ client library and the Python package, with the
 # generated constants and protocol buffer code they share.
-load("@pybind11_bazel//:build_defs.bzl", "pybind_extension")
 load("//bazel:maybe_strip.bzl", "STRIP_IN_RELEASE", "maybe_strip")
+load("//bazel:pybind.bzl", "pybind_extension")
 
 # Generates multiplexer.constants.h and multiplexer_constants.py from the
 # rules file selected by //:multiplexer_rules.

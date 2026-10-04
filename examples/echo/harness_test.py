@@ -35,7 +35,7 @@ class HarnessTest(unittest.TestCase):
 
     def test_the_rules_file_is_this_workspace_s(self):
         """mx_integration_test passed echo.rules, the file the constants come from."""
-        assert testing.CONFIG is not None
+        assert testing.CONFIG is not None and testing.CONFIG.rules is not None
         self.assertTrue(testing.CONFIG.rules.endswith("echo.rules"), testing.CONFIG.rules)
 
     def test_a_multiplexer_restart_under_a_live_client(self):
@@ -75,6 +75,7 @@ class HarnessTest(unittest.TestCase):
             with FakePeer(cluster, peers.ECHO_BACKEND) as backend, TestClient(cluster, peers.ECHO_CLIENT) as client:
                 backend.reply_with(types.ECHO_REQUEST, b"pong", types.ECHO_RESPONSE)
                 client.query(b"ping", types.ECHO_REQUEST)
+                assert backend.backend is not None
                 backend_id = backend.backend.conn.instance_id
                 client_id = client.client.instance_id
             cluster.mx[0].stop()
@@ -84,13 +85,11 @@ class HarnessTest(unittest.TestCase):
             request = next(r for r in routed if r.type == types.ECHO_REQUEST)
             self.assertEqual(
                 (client_id, backend_id, RoutedMessage.DELIVERED),
-                (getattr(request, "from"), request.recipient, request.disposition),
+                (request.sender, request.recipient, request.disposition),
             )
             self.assertEqual(b"ping", request.payload)
             reply = next(r for r in routed if r.type == types.ECHO_RESPONSE)
-            self.assertEqual(
-                (backend_id, client_id, request.id), (getattr(reply, "from"), reply.recipient, reply.references)
-            )
+            self.assertEqual((backend_id, client_id, request.id), (reply.sender, reply.recipient, reply.references))
 
 
 if __name__ == "__main__":

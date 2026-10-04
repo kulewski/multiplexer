@@ -24,7 +24,7 @@ class Gateway:
         self.clients: set[asyncio.StreamWriter] = set()
         self.unsubscribe = None
 
-    async def start(self, host: str, port: int) -> asyncio.AbstractServer:
+    async def start(self, host: str, port: int) -> asyncio.Server:
         """Listen, and subscribe to broadcasts for as long as the server runs."""
         self.unsubscribe = MX.get().subscribe(types.CHAT_BROADCAST, self.broadcast)
         return await asyncio.start_server(self.serve, host, port)
