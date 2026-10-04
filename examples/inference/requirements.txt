@@ -1,0 +1,9 @@
+# What the example runs on: `pip install -r requirements.txt`. torch comes
+# from its CPU index, a 200 MB download rather than the 2 GB of the CUDA
+# build; drop the index line for a machine with a GPU to use.
+--extra-index-url https://download.pytorch.org/whl/cpu
+mx-multiplexer
+django
+torch
+pillow
+protobuf

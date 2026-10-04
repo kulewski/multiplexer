@@ -1,0 +1,40 @@
+# `docker compose up`: two multiplexers from the release image, two model
+# workers and the web app built from this directory. The page is at
+# http://127.0.0.1:8000 and the JSON endpoint at /classify:
+#
+#   curl -F image=@samples/7.png http://127.0.0.1:8000/classify
+#
+# Kill a worker or a multiplexer (`docker compose kill worker1`) and ask
+# again: the answer comes from what is left. MX_IMAGE picks another image.
+# Everything is amd64, as the release image and the wheels are; on arm64
+# Docker runs it under emulation.
+services:
+  mx1:
+    image: ${MX_IMAGE:-ghcr.io/kulewski/multiplexer:latest}
+    platform: linux/amd64
+    command: ["run_multiplexer", "--rules", "/rules/inference.rules", "--address", "0.0.0.0:1980"]
+    volumes: ["./inference.rules:/rules/inference.rules:ro"]
+  mx2:
+    image: ${MX_IMAGE:-ghcr.io/kulewski/multiplexer:latest}
+    platform: linux/amd64
+    command: ["run_multiplexer", "--rules", "/rules/inference.rules", "--address", "0.0.0.0:1980"]
+    volumes: ["./inference.rules:/rules/inference.rules:ro"]
+  worker1:
+    build: .
+    platform: linux/amd64
+    command: ["python", "backend.py", "mx1:1980,mx2:1980", "--name", "worker1"]
+    environment: {MX_LOG_VERBOSITY: "DEBUG:LOW"}
+    depends_on: [mx1, mx2]
+  worker2:
+    build: .
+    platform: linux/amd64
+    command: ["python", "backend.py", "mx1:1980,mx2:1980", "--name", "worker2"]
+    environment: {MX_LOG_VERBOSITY: "DEBUG:LOW"}
+    depends_on: [mx1, mx2]
+  web:
+    build: .
+    platform: linux/amd64
+    command: ["python", "web/manage.py", "runserver", "--noreload", "0.0.0.0:8000"]
+    environment: {MX_ADDRESSES: "mx1:1980,mx2:1980", MX_LOG_VERBOSITY: "DEBUG:LOW"}
+    ports: ["8000:8000"]
+    depends_on: [mx1, mx2]

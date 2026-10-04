@@ -1,0 +1,5 @@
+# MNIST, downloaded when training, and the peers and drain files the
+# walkthrough's shell cells write.
+data/
+*.peers
+*.drain

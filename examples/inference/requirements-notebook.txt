@@ -1,0 +1,6 @@
+# What the walkthrough notebook and train.py need on top of the example.
+-r requirements.txt
+torchvision
+notebook
+nbconvert
+ipykernel

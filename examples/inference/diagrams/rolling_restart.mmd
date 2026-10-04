@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant C as client.py
+    participant M as multiplexer
+    participant O as worker alpha, leaving
+    participant N as worker alpha-v2
+    N->>M: connects, a second INFERENCE peer
+    Note over O: its drain file appears
+    O->>M: PEER_CONTROL, route me nothing new
+    M->>O: PEER_STATUS, in effect
+    C->>M: INFER_REQUEST
+    M->>N: INFER_REQUEST, to alpha-v2 only now
+    N->>M: INFER_RESPONSE
+    M->>C: INFER_RESPONSE
+    Note over O: answers what it already had, then leaves

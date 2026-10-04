@@ -1,0 +1,21 @@
+// The payloads of the inference example: an image in, a label and the
+// probabilities out. Compiled once with `protoc --python_out=. --pyi_out=.
+// inference.proto`; the generated inference_pb2.py is committed next to it.
+syntax = "proto3";
+
+package inference;
+
+// INFER_REQUEST: an image file's bytes, PNG or JPEG, any size; the worker
+// turns it into the 28x28 grey square the model expects.
+message InferRequest {
+  bytes image = 1;
+}
+
+// INFER_RESPONSE: the digit, the probability of each digit, which worker
+// answered and how long the model took, for the walkthrough to show.
+message InferResponse {
+  int32 label = 1;
+  repeated float probabilities = 2;
+  string worker = 3;
+  float seconds = 4;
+}

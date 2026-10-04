@@ -1,12 +1,13 @@
 # Examples
 
-Each directory here is a **separate Bazel workspace** that consumes the
+Each Bazel example here is a **separate Bazel workspace** that consumes the
 multiplexer exactly the way any other project would: as the external
 repository `@mx`. Being inside this repository they use
-`local_repository(path = "../..")`; your workspace would use `git_repository`
-or `http_archive`, as the commented block in `echo/WORKSPACE` shows. That keeps
-example-only dependencies out of the multiplexer's own workspace and makes
-every example a test of the real consumption path.
+`local_repository(path = "../..")`; your workspace would use
+`git_repository` or `http_archive`, as the commented block in
+`echo/WORKSPACE` shows. That keeps example-only dependencies out of the
+multiplexer's own workspace and makes every example a test of the real
+consumption path.
 
 The root `.bazelignore` keeps these directories out of the root `//...`, so
 they are built from inside:
@@ -17,6 +18,15 @@ bazel test //...
 ```
 
 `./test_all.sh` runs every example's tests in turn; use it in CI.
+
+A pip example is installed the way a project on the released package is: a
+`requirements.txt` naming `mx-multiplexer`, which brings the multiplexer,
+`mxcontrol`, with it, and a `test.sh` that makes a virtual environment and
+runs the example's test on that `mxcontrol`, unless `MXCONTROL` names
+another. `./test_all.sh` runs those with `EXAMPLES_PIP=1`, as the examples
+workflow does against the tree's wheel, mxcontrol inside, and `check.sh` at
+the root runs them against the tree itself, its library and its
+multiplexer, when `examples/.venv` exists, which `venv.sh` makes.
 
 ## Consuming the multiplexer from your own workspace
 
@@ -58,6 +68,9 @@ The multiplexer needs `protoc` and `libprotobuf` from the system, and C++17.
   another workspace.
 - [aio](aio/): an asyncio TCP gateway with `AsyncClient` in front of a chat
   backend, replies to the client that asked and broadcasts to every client.
+- [inference](inference/): a Django web app asking a pool of PyTorch model
+  workers, with the walkthrough notebook that builds it up and shows a
+  worker die, a rolling restart and a multiplexer die. A pip example.
 
 ## Adding an example
 
