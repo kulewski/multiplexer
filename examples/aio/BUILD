@@ -5,6 +5,7 @@ py_binary(
     name = "backend",
     srcs = ["backend.py"],
     deps = [
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
         "@mx//multiplexer:servers",
     ],
@@ -15,6 +16,7 @@ py_binary(
     srcs = ["gateway.py"],
     deps = [
         "@mx//multiplexer:aio",
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
     ],
 )
@@ -29,6 +31,7 @@ py_test(
     ],
     deps = [
         "@mx//multiplexer:aio",
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
         "@mx//multiplexer:servers",
         "@mx//multiplexer/testing",

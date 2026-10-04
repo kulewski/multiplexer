@@ -8,6 +8,7 @@ py_binary(
     srcs = ["backend.py"],
     main = "backend.py",
     deps = [
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
         "@mx//multiplexer:servers",
     ],
@@ -17,6 +18,7 @@ cc_binary(
     name = "backend_cc",
     srcs = ["backend.cc"],
     deps = [
+        "@mx//multiplexer:endpoint",
         "@mx//multiplexer:multiplexer_cc_constants",
         "@mx//multiplexer/backend:base_multiplexer_server",
     ],
@@ -28,6 +30,7 @@ py_binary(
     main = "client.py",
     deps = [
         "@mx//multiplexer:clients",
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
     ],
 )
@@ -37,6 +40,7 @@ cc_binary(
     srcs = ["client.cc"],
     deps = [
         "@mx//multiplexer:client",
+        "@mx//multiplexer:endpoint",
         "@mx//multiplexer:multiplexer_cc_constants",
     ],
 )
@@ -45,6 +49,7 @@ py_binary(
     name = "workers",
     srcs = ["workers.py"],
     deps = [
+        "@mx//multiplexer:endpoints",
         "@mx//multiplexer:multiplexer_constants",
         "@mx//multiplexer:threaded_client_py",
     ],

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 
+from multiplexer.endpoints import parse_endpoint
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.threaded_client import ThreadedClient
@@ -55,10 +56,10 @@ def report(name: str, reply: MultiplexerMessage | Exception) -> None:
 
 def main(argv: list[str]) -> None:
     """Start the workers, wait for them, shut the client down."""
-    host, port = (argv[1] if len(argv) > 1 else "127.0.0.1:1980").rsplit(":", 1)
+    endpoint = parse_endpoint(argv[1] if len(argv) > 1 else "127.0.0.1:1980")  # [address]:port for IPv6
     n_workers = int(argv[2]) if len(argv) > 2 else 3
     n_jobs = int(argv[3]) if len(argv) > 3 else 4
-    client = ThreadedClient([(host, int(port))], type=peers.ECHO_CLIENT)
+    client = ThreadedClient([endpoint], type=peers.ECHO_CLIENT)
     threads = [
         threading.Thread(target=worker, args=("worker-%d" % w, client, ["w%d job %d" % (w, j) for j in range(n_jobs)]))
         for w in range(n_workers)

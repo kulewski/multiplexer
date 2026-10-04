@@ -16,6 +16,7 @@
 static volatile std::sig_atomic_t leave_requested = 0;
 
 #include "multiplexer/backend/base_multiplexer_server.h"
+#include "multiplexer/endpoint.h"
 #include "multiplexer/multiplexer.constants.h"  // generated from echo.rules
 
 using multiplexer::MultiplexerMessage;
@@ -53,11 +54,8 @@ class EchoBackend : public BaseMultiplexerServer {
 };
 
 int main(int argc, char** argv) {
-  std::string address = argc > 1 ? argv[1] : "127.0.0.1:1980";
-  std::string::size_type colon = address.rfind(':');
-  MultiplexerAddresses addresses;
-  addresses.push_back(
-      std::make_pair(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1)))));
+  MultiplexerAddresses addresses;  // host:port, or [address]:port for an IPv6 one
+  addresses.push_back(multiplexer::parse_endpoint(argc > 1 ? argv[1] : "127.0.0.1:1980"));
   EchoBackend backend(addresses, multiplexer::peers::ECHO_BACKEND);
   // The echo test reads "ready" and queries at once, so the line must mean
   // reachable: connect() first; serve_forever() would otherwise.

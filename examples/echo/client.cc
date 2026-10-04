@@ -7,15 +7,17 @@
 #include <iostream>
 #include <string>
 
+#include "multiplexer/endpoint.h"
 #include "multiplexer/multiplexer.constants.h"  // generated from echo.rules
 
 int main(int argc, char** argv) {
-  std::string address = argc > 1 ? argv[1] : "127.0.0.1:1980";
+  // host:port, or [address]:port for an IPv6 one
+  const std::pair<std::string, std::uint16_t> endpoint =
+      multiplexer::parse_endpoint(argc > 1 ? argv[1] : "127.0.0.1:1980");
   std::string text = argc > 2 ? argv[2] : "hello multiplexer";
-  std::string::size_type colon = address.rfind(':');
 
   multiplexer::SyncClient client(multiplexer::peers::ECHO_CLIENT);
-  client.connect(address.substr(0, colon), static_cast<std::uint16_t>(std::stoi(address.substr(colon + 1))));
+  client.connect(endpoint.first, endpoint.second);
 
   // query() sends the request through one connection and returns the reply;
   // it throws when there is none: OperationFailed when no backend of the
