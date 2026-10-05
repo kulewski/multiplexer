@@ -448,7 +448,9 @@ addressed with `to`, when the message itself does.
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says
-`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)).
+`whom: ALL`, so every backend of that type gets every event, one that is draining with the default routing apart, since it turned fan-out off ([how a backend leaves](leaving.md)). The
+[cache example](../examples/cache/README.md) is this in a program: a
+write is an event to every replica, and its walkthrough counts the copies.
 """,
     sections=[
         Section(
@@ -780,7 +782,9 @@ receive is answered with `DELIVERY_ERROR` if the client asked for one.
 Peer types are how you group backends. The picture has one client, one
 multiplexer and two backend types, A and B, with two backends each. Type A
 receives an event type under a `whom: ALL` rule; type B receives a request
-type under a `whom: ANY` rule.
+type under a `whom: ANY` rule. The smallest program that uses both rules is
+the [cache example](../examples/cache/README.md): a write to every replica,
+a read from any one.
 """,
     sections=[
         Section(

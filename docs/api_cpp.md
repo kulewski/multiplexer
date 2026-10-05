@@ -401,8 +401,11 @@ connected, for backends that also act as clients.
 each iteration waits up to `poll` seconds for a message, handles it if one
 came, then calls the virtual `periodic_task()`, message or not, so anything
 checked there takes effect within one poll, unless `poll` sets no deadline
-([timeouts](#timeouts)). It returns, with the connections closed, when the
-public `working` flag is cleared or a drain is over. `loop_iter(timeout)`
+([timeouts](#timeouts)); a liveness probe that must see the loop answers
+from a time written down there ([check a backend's
+health](recipes/check_backend_health.md)). It returns, with the
+connections closed, when the public `working` flag is cleared or a drain
+is over. `loop_iter(timeout)`
 does one step and throws `SyncClient::OperationTimedOut` after `timeout`
 seconds. The thread that calls
 `serve_forever` becomes the backend's thread, whichever thread built it;

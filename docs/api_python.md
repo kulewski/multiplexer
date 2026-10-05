@@ -338,7 +338,13 @@ connection cannot take waits there for room. When the connection dies,
 what it had not written moves, in order, to one other connection, and
 the lane follows it there: a gap or a reorder at the failover and no
 other, one more for each further failover; a sequencer on the receiving
-side is for that.
+side is for that,
+and [the stream example](../examples/stream/walkthrough.md#how-it-fits-together)
+is one, its tokens numbered, held back until their turn and asked for
+again. It pins its request hard, and when the connection dies sends it
+again itself, addressed to the generator that has the answer, since the
+library would send a typed request again to whichever backend answers
+its search first.
 `lane(pinned=True)` is the hard pin: once its connection is gone, every
 send and query through it raises `NotConnected`, and `lane.closed` says
 so, until the caller makes a new lane; a flushing send through it that
@@ -468,7 +474,10 @@ Override `periodic_task()` for work on the backend's own schedule, a
 heartbeat to a monitor, a stale-connection check, and for noticing a
 request to leave: a file a preStop hook wrote, a flag another thread set.
 The default does nothing; gate the frequency inside it if the poll is
-shorter than the work's period.
+shorter than the work's period. A loop that stops stops calling it, so a
+liveness probe that must see the loop, not only the process, answers
+from a time written down there
+([check a backend's health](recipes/check_backend_health.md)).
 
 A `BaseMultiplexerServer` may be made on one thread and served from
 another: the thread that calls `serve_forever()` becomes its thread, and
@@ -1397,7 +1406,10 @@ Everything in-process uses the client library as your code does, so what a
 test sees is what production sees, including the thread rules: a
 `FakePeer` or `BackendThread` is served on its own thread, a
 `TestClient` belongs to the test's thread, and a `ThreadedTestClient`
-may be used from any.
+may be used from any. [examples/cache/test.py](../examples/cache/test.py)
+is a complete test of a backend of your own on this harness, a cluster,
+replicas on threads, a multiplexer killed under traffic and Django
+configured against the cluster, and its walkthrough walks through it.
 
 ### Tests that hold up under load
 

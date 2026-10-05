@@ -9,7 +9,9 @@ receive is answered with `DELIVERY_ERROR` if the client asked for one.
 Peer types are how you group backends. The picture has one client, one
 multiplexer and two backend types, A and B, with two backends each. Type A
 receives an event type under a `whom: ALL` rule; type B receives a request
-type under a `whom: ANY` rule.
+type under a `whom: ANY` rule. The smallest program that uses both rules is
+the [cache example](../examples/cache/README.md): a write to every replica,
+a read from any one.
 
 ## Rules, direct addressing, delivery errors
 

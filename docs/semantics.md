@@ -109,6 +109,9 @@ that changes.
   reply, a stream of results after the answer, a notification about the
   work, must not reference the request: address it to the peer with `to`
   and correlate in the payload. One reply per request.
+  [The stream example](../examples/stream/README.md) is this rule at
+  work: an answer's tokens addressed to the requester, each carrying the
+  answer's number and its own, and one reply after the last.
 - **Events give no feedback** unless the rule reports delivery errors, and
   even then only that nobody was there, not that anybody processed it. A
   flushing send (`flush=True`, `SyncClient::send`) does guarantee the event was

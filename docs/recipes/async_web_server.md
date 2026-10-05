@@ -71,7 +71,15 @@ the loop. A socket held by another worker is
 reached the way
 Channels reaches it, through the channel layer, from a handler that
 forwards what it matched. Subscribe in `connect`, unsubscribe in
-`disconnect`, or the handler keeps a closed consumer alive.
+`disconnect`, or the handler keeps a closed consumer alive. The channel
+layer itself can be the multiplexer: [examples/channels](../../examples/channels)
+is a layer whose group sends are events to every process and whose
+channel sends are addressed to the owning process, so the same
+connections carry the layer and the backends.
+[examples/audio](../../examples/audio) streams through those connections:
+every 10 ms frame a socket receives is a query to a C++ worker, addressed
+to the same worker for as long as it lives, and the answer a group send
+to the room.
 
 ## Backpressure and shutdown
 

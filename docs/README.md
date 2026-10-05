@@ -184,8 +184,42 @@ graph LR
 
 ## Start here
 
-- [Walkthrough: the echo example](walkthrough.md): run a multiplexer, a
+- [Running the echo example, step by step](../examples/echo/walkthrough.md): run a multiplexer, a
   backend and a client, and read what they print.
+- [Building the chat gateway, step by step](../examples/aio/walkthrough.md):
+  an asyncio TCP server on one `AsyncClient`, a line awaited as a query
+  and a broadcast delivered to every client, the piece the channel layer
+  and the audio room rest on.
+- [Building the health check, step by step](../examples/health/walkthrough.md):
+  a backend whose health endpoint answers from the time its serve loop
+  last came round, a handler held past the limit and past the
+  multiplexers' drop interval, and the Kubernetes manifest with the
+  liveness probe beside the drain.
+- [Building the cache, step by step](../examples/cache/walkthrough.md):
+  a replicated cache as a Django cache backend, the smallest program
+  that uses both routing modes, every line explained as it is added,
+  and a journal added by changing the rules under running multiplexers;
+  with the measured steps and a walk through testing a backend on the
+  harness.
+- [Building the channel layer, step by step](../examples/channels/walkthrough.md):
+  a Django Channels channel layer on the multiplexer, Redis replaced by
+  one setting, with the tutorial's chat on it;
+  with the steps and the test.
+- [Walkthrough: a web app and a pool of model workers](../examples/inference/walkthrough.ipynb):
+  a notebook that builds the inference example up step by step, from
+  `pip install` to a rolling restart of the workers under load.
+- [Building the streaming answers, step by step](../examples/stream/walkthrough.md):
+  an answer that arrives token by token, the request's follow-ups
+  addressed and numbered and its one reply at the end, through a pinned
+  lane so that they arrive in order and sent again to the same generator
+  when its multiplexer dies, with a multiplexer and a generator killed
+  under an answer and a rolling restart; with the measured steps and the
+  test.
+- [Building the audio room, step by step](../examples/audio/walkthrough.md):
+  live audio through a C++ worker, every 10 ms frame a query answered in
+  a fifth of a millisecond and heard by everyone in the room, the worker
+  killed and rolled under the stream;
+  with the measured steps and the test.
 
 ## How it works, step by step
 
@@ -239,6 +273,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
   backpressure.
 - [Use the client from a threaded web server](recipes/web_server.md): one
   `ThreadedClient` per process, request threads, events without a receiver thread, fork and exit.
+- [Check a backend's health](recipes/check_backend_health.md): a
+  Kubernetes liveness probe that sees the serve loop through
+  `periodic_task()`, and why a health thread or a TCP probe does not.
 - [Add an integration test scenario](recipes/add_a_scenario.md)
 - [Add an mxcontrol subcommand](recipes/add_an_mxcontrol_subcommand.md)
 - [Change a timeout or a limit](recipes/change_a_default.md)

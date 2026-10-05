@@ -62,7 +62,9 @@ a `ROUTING` peer event, and marks a fan-out skipped for it as
 ## A drain, then the close: a rolling restart
 
 The deployment asks the backend to leave, a preStop hook writing a file
-that `periodic_task()` watches, for instance. The backend drains until the
+that `periodic_task()` watches, for instance, and waiting until the
+backend has left ([restarting backends](operations.md#restarting-backends)
+says why). The backend drains until the
 multiplexers confirmed and its work is done, then `serve_forever()`
 returns and `close()` runs. Backend B is another instance of the same
 type.

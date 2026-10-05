@@ -108,6 +108,13 @@ peers file, if you use them, want a volume of their own, `emptyDir` for a
 recording nobody keeps or a `volumeClaimTemplate` for one somebody does.
 [Packaging](packaging.md) describes the image.
 
+The backends run beside them, each type a Deployment of its own given
+the names above: [examples/health](../examples/health/deployment.yaml)
+has one, with the drain on a preStop hook ([restarting
+backends](#restarting-backends)) and a liveness probe that sees the
+backend's serve loop ([check a backend's
+health](recipes/check_backend_health.md)).
+
 ## Starting one
 
 ```
@@ -219,7 +226,10 @@ The `rules_edited_on_disk`, `rules_reload_on_sighup` and
 `rules_reload_by_mxcontrol` scenarios in `tests/scenarios/` show each
 trigger, the first one against a ConfigMap-style mount;
 `rules_reload_peers` and `rules_reload_silent_backend` what a reload does
-to the peers connected.
+to the peers connected. The cache
+example adds a peer type and a destination under a running cache, with
+what each side prints:
+[examples/cache/walkthrough.md](../examples/cache/walkthrough.md#6-a-journal-added-while-it-runs).
 
 ## Restarting one
 
@@ -289,6 +299,16 @@ clients a timeout per request it held. [How a backend leaves](leaving.md)
 draws the three phases and the routing flags; a recording notes each peer
 a fan-out skips as `NOT_ACCEPTED`, and a request no peer takes as one
 `NOT_ACCEPTED` for its type.
+
+On Kubernetes the hook waits until the backend has left, since the
+kubelet sends `SIGTERM` as soon as the hook returns:
+[examples/health](../examples/health/deployment.yaml) has such a hook,
+and a backend that removes the file once its connections are closed,
+which ends the hook. Beside it goes a liveness probe that asks about the
+backend's serve loop, since a health endpoint on another thread or a TCP
+probe passes while the loop is stuck, and the multiplexers route such a
+backend its share until its silence drops it, 90 s after its last frame
+([check a backend's health](recipes/check_backend_health.md)).
 
 ## Debug symbols
 
