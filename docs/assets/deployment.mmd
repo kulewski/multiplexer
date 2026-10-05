@@ -1,0 +1,19 @@
+graph LR
+  subgraph web [Web servers]
+    W1[web 1]
+    W2[web 2]
+    W3[web 3]
+  end
+  subgraph brokers [Multiplexers]
+    M1[multiplexer 1]
+    M2[multiplexer 2]
+  end
+  subgraph compute [Compute backends, C++]
+    B1[compute 1]
+    B2[compute 2]
+    B3[compute 3]
+  end
+  W1 & W2 & W3 --- M1
+  W1 & W2 & W3 --- M2
+  M1 --- B1 & B2 & B3
+  M2 --- B1 & B2 & B3

@@ -16,15 +16,154 @@ coordination between instances. It terminates no HTTP or WebSocket
 connections and manages no client sessions; a web server is one kind of
 peer among others.
 
-The core is C++17 with client libraries for C++ and Python, built with Bazel.
-Deploy several instances active-active: there is no single point of failure,
-every client and backend connects to all of them, and failover between them
-is automatic and transparent.
+`pip install mx-multiplexer` installs the Python package and the
+multiplexer itself, `mxcontrol`; a release also ships `mxcontrol` as one
+static binary and as a container image, and the C++ library as a Debian or
+Ubuntu package, all for Linux x86_64. Nothing needs building; the C++17
+source builds with Bazel or `make` when you want to. In Docker a
+multiplexer is one `docker run`, and on Kubernetes a StatefulSet behind a
+headless Service, with no operator, no leader and no state to keep
+([in Docker and on Kubernetes](#in-docker-and-on-kubernetes)).
+Deploy several instances active-active: there is no single point of
+failure, every client and backend connects to all of them, and failover
+between them is automatic and transparent.
 
 Multiplexer has been used in production in a number of projects since 2008.
 This repository adds what publication calls for:
 complete documentation, a test for every failure mode, and static
 thread-safety analysis.
+
+## Quick start
+
+On Linux x86_64 with Python 3.10 or newer: the package from PyPI, which
+brings the multiplexer with it, a rules file, two multiplexers, a backend
+and a client. Nothing to build.
+
+```
+python3 -m venv mx && . mx/bin/activate
+pip install mx-multiplexer
+mxcontrol generate_rules multiplexer.rules          # the system rules every rules file starts from
+cat >> multiplexer.rules <<'END'
+peer { type: 200 name: "WEB" }
+peer { type: 201 name: "COMPUTE" }
+type { type: 301 name: "COMPUTE_REQUEST" to { peer: "COMPUTE" whom: ANY } }
+type { type: 302 name: "COMPUTE_RESPONSE" }
+END
+mxcontrol generate_constants multiplexer.rules --python multiplexer_constants.py
+mxcontrol run_multiplexer --address 127.0.0.1:1980 2> mx1.log &
+mxcontrol run_multiplexer --address 127.0.0.1:1981 2> mx2.log &
+```
+
+`backend.py` answers each request with its payload upper-cased:
+
+```python
+from multiplexer.servers import BaseMultiplexerServer
+from multiplexer_constants import peers, types
+
+
+class Compute(BaseMultiplexerServer):
+    def handle_message(self, mxmsg):
+        self.send_message(message=mxmsg.message.upper(), type=types.COMPUTE_RESPONSE)
+
+
+Compute([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.COMPUTE).serve_forever()
+```
+
+`client.py` asks:
+
+```python
+from multiplexer.threaded_client import ThreadedClient
+from multiplexer_constants import peers, types
+
+client = ThreadedClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.WEB)
+print(client.query(b"hello", type=types.COMPUTE_REQUEST, timeout=10).message)
+client.shutdown()
+```
+
+Start the backend, then ask, take a multiplexer away and ask again:
+
+```
+$ python backend.py 2> backend.log &
+$ python client.py 2> client.log
+b'HELLO'
+$ kill %1                       # the multiplexer on 1980
+$ python client.py 2> client.log
+b'HELLO'
+```
+
+Both peers are connected to both multiplexers, so the second query goes
+through the one left, and nothing waited or failed. `kill %2 %3` ends the
+rest. The libraries log their connections to stderr, which the commands
+above send to files.
+
+## In Docker and on Kubernetes
+
+A multiplexer is one process, one rules file and nothing to keep, so a
+container is all it takes. The image, `ghcr.io/kulewski/multiplexer`, is
+12 MB: `mxcontrol` and the system rules on distroless, running as
+`nonroot`, listening on 1980 and reading `/etc/mx/multiplexer.rules`.
+Mount the quick start's directory there, and these two lines replace the
+quick start's two `mxcontrol run_multiplexer` lines:
+
+```
+docker run -d --name mx1 -p 1980:1980 -u "$(id -u)" -v "$PWD:/etc/mx:ro" ghcr.io/kulewski/multiplexer:latest
+docker run -d --name mx2 -p 1981:1980 -u "$(id -u)" -v "$PWD:/etc/mx:ro" ghcr.io/kulewski/multiplexer:latest
+```
+
+The backend and the client stay as they are, and `docker stop mx1` is the
+quick start's `kill %1`; `-u` runs the containers as you, so that they can
+read your directory. An edit of `multiplexer.rules` is put in use by both
+within seconds, with no restart; the directory is mounted rather than the
+file so that an editor's save reaches them
+([changing the rules](docs/operations.md#changing-the-rules)).
+
+On Kubernetes there is nothing to operate: no operator, no leader, no
+shared state. A StatefulSet behind a headless Service gives each
+multiplexer a name of its own, `mx-0.mx`, `mx-1.mx`, `mx-2.mx`, every peer
+is given all of them, and the rules file is a ConfigMap:
+
+```
+kubectl create configmap mx-rules --from-file=multiplexer.rules
+kubectl apply -f mx.yaml
+```
+
+```yaml
+# mx.yaml
+apiVersion: v1
+kind: Service
+metadata: {name: mx}
+spec:
+  clusterIP: None              # headless: a DNS name per pod, no load balancing
+  selector: {app: mx}
+  ports: [{port: 1980}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: mx}
+spec:
+  serviceName: mx
+  replicas: 3
+  selector: {matchLabels: {app: mx}}
+  template:
+    metadata: {labels: {app: mx}}
+    spec:
+      containers:
+        - name: mx
+          image: ghcr.io/kulewski/multiplexer:latest   # or a version, to pin it
+          ports: [{containerPort: 1980}]
+          readinessProbe: {tcpSocket: {port: 1980}, periodSeconds: 5}
+          volumeMounts: [{name: rules, mountPath: /etc/mx}]
+      volumes: [{name: rules, configMap: {name: mx-rules}}]
+```
+
+The peers get `mx-0.mx:1980,mx-1.mx:1980,mx-2.mx:1980`. A rolling update
+restarts the multiplexers one at a time, which costs a request nothing
+while the peers are on the others, and an edit of the ConfigMap needs no
+rollout at all. [docs/operations.md](docs/operations.md#on-kubernetes) has
+the complete manifest, with the pods spread over nodes and a
+PodDisruptionBudget, and the inference example's `compose.yaml` runs a
+whole stack with `docker compose up`: two multiplexers, the workers and
+the web app ([examples/inference](examples/inference)).
 
 ## Internal service-to-service messaging
 
@@ -37,6 +176,7 @@ any web server reaches one backend, chosen round robin, and the answer
 comes back to the server that asked. Lose either multiplexer, or any
 backend, and nothing stops.
 
+<!-- pypi: ![Web servers on the left, two multiplexers in the middle, compute backends on the right, every peer connected to both multiplexers](docs/assets/deployment.svg) -->
 ```mermaid
 graph LR
   subgraph web [Web servers]
@@ -60,14 +200,15 @@ graph LR
 ```
 
 The rules behind the picture, in the format [rules.md](docs/rules.md)
-describes; the web servers are `is_passive` because they use
-`SyncClient`, which calls in only to send; no other class needs the mark:
+describes, are the quick start's: the system rules every rules file starts
+from, left out here, then the four entries it appended, written out:
 
 ```
+# ... the system rules, as `mxcontrol generate_rules` writes them ...
+
 peer {
-    type: 102
+    type: 200
     name: "WEB"
-    is_passive: true
 }
 
 peer {
@@ -90,6 +231,20 @@ type {
 }
 ```
 
+Every peer has a peer type and every message a message type, numbers the
+rules file names. A type's rule says where its messages go: to `ANY` one
+peer of a type, round robin, or to `ALL` of them, and several rules fan
+one message out to several types. A message with `to` set goes to that
+one instance whatever the rules say, which is how a reply finds the peer
+that asked, so `COMPUTE_RESPONSE` needs no rule. A deployment keeps its
+own rules file, the system rules and its own types after them, and the
+multiplexers put a changed file in use without a restart ([changing the
+rules](docs/operations.md#changing-the-rules)); the constants a program
+imports are generated from it, by `mxcontrol generate_constants` or a
+Bazel build.
+[rules.md](docs/rules.md) describes every field and
+[docs/README.md](docs/README.md) the words.
+
 ## Highlights
 
 - **Highly available, no single point of failure.** Run several multiplexers
@@ -97,6 +252,13 @@ type {
   automatically, and reconnect on their own. A rolling restart of three
   multiplexers under traffic costs no request more than a millisecond
   ([rolling_restart](tests/scenarios/rolling_restart/README.md)).
+- **One `docker run`, or a StatefulSet on Kubernetes.** The image is 12 MB,
+  `mxcontrol` and the system rules on distroless, running as `nonroot`;
+  mount a rules file over its own and it is a multiplexer. On Kubernetes a
+  StatefulSet behind a headless Service runs as many as you want, with no
+  operator, no leader and no shared state, and an edit of the rules'
+  ConfigMap is put in use without a rollout
+  ([in Docker and on Kubernetes](#in-docker-and-on-kubernetes)).
 - **Fault-tolerant requests.** A request whose backend dies, or whose
   connection dies, is retried once, through the backend a search across
   every multiplexer finds, all inside one call
@@ -174,14 +336,6 @@ type {
 exactly what is promised, for the deployment the multiplexer is designed for:
 several of them, every peer connected to all.
 
-## Quick start
-
-```
-bazel build //...                       # see docs/building.md for the packages
-bazel test --test_tag_filters=-slow //...
-cd examples/echo && bazel test //...    # a backend and a client, built the way your code will be
-```
-
 ## Examples
 
 Complete programs under [examples/](examples/), each with a README that
@@ -213,82 +367,80 @@ what the broker's latency makes possible:
   C++ worker and the answer heard by everyone, the worker replaced under
   the stream.
 
-## Where to read next
+## Using it from Python
 
-[docs/README.md](docs/README.md) defines the terminology, shows the
-reference deployment and traces a query and an event step by step;
-[examples/echo/walkthrough.md](examples/echo/walkthrough.md) runs the
-smallest example and reads what each side prints. The reference pages
-under [docs/](docs/) cover the rules file, both client libraries,
-`mxcontrol`, the wire format and operations.
+`pip install mx-multiplexer` installs the package, its compiled extension
+included, and the `mxcontrol` command, which runs the multiplexer and its
+tools, on Linux x86_64 for CPython 3.10 and newer; the import is
+`multiplexer`, since `multiplexer` on PyPI is an unrelated package.
+`mxcontrol generate_rules your.rules` writes the system rules every rules
+file starts from; add your own types after them, and `mxcontrol
+generate_constants your.rules --python multiplexer_constants.py --pyi
+multiplexer_constants.pyi` writes their constants, once and again whenever
+the file changes, for `from multiplexer_constants import peers, types`. A
+Bazel build generates them on its own.
 
-## Rules and routing
+The quick start's two classes are the usual start: a backend built on
+`BaseMultiplexerServer`, whose `serve_forever()` runs the loop and calls
+`handle_message` for each request, `send_message` replying to the peer
+that asked, and a `ThreadedClient`, safe to share between threads, whose
+`query()` sends a request and returns the answer. An event is sent the
+same way without waiting for an answer, `client.send_message(b"payload",
+type=types.SOME_EVENT)`, and `to=<an instance id>` addresses one peer,
+bypassing the routing rules. `SyncClient` (named `Client` up to 2.3.1),
+`AsyncClient` for asyncio and `BaseThreadedMultiplexerServer`, whose
+handlers run on worker threads, are in the [Python API](docs/api_python.md),
+and [which class to build on](docs/README.md#which-class-to-build-on)
+compares them all. A test starts real multiplexers with
+`multiplexer.testing`, which runs the package's `mxcontrol`
+([testing](docs/api_python.md#testing)).
 
-### Terminology
+## Using it from C++
 
-- `peer`: any program connected to the multiplexer, a client or a backend. Peers send and receive messages. Must be of a defined `peer type`.
-- `peer type`: a numeric value defined via a `peer {...}` block in `multiplexer.rules`
-- `peer instance id`: every peer gets assigned an `instance id` when it connects to the multiplexer. Peers can send messages directly to each other using this id.
-- `message`: a data packet that peers can send to each other. Must be of a defined `message type`.
-- `message type`: a numeric value defined via a `type {...}` block in `multiplexer.rules`
-
-### multiplexer.rules file
-
-Peer types and message types are defined in `multiplexer.rules` file.
-
-**If you make any changes to any of the type ids or constants, client library files will need to be regenerated. It happens automatically if you use the `bazel run` or `bazel build`. Multiplexer itself doesn't need to be rebuilt or restarted: it reads the changed file and puts it in use on its own ([changing the rules](docs/operations.md#changing-the-rules)).**
-
-### Send message directly to a peer
-
-Specify another peer's `peer instance id` in the `to` field in the message to send it directly to that particular peer.
-
-**This routing rule takes precedence over other rules specified below.**
-
-### Route message by message type
-
-File `multiplexer.rules` allows you to define how messages of particular types are routed. Example:
+pip installs no C++ library: the Debian and Ubuntu packages on the
+release page hold it, its headers and a pkg-config file, besides
+`mxcontrol`, one package per release, because protobuf's C++ library promises no compatibility between
+versions and the library is built against each release's own. With the
+package installed, and `libprotobuf-dev` and `libasio-dev`:
 
 ```
-# Peers
-peer {
-    type: 300
-    name: "ECHO_BACKEND"
-}
-
-# Messages
-type {
-    type: 300
-    name: "ECHO_REQUEST"
-    to {
-        peer: "ECHO_BACKEND"
-        whom: ANY
-    }
-}
+sudo apt install ./multiplexer_<version>~<codename>_amd64.deb
+g++ -std=c++17 backend.cc $(pkg-config --cflags --libs multiplexer) -o backend
 ```
 
-This means: every message of type `ECHO_REQUEST` will be sent to one of the connected `ECHO_BACKEND` peers (round-robin).
-If you need the message to be sent to all peers of a particular type, use `whom: ALL`. [docs/rules.md](docs/rules.md) describes every field.
+The C++ library has the Python package's classes but the asyncio one:
+`SyncClient` with `query`, `schedule_one` and `schedule_all`,
+`ThreadedClient`, `BaseMultiplexerServer` and
+`BaseThreadedMultiplexerServer`; [examples/echo/backend.cc](examples/echo/backend.cc)
+is a complete backend and the [C++ API](docs/api_cpp.md) describes them. The constants of your own
+rules file come from `mxcontrol generate_constants your.rules --cxx
+multiplexer/multiplexer.constants.h`, placed on the include path before
+the package's copy ([packaging](docs/packaging.md#the-debian-packages)).
 
 ## Getting it
 
 Two ways, and the choice is only whether you build it:
 
-- **A release.** Every release on GitHub ships the same set, built from
-  one commit: a static `mxcontrol` for any x86_64 Linux, the container
-  image `ghcr.io/kulewski/multiplexer:<version>` with nothing in it but
-  the binary, a Debian package per Debian and Ubuntu release with
-  `mxcontrol`, the C++ library, its headers and a pkg-config file, and
-  manylinux wheels of the Python package, `mxcontrol` inside, for every
-  CPython from 3.10,
-  which `pip install mx-multiplexer` fetches from PyPI.
+- **A release.** `pip install mx-multiplexer` fetches the Python package
+  from PyPI, `mxcontrol` inside, one manylinux wheel per CPython from 3.10.
+  Every release on GitHub ships the same set, built from one commit and
+  stripped: those wheels, a static `mxcontrol` for any x86_64 Linux, the
+  container image `ghcr.io/kulewski/multiplexer:<version>`, also tagged
+  `latest`, with nothing in it but `mxcontrol` and the system rules, and a
+  Debian package per Debian and Ubuntu release with `mxcontrol`, the C++
+  library, its headers and a pkg-config file.
   [docs/packaging.md](docs/packaging.md) says how to use each;
-  [docs/operations.md](docs/operations.md#on-kubernetes) how to run the
-  image on Kubernetes.
+  [in Docker and on Kubernetes](#in-docker-and-on-kubernetes) runs the
+  image in both, and [docs/operations.md](docs/operations.md#on-kubernetes)
+  has the complete Kubernetes manifest.
 - **From source**, with Bazel, which is how the repository is developed
   and tested and how another Bazel workspace consumes it, or with `make`
-  from the distribution's own packages. The two sections below.
+  from the distribution's own packages: [building from
+  source](#building-from-source).
 
-## Building with Bazel
+## Building from source
+
+### Building with Bazel
 
 Prerequisites, verified on clean Debian 12, Ubuntu 24.04 and Debian 13
 installations: Bazel 6.2 through Bazelisk, a C++17 compiler,
@@ -303,6 +455,7 @@ bazel build //...
 bazel test //...                              # unit and integration tests
 bazel test --test_tag_filters=-slow //...     # the fast ones, a few seconds
 bazel run //mxcontrol run_multiplexer
+cd examples/echo && bazel test //...          # a backend and a client, built the way your code will be
 ```
 
 The integration tests under [tests/](tests/) start real multiplexers and play
@@ -313,9 +466,9 @@ connections and exits with 0.
 
 `--config=debug` keeps debug info and frame pointers; `--config=release` builds optimized, stripped binaries. Run the server inside `screen` or `tmux` if you want to get back to the session later.
 
-### Your own peer and message types
+#### Your own peer and message types
 
-`multiplexer.rules` in this repository is the system rules, which every rules file starts from (`mxcontrol generate_rules your.rules` writes them). Keep your deployment's rules file in your own repository and point the build at it:
+`multiplexer.rules` in this repository is the system rules, which every rules file starts from. Keep your deployment's rules file in your own repository and point the build at it:
 
 ```
 bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //...
@@ -323,7 +476,7 @@ bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //...
 
 When this repository is consumed as an external Bazel repository named `mx`, the flag is `--@mx//:multiplexer_rules=...`. At run time `mxcontrol run_multiplexer` reads `multiplexer.rules` from the current directory unless `--rules` points elsewhere.
 
-## Building without Bazel
+### Building without Bazel
 
 For a machine that will not have Bazel, a `Makefile` builds the same things
 from the distribution's own compiler, protobuf, Asio and pybind11:
@@ -340,7 +493,7 @@ make RULES=your.rules -j     # the constants from your rules file
 what a program links and imports. The test roles, the scenarios, the
 examples and the sanitizer builds stay with Bazel.
 
-## Using it from another Bazel workspace
+### Using it from another Bazel workspace
 
 Declare this repository as `mx`, then two calls in your `WORKSPACE`:
 
@@ -369,52 +522,16 @@ Your tests get `@mx//multiplexer/testing`: real multiplexers on ephemeral
 ports, scripted peers, and the macro this repository's own scenarios use
 ([docs/api_python.md](docs/api_python.md#testing)).
 
-## Using it from Python
+## Where to read next
 
-`pip install mx-multiplexer` installs the package, extension included, on
-Linux, and the `mxcontrol` command, which runs a multiplexer; the import is
-`multiplexer`, and `mxcontrol generate_constants your.rules --python
-multiplexer_constants.py` writes the `peers` and `types` of your rules
-file, which a Bazel build generates on its own. A
-backend waits for requests and answers them. This one is built on
-`BaseMultiplexerServer`: `serve_forever()` runs the loop and calls
-`handle_message` for each request; `send_message` replies to the peer that
-asked.
-
-```python
-from multiplexer.servers import BaseMultiplexerServer
-from multiplexer_constants import peers, types
-
-
-class Echo(BaseMultiplexerServer):
-    def handle_message(self, mxmsg):
-        self.send_message(message=mxmsg.message.upper(), type=types.ECHO_RESPONSE)
-
-
-Echo([("127.0.0.1", 1980)], type=peers.ECHO_BACKEND).serve_forever()
-```
-
-A client sends a request and gets the answer back; give it the addresses of
-all your multiplexers.
-
-```python
-from multiplexer.clients import SyncClient
-from multiplexer_constants import peers, types
-
-client = SyncClient([("127.0.0.1", 1980), ("127.0.0.1", 1981)], type=peers.ECHO_CLIENT)
-response = client.query(b"hello", type=types.ECHO_REQUEST, timeout=10)
-print(response.message)  # b"HELLO"
-```
-
-An event is sent the same way without waiting for an answer:
-`client.send_message(b"payload", type=types.SOME_EVENT)`. To address one
-specific peer, pass `to=<its instance id>`; that bypasses the routing rules.
-The peer and message names come from your rules file; these are from
-[examples/echo/echo.rules](examples/echo/echo.rules).
-
-The C++ client offers the same calls: `Client::query`, `schedule_one`,
-`schedule_all`, and `BaseMultiplexerServer` for backends. See
-[examples/echo/backend.cc](examples/echo/backend.cc).
+[docs/README.md](docs/README.md) defines the terminology, shows the
+reference deployment and traces a query and an event step by step. The
+[examples](examples/) carry on from the quick start:
+[cache](examples/cache/walkthrough.md) builds a pip project from nothing,
+and [echo](examples/echo/walkthrough.md) runs the smallest program with
+Bazel and reads what each side prints. The reference pages
+under [docs/](docs/) cover the rules file, both client libraries,
+`mxcontrol`, the wire format and operations.
 
 ## History
 

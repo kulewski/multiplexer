@@ -27,9 +27,14 @@ class BinaryDistribution(Distribution):
 
 def readme_for_pypi():
     """README.md with every relative link and image pointing at the tagged
-    tree on GitHub, so that the links work on the PyPI page."""
+    tree on GitHub, so that the links work on the PyPI page, and every
+    Mermaid block, which PyPI does not render, replaced by the picture named
+    on the line above it (docs/check_mermaid.py keeps the two the same)."""
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"), encoding="utf-8") as readme:
         text = readme.read()
+    text = re.sub(r"<!-- pypi: ([^\n]+) -->\n```mermaid\n.*?\n```", lambda m: m.group(1), text, flags=re.S)
+    if "```mermaid" in text:
+        raise SystemExit("README.md: a Mermaid block without its picture for PyPI above it")
     tree = "%s/blob/v%s/" % (REPOSITORY, VERSION)
     raw = "https://raw.githubusercontent.com/kulewski/multiplexer/v%s/" % VERSION
     text = re.sub(r'src="(?!https?://)([^"]+)"', lambda m: 'src="%s%s"' % (raw, m.group(1)), text)
