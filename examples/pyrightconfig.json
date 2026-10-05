@@ -14,7 +14,8 @@
     "cache",
     "channels",
     "echo",
-    "inference"
+    "inference",
+    "stream"
   ],
   "exclude": [
     "**/bazel-*",
@@ -73,6 +74,14 @@
       "extraPaths": [
         "inference",
         "inference/web",
+        ".venv/mxtree"
+      ]
+    },
+    {
+      "root": "stream",
+      "extraPaths": [
+        "stream",
+        "stream/web",
         ".venv/mxtree"
       ]
     }

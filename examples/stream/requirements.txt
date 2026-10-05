@@ -1,0 +1,7 @@
+# What the example runs on: `pip install -r requirements.txt`. fastapi and
+# uvicorn serve the web side; httpx drives it in the test.
+mx-multiplexer
+fastapi
+uvicorn
+httpx
+protobuf
