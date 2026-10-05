@@ -7,14 +7,16 @@ kinds. The building blocks are what a service needs and would otherwise
 get from Redis, an HTTP pool or a task queue: a replicated cache, a
 channel layer, a pool of model workers, an answer streamed token by
 token. The others show what a broker with this latency makes possible,
-starting with an audio room where every 10 ms frame is a request. Two
+starting with an audio room where every 10 ms frame is a request. Three
 small ones come first: the shape of a backend and a client in both
-languages, and an asyncio gateway.
+languages, an asyncio gateway, and a health check that sees a backend's
+serve loop.
 
 | example | what it shows | languages | built with | walkthrough |
 |---|---|---|---|---|
 | [echo](echo/) | the smallest backend and client, in Python and in C++, and threads sharing one client | Python, C++ | Bazel | [walkthrough.md](echo/walkthrough.md) runs it |
 | [aio](aio/) | an asyncio TCP gateway in front of a chat backend: a reply to the one who asked, a broadcast to everyone | Python | Bazel | [walkthrough.md](aio/walkthrough.md) |
+| [health](health/) | a backend's health check that sees its serve loop: a Kubernetes liveness probe on an endpoint that answers 503 once `periodic_task()` has not run for a while, beside the drain on a preStop hook | Python | pip | [walkthrough.md](health/walkthrough.md) |
 | [cache](cache/) | a replicated cache as a Django cache backend: a write to every replica, a read from any; and a journal added by changing the rules under the running multiplexers | Python | pip | [walkthrough.md](cache/walkthrough.md) |
 | [channels](channels/) | a Django Channels channel layer on the multiplexer, Redis replaced by one setting | Python | pip | [walkthrough.md](channels/walkthrough.md) |
 | [inference](inference/) | a web app asking a pool of PyTorch workers, with a worker killed, a rolling restart and a multiplexer killed | Python | pip | [walkthrough.ipynb](inference/walkthrough.ipynb) |
@@ -44,7 +46,7 @@ cd examples/echo
 bazel test //...
 ```
 
-The pip examples, cache, channels, inference, stream and the audio gateway, are
+The pip examples, health, cache, channels, inference, stream and the audio gateway, are
 installed the way a Django project is: `mx-multiplexer` from PyPI, which
 brings the multiplexer, `mxcontrol`, with it, with a `requirements.txt`, a
 `test.py` on the harness and a `test.sh` that makes a virtual environment

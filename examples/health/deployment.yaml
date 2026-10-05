@@ -1,0 +1,38 @@
+# The workers on Kubernetes, beside the multiplexers of docs/operations.md
+# ("On Kubernetes"): a StatefulSet named mx behind a headless Service, so
+# every worker is given each multiplexer's name. The image is Python, with
+# requirements.txt installed and this directory as its working directory,
+# as examples/inference/Dockerfile builds one.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: worker}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      terminationGracePeriodSeconds: 30  # the drain's 20 s at most, the close's 2 s, and room
+      containers:
+        - name: worker
+          image: <registry>/health-worker:<version>
+          command: [python, backend.py, "mx-0.mx:1980,mx-1.mx:1980,mx-2.mx:1980",
+                    --health-port, "8080", --stale-seconds, "30", --stall-seconds, "20", --drain-file, /tmp/leave]
+          ports: [{name: health, containerPort: 8080}]
+          # 503 once the serve loop has not come round for 30 s; three in a
+          # row, 10 s apart, and the container is killed and started again.
+          # A container the probe kills has a stuck loop, which no drain
+          # can end, so it is given 5 s rather than the pod's 30.
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+            failureThreshold: 3
+            terminationGracePeriodSeconds: 5
+          # The drain: the file asks the worker to leave, and the worker
+          # removes it once it has left, its connections closed. The hook
+          # waits for that, so that the SIGTERM the kubelet sends once the
+          # hook returns finds the worker gone.
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, "touch /tmp/leave; while [ -e /tmp/leave ]; do sleep 0.5; done"]

@@ -1,0 +1,4 @@
+# What the example runs on: `pip install -r requirements.txt`. PyYAML reads
+# the manifest in the test.
+mx-multiplexer
+pyyaml

@@ -14,6 +14,7 @@
     "cache",
     "channels",
     "echo",
+    "health",
     "inference",
     "stream"
   ],
@@ -58,6 +59,13 @@
       "extraPaths": [
         "cache",
         "cache/web",
+        ".venv/mxtree"
+      ]
+    },
+    {
+      "root": "health",
+      "extraPaths": [
+        "health",
         ".venv/mxtree"
       ]
     },
