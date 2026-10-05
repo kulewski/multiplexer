@@ -2,7 +2,7 @@
 
 A program built on SyncClient, or on an MxClient holding one, imports this
 module, whatever its role (docs/api_python.md). SyncClient was named Client
-up to 2.3.1, and Client is still the same class. It builds on
+before 2.4.0, and Client is still the same class. It builds on
 multiplexer.mxclient, which wraps the C++ Client: everything about
 connections, queues, timeouts and the query algorithm lives there; this
 module adds the BACKEND_ERROR check and the exception classes.
@@ -144,7 +144,7 @@ _SyncClientT = TypeVar("_SyncClientT", bound="SyncClient")
 
 class SyncClient(BasicClient):
     """A peer's connections to every multiplexer in `addresses`, a list of
-    (host, port) pairs, used from one thread; named Client up to 2.3.1.
+    (host, port) pairs, used from one thread; named Client before 2.4.0.
 
     It is passive: the loop runs only inside calls, so its peer type must
     be marked is_passive in the rules file, which no other class needs.
@@ -177,7 +177,7 @@ class SyncClient(BasicClient):
         self.shutdown()
 
 
-# The name up to 2.3.1, kept as the same class object: isinstance,
+# The name before 2.4.0, kept as the same class object: isinstance,
 # subclassing and Client.ONE/ALL work under either name, at no cost.
 Client = SyncClient
 

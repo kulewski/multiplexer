@@ -1,6 +1,6 @@
 """Read-only aliases of the sender field under the names it had: `from_`,
 the property this module gave MultiplexerMessage while the field was named
-`from`, a Python keyword, up to 2.3.1, and `from` itself, as
+`from`, a Python keyword, before 2.4.0, and `from` itself, as
 getattr(message, "from") read it, on MultiplexerMessage and on a
 recording's RoutedMessage. The field is `sender` now, under the same
 number, so that the wire and every recording are unchanged. Each alias

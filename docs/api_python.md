@@ -1,7 +1,7 @@
 # Using the Python library
 
 Three modules matter: `multiplexer.clients` holds `SyncClient`, also
-importable as `Client`, its name up to 2.3.1; `multiplexer.servers` holds
+importable as `Client`, its name before 2.4.0; `multiplexer.servers` holds
 `BaseMultiplexerServer`, one class a backend can be built on; and
 `multiplexer.multiplexer_constants` holds `peers` and `types`, generated
 from the [rules file](rules.md) the build was pointed at. Depend on `@mx//multiplexer:clients` or
@@ -39,7 +39,7 @@ touch:
 | `type` | the message type, a `types.*` constant |
 | `message` | the payload, bytes; the multiplexer never reads it |
 | `id` | random 64-bit id, set by the library; each attempt `query()` makes gets a new one, so the same request may reach a backend under different ids |
-| `sender` | the sender's instance id, set by the library; named `from`, a Python keyword, up to 2.3.1, read as `from_` then, which still reads it for a release, with a `DeprecationWarning` |
+| `sender` | the sender's instance id, set by the library; named `from`, a Python keyword, before 2.4.0, read as `from_` then, which still reads it for a release, with a `DeprecationWarning` |
 | `to` | an instance id to deliver to directly, bypassing the rules; 0 means route by the rules |
 | `references` | the id of the message this one answers; `query()` matches replies by it |
 | `workflow` | opaque bytes copied from request to reply, for tracing |
@@ -92,7 +92,7 @@ does, and the default of each.
 client = SyncClient([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_CLIENT)
 ```
 
-Named `Client` up to 2.3.1; `Client` is still the same class. Connects to
+Named `Client` before 2.4.0; `Client` is still the same class. Connects to
 every address, each with a 10 s timeout, and keeps the
 connections. A host is an address or a name; a name is resolved by the
 library on every attempt, each address it has tried in turn, for 5 s at

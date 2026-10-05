@@ -2,7 +2,7 @@
 
 `multiplexer::SyncClient` in [multiplexer/client.h](../multiplexer/client.h)
 is the class a program on one thread connects with. It is an alias of the
-class `multiplexer::Client`, its name up to 2.3.1, which compiler messages
+class `multiplexer::Client`, its name before 2.4.0, which compiler messages
 show and a forward declaration must name (`class Client;`), since an alias
 cannot be forward-declared. `multiplexer::backend::BaseMultiplexerServer` in
 [multiplexer/backend/base_multiplexer_server.h](../multiplexer/backend/base_multiplexer_server.h)

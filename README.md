@@ -387,7 +387,7 @@ that asked, and a `ThreadedClient`, safe to share between threads, whose
 `query()` sends a request and returns the answer. An event is sent the
 same way without waiting for an answer, `client.send_message(b"payload",
 type=types.SOME_EVENT)`, and `to=<an instance id>` addresses one peer,
-bypassing the routing rules. `SyncClient` (named `Client` up to 2.3.1),
+bypassing the routing rules. `SyncClient` (named `Client` before 2.4.0),
 `AsyncClient` for asyncio and `BaseThreadedMultiplexerServer`, whose
 handlers run on worker threads, are in the [Python API](docs/api_python.md),
 and [which class to build on](docs/README.md#which-class-to-build-on)

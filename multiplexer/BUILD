@@ -200,7 +200,7 @@ genrule(
     cmd = "root=$(location Multiplexer.proto); root=$${root%multiplexer/Multiplexer.proto}; root=$${root%/}; " +
           "$(location //:protoc) -I $${root:-.} --cpp_out=$(RULEDIR)/.. --python_out=$(RULEDIR)/.. --pyi_out=$(RULEDIR)/.. $(SRCS) && " +
           # multiplexer/protocolbuffers.py keeps `from_`, a read-only alias of `sender`, the field named
-          # `from` up to 2.3.1.
+          # `from` before 2.4.0.
           "sed -i 's/^class MultiplexerMessage(.*/&\\n    @property\\n    def from_(self) -> int: ...  " +
           "# deprecated: the field is sender/' $(location Multiplexer_pb2.pyi)",
     tools = ["//:protoc"],

@@ -26,7 +26,7 @@ PROTOC ?= protoc
 CXX ?= g++
 AR ?= ar
 STRIP ?= strip
-VERSION ?= 2.3.1
+VERSION ?= 2.4.0
 # A version given as its tag, v2.3.1, as the release workflow passes it in
 # the environment, is taken without the v: the .pc file carries the number,
 # which pkg-config compares.
@@ -110,8 +110,8 @@ $(GEN)/%.pb.cc $(GEN)/%.pb.h $(GEN)/%_pb2.py $(GEN)/%_pb2.pyi: %.proto
 	@mkdir -p $(GEN)
 	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<
 
-# multiplexer/protocolbuffers.py keeps `from_`, a read-only alias of `sender`, the field named `from` up
-# to 2.3.1.
+# multiplexer/protocolbuffers.py keeps `from_`, a read-only alias of `sender`, the field named `from` before
+# 2.4.0.
 $(GEN)/multiplexer/Multiplexer_pb2.pyi: multiplexer/Multiplexer.proto
 	@mkdir -p $(GEN)
 	$(PROTOC) -I. --cpp_out=$(GEN) --python_out=$(GEN) $(PYI_OUT) $<

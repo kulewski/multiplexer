@@ -1,10 +1,10 @@
 // The synchronous client's two names: SyncClient, the name the docs use
-// after 2.3.1, is the class Client, which code written before may still
+// since 2.4.0, is the class Client, which code written before may still
 // name, forward-declare or derive from. Most of this is checked when it
 // compiles; the test constructs one through each spelling.
 
 namespace multiplexer {
-class Client;  // a forward declaration as code written for 2.3.1 may have it
+class Client;  // a forward declaration as code written before 2.4.0 may have it
 }  // namespace multiplexer
 
 #include <gtest/gtest.h>

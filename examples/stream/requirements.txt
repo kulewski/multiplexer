@@ -1,6 +1,6 @@
 # What the example runs on: `pip install -r requirements.txt`. fastapi and
 # uvicorn serve the web side; httpx drives it in the test.
-mx-multiplexer
+mx-multiplexer>=2.4.0
 fastapi
 uvicorn
 httpx

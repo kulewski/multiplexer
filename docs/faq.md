@@ -67,7 +67,7 @@ the rules file is a protocol buffer in text format, but that is a habit, not
 a requirement.
 
 **What became of `from` and `from_`?**
-The sender's field was named `from` up to 2.3.1, a keyword in Python, where
+The sender's field was named `from` before 2.4.0, a keyword in Python, where
 the library gave it a read-only alias, `from_`, and setting it took
 `setattr`. It is `sender` now, in every language, under the same field
 number, so that the wire and every recording are unchanged. For a release,

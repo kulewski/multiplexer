@@ -76,7 +76,7 @@ def _runnable_mxcontrol() -> str:
     path = mxcontrol_path()
     if shutil.which(path) is None:
         raise FileNotFoundError(
-            "no multiplexer binary at %s (%s): set MXCONTROL to one, or install an mx-multiplexer newer than 2.3.1, "
+            "no multiplexer binary at %s (%s): set MXCONTROL to one, or install mx-multiplexer 2.4.0 or newer, "
             "which carries it" % (path, "from MXCONTROL" if os.environ.get("MXCONTROL") else "with this package")
         )
     return path

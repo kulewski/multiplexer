@@ -1,6 +1,6 @@
 """Version strings attached to every log entry. Placeholders; a release
 process may overwrite this file."""
 
-version = "2.3.1"
-version_hash = "v2.3.1"
-version_short_hash = "2.3"
+version = "2.4.0"
+version_hash = "v2.4.0"
+version_short_hash = "2.4"

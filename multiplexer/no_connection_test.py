@@ -110,7 +110,7 @@ class NothingToReceiveFromTest(EndsTest):
 
     def test_a_backend_never_connected_raises_not_connected_from_loop_iter(self) -> None:
         """A loop of a program's own around loop_iter(), without the
-        connect() this release asks for before it."""
+        connect() 2.4.0 asks for before it."""
         with Cluster(1, rules=RULES) as cluster:
             self.assertEqual(
                 "NotConnected",

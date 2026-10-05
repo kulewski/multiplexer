@@ -38,7 +38,7 @@ a pool of interchangeable workers, and publish/subscribe for events.
   `ThreadedClient`, `AsyncClient` and the two server classes run the loop
   all the time.
 - **Class names**: five classes connect a program to the multiplexers.
-  `SyncClient` (named `Client` up to 2.3.1; both names work),
+  `SyncClient` (named `Client` before 2.4.0; both names work),
   `ThreadedClient` and `AsyncClient` give you calls and hand you what
   arrives; `BaseMultiplexerServer` and `BaseThreadedMultiplexerServer`,
   the server classes, run a `serve_forever()` loop that calls your

@@ -1,4 +1,4 @@
 # What the example runs on: `pip install -r requirements.txt`.
-mx-multiplexer
+mx-multiplexer>=2.4.0
 django
 protobuf

@@ -17,7 +17,7 @@ import time
 from typing import Any, Callable, Generic, Protocol, TypeVar
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.clients import Client as Client  # the name up to 2.3.1, importable here as before
+from multiplexer.clients import Client as Client  # the name before 2.4.0, importable here as before
 from multiplexer.clients import SyncClient
 from multiplexer.mxclient import ConnectionWrapper, Lane
 from multiplexer.servers import BaseMultiplexerServer

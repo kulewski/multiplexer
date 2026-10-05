@@ -2,7 +2,7 @@
 # layer comes from ../channels; daphne is the ASGI server `runserver` uses
 # under Channels; websockets is for audio_cli.py, the participant for the
 # command line. The worker is C++, built with Bazel under worker/.
-mx-multiplexer
+mx-multiplexer>=2.4.0
 channels[daphne]
 msgpack
 protobuf

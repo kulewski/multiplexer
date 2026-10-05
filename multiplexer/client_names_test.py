@@ -1,5 +1,5 @@
 """The synchronous client's two names: SyncClient, the name the docs use
-after 2.3.1, and Client, its name before, are one class under every import
+since 2.4.0, and Client, its name before, are one class under every import
 path a release had. A subclass and an annotation through the old name mean
 the new class, to Python and to pyright, which check.sh runs over this file."""
 
@@ -16,7 +16,7 @@ def adopt(client: Client) -> SyncClient:
 
 
 class Mine(Client):
-    """A subclass through the old name, as code written for 2.3.1 has them."""
+    """A subclass through the old name, as code written before 2.4.0 has them."""
 
 
 class ClientNamesTest(unittest.TestCase):

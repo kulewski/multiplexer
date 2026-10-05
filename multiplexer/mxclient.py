@@ -111,7 +111,7 @@ def make_message(_type, **kwargs):
 
 def renamed_sender(kwargs: dict) -> None:
     """A sender given to new_message() under a name the field had, `from`
-    up to 2.3.1 or the `from_` alias, moved to `sender`, with a
+    before 2.4.0 or the `from_` alias, moved to `sender`, with a
     DeprecationWarning; a `sender` given as well wins. For a release, as
     the read aliases (protocolbuffers.py)."""
     for former in ("from", "from_"):

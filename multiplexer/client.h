@@ -514,7 +514,7 @@ class Client : public ExceptionDefinitions {
   shared_ptr<BasicClient> basic_client_;
 };
 
-// SyncClient is this class's name in the docs after 2.3.1, so that no class
+// SyncClient is this class's name in the docs since 2.4.0, so that no class
 // is named like the client role. Client stays the class itself: what a
 // forward declaration names and what compiler messages show.
 using SyncClient = Client;

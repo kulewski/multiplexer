@@ -6,7 +6,7 @@ back the package's own constants; the multiplexer the command starts is the
 package's binary, under the command's pid and name, and ends with 0 on
 SIGTERM; the command leaves SIGPIPE and SIGXFSZ at their defaults, which
 only run_multiplexer changes, ignoring SIGPIPE itself; a host name
-resolves; Client, the synchronous client's name up to 2.3.1, is the class
+resolves; Client, the synchronous client's name before 2.4.0, is the class
 SyncClient; and a
 rules file of the smoke's own, the system rules with a client's and a
 backend's types after them, runs two multiplexers that answer every query.

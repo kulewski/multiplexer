@@ -1,5 +1,5 @@
-"""The sender field is `sender`, named `from`, a Python keyword, up to
-2.3.1, under the same number, so that the wire and every recording are
+"""The sender field is `sender`, named `from`, a Python keyword, before
+2.4.0, under the same number, so that the wire and every recording are
 unchanged: it is set, read, cleared and given to a constructor like any
 field, where `from_` could only be read on protobuf's default runtime. For
 a release, the names it had still read it, with a DeprecationWarning:

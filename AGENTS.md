@@ -71,7 +71,7 @@ bazel run //compdb                         # compile_commands.json for clangd, a
 - A role is what a peer does, not the class it is built on: a client sends
   requests or events, a backend receives them and answers the requests.
   Role words are plain lower case; class names are in code font and in
-  full: `SyncClient` (named `Client` up to 2.3.1; both names work),
+  full: `SyncClient` (named `Client` before 2.4.0; both names work),
   `ThreadedClient`, `AsyncClient`, and the server classes
   `BaseMultiplexerServer` and `BaseThreadedMultiplexerServer`, which run a
   `serve_forever()` loop that calls `handle_message()`. "Client" in a class
