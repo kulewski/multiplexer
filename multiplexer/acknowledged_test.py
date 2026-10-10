@@ -5,7 +5,9 @@ from SyncClient, passed to ThreadedClient's on_message, delivered on
 AsyncClient's loop, handled by the server classes, on their loop's
 thread), and the server classes' loops wake at the acknowledgement rather
 than at their next poll, an hour away here, for a drain as for a change of
-filters. Counted, not timed: the sender's own marker coming back says the
+filters, and a receive's wait as well when the receive before it, taking
+the last message routed before the change, is what acknowledged it.
+Counted, not timed: the sender's own marker coming back says the
 multiplexer routed everything it sent before; a held handler says what a
 threaded server still has; a bound on a wait only detects a failure.
 """
@@ -89,22 +91,27 @@ class AcknowledgedTest(unittest.TestCase):
         routed(sender)
         return sender
 
-    def test_sync_client_hears_it_in_the_receive_after_everything_received(self) -> None:
-        receiver = SyncClient([self.endpoint], peers.TEST_EVENT_BACKEND)  # connected when made
-        self.addCleanup(receiver.shutdown)
+    def change_read_with_what_came_before(self, receiver: SyncClient, on_acknowledged) -> None:
+        """EVENTS events routed to `receiver`, then a change of its routing,
+        `on_acknowledged` its callback, whose confirmation the receiver reads
+        with the events, before any of them is received. What the receiver
+        sends after the change reaches the sender after the multiplexer took
+        the change, whose confirmation is on its way to the receiver by then;
+        the next send polls the receiver's sockets first, as a server's reply
+        does, and reads it with the events."""
         sender = self.send_routed()
-        received: list[bytes] = []
-        heard: list[int] = []
-        receiver.set_routing(Routing(all=False), on_acknowledged=lambda: heard.append(len(received)))
-        # What the receiver sends after the change reaches the sender after
-        # the multiplexer took the change, whose confirmation is on its way
-        # to the receiver by then; the next send polls the receiver's
-        # sockets first, as a server's reply does, and reads it with the
-        # events, before any of them is received.
+        receiver.set_routing(Routing(all=False), on_acknowledged=on_acknowledged)
         receiver.send_message(b"after", type=EVENT, to=sender.instance_id, flush=True)
         while sender.receive_type(EVENT).message != b"after":
             pass
         receiver.send_message(b"poll", type=EVENT, to=sender.instance_id, flush=True)
+
+    def test_sync_client_hears_it_in_the_receive_after_everything_received(self) -> None:
+        receiver = SyncClient([self.endpoint], peers.TEST_EVENT_BACKEND)  # connected when made
+        self.addCleanup(receiver.shutdown)
+        received: list[bytes] = []
+        heard: list[int] = []
+        self.change_read_with_what_came_before(receiver, lambda: heard.append(len(received)))
         while len(received) < EVENTS:  # every one routed before the change, then nothing
             received.append(receiver.receive_message(timeout=BOUND)[0].message)
             self.assertEqual([], heard, "not while a message routed before was still to be received")
@@ -121,6 +128,24 @@ class AcknowledgedTest(unittest.TestCase):
         self.assertEqual([EVENTS], heard)
         self.assertEqual([b"%d" % index for index in range(EVENTS)], received)
         self.assertTrue(receiver.routing_acknowledged())
+
+    def test_a_wait_ends_at_an_acknowledgement_the_last_receive_made(self) -> None:
+        """The confirmation came while messages routed before the change were
+        still queued, so the receive that took the last of them is what
+        acknowledged it: the next receive that ends at an acknowledgement
+        runs the callback and ends at once, as at a confirmation, rather than
+        wait out its hour. A serve loop's wait is that receive."""
+        receiver = SyncClient([self.endpoint], peers.TEST_EVENT_BACKEND)
+        self.addCleanup(receiver.shutdown)
+        heard: list[int] = []
+        self.change_read_with_what_came_before(receiver, lambda: heard.append(1))
+        for _ in range(EVENTS):
+            receiver.receive_message(timeout=BOUND)
+        self.assertTrue(receiver.routing_acknowledged())
+        self.assertEqual([], heard, "its callback waits for the next receive")
+        with self.assertRaises(OperationTimedOut):
+            receiver.receive_message(timeout=HOUR, end_on_acknowledgement=True)
+        self.assertEqual([1], heard, "run before the wait ended")
 
     def test_threaded_client_hears_it_after_on_message_had_everything(self) -> None:
         got: list[bytes] = []

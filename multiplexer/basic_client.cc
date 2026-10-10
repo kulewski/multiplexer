@@ -265,6 +265,14 @@ void BasicClient::_update_confirmation() {
   }
 }
 
+void BasicClient::_acknowledged_by_receive() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (acknowledged_version_ != routing_version_ && routing_acknowledged()) {
+    acknowledged_version_ = routing_version_;
+    _acknowledged();
+  }
+}
+
 void BasicClient::_acknowledged() {
   acknowledged_wake_ = true;
   if (incoming_sink_) {
@@ -301,6 +309,11 @@ bool BasicClient::wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledg
     if (has_incoming_messages()) {
       return true;
     }
+    // A confirmation that came while messages routed before it were still
+    // queued left the change to the receive that took the last of them:
+    // told of now, its callbacks run above, so that a serve loop's wait
+    // ends at it as at any other.
+    _acknowledged_by_receive();
     if (end_on_acknowledgement && take_acknowledged_wake()) {
       return false;
     }

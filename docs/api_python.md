@@ -216,7 +216,10 @@ the time and their peer types are ordinary ones.
   `end_on_acknowledgement`, a change of the routing or the key filters
   acknowledged ends the wait too, raising `OperationTimedOut` as the time
   running out would: what a loop of receives acts on at once, the server
-  classes' loops among them.
+  classes' loops among them. A change whose last confirmation came while
+  messages routed before it were still to be received is acknowledged by
+  the receive that takes the last of them, and the next wait ends at it,
+  its callbacks run first.
 - `set_routing(routing, on_acknowledged=None)` and
   `routing_acknowledged()`: which of a multiplexer's routing paths reach
   this peer, a `Routing` from `multiplexer.Multiplexer_pb2` with `any`,

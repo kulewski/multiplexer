@@ -609,6 +609,12 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // A change acknowledged: the serve loop's wake, and a sink client's
   // callbacks at once.
   void _acknowledged();
+  // A change that became acknowledged when a receive took the last message
+  // read before every connection confirmed it, rather than at a
+  // confirmation, which _update_confirmation() tells of: told of the same
+  // way, once. What wait_to_receive() calls before it waits, nothing being
+  // queued, so that nothing is added per message.
+  void _acknowledged_by_receive();
   // The routing or the key filters changed: a new version, a new welcome,
   // and PEER_CONTROL on every connection.
   void _routing_changed();
