@@ -1,3 +1,3 @@
 # What the example runs on: `pip install -r requirements.txt`. The library
 # alone: the models are stand-ins, and the test runs on its harness.
-mx-multiplexer
+mx-multiplexer>=2.5.0
