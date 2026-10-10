@@ -10,6 +10,9 @@ one type are not interchangeable for every message:
 A key lets a message say what it is about, and a key filter lets each peer
 say which keys of a message type it takes. Everything else about routing
 stays as [routing](routing.md) and [the rules file](rules.md) describe it.
+[examples/models](../examples/models/README.md) is a complete program on
+keys: workers that each hold some of the models, loading and unloading
+them while they serve.
 
 ## A key and a key filter
 
@@ -125,6 +128,7 @@ That ordering makes a handover safe:
   `on_acknowledged`: the requests routed before have been served by then,
   and no more come. A worker unloading its last model keeps the type with
   an empty list: dropping the type from its filters would take every key.
+  [examples/models](../examples/models/walkthrough.md) does it.
 - **Moving a tenant between pools:** the new owner adds the key and waits
   for its acknowledgement; then the old owner removes it and waits for
   its own. Both may serve the tenant in between.
@@ -203,3 +207,8 @@ without Bazel needs `libre2-dev` ([building](building.md)).
   and [its C++ twin](../multiplexer/backend/acknowledged_test.cc):**
   `on_acknowledged` in every class, after what was routed before, and the
   server classes' loops woken by the acknowledgement.
+- **[examples/models](../examples/models/README.md):** workers that each
+  hold some of the models, a model loaded and one unloaded while its
+  requests keep coming, a worker with an empty filter and one with none;
+  its test makes the race of a request routed under the old filter happen
+  every time.

@@ -277,7 +277,8 @@ Bazel build.
   tenant, a model, a group, and each backend which keys of a type it
   takes: a tenant's requests reach only the backends that take its key,
   an event only the subscribers of its group, and a failover's retry
-  stays with the backends that take the key ([keys](docs/keys.md)).
+  stays with the backends that take the key ([keys](docs/keys.md),
+  [examples/models](examples/models/)).
 - **One instance, one path, when it matters.** A request addressed to one
   backend instance reaches it or fails, never another instance, and is
   found again behind another multiplexer; a lane keeps a stream of
@@ -363,6 +364,10 @@ what the broker's latency makes possible:
 - [inference](examples/inference/): a web app asking a pool of PyTorch
   workers, with a worker killed, a rolling restart and a multiplexer
   killed, in an executed notebook.
+- [models](examples/models/): workers that each hold some of the
+  models, a request's key naming its model and each worker's key filter
+  the models it holds, and a model loaded, and unloaded while its
+  requests keep coming.
 - [stream](examples/stream/): an answer that arrives token by token, as
   a language model's does, one request and one reply with the pieces
   addressed and numbered between them, a multiplexer killed under it

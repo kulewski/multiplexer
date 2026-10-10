@@ -210,6 +210,12 @@ graph LR
 - [Walkthrough: a web app and a pool of model workers](../examples/inference/walkthrough.ipynb):
   a notebook that builds the inference example up step by step, from
   `pip install` to a rolling restart of the workers under load.
+- [Building the model workers, step by step](../examples/models/walkthrough.md):
+  workers that each hold some of the models, a request's key naming its
+  model and each worker's key filter the models it holds, every line
+  explained as it is added; a model nobody holds, one loaded, one
+  unloaded while its requests keep coming and a worker that takes every
+  model, with the steps and the test.
 - [Building the streaming answers, step by step](../examples/stream/walkthrough.md):
   an answer that arrives token by token, the request's follow-ups
   addressed and numbered and its one reply at the end, through a pinned
