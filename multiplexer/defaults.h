@@ -35,6 +35,14 @@ static const float ROOM_GRACE_SECONDS = 0.01f;
 static const float DEFAULT_READ_TIMEOUT = -1;
 // Largest frame body accepted; a bigger one closes the connection.
 static const unsigned int MAX_MESSAGE_SIZE = 128 * 1024 * 1024;
+// Key filters (Multiplexer.proto's KeyFilter), matched on the multiplexer's
+// one thread. The longest key a message may carry, in bytes: a library
+// refuses a longer one where the message is built, and the multiplexer
+// drops one and tells the sender. The longest pattern, in bytes. How many
+// patterns a filter may have is bounded by the frame that carries it alone
+// (KeyPatterns in multiplexer/key_filters.h says what they cost).
+static const unsigned int MAX_KEY_SIZE = 256;
+static const unsigned int MAX_KEY_PATTERN_SIZE = 1024;
 
 // Seconds of silence before a side sends a HEARTBIT.
 static const float HEARTBIT_INTERVAL = 3.0;

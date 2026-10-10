@@ -779,7 +779,9 @@ round robin) or all of them (`whom: ALL`). A message may instead name a peer
 directly by instance id, which wins over the rules. A message nobody can
 receive is answered with `DELIVERY_ERROR` if the client asked for one.
 
-Peer types are how you group backends. The picture has one client, one
+Peer types are how you group backends; within a type, a message's key and
+the peers' key filters send some messages to some of its backends only
+([keys](keys.md)). The picture has one client, one
 multiplexer and two backend types, A and B, with two backends each. Type A
 receives an event type under a `whom: ALL` rule; type B receives a request
 type under a `whom: ANY` rule. The smallest program that uses both rules is

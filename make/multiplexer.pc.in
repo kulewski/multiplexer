@@ -9,5 +9,8 @@ Description: Client and backend library for the multiplexer message broker
 Version: @VERSION@
 URL: https://github.com/kulewski/multiplexer
 Requires: protobuf
+# The multiplexer itself, in the library beside the clients, matches keys
+# with RE2: a program that links it statically needs RE2 too.
+Requires.private: re2
 Cflags: -I${includedir} -DASIO_STANDALONE
 Libs: -L${libdir} -lmultiplexer -pthread

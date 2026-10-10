@@ -494,6 +494,22 @@ mx_integration_test(
 
 [
     mx_integration_test(
+        name = "key_routing_%s" % lang,
+        size = "medium",
+        extra_deps = ["//multiplexer:multiplexer_py_proto"],
+        roles = {
+            "backend": lang,
+            "client": lang,
+            "event_backend": lang,
+            "event_client": lang,
+        },
+        scenario = "key_routing/key_routing.py",
+    )
+    for lang in LANGS
+]
+
+[
+    mx_integration_test(
         name = "drain_survives_mx_restart_%s" % lang,
         size = "medium",
         roles = {

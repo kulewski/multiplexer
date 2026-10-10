@@ -23,6 +23,21 @@ from multiplexer.mxclient import OperationTimedOut as OperationTimedOut  # re-ex
 STOP = threading.Event()
 
 
+def key_filters(values: list[str] | None) -> dict[int, list[str]]:
+    """--key-filter's TYPE:PATTERN values, repeatable: per message type its
+    patterns, split at the first colon, so that a pattern may have more."""
+    filters: dict[int, list[str]] = {}
+    for value in values or []:
+        type_, _, pattern = value.partition(":")
+        filters.setdefault(int(type_), []).append(pattern)
+    return filters
+
+
+def key_fields(mxmsg: Any) -> dict[str, str]:
+    """An event's `key` field for a message that carried one, else none."""
+    return {"key": mxmsg.key} if mxmsg.HasField("key") else {}
+
+
 def drain_routing(flags: str) -> Routing:
     """--drain-routing's comma-separated flag names as a Routing."""
     kept = {flag for flag in flags.split(",") if flag}

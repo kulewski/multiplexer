@@ -15,6 +15,7 @@ def main() -> None:
     p.add_argument("--no-flush", action="store_true")
     p.add_argument("--interval", type=float, default=0.0, help="pause between sends")
     p.add_argument("--linger", type=float, default=0.0, help="stay connected this long after sending")
+    p.add_argument("--key", default=None, help="the key every message carries")
     args = p.parse_args()
 
     client = clients.Client(common.endpoints(args), type=args.type)
@@ -24,6 +25,8 @@ def main() -> None:
         fields = dict(type=type_)
         if args.to:
             fields["to"] = args.to
+        if args.key is not None:
+            fields["key"] = args.key
         mxmsg = client.new_message(message=payload, **fields)
         state = {}
         try:

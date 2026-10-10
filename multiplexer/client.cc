@@ -392,6 +392,9 @@ MultiplexerMessage Client::_locator_for(const MultiplexerMessage& query) {
     search.set_packet_type(query.type());
     mxmsg.set_type(types::BACKEND_FOR_PACKET_SEARCH);
     search.SerializeToString(mxmsg.mutable_message());
+    if (query.has_key()) {
+      mxmsg.set_key(query.key());  // only a backend that takes the key may be found
+    }
   }
   return mxmsg;
 }

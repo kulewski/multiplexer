@@ -121,8 +121,11 @@ multiplexer::backend::MultiplexerAddresses CommonOptions::addresses() const {
   return addresses;
 }
 
-std::unique_ptr<Client> CommonOptions::connect() const {
+std::unique_ptr<Client> CommonOptions::connect(const multiplexer::BasicClient::KeyFilters& key_filters) const {
   std::unique_ptr<Client> client(new Client(type));
+  if (!key_filters.empty()) {
+    client->set_key_filters(key_filters);
+  }
   for (const multiplexer::backend::MultiplexerAddress& address : addresses()) {
     client->connect(address.first, address.second);
   }
@@ -145,6 +148,18 @@ std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string>& i
         mx::from_string<std::uint32_t>(items[index].substr(eq + 1));
   }
   return out;
+}
+
+multiplexer::BasicClient::KeyFilters parse_key_filters(const std::vector<std::string>& items) {
+  multiplexer::BasicClient::KeyFilters filters;
+  for (const std::string& item : items) {
+    const std::string::size_type colon = item.find(':');
+    if (colon == std::string::npos) {
+      throw std::invalid_argument("a key filter is TYPE:PATTERN, not " + item);
+    }
+    filters[mx::from_string<std::uint32_t>(item.substr(0, colon))].push_back(item.substr(colon + 1));
+  }
+  return filters;
 }
 
 std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string>& items) {

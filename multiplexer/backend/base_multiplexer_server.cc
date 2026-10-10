@@ -33,10 +33,10 @@ void BaseMultiplexerServer::loop_iter(float timeout) {
   _handle_received();
 }
 
-bool BaseMultiplexerServer::_receive_one(float timeout) {
+bool BaseMultiplexerServer::_receive_one(float timeout, bool end_on_acknowledgement) {
   std::pair<std::shared_ptr<MultiplexerMessage>, ConnectionWrapper> received;
   try {
-    received = conn->receive_message(timeout);
+    received = conn->receive_message(timeout, end_on_acknowledgement);
   } catch (Client::OperationTimedOut&) {
     return false;
   }
@@ -104,8 +104,10 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
       }
       // Only the wait running out is the poll's timeout: what the handler
       // throws, an OperationTimedOut of its own included, goes by
-      // on_handler_exception().
-      if (_receive_one(poll)) {
+      // on_handler_exception(). An acknowledgement ends the wait too, so
+      // that a drain is over, and periodic_task() hears of a change, as
+      // soon as every multiplexer has it.
+      if (_receive_one(poll, /*end_on_acknowledgement=*/true)) {
         _handle_received();
       }
       periodic_task();

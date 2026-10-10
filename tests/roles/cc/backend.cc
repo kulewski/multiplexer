@@ -90,6 +90,9 @@ struct Behaviour {
     request.set_id(mxmsg.id());
     request.set_sender(mxmsg.sender());
     request.set_size(mxmsg.message().size());
+    if (mxmsg.has_key()) {
+      request.set_key(mxmsg.key());
+    }
     emit(request);
 
     std::map<std::uint32_t, std::uint32_t>::const_iterator served = serves.find(mxmsg.type());
@@ -220,6 +223,9 @@ class BackendRole : public mxcontrol::Task {
       multiplexer::backend::ThreadedServerOptions options;
       options.drain_routing = parse_drain_routing(leave_.drain_routing);
       ThreadedBackendServer server(common_.addresses(), common_.type, behaviour, leave_, options);
+      if (!key_filters_.empty()) {
+        server.set_key_filters(parse_key_filters(key_filters_));
+      }
       server.connect();
       Event connected = event("connected");
       connected.set_instance_id(server.instance_id());
@@ -228,7 +234,7 @@ class BackendRole : public mxcontrol::Task {
       emit(connected);
       return serve(server);
     }
-    std::unique_ptr<Client> client = common_.connect();
+    std::unique_ptr<Client> client = common_.connect(parse_key_filters(key_filters_));
     BackendServer server(client.get(), common_.type, behaviour, leave_);
     emit(common_.connected_event(*client));
     return serve(server);
@@ -269,6 +275,7 @@ class BackendRole : public mxcontrol::Task {
                 "Routing flags kept on while draining: any,all,last_resort");
     options.add_switch("exit-on-exception", &leave_.exit_on_exception, "a handler exception ends the process (4)");
     options.add_switch("threaded", &threaded_, "serve on BaseThreadedMultiplexerServer instead");
+    options.add("key-filter", &key_filters_, "TYPE:PATTERN, repeatable: the key filters, set before connecting");
   }
 
  private:
@@ -279,6 +286,7 @@ class BackendRole : public mxcontrol::Task {
   int memory_every_;
   LeaveOptions leave_;
   bool threaded_ = false;
+  std::vector<std::string> key_filters_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(backend, BackendRole);

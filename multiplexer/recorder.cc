@@ -55,6 +55,9 @@ void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t fr
   if (!msg.workflow().empty()) {
     routed->set_workflow(msg.workflow());
   }
+  if (msg.has_key()) {
+    routed->set_key(msg.key());
+  }
   routed->set_from_peer_type(from_peer_type);
   if (recipient) {
     routed->set_recipient(recipient);

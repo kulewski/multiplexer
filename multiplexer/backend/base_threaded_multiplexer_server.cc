@@ -122,6 +122,7 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
         }
         woken_ = false;
       }
+      _run_acknowledged();
       if (!working.load() || (draining() && drained()) || _failure()) {
         break;
       }
@@ -181,10 +182,58 @@ void BaseThreadedMultiplexerServer::start_draining() {
   std::chrono::steady_clock::rep unset = 0;
   draining_since_ticks_.compare_exchange_strong(unset, std::chrono::steady_clock::now().time_since_epoch().count());
   if (!draining_.exchange(true)) {
-    client_.set_routing(options_.drain_routing);  // close()'s too; nothing on a client already shut down
-    mx::MutexLock lock(wake_mutex_);
-    woken_ = true;
-    wake_.notify_all();
+    // close()'s too; nothing on a client already shut down. The loop looks
+    // again when every multiplexer has it, rather than at its next poll.
+    client_.set_routing(options_.drain_routing, [this] { _wake(); });
+    _wake();
+  }
+}
+
+void BaseThreadedMultiplexerServer::set_key_filters(const BasicClient::KeyFilters& filters,
+                                                    BasicClient::AcknowledgedCallback acknowledged) {
+  client_.set_key_filters(filters, [this, acknowledged] { _acknowledged(acknowledged); });
+}
+
+void BaseThreadedMultiplexerServer::_wake() {
+  mx::MutexLock lock(wake_mutex_);
+  woken_ = true;
+  wake_.notify_all();
+}
+
+// Every request the queue took before now is queued or held by a worker,
+// or done: the ones not done are counted, and each worker that finishes
+// one of them counts down (_work).
+void BaseThreadedMultiplexerServer::_acknowledged(BasicClient::AcknowledgedCallback callback) {
+  {
+    mx::MutexLock lock(mutex_);
+    acknowledged_.push_back(Acknowledged{accepted_, queue_.size() + busy_, std::move(callback)});
+  }
+  _wake();
+}
+
+void BaseThreadedMultiplexerServer::_run_acknowledged() {
+  std::vector<BasicClient::AcknowledgedCallback> due;
+  {
+    mx::MutexLock lock(mutex_);
+    // A later change counts the requests of an earlier one too, so the
+    // ones done come first, in order.
+    std::size_t done = 0;
+    while (done < acknowledged_.size() && acknowledged_[done].remaining == 0) {
+      if (acknowledged_[done].callback) {
+        due.push_back(std::move(acknowledged_[done].callback));
+      }
+      ++done;
+    }
+    acknowledged_.erase(acknowledged_.begin(), acknowledged_.begin() + done);
+  }
+  for (BasicClient::AcknowledgedCallback& callback : due) {
+    try {
+      callback();
+    } catch (const std::exception& error) {
+      MX_LOG(ERROR, LOWVERBOSITY,
+             CTX("BaseThreadedMultiplexerServer")
+                 TEXT(std::string("a callback of an acknowledged change threw: ") + error.what()));
+    }
   }
 }
 
@@ -215,9 +264,7 @@ void BaseThreadedMultiplexerServer::stop() {
   if (client_.orphaned()) {
     return;  // a forked child's: nothing serves here, and the lock may be the parent's serving thread's
   }
-  mx::MutexLock lock(wake_mutex_);
-  woken_ = true;
-  wake_.notify_all();
+  _wake();
 }
 
 std::size_t BaseThreadedMultiplexerServer::pending() const {
@@ -249,6 +296,7 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
     // that wait for one: queue_ also holds what an idle worker is about to
     // take, and busy_ counts only the requests taken.
     if (accepting_ && queue_.size() + busy_ < options_.workers + options_.queue_size) {
+      request->accepted_ = accepted_++;
       queue_.push_back(request);
       cond_.notify_one();
       return;
@@ -361,8 +409,21 @@ void BaseThreadedMultiplexerServer::_work() {
       _fail(std::current_exception());
       failed = true;
     }
-    mx::MutexLock lock(mutex_);
-    --busy_;
+    bool wake = false;
+    {
+      mx::MutexLock lock(mutex_);
+      --busy_;
+      for (Acknowledged& acknowledged : acknowledged_) {
+        if (acknowledged.remaining && request->accepted_ < acknowledged.before && !--acknowledged.remaining) {
+          wake = true;  // its callback is due
+        }
+      }
+      // A drain waits for the last request too: serve_forever() looks now.
+      wake = wake || (draining() && queue_.empty() && !busy_);
+    }
+    if (wake) {
+      _wake();
+    }
     if (failed) {
       return;
     }

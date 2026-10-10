@@ -19,7 +19,9 @@ rules_python from 0.1.0 on works, and mx_setup(python = False) skips the
 call when another ruleset already made it, while a workspace without the
 Python package calls neither; standalone Asio for the io layer;
 pybind11 and pybind11_bazel for the Python extension; bazel_skylib
-for the build flags in the root BUILD. protoc and libprotobuf are not
+for the build flags in the root BUILD; RE2 for the multiplexer's key
+filters, which only the multiplexer itself (//mxcontrol) links, so a
+workspace that builds peers alone never fetches it. protoc and libprotobuf are not
 declared here: they come from the system by default, or from the targets
 //:protoc and //:protobuf_runtime are pointed at.
 """
@@ -30,6 +32,7 @@ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 PYBIND11_BAZEL_TAG = "c65db0ac44ff3cd790a803e4a804e2cc806cf641"
 PYBIND11_TAG = "b389ae77cb8a872d62e96d5f38ce020480140033"
 ASIO_TAG = "asio-1-30-2"
+RE2_TAG = "2023-03-01"
 
 def mx_dependencies(python = True):
     """Declares every repository the multiplexer needs, with maybe(), so a
@@ -66,6 +69,18 @@ def mx_dependencies(python = True):
         sha256 = "755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8",
         strip_prefix = "asio-{tag}".format(tag = ASIO_TAG),
         urls = ["https://github.com/chriskohlhoff/asio/archive/refs/tags/{tag}.tar.gz".format(tag = ASIO_TAG)],
+    )
+
+    # RE2 matches messages' keys against peers' key filters
+    # (multiplexer/key_filters.cc): the last release without Abseil, a plain
+    # cc_library that needs nothing else declared.
+    maybe(
+        http_archive,
+        name = "com_googlesource_code_re2",
+        canonical_id = RE2_TAG,
+        sha256 = "7a9a4824958586980926a300b4717202485c4b4115ac031822e29aa4ef207e48",
+        strip_prefix = "re2-{tag}".format(tag = RE2_TAG),
+        urls = ["https://github.com/google/re2/archive/refs/tags/{tag}.tar.gz".format(tag = RE2_TAG)],
     )
     if python:
         maybe(

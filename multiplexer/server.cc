@@ -149,6 +149,37 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
   self->_stop_if_done();
 }
 
+// The filters are taken before the connection is indexed and set on it
+// before anything can be routed, so that nothing reaches the peer against
+// them; given back when the base class refuses the connection after all.
+void Server::register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
+  if (stopping_) {
+    conn->shutdown();
+    return;
+  }
+  const KeyPatterns::Owner owner = key_patterns_.add_owner();
+  std::string error;
+  if (!key_patterns_.set_filters(owner, welcome.key_filter(), &error)) {
+    key_patterns_.remove_owner(owner);
+    MX_LOG(WARNING, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("key filters of peer " + repr(welcome.id()) + " of type " +
+                                          repr(welcome.type()) + " refused: " + error));
+    conn->shutdown();
+    return;
+  }
+  Base::register_connection(conn, welcome);
+  if (conn->shuts_down()) {
+    key_patterns_.remove_owner(owner);
+    return;
+  }
+  conn->set_key_filters(welcome.key_filter(), owner);
+  if (welcome.key_filter_size()) {
+    MX_LOG(INFO, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
+                                          ") takes keys: " + key_filters_text(conn->key_filters())));
+  }
+}
+
 void Server::connection_closed(Connection* conn) {
   accepted_.erase(conn);
   if (departed_.erase(conn)) {
@@ -357,6 +388,23 @@ void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage&
   }
 
   MessageMetaHandler meta_handler(msg, conn, raw);
+  // A key counts where the rules route: a message with `to` ignores the
+  // filters, and a search matches its key for the type it searches.
+  if (msg.has_key() && !msg.to()) {
+    if (msg.key().size() > MAX_KEY_SIZE) {
+      if (const std::string* line = drops_.first({KEY_TOO_LONG, WARNING, msg.type(), 0}, [&] {
+            return "message of type " + _type_name(msg.type()) + " with a key over " + repr(MAX_KEY_SIZE) +
+                   " bytes (MAX_KEY_SIZE); dropping";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(msg.workflow()) TEXT(*line));
+      }
+      meta_handler.unroutable();
+      _record(meta_handler, 0, 0, RoutedMessage::KEY_NOT_TAKEN, true);
+      _handle_delivery_errors(meta_handler);
+      return;
+    }
+    _match_key(meta_handler, msg.type());
+  }
   do {
     if (_handle_message_inlined_rules(meta_handler)) {
       break;  // already handled
@@ -570,12 +618,18 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       }
 
       // The searched-for type's first rule, to every peer it names that
-      // takes rule-routed requests (see MessageMetaHandler::search).
+      // takes rule-routed requests (see MessageMetaHandler::search); the
+      // search of a keyed request carries the request's key, matched for
+      // the searched-for type.
       MultiplexerMessageDescription::RoutingRule rule = description->to().Get(0);
       rule.set_whom(MultiplexerMessageDescription::RoutingRule::ALL);
       rule.set_report_delivery_error(true);
       rule.set_include_original_packet_in_report(false);
       meta_handler.search = true;
+      meta_handler.keyed = false;
+      if (meta_handler.msg.has_key()) {
+        _match_key(meta_handler, search.packet_type());
+      }
 
       if (rule.peer_type() == peers::ALL_TYPES) {
         for (ConnectionsByType::value_type& by_type : connections_by_type_) {
@@ -642,26 +696,37 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
 
   if (!scheduled) {
     const unsigned int level = rule.delivery_error_is_error() ? ERROR : WARNING;
-    const Unrouted why = _unrouted(rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY);
+    const Unrouted why = _unrouted(meta_handler, rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY);
     if (rule.peer_type() == peers::ALL_TYPES && why == NONE_PRESENT) {
       return 0;  // nobody connected to tell: no failure for ALL_TYPES (see below)
     }
-    if (const std::string* line =
-            drops_.first({why, level, rule.peer_type(), 0}, [&] { return _unrouted_text(why, rule.peer_type()); })) {
-      MX_LOG(level, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+    // A key nobody takes is a kind of line per message type, in the place
+    // of the instance id, and the first line of the kind names the key.
+    const bool key = why == KEY_NOT_TAKEN;
+    if (const std::string* line = drops_.first({why, level, rule.peer_type(), key ? meta_handler.key_type : 0},
+                                               [&] { return _unrouted_text(why, rule.peer_type(), meta_handler); })) {
+      MX_LOG(level, LogSummary::VERBOSITY,
+             CTX("multiplexer.server") FLOW(meta_handler.msg.workflow())
+                 TEXT(*line + (key ? ", the first key \"" + meta_handler.msg.key() + "\"" : "")));
     }
   }
   return scheduled;
 }
 
-Server::Unrouted Server::_unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const {
+Server::Unrouted Server::_unrouted(const MessageMetaHandler& meta_handler,
+                                   const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const {
   bool present = false;
+  bool key_taken = false;
   bool takes = false;
   const auto look_at = [&](const ConnectionsList& connections) {
     for (const auto& weak : connections) {
       if (Connection::pointer connection = weak.lock()) {
         if (connection->living()) {
           present = true;
+          if (meta_handler.keyed && !_takes_key(*connection, meta_handler)) {
+            continue;
+          }
+          key_taken = true;
           takes =
               takes || (by_any ? connection->accepts_any() : connection->accepts_all()) || connection->last_resort();
         }
@@ -683,20 +748,37 @@ Server::Unrouted Server::_unrouted(const MultiplexerMessageDescription::RoutingR
   if (!present) {
     return NONE_PRESENT;
   }
+  if (!key_taken) {
+    return KEY_NOT_TAKEN;
+  }
   return takes ? ALL_FULL : ROUTING_OFF;
 }
 
-std::string Server::_unrouted_text(Unrouted why, std::uint32_t peer_type) const {
+std::string Server::_unrouted_text(Unrouted why, std::uint32_t peer_type,
+                                   const MessageMetaHandler& meta_handler) const {
   const std::string type = repr(peer_type) + " (" + config_.peer_name_by_type(peer_type) + ")";
   switch (why) {
     case NONE_PRESENT:
       return "routing while none present of type " + type;
     case ROUTING_OFF:
       return "routing off on every peer of type " + type;
+    case KEY_NOT_TAKEN:
+      return "no key filter of a peer of type " + type + " takes the key of a message of type " +
+             _type_name(meta_handler.key_type);
     case ALL_FULL:
       break;
   }
   return "queue full on every peer of type " + type + " that takes it";
+}
+
+std::string Server::_type_name(std::uint32_t type) const {
+  const MultiplexerMessageDescription* description = config_.message_description(type);
+  return repr(type) + (description ? " (" + description->name() + ")" : "");
+}
+
+void Server::_match_key(MessageMetaHandler& meta_handler, std::uint32_t type) {
+  meta_handler.keyed = key_patterns_.match(type, meta_handler.msg.key(), &meta_handler.key_evaluation);
+  meta_handler.key_type = type;
 }
 
 void Server::_dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection) {
@@ -737,7 +819,8 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
     // message nowhere, as its log line does (_unrouted), and whether the
     // sender was told; whom: ALL recorded each peer it passed over besides.
     const bool by_any = meta_handler.search || rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY;
-    _record(meta_handler, 0, peer_type, _unrouted_disposition(_unrouted(rule, by_any)), rule.report_delivery_error());
+    _record(meta_handler, 0, peer_type, _unrouted_disposition(_unrouted(meta_handler, rule, by_any)),
+            rule.report_delivery_error());
   }
   return scheduled;
 }
@@ -748,6 +831,8 @@ RoutedMessage::Disposition Server::_unrouted_disposition(Unrouted why) {
       return RoutedMessage::NO_RECIPIENT;
     case ROUTING_OFF:
       return RoutedMessage::NOT_ACCEPTED;
+    case KEY_NOT_TAKEN:
+      return RoutedMessage::KEY_NOT_TAKEN;
     case ALL_FULL:
       break;
   }
@@ -758,13 +843,16 @@ RoutedMessage::Disposition Server::_unrouted_disposition(Unrouted why) {
 // the frame (Routing.all, or Routing.any for a search); one whose queue is
 // full drops it, said by _dropped_queue_full, and is not counted. The
 // peers that take nothing by the path are skipped, and recorded as such,
-// unless no peer takes it: then the last resorts among them get it.
+// unless no peer takes it: then the last resorts among them get it. A
+// keyed message, the search for a keyed request too, skips the peers whose
+// filter does not take its key, as if they were not there.
 unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
   const bool by_any = meta_handler.search;
   bool somebody_takes = false;
   for (ConnectionsList::iterator current = connections.begin(); current != connections.end(); ++current) {
     if (Connection::pointer connection = current->lock()) {
-      if (connection->living() && (by_any ? connection->accepts_any() : connection->accepts_all())) {
+      if (connection->living() && (!meta_handler.keyed || _takes_key(*connection, meta_handler)) &&
+          (by_any ? connection->accepts_any() : connection->accepts_all())) {
         somebody_takes = true;
         break;
       }
@@ -775,6 +863,10 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
        next != connections.end() && (current = next++, true);) {
     if (Connection::pointer connection = current->lock()) {
       if (!connection->living()) {
+        continue;
+      }
+      if (meta_handler.keyed && !_takes_key(*connection, meta_handler)) {
+        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::KEY_NOT_TAKEN, false);
         continue;
       }
       const bool takes = by_any ? connection->accepts_any() : connection->accepts_all();
@@ -799,7 +891,10 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
 // whom: ANY. The first live connection with room that takes the path
 // (Routing.any), starting from the front of the type's list, then moved
 // to the back: round robin that skips busy peers and the ones taking no
-// new requests. When there is none, the same over the last resorts.
+// new requests. When there is none, the same over the last resorts. A
+// keyed message skips the peers whose filter does not take its key; the
+// one list serves every key, and the peers that take one, each taken from
+// the front and moved to the back, go round robin among themselves.
 unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
   for (int pass = 0; pass < 2; ++pass) {
     const bool last_resort = pass == 1;
@@ -807,6 +902,9 @@ unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsLi
     for (ConnectionsList::iterator current = connections.begin();
          (current = choose_free_connections(connections, current, last_resort)) != connections.end(); ++current) {
       if (!(connection = current->lock())) {
+        continue;
+      }
+      if (meta_handler.keyed && !_takes_key(*connection, meta_handler)) {
         continue;
       }
       if (!connection->schedule(meta_handler.raw)) {
@@ -1111,17 +1209,35 @@ void Server::_handle_peer_control(MessageMetaHandler& meta_handler) {
   PeerStatus status;
   if (!control.ParseFromString(meta_handler.msg.message())) {
     status.set_error("garbled PeerControl");
-  } else if (conn->living() && !same_routing(conn->routing(), control.routing())) {
+  } else if (conn->living()) {
     // One read on after its connection failed, its peer gone from routing,
-    // changes nothing and records nothing.
-    conn->set_routing(control.routing());
-    MX_LOG(INFO, LOWVERBOSITY,
-           CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
-                                          ") takes " + routing_text(conn->routing())));
-    _emit_peer_routing(*conn);
+    // changes nothing and records nothing. New key filters replace the old
+    // ones whole or not at all; refused, the routing stays as it was too.
+    if (!same_key_filters(conn->key_filters(), control.key_filter())) {
+      std::string error;
+      if (key_patterns_.set_filters(conn->key_owner(), control.key_filter(), &error)) {
+        conn->set_key_filters(control.key_filter(), conn->key_owner());
+        MX_LOG(INFO, LOWVERBOSITY,
+               CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
+                                              ") takes keys: " + key_filters_text(conn->key_filters())));
+      } else {
+        MX_LOG(WARNING, LOWVERBOSITY,
+               CTX("multiplexer.server") TEXT("key filters of peer " + repr(conn->peer_id()) + " (" +
+                                              _peer_name(conn->peer_type()) + ") refused: " + error));
+        status.set_error(error);
+      }
+    }
+    if (!status.has_error() && !same_routing(conn->routing(), control.routing())) {
+      conn->set_routing(control.routing());
+      MX_LOG(INFO, LOWVERBOSITY,
+             CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
+                                            ") takes " + routing_text(conn->routing())));
+      _emit_peer_routing(*conn);
+    }
   }
   status.set_multiplexer_id(instance_id_);
   *status.mutable_routing() = conn->routing();
+  *status.mutable_key_filter() = conn->key_filters();
   _reply(meta_handler, PEER_STATUS, status);
 }
 

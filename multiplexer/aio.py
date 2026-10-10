@@ -48,7 +48,7 @@ import itertools
 import os
 import pickle
 import threading
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.mxclient import (
@@ -111,6 +111,7 @@ class AsyncClient:
         queue_size: int = 1024,
         *,
         on_drop: Callable[[int, DropReason], None] | None = None,
+        key_filters: Mapping[int, Iterable[str]] | None = None,
     ):
         """Connect to every (host, port) in `addresses` and bind to `loop`,
         the running one by default. Connecting blocks the loop, like
@@ -123,7 +124,8 @@ class AsyncClient:
         asyncio.Queue's 0 for no bound is not offered. `on_drop(message_id,
         reason)` runs on the loop for every message the client gives up on,
         each copy of one sent to ALL, with a DropReason; `dropped` counts
-        them."""
+        them. `key_filters` is set_key_filters() made before the first
+        connection, as ThreadedClient's."""
         if queue_size < 1:
             raise ValueError("queue_size is how many messages messages() holds, 1 at least: %r" % (queue_size,))
         self._loop = loop or asyncio.get_running_loop()
@@ -157,6 +159,7 @@ class AsyncClient:
             timeout,
             on_message=self._on_message,
             on_drop=self._on_drop_reported if on_drop is not None else None,
+            key_filters=key_filters,
         )
         self.type = type
 
@@ -169,6 +172,7 @@ class AsyncClient:
         queue_size: int = 1024,
         *,
         on_drop: Callable[[int, DropReason], None] | None = None,
+        key_filters: Mapping[int, Iterable[str]] | None = None,
     ) -> "AsyncClient":
         """The constructor run in the default executor, so the loop does
         not wait for the connections; bound to the running loop. A caller
@@ -176,7 +180,10 @@ class AsyncClient:
         waiting, and the client made anyway is closed once it is there,
         rather than left connected with nobody to close it."""
         loop = asyncio.get_running_loop()
-        making = loop.run_in_executor(None, lambda: cls(addresses, type, timeout, loop, queue_size, on_drop=on_drop))
+        making = loop.run_in_executor(
+            None,
+            lambda: cls(addresses, type, timeout, loop, queue_size, on_drop=on_drop, key_filters=key_filters),
+        )
         try:
             return await asyncio.shield(making)
         except asyncio.CancelledError:
@@ -227,14 +234,40 @@ class AsyncClient:
         NotConnected after close()."""
         return self._threaded.disconnect(endpoint)
 
-    def set_routing(self, routing: Routing) -> None:
+    def set_routing(self, routing: Routing, on_acknowledged: Callable[[], None] | None = None) -> None:
         """Which of a multiplexer's routing paths reach this peer; see
-        ThreadedClient.set_routing. Does not block."""
-        self._threaded.set_routing(routing)
+        ThreadedClient.set_routing. Does not block. `on_acknowledged()`
+        runs on the loop, after what arrived before the acknowledgement was
+        delivered there."""
+        self._threaded.set_routing(routing, self._on_loop(on_acknowledged))
+
+    def set_key_filters(
+        self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
+    ) -> None:
+        """Which keys of each message type reach this peer by the rules;
+        see ThreadedClient.set_key_filters. Does not block.
+        `on_acknowledged` as for set_routing()."""
+        self._threaded.set_key_filters(filters, self._on_loop(on_acknowledged))
+
+    def _on_loop(self, callback: Callable[[], None] | None) -> Callable[[], None] | None:
+        """`callback` as the io thread calls it, run on the loop instead,
+        nothing once the loop is closed."""
+        if callback is None:
+            return None
+
+        def call() -> None:
+            """The io thread's call."""
+            try:
+                self._loop.call_soon_threadsafe(callback)
+            except RuntimeError:
+                pass  # the loop is closed: nobody left to tell
+
+        return call
 
     def routing_acknowledged(self) -> bool:
-        """Whether every connected multiplexer has that routing in effect;
-        see ThreadedClient.routing_acknowledged. Blocks briefly."""
+        """Whether every connected multiplexer has that routing, and those
+        key filters, in effect; see ThreadedClient.routing_acknowledged.
+        Blocks briefly."""
         return self._threaded.routing_acknowledged()
 
     @property
@@ -313,10 +346,11 @@ class AsyncClient:
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
+        key: str | None = None,
     ) -> Any:
         """Send a request and await its reply: `message` itself when it is
         a whole MultiplexerMessage, typed and addressed by its own fields,
-        else one built from the payload, `type` and `to`, as
+        else one built from the payload, `type`, `to` and `key`, as
         ThreadedClient.query() takes them. Raises the same exceptions
         as SyncClient: NotConnected, OperationTimedOut,
         OperationFailed, BackendError. Cancelling the await does not cancel
@@ -338,6 +372,7 @@ class AsyncClient:
             multiplexer=multiplexer,
             with_connection=with_connection,
             on_received=None if on_received is None else self._before(future, on_received),
+            key=key,
         )
         return await future
 

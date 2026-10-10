@@ -34,6 +34,9 @@ class EventClientRole : public mxcontrol::Task {
       if (to_) {
         message.set_to(to_);
       }
+      if (!key_.empty()) {
+        message.set_key(key_);
+      }
       Event sent = event("sent");
       sent.set_type(sends[index].first);
       sent.set_id(message.id());
@@ -88,6 +91,7 @@ class EventClientRole : public mxcontrol::Task {
     options.add_switch("no-flush", &no_flush_, "");
     options.add("interval", &interval_, 0.0, "pause between sends");
     options.add("linger", &linger_, 0.0, "stay connected this long after sending");
+    options.add("key", &key_, "", "the key every message carries");
   }
 
  private:
@@ -98,6 +102,7 @@ class EventClientRole : public mxcontrol::Task {
   bool no_flush_;
   double interval_;
   double linger_;
+  std::string key_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_client, EventClientRole);

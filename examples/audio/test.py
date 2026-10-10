@@ -180,11 +180,11 @@ class WorkerTest(unittest.TestCase):
         self.cluster.wait_for_peer(peers.DSP, count=2)
 
     def test_a_drained_worker_serves_its_stream_then_leaves_on_the_confirmation(self):
-        """SIGTERM under a stream addressed to the worker: the frames are
-        answered while it drains, it leaves once both multiplexers have
-        confirmed, well within the three seconds it allows itself, and then
-        the stream's next frame is refused at once. A frame caught on its
-        way at the close may be lost to its timeout first, as in the gateway."""
+        """SIGTERM under a stream addressed to the worker: it leaves once
+        both multiplexers have confirmed, at once rather than at its next
+        poll, well within the three seconds it allows itself, and then the
+        stream's next frame is refused at once. A frame caught on its way
+        at the close may be lost to its timeout first, as in the gateway."""
         extra = Worker(self.cluster, "gamma")
         self.workers.append(extra)
         self.cluster.wait_for_peer(peers.DSP, count=3)
@@ -210,13 +210,11 @@ class WorkerTest(unittest.TestCase):
         wait_until(lambda: answered[0] >= 10, 5, "the stream on gamma")
         started = time.monotonic()
         self.assertEqual("leaving\n", extra.drain(), "the drain begun")
-        during = answered[0]  # every frame answered from here on was answered while the worker drained
         status, output = extra.reap()
         took = time.monotonic() - started
         streaming.join(10)
         self.assertEqual((0, "left\n"), (status, output), "a drain, not a crash")
         self.assertLess(took, 1.5, "ended by the confirmation, not by the three seconds")
-        self.assertGreater(answered[0], during, "addressed frames served while draining")
         self.assertIn(failures, ([OperationFailed], [OperationTimedOut, OperationFailed]), "refused at once once gone")
         wait_until(
             lambda: all(

@@ -71,6 +71,7 @@ class BasicClient(mxclient.Client):
         with_connection: Literal[False] = ...,
         *,
         on_received: Callable[[int], None] | None = ...,
+        key: str | None = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -84,6 +85,7 @@ class BasicClient(mxclient.Client):
         *,
         with_connection: Literal[True],
         on_received: Callable[[int], None] | None = ...,
+        key: str | None = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     @log_call
@@ -97,15 +99,18 @@ class BasicClient(mxclient.Client):
         with_connection: bool = False,
         *,
         on_received: Callable[[int], None] | None = None,
+        key: str | None = None,
     ) -> MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]:
         """Like mxclient.Client.query, but a BACKEND_ERROR reply raises BackendError."""
         if with_connection:
             reply, connection = super(BasicClient, self).query(
-                message, type, timeout, to, multiplexer, with_connection=True, on_received=on_received
+                message, type, timeout, to, multiplexer, with_connection=True, on_received=on_received, key=key
             )
             self.__check_backend_error(reply)
             return reply, connection
-        reply = super(BasicClient, self).query(message, type, timeout, to, multiplexer, on_received=on_received)
+        reply = super(BasicClient, self).query(
+            message, type, timeout, to, multiplexer, on_received=on_received, key=key
+        )
         self.__check_backend_error(reply)
         return reply
 

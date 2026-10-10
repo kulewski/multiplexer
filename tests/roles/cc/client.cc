@@ -61,6 +61,7 @@ class ClientRole : public mxcontrol::Task {
     options.add("async", &async_, 0, "with --threaded: keep up to N queries in flight at once, through callbacks");
     options.add("workers", &workers_, 0, "N threads sharing one ThreadedClient, each with its own reply queue");
     options.add("memory-every", &memory_every_, 0, "emit a memory event every N answered queries");
+    options.add("key", &key_, "", "the key every request carries");
   }
 
  private:
@@ -102,6 +103,16 @@ class ClientRole : public mxcontrol::Task {
       }
     }
     return out;
+  }
+
+  // `query`'s request as a whole message carrying --key: the payload forms
+  // of query() take no key, the whole-message forms send what they are given.
+  MultiplexerMessage keyed_request(const Query& query) const {
+    MultiplexerMessage request;
+    request.set_type(query.type);
+    request.set_message(query.payload);
+    request.set_key(key_);
+    return request;
   }
 
   // The fields every response or error event carries.
@@ -214,7 +225,8 @@ class ClientRole : public mxcontrol::Task {
       multiplexer::IncomingMessage reply;
       bool ok = false;
       try {
-        reply = client->query(query.payload, query.type, timeout_);
+        reply = key_.empty() ? client->query(query.payload, query.type, timeout_)
+                             : client->query(keyed_request(query), timeout_);
         ok = true;
       } catch (...) {
         ++errors;
@@ -255,7 +267,8 @@ class ClientRole : public mxcontrol::Task {
       if (async_ <= 1) {
         // The query first, then the clock: argument evaluation order is
         // unspecified, and measuring before the call once reported 0 ms.
-        ThreadedClient::Result result = client->query(query.payload, query.type, timeout_);
+        ThreadedClient::Result result = key_.empty() ? client->query(query.payload, query.type, timeout_)
+                                                     : client->query(keyed_request(query), timeout_);
         double ms = ms_since(started);
         if (report_outcome(worker_index, query, result, ms)) {
           ++responses;
@@ -270,18 +283,20 @@ class ClientRole : public mxcontrol::Task {
         done_cv.wait(lock, [&] { return in_flight < async_; });
         ++in_flight;
       }
-      client->query(
-          query.payload, query.type,
-          [&, query, started, worker_index](const ThreadedClient::Result& result) {
-            // On the io thread: report, then let the worker issue the next one.
-            bool replied = report_outcome(worker_index, query, result, ms_since(started));
-            count_answered(client.get());
-            std::lock_guard<std::mutex> lock(mutex);
-            (replied ? responses : errors) += 1;
-            --in_flight;
-            done_cv.notify_all();
-          },
-          timeout_);
+      ThreadedClient::Callback on_result = [&, query, started, worker_index](const ThreadedClient::Result& result) {
+        // On the io thread: report, then let the worker issue the next one.
+        bool replied = report_outcome(worker_index, query, result, ms_since(started));
+        count_answered(client.get());
+        std::lock_guard<std::mutex> lock(mutex);
+        (replied ? responses : errors) += 1;
+        --in_flight;
+        done_cv.notify_all();
+      };
+      if (key_.empty()) {
+        client->query(query.payload, query.type, on_result, timeout_);
+      } else {
+        client->query(keyed_request(query), on_result, timeout_);
+      }
     }
     {
       std::unique_lock<std::mutex> lock(mutex);
@@ -327,14 +342,16 @@ class ClientRole : public mxcontrol::Task {
         for (size_t index = 0; index < queries.size(); ++index) {
           const Query& query = queries[index];
           std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-          client->query(
-              query.payload, query.type,
-              [&, query, started](const ThreadedClient::Result& result) {
-                std::lock_guard<std::mutex> lock(mutex);
-                inbox.push(Item{query, started, result});
-                cv.notify_one();
-              },
-              timeout_);
+          ThreadedClient::Callback on_result = [&, query, started](const ThreadedClient::Result& result) {
+            std::lock_guard<std::mutex> lock(mutex);
+            inbox.push(Item{query, started, result});
+            cv.notify_one();
+          };
+          if (key_.empty()) {
+            client->query(query.payload, query.type, on_result, timeout_);
+          } else {
+            client->query(keyed_request(query), on_result, timeout_);
+          }
           ++pending;
           if (sleep_between_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(int(sleep_between_ * 1000)));  // own work
@@ -375,6 +392,7 @@ class ClientRole : public mxcontrol::Task {
   int async_ = 0;
   int workers_ = 0;
   int memory_every_ = 0;
+  std::string key_;
   std::atomic<long> answered_{0};
 };
 

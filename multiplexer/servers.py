@@ -16,7 +16,7 @@ import pickle
 import sys
 import time
 import traceback
-from typing import TypeVar
+from typing import Callable, Iterable, Mapping, TypeVar
 
 from multiplexer.clients import BasicClient
 from multiplexer.clients import BackendError as BackendError  # re-exported
@@ -91,6 +91,19 @@ class MultiplexerPeer(object):
         deadline = mxclient.TimeoutTicker(mxclient.DEFAULT_TIMEOUT)
         for connection in self._start_connecting():
             self.conn.wait_for_connection(connection, deadline())
+
+    def set_key_filters(
+        self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
+    ) -> None:
+        """Which keys of each message type reach this peer by the rules; see
+        mxclient.Client.set_key_filters. Set before connect() or
+        serve_forever() to be in effect from the first message; a drain
+        keeps them. `on_acknowledged()`, when given, is called on the
+        loop's thread, between two messages, once every multiplexer has the
+        change, or a later one, and every request routed under the filters
+        before has been handled: serve_forever()'s wait ends at the
+        acknowledgement, as it does for a drain's."""
+        self.conn.set_key_filters(filters, on_acknowledged)
 
     def _start_connecting(self) -> list[ConnectionWrapper]:
         """Start a connection to every address given to the constructor,
@@ -206,9 +219,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
     def periodic_task(self) -> None:
         """Called after every iteration of serve_forever(), message or not,
-        so at least once per `poll` seconds. Override for work on your own
-        schedule and for noticing a request to leave: call start_draining()
-        or clear `working`. Does nothing by default."""
+        so at least once per `poll` seconds, and at once when a change of
+        the routing or the key filters is acknowledged, a drain's included.
+        Override for work on your own schedule and for noticing a request
+        to leave: call start_draining() or clear `working`. Does nothing by
+        default."""
 
     def on_handler_exception(self, exc: Exception) -> bool:
         """Called when handle_message() raised, after the requester was
@@ -231,7 +246,10 @@ class BaseMultiplexerServer(MultiplexerPeer):
         routes to it while another has not welcomed it yet.
 
         Each iteration waits up to `poll` seconds for a message, handles it
-        if one came, and calls periodic_task(). `drain_seconds` is how long
+        if one came, and calls periodic_task(); a change of the routing or
+        the key filters acknowledged by every multiplexer, a drain's
+        included, ends the wait as the poll's time would, so that
+        periodic_task() and drained() see it at once. `drain_seconds` is how long
         to keep serving after start_draining(), unless drained() is
         overridden. With `stall_seconds`, a message's handling and the
         periodic_task() after it that take longer, the wait before them
@@ -262,7 +280,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     # Only the wait running out is the poll's timeout: what the
                     # handler raises, an OperationTimedOut of its own included,
                     # goes by on_handler_exception().
-                    received = self.__receive_one(timeout=poll)
+                    received = self.__receive_one(timeout=poll, end_on_acknowledgement=True)
                 finally:
                     # The watchdog covers the handling and periodic_task(), not
                     # the wait, an idle poll being no stall, and is cancelled
@@ -307,7 +325,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
 
     def __receive_one(self, *args, **kwargs) -> bool:
         """Wait for one message, as loop_iter() does, and keep it as the one
-        to handle: False when the time passed. serve_forever() calls this and
+        to handle: False when the time passed, or, for serve_forever(), a
+        change was acknowledged. serve_forever() calls this and
         __handle_received() apart, so that only the wait running out is its
         poll's timeout."""
         # The plain read: a BACKEND_ERROR is a message like any other here,

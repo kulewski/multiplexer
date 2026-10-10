@@ -36,6 +36,10 @@ that changes.
   connection. It breaks only where a message went out through fewer
   connections than the one after it, one being down at that moment, or
   where a late copy came after the library forgot the first.
+- **A key narrows, never widens.** A keyed message reaches, of the peers
+  its rule names, those with no key filter for its type and those whose
+  filter takes the key; it reaches no peer the rule would not have reached
+  without a key ([keys](keys.md)).
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type, and 64
   protocol frames past that, heartbeats and the answers to the peer's
@@ -358,6 +362,8 @@ multiplexer and both libraries, and exported to Python as attributes of
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
 | `KEEPALIVE_PROBE_INTERVAL` | 10 s | between the TCP keepalive probes on the multiplexer's accepted connections, which start after the first interval above and close the connection after the second without an answer |
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
+| `MAX_KEY_SIZE` | 256 bytes | the longest key a message may carry; a library refuses a longer one where the message is built, a multiplexer drops and reports it ([keys](keys.md)) |
+| `MAX_KEY_PATTERN_SIZE` | 1024 bytes | the longest pattern of a key filter |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client holds; a `ThreadedClient` with no `on_message` drops what arrives on its own, with a warning |
 | `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |

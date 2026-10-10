@@ -29,7 +29,11 @@ so a backend that must not do the same work twice keys on the payload, not
 on `id()`. A message you pass to a query is never changed, since the library
 sends copies: both clients draw an id for every attempt, the first
 included, and a reply's `references()` names the attempt it answers, so
-one message may be queried again and again as it is.
+one message may be queried again and again as it is. `set_key()` gives a
+message the key that peers' key filters are matched against
+([keys](keys.md)): the whole-message forms of every send and query take
+it, the payload forms of `query()` none; a key over `MAX_KEY_SIZE`, 256
+bytes, is refused where the message is framed, with `std::length_error`.
 
 ## Timeouts
 
@@ -216,18 +220,45 @@ client.shutdown();
   the kernel then holds and the multiplexer may not have yet; and
   `is_lost()`, dropped: its connection ended before writing it, or it
   waited past its timeout.
-- `receive_message(timeout = -1)` waits for the next message, with no
-  deadline by default, and returns a pair of the message and its
-  connection. It throws `NotConnected` at once when nothing could arrive:
-  no connection and none on its way, on a client never connected, made
-  with no address, or shut down.
-- `set_routing(const Routing&)` and `routing_acknowledged()`: which of a
-  multiplexer's routing paths reach this peer, `any`, `all` and
-  `last_resort`, told to every multiplexer and carried in every welcome
-  from then on, and whether every one has it in effect; what a backend's
+- `receive_message(timeout = -1, end_on_acknowledgement = false)` waits
+  for the next message, with no deadline by default, and returns a pair
+  of the message and its connection. It throws `NotConnected` at once
+  when nothing could arrive: no connection and none on its way, on a
+  client never connected, made with no address, or shut down. It runs the
+  `acknowledged` callbacks whose time came (below); with
+  `end_on_acknowledgement`, a change of the routing or the key filters
+  acknowledged ends the wait too, throwing `OperationTimedOut` as the time
+  running out would: what a loop of receives acts on at once, the server
+  classes' loops among them.
+- `set_routing(const Routing&, acknowledged = {})` and
+  `routing_acknowledged()`: which of a multiplexer's routing paths reach
+  this peer, `any`, `all` and `last_resort`, told to every multiplexer and
+  carried in every welcome from then on, and whether every one has it in
+  effect, with everything they routed before received; what a backend's
   drain uses, see [How a backend
   leaves](leaving.md#what-a-draining-backend-still-takes). On
-  `ThreadedClient` too, from any thread.
+  `ThreadedClient` too, from any thread. `acknowledged`, a
+  `std::function<void()>` when given, is called once the change, or a
+  later one, is acknowledged so: on `SyncClient` inside a
+  `receive_message()`, the one after the last message routed before was
+  received, or the one waiting when the acknowledgement came, and it must
+  not receive or query through the client; on `ThreadedClient` on the io
+  thread, as its other callbacks, after `on_message` had everything routed
+  before, and never after `shutdown()`. What it throws is logged.
+- `set_key_filters(const BasicClient::KeyFilters&, acknowledged = {})` and `key_filters()`:
+  which keys of each message type reach this peer by the rules, a
+  `std::map` of message type to its patterns, RE2 regular expressions of
+  which one must match a key whole; a type left out takes every key, one
+  with no pattern none, and a message without a key arrives whatever its
+  type. Replaces the filters
+  set before, leaves the routing as it is, and goes as `set_routing()`
+  does, acknowledged by `routing_acknowledged()` and `acknowledged` as the
+  routing is: set before connecting to be in effect from the first
+  message. `std::invalid_argument` for a
+  protocol message type or a pattern over `MAX_KEY_PATTERN_SIZE`, on the
+  calling thread, `ThreadedClient`'s included; a pattern a multiplexer
+  refuses is logged by it, and by the client as an error. The search of a
+  keyed query carries the request's key. See [Keys](keys.md).
 - `refuse_arrivals()` and `refuse_unread()`: how the server classes leave.
   From the first on, a request that arrives is refused at once with the
   `DELIVERY_ERROR` a multiplexer sends for a peer that is gone, so that its
@@ -401,7 +432,9 @@ connected, for backends that also act as clients.
 each iteration waits up to `poll` seconds for a message, handles it if one
 came, then calls the virtual `periodic_task()`, message or not, so anything
 checked there takes effect within one poll, unless `poll` sets no deadline
-([timeouts](#timeouts)); a liveness probe that must see the loop answers
+([timeouts](#timeouts)), and a change of the routing or the key filters
+that every multiplexer has acknowledged, a drain's included, ends the
+wait too, so that `periodic_task()` and `drained()` see it at once; a liveness probe that must see the loop answers
 from a time written down there ([check a backend's
 health](recipes/check_backend_health.md)). It returns, with the
 connections closed, when the public `working` flag is cleared or a drain
@@ -451,7 +484,12 @@ is sent to it, while it serves what was already on its way.
 served what it had read by then and refused what arrived later, however
 fast it comes: by default once every multiplexer confirmed, so nothing
 more is coming, or `drain_seconds` after the drain started at the latest; override it to
-wait for a condition of your own. `set_drain_routing(routing)` before the
+wait for a condition of your own. `set_key_filters(filters,
+acknowledged = {})`, as on `SyncClient`, declares which keys of each
+message type reach the backend: before `serve_forever()`, from the first
+request on, and a drain keeps them ([keys](keys.md)); `acknowledged`
+runs on the loop's thread, between two messages, once every multiplexer
+has the change and every request routed before it has been handled. `set_drain_routing(routing)` before the
 drain changes what it asks for: `all` kept keeps events coming,
 `last_resort` keeps a lone backend serving through its drain, and either
 makes the drain last its `drain_seconds`. [How a backend
@@ -544,7 +582,11 @@ Echo(addresses, options).serve_forever();
   while every worker is busy and requests wait), `connect_timeout` and
   `drain_routing` (what `start_draining()` tells the multiplexers; `any` and
   `all` off by default).
-- The constructor only makes the instance id; `connect()` starts the
+- The constructor only makes the instance id; `set_key_filters(filters,
+  acknowledged = {})`, as on `BaseMultiplexerServer`, goes before
+  `connect()`, `acknowledged` running on `serve_forever()`'s thread, before
+  `periodic_task()`, once every multiplexer has the change and the workers
+  have finished every request routed before it; `connect()` starts the
   workers and connects, to every address at once against one
   `connect_timeout`, as `BaseMultiplexerServer` does, once, and
   `serve_forever()` calls it first, so
@@ -581,7 +623,8 @@ Echo(addresses, options).serve_forever();
   `draining()`, `drained()`, `periodic_task()`, `on_handler_exception()` and
   `should_respond_to_backend_for_packet_search()` are
   `BaseMultiplexerServer`'s, with the same meanings, `drained()` also
-  waiting for the queue to be empty; `close(timeout)` takes no more
+  waiting for the queue to be empty, and `serve_forever()` woken by a
+  change acknowledged and by a drain's last request as well; `close(timeout)` takes no more
   messages, lets the workers finish the queue, and ends the connections as
   `ThreadedClient::shutdown(timeout)` does, the last replies written first,
   and throws `std::logic_error` from a handler, on a worker, rather than

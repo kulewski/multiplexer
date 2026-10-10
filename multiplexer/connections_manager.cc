@@ -31,12 +31,14 @@ std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type
   return pack_welcome(welcome, instance_id);
 }
 
-std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id,
-                                                         const Routing& routing) {
+std::shared_ptr<const RawMessage> create_welcome_message(
+    std::uint32_t peer_type, std::uint64_t instance_id, const Routing& routing,
+    const google::protobuf::RepeatedPtrField<KeyFilter>& key_filters) {
   WelcomeMessage welcome;
   welcome.set_type(peer_type);
   welcome.set_id(instance_id);
   *welcome.mutable_routing() = routing;
+  *welcome.mutable_key_filter() = key_filters;
   return pack_welcome(welcome, instance_id);
 }
 

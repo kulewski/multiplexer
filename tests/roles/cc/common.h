@@ -53,7 +53,9 @@ struct CommonOptions {
   std::string name;
 
   void add(mx::options::Options& options);
-  std::unique_ptr<Client> connect() const;
+  // The client connected to every --mx, its key filters set before the
+  // first connection, so that every welcome carries them.
+  std::unique_ptr<Client> connect(const multiplexer::BasicClient::KeyFilters& key_filters = {}) const;
   // The --mx addresses as (host, port) pairs (multiplexer/endpoint.h), for a role that connects by hand.
   multiplexer::backend::MultiplexerAddresses addresses() const;
   // The "connected" event with instance_id, connections and name filled in.
@@ -64,6 +66,9 @@ struct CommonOptions {
 std::map<std::uint32_t, std::uint32_t> kv_ints(const std::vector<std::string>& items);
 // "201:payload" pairs, as --query and --send take them.
 std::vector<std::pair<std::uint32_t, std::string>> typed_payloads(const std::vector<std::string>& items);
+// --key-filter's "201:pattern" values: per message type its patterns, each
+// split at its first colon, so that a pattern may have more.
+multiplexer::BasicClient::KeyFilters parse_key_filters(const std::vector<std::string>& items);
 std::string replace_all(std::string text, const std::string& from, const std::string& to);
 std::string upper(std::string text);
 

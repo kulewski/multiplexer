@@ -386,11 +386,20 @@ logs `cannot accept a connection: Too many open files` and tries again
 every 0.1 s. A `ThreadedClient` warns
 `connection lost under query <id>`, followed by what the query does
 next, for each query whose connection is lost under it. A message a rule
-queued nowhere gives one of three lines: `routing while none present of type N (NAME)`
-when no peer of the type is connected; `routing off on every peer of type
+queued nowhere gives one of four lines: `routing while none present of type N (NAME)`
+when no peer of the type is connected; `no key filter of a peer of type N
+(NAME) takes the key of a message of type M (MNAME)` when every one has a
+key filter for the message's type and none takes its key, a kind for each
+message type whose first line names the key ([keys](keys.md));
+`routing off on every peer of type
 N (NAME)` when every one has turned rule routing off, as while it drains;
 and `queue full on every peer of type N (NAME) that takes it` when every
-peer that would take it is full.
+peer that would take it is full. A message whose key is over
+`MAX_KEY_SIZE` gives `message of type M (MNAME) with a key over 256 bytes
+(MAX_KEY_SIZE); dropping`. Key filters are logged as they change, at
+`INFO`, `peer ID (NAME) takes keys: type M: "PATTERN" ...`, and a refusal
+at `WARNING`, `key filters of peer ID ... refused: WHY`, the peer's
+connection closed when its welcome carried them.
 
 `--logging-file PATH` on `mxcontrol` writes the same entries as a binary
 stream of `LogEntry` protocol buffers, each preceded by its length as a
@@ -491,15 +500,17 @@ a multiplexer that died left, can end partway through a record: both
 readers give every whole record and then say so, `dump_recording` with
 exit status 1, `recording.read()` by raising `TruncatedRecording`. A
 `RoutedMessage` says whether it was `DELIVERED` or why not:
-`NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`, `QUEUE_FULL`, or
+`NO_RECIPIENT`, `UNKNOWN_TYPE`, `NO_RULE`, `QUEUE_FULL`,
 `NOT_ACCEPTED` for a peer whose routing turned the path off ([how a
-backend leaves](leaving.md)). A rule that queued a message nowhere has a
+backend leaves](leaving.md)), or `KEY_NOT_TAKEN` for a peer whose key
+filter does not take the message's key ([keys](keys.md)). A rule that queued a message nowhere has a
 record of its own, recipient 0, with the peer type and whether the sender
 was told, saying why for the type as a whole, as the log line does:
-`NO_RECIPIENT` when nobody of the type is connected, `QUEUE_FULL` when
+`NO_RECIPIENT` when nobody of the type is connected, `KEY_NOT_TAKEN` when
+no key filter of one takes the key, `QUEUE_FULL` when
 every peer that takes the message has its queue full, `NOT_ACCEPTED` when
 none takes it; a fan-out (`whom: ALL`) records each peer it passed over
-besides. A `PeerEvent` marks a peer
+besides. The record of a keyed message carries its `key`. A `PeerEvent` marks a peer
 arriving, leaving, or changing its routing. A peer's `DISCONNECTED` comes
 when its connection has closed, after the records of what it sent last: a
 connection whose write failed reads on to the peer's end and routes what

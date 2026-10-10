@@ -36,13 +36,15 @@ the protocol:
 | `workflow` | 8 | opaque bytes for tracing, copied from request to reply by the libraries |
 | `report_delivery_error` | 21 | for a `to`-addressed message: report when the target is gone |
 | `override_rrules` | 20 | routing rules carried by the message, replacing the file's |
+| `key` | 9 | what the message is about, at most `MAX_KEY_SIZE` (256) bytes: routed by the rules, it reaches a peer with a key filter for its type only when the filter takes it ([keys](keys.md)); a `to` ignores it |
 | `timestamp`, `compression`, `logging_method` | 6, 24, 23 | carried but not acted on by the multiplexer, except that `logging_method` gates its own log |
 
 ## The handshake
 
 The peer's first frame must be a message of type `CONNECTION_WELCOME` (2)
 whose payload is a `WelcomeMessage` with the peer's `type` and its `id`, the
-instance id it will use as `sender`. Any other first message closes the
+instance id it will use as `sender`, and optionally its `routing` and its
+`key_filter`s, applied before anything is routed to it. Any other first message closes the
 connection, as does a peer type absent from the rules file or one of the
 reserved 99, the two controllers apart (`RULES_CONTROLLER` always,
 `RECORDING_CONTROLLER` when remote recording is on). The multiplexer registers the connection, then answers with its own
@@ -86,7 +88,7 @@ not answer a `PING`.
 | Type | Payload | Who sends it, and what the receiver does |
 |---|---|---|
 | `PING` (1) | any | a peer that gets a `PING` without `references` answers (every class but `SyncClient`) with a `PING` carrying the same payload, `references` set to the request's id, or, when that echo would be over `MAX_MESSAGE_SIZE`, with a `BACKEND_ERROR` saying so; a `PING` that references something is an answer and is not answered again |
-| `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake; the optional `routing` (a `Routing`: `any`, `all`, `last_resort`) says which rule-routed paths reach the peer, applied before anything is routed to it |
+| `CONNECTION_WELCOME` (2) | `WelcomeMessage` | the handshake; the optional `routing` (a `Routing`: `any`, `all`, `last_resort`) says which rule-routed paths reach the peer, and the `key_filter`s (a `KeyFilter` each: a message `type` and its `pattern`s, RE2 regular expressions matched against a whole key) which keys of those types reach it, both applied before anything is routed to it; a filter the multiplexer refuses, a pattern that does not compile or two for one type, closes the connection |
 | `BACKEND_FOR_PACKET_SEARCH` (3) | `BackendForPacketSearch { packet_type }` | a client asking who handles `packet_type`; the multiplexer forwards it to every peer named by the first rule of that type whose routing takes requests (`any`), or to the last resorts when none does; each backend answers with a `PING` referencing the search's id, addressed to the client and carrying the search's payload back, or, when that echo would be over `MAX_MESSAGE_SIZE`, with a `BACKEND_ERROR` saying so |
 | `HEARTBIT` (4) | empty | keep-alive, ignored |
 | `DELIVERY_ERROR` (5) | `DeliveryError` | the multiplexer, to a message's `sender`, when nobody received it: `packet_id` names the message; `failed_type` lists the peer types with no receiver, or `failed_to` the missing instance id, or `is_known_type` false for an unknown type; `original_message` is included only if the rule asked for it, and left out, `original_message_omitted` set, when the report would be over `MAX_MESSAGE_SIZE`. `references` is the failed message's id |
@@ -95,8 +97,8 @@ not answer a `PING`.
 | `RECORDING_RECORD` (8) | `Record` | the multiplexer, to every peer that tapped in, one per record, `multiplexer_id` set |
 | `RULES_CONTROL` (9) | `RulesControl` | a peer, without `to`, asking the multiplexer it is connected to for RELOAD of its rules file, or its STATUS ([operations](operations.md#changing-the-rules)) |
 | `RULES_STATUS` (10) | `RulesStatus` | the multiplexer's answer, `references` the request's id: the fingerprint, path and counts of the rules in use, `error` set when a reload was refused |
-| `PEER_CONTROL` (11) | `PeerControl { routing }` | a peer, without `to`, telling the multiplexer it is connected to which rule-routed paths reach it from now on, replacing what its welcome said ([how a backend leaves](leaving.md#what-a-draining-backend-still-takes)) |
-| `PEER_STATUS` (12) | `PeerStatus` | the multiplexer's answer, `references` the request's id, once the routing is in effect: `routing` as applied, `error` set when the request was ignored; queued after everything routed to the peer before the change |
+| `PEER_CONTROL` (11) | `PeerControl { routing, key_filter }` | a peer, without `to`, telling the multiplexer it is connected to which rule-routed paths, and which keys of which types, reach it from now on, both replacing what its welcome or its last `PEER_CONTROL` said ([how a backend leaves](leaving.md#what-a-draining-backend-still-takes), [keys](keys.md)) |
+| `PEER_STATUS` (12) | `PeerStatus` | the multiplexer's answer, `references` the request's id, once the change is in effect: `routing` and `key_filter` as applied, `error` set when the request was refused, which leaves both as they were; queued after everything routed to the peer before the change |
 
 A `PING`, a `RECORDING_RECORD` or a status sent without `to`, which nobody
 could receive, is answered with a `DELIVERY_ERROR` and recorded as a type
@@ -114,10 +116,16 @@ In this order, the first that applies wins:
 3. Type 99 or below: the protocol handling above.
 4. The rules file's entries for the type: for each rule, `ANY` picks the
    next peer of the type in round robin whose queue has room, `ALL` queues
-   the frame on every peer of the type. No receiver for a rule that has
-   `report_delivery_error` produces a `DELIVERY_ERROR`.
+   the frame on every peer of the type. A keyed message passes over a
+   peer whose key filter for its type does not take the key; a peer with
+   no filter for the type takes every key ([keys](keys.md)). No receiver
+   for a rule that has `report_delivery_error` produces a
+   `DELIVERY_ERROR`.
 5. No entry for the type: drop, and report `is_known_type` false. An entry
    with no rule and no `to`: drop, and report `is_known_type` true.
+
+Before any of it, a message without `to` whose key is over `MAX_KEY_SIZE`
+is dropped and reported, `is_known_type` true.
 
 The multiplexer forwards the frame it received, bytes unchanged; it does not
 re-serialize, so anything in the body survives, including fields it does not

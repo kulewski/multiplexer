@@ -34,7 +34,9 @@ and gets nothing from that multiplexer's first message on.
 The `Routing` has three flags, and the drain is strict by default:
 
 - `any` off, `all` off: nothing new by the rules; the default. A drain
-  ends as soon as every multiplexer confirmed and the work is done.
+  ends as soon as every multiplexer confirmed and the work is done: the
+  confirmation, and on a threaded server the last request done, wake the
+  serve loop, which does not wait for its next poll.
 - `all` kept on, `Routing(any=False)`: events keep arriving through the
   drain, for a backend that must hear them to the end; the drain then
   lasts its `drain_seconds`, since work keeps coming.
@@ -55,9 +57,18 @@ requests is not offered, and a last resort is offered when nobody else is.
 `set_routing()` on `SyncClient`, `ThreadedClient` and `AsyncClient` is the
 same call outside a drain, in both directions: a saturated backend can step
 out of the round robin and back in, and `routing_acknowledged()` says when
-the multiplexers have it. The multiplexer logs every change, records it as
+the multiplexers have it, with everything they routed before handed to the
+backend; `on_acknowledged`, given to `set_routing()`, is called then, where
+each class calls back ([keys](keys.md#declaring-the-filters) lists where).
+The multiplexer logs every change, records it as
 a `ROUTING` peer event, and marks a fan-out skipped for it as
 `NOT_ACCEPTED` in a recording.
+
+A backend's key filters ([keys](keys.md)) stay as they are through a
+drain: a drain that keeps events keeps getting only the keys its filters
+take, and one that stays a last resort is a last resort for those keys
+alone, after every peer that takes the key without being one. A change of
+filters during a drain leaves the drain's routing as it is.
 
 ## A drain, then the close: a rolling restart
 
@@ -294,10 +305,11 @@ Where the pieces live: `start_draining()`, `drained()` and the
 `drain_routing` in [threaded_server.py](../multiplexer/threaded_server.py)
 and
 [base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h),
-the same on the plain classes; `set_routing()` and
-`routing_acknowledged()` on `SyncClient`, `ThreadedClient` and `AsyncClient`, `BasicClient::set_routing`
-underneath, which puts the routing in the welcome and sends
-`PEER_CONTROL`; `Server::send_to_one`, `send_to_all` and
+the same on the plain classes; `set_routing()`, its `on_acknowledged`, and
+`routing_acknowledged()` on `SyncClient`, `ThreadedClient` and
+`AsyncClient`, `BasicClient::set_routing` underneath, which puts the
+routing in the welcome, sends `PEER_CONTROL` and notes where the incoming
+queue stood when every multiplexer confirmed; `Server::send_to_one`, `send_to_all` and
 `_handle_peer_control` in [server.cc](../multiplexer/server.cc) on the
 multiplexer's side; the refusal in the threaded classes' `_on_message()`,
 and in `SyncClient.refuse_arrivals()` and `refuse_unread()` for the plain

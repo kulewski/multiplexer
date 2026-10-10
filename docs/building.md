@@ -15,7 +15,7 @@ Docker. The commands themselves are in the [README](../README.md#building-with-b
 | protoc and libprotobuf, the same version | the wire format and the recording are protocol buffers; the generated code must match the runtime it links | `protobuf-compiler libprotobuf-dev` |
 | the Python protobuf runtime | the generated Python modules | `python3-protobuf` |
 | Python 3.10 or newer with headers | the extension (`pybind11`) and the Python library | `python3-dev` |
-| network access on the first build | Bazel fetches Asio, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
+| network access on the first build | Bazel fetches Asio, RE2, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
 
 On Debian or Ubuntu, that is:
 
@@ -94,11 +94,12 @@ every push and pull request, CI runs three of those checks,
 A `Makefile` at the root builds the same things from the distribution's own
 packages, for a machine that will not have Bazel: no fetching, no JDK, no
 sandbox. It needs the compiler and protobuf from the table above, plus
-Asio (standalone, header-only), pybind11 (2.9, Ubuntu 22.04's, is the
-oldest tested) and, for the tests, googletest:
+Asio (standalone, header-only), RE2, with which the multiplexer matches
+keys against key filters ([keys](keys.md)), pybind11 (2.9, Ubuntu 22.04's,
+is the oldest tested) and, for the tests, googletest:
 
 ```
-sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libasio-dev \
+sudo apt-get install g++ make protobuf-compiler libprotobuf-dev libasio-dev libre2-dev \
     python3-dev python3-protobuf pybind11-dev python3-pybind11 libgtest-dev \
     python3-pip python3-setuptools python3-wheel
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a, build/python/

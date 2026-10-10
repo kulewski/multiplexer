@@ -1379,11 +1379,10 @@ uses:
   other worker.
 - **A drain under a stream.** A third worker takes a stream of frames
   addressed to it, then gets `SIGTERM`: it says `leaving` once the drain
-  has begun, frames are answered after that, and it exits 0 with `left`
-  well within a second and a half, ended by the multiplexers'
-  confirmation and not by its three seconds, and the stream's next frame
-  is refused at once, after at most one frame that was on its way at the
-  close and timed out.
+  has begun and exits 0 with `left` well within a second and a half,
+  ended by the multiplexers' confirmation and not by its three seconds,
+  and the stream's next frame is refused at once, after at most one
+  frame that was on its way at the close and timed out.
 - **Django against the cluster**: the endpoints go into the environment
   the settings read, then `django.setup()`, and the consumer is driven
   by Channels' `WebsocketCommunicator`, two sockets in one room, with the

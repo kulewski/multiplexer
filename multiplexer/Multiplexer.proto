@@ -120,6 +120,25 @@ message MultiplexerMessage {
 
     // request disabling logging to file or stream
     optional LoggingMethod.Values logging_method = 23 [default = BOTH];
+
+    // What the message is about, for peers that take only some keys of
+    // its type (KeyFilter): routed by the rules, it reaches a peer with a
+    // filter for its type only when that filter takes the key. Absent, no
+    // filter applies. At most MAX_KEY_SIZE bytes. docs/keys.md.
+    optional string key = 9;
+}
+
+// Which keys of one message type reach a peer by the rules: a filter on
+// what the peer receives, taking a key that one of the patterns, an RE2
+// regular expression, matches whole. A peer with no filter for a type
+// takes every key of it, and every message without a key reaches it as
+// before. Routing passes over a peer whose filter does not take a
+// message's key and treats the others as it always does: whom: ANY picks
+// one of them round robin, whom: ALL reaches them all. docs/keys.md
+// describes the use.
+message KeyFilter {
+    required uint32 type = 1;
+    repeated string pattern = 2;
 }
 
 // Which of a multiplexer's routing paths reach a peer: `any` for rules
@@ -144,6 +163,11 @@ message WelcomeMessage {
     required uint32 type = 1;
     required uint64 id = 2;
     optional Routing routing = 3;  // absent: every path, as before the field existed
+    // The peer's key filters, at most one per message type, applied before
+    // anything is routed to it; a filter that is refused (a pattern that
+    // does not compile, a limit passed) closes the connection, as a peer
+    // type the rules file does not name does.
+    repeated KeyFilter key_filter = 4;
 }
 
 // The protocol's message types for a peer's routing, in the reserved
@@ -156,10 +180,12 @@ enum PeerMessageType {
     PEER_STATUS = 12;
 }
 
-// What a peer tells the multiplexer about itself: the routing that reaches
-// it from now on, replacing what its welcome said.
+// What a peer tells the multiplexer about itself: the routing and the key
+// filters that reach it from now on, both replacing what its welcome, or
+// its last PeerControl, said. A request that is refused changes neither.
 message PeerControl {
     required Routing routing = 1;
+    repeated KeyFilter key_filter = 2;  // at most one per message type; none: every key of every type
 }
 
 // The multiplexer's answer to every PeerControl.
@@ -167,6 +193,7 @@ message PeerStatus {
     optional uint64 multiplexer_id = 1;
     optional Routing routing = 2;  // in effect for the peer's connection
     optional string error = 3;     // why the request was ignored; unset when it was applied
+    repeated KeyFilter key_filter = 4;  // in effect for the peer's connection
 }
 
 // a message to be used when searching for working backend

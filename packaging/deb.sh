@@ -24,6 +24,9 @@ protobuf="$(dpkg-query -W -f '${Version}' libprotobuf-dev)"
 # libprotobuf32t64 on the releases after the time_t transition.
 protobuf_runtime="$(dpkg-query -W -f '${Depends}' libprotobuf-dev | tr ',' '\n' | sed -n 's/^ *\(libprotobuf[0-9][0-9a-z]*\).*/\1/p' | head -1)"
 [[ -n "$protobuf_runtime" ]] || { echo "cannot tell the libprotobuf runtime package from libprotobuf-dev's Depends" >&2; exit 1; }
+# RE2's the same way, for mxcontrol's key filters: libre2-9, libre2-11, ...
+re2_runtime="$(dpkg-query -W -f '${Depends}' libre2-dev | tr ',' '\n' | sed -n 's/^ *\(libre2-[0-9][0-9a-z]*\).*/\1/p' | head -1)"
+[[ -n "$re2_runtime" ]] || { echo "cannot tell the RE2 runtime package from libre2-dev's Depends" >&2; exit 1; }
 staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 
@@ -57,8 +60,8 @@ Priority: optional
 Architecture: ${arch}
 Maintainer: Krzysztof Kulewski <kulewski@gmail.com>
 Installed-Size: ${size_kb}
-Depends: ${protobuf_runtime}, libc6, libstdc++6
-Recommends: libprotobuf-dev (= ${protobuf}), libasio-dev
+Depends: ${protobuf_runtime}, ${re2_runtime}, libc6, libstdc++6
+Recommends: libprotobuf-dev (= ${protobuf}), libasio-dev, libre2-dev
 Homepage: https://github.com/kulewski/multiplexer
 Description: message broker with C++ and Python client libraries
  mxcontrol runs a multiplexer and its tools; libmultiplexer.a, the headers

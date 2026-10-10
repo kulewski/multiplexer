@@ -273,6 +273,11 @@ Bazel build.
   chosen per message type, no code change ([rules](docs/rules.md)); the
   file is edited under running multiplexers, which put it in use without a
   restart ([changing the rules](docs/operations.md#changing-the-rules)).
+- **Pools within a type, by key.** A message may say what it is about, a
+  tenant, a model, a group, and each backend which keys of a type it
+  takes: a tenant's requests reach only the backends that take its key,
+  an event only the subscribers of its group, and a failover's retry
+  stays with the backends that take the key ([keys](docs/keys.md)).
 - **One instance, one path, when it matters.** A request addressed to one
   backend instance reaches it or fails, never another instance, and is
   found again behind another multiplexer; a lane keeps a stream of

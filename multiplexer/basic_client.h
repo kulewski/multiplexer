@@ -429,10 +429,15 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // ConnectionsManager interface: what a Connection needs from its manager.
   std::shared_ptr<const RawMessage> get_welcome_message() {
     if (!welcome_message_) {
-      welcome_message_ = create_welcome_message(client_type_, routing_);
+      welcome_message_ = create_welcome_message(client_type_, routing_, key_filters_message_);
     }
     return welcome_message_;
   }
+
+  // Called once a change of the routing or the key filters is
+  // acknowledged (routing_acknowledged()), that change or a later one: see
+  // set_routing() for where and when.
+  typedef std::function<void()> AcknowledgedCallback;
 
   // Which of a multiplexer's routing paths reach this peer
   // (Multiplexer.proto's Routing; everything by default): told to every
@@ -440,17 +445,60 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // of every connection made or remade from now on, and sent after the
   // handshake on a connection whose welcome was already out. A backend
   // draining sets `any` and `all` off. On the owner thread.
-  void set_routing(const Routing& routing);
+  // `acknowledged`, when given, is called once this change, or a later
+  // one, is acknowledged: on the owner thread, in the handler that
+  // completed it for a client whose messages go to a sink (ThreadedClient),
+  // which has handed everything routed before to the sink by then;
+  // otherwise from inside a receive (wait_to_receive()), when the caller
+  // came back for more after everything read before the acknowledgement.
+  // Never after shutdown(). What it throws is logged.
+  void set_routing(const Routing& routing, AcknowledgedCallback acknowledged = AcknowledgedCallback());
   const Routing& routing() const { return routing_; }
-  // Whether every connection has the current routing in effect: the
-  // multiplexer confirmed it, by its welcome for a routing the
+  // Which keys of each message type reach this peer by the rules
+  // (Multiplexer.proto's KeyFilter): per message type, RE2 patterns of
+  // which one must match a message's key whole. A type not named takes
+  // every key, one with no pattern none, and a message without a key
+  // arrives whatever its type.
+  // Replaces the filters set before, and goes with the routing: told to
+  // every registered connection with PEER_CONTROL now, carried in the
+  // welcome of every connection made or remade from now on, so set before
+  // connecting to have it from the first message. The routing set by
+  // set_routing() stays, as these stay when the routing changes. Throws
+  // std::invalid_argument for a protocol message type (99 and below) or a
+  // pattern over MAX_KEY_PATTERN_SIZE bytes; a pattern that does not
+  // compile is refused by the multiplexer, which logs why and keeps the
+  // filters it had, or closes a connection whose welcome carries it. On
+  // the owner thread.
+  // `acknowledged` as for set_routing().
+  typedef std::map<std::uint32_t, std::vector<std::string>> KeyFilters;
+  void set_key_filters(const KeyFilters& filters, AcknowledgedCallback acknowledged = AcknowledgedCallback());
+  // The checks set_key_filters() makes before taking `filters`, for a
+  // class that hands them to another thread: throws as it does.
+  static void check_key_filters(const KeyFilters& filters);
+  const KeyFilters& key_filters() const { return key_filters_; }
+  // Whether every connection has the current routing and key filters in
+  // effect: the multiplexer confirmed them, by its welcome for those the
   // connection's welcome carried or by PEER_STATUS for a change; a
   // handshake still in flight counts as not confirmed. Then nothing
-  // routed to this peer by a path turned off since is on its way from
-  // those multiplexers, except as a last resort; what this client has
-  // read but not yet handed out (has_incoming_messages()) still is, so
-  // that counts as not confirmed too.
+  // routed to this peer by a path turned off since, or under a filter
+  // replaced since, is on its way from those multiplexers, except as a
+  // last resort; what this client read before the last confirmation and
+  // has not handed out yet still is, so that counts as not confirmed too,
+  // until it is handed out. A change a multiplexer refused stays
+  // unconfirmed.
   bool routing_acknowledged() const;
+  // The acknowledged changes' callbacks, run now, on the owner thread, when
+  // routing_acknowledged() holds; nothing otherwise. What wait_to_receive()
+  // calls for the synchronous client.
+  void run_acknowledged_callbacks();
+  // Whether a change was acknowledged since the last call, which clears it:
+  // what ends a serve loop's wait early (wait_to_receive()).
+  bool take_acknowledged_wake() {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    const bool woken = acknowledged_wake_;
+    acknowledged_wake_ = false;
+    return woken;
+  }
 
   // Called by a Connection with every parsed message: drops ones without an
   // id or seen before, then queues or hands to the sink.
@@ -548,9 +596,24 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // A connection has ended for good: the messages it read after it began
   // closing, which it could only drop, are added up and logged.
   void connection_closed(Connection* conn);
-  // PEER_CONTROL with the current routing on `conn`.
+  // PEER_CONTROL with the current routing and key filters on `conn`.
   void _send_routing(Connection::pointer conn);
-  // A PEER_STATUS from a multiplexer: the routing it now applies to us.
+  // Whether every living connection is registered and has confirmed the
+  // current routing.
+  bool _all_confirmed() const;
+  // After whatever can confirm the routing or take that back: a change, a
+  // PEER_STATUS, a welcome, a connection gone. Notes where the incoming
+  // queue stood when every connection confirmed, and tells of an
+  // acknowledgement (_acknowledged()) once per change.
+  void _update_confirmation();
+  // A change acknowledged: the serve loop's wake, and a sink client's
+  // callbacks at once.
+  void _acknowledged();
+  // The routing or the key filters changed: a new version, a new welcome,
+  // and PEER_CONTROL on every connection.
+  void _routing_changed();
+  // A PEER_STATUS from a multiplexer: the routing and key filters it now
+  // applies to us.
   void _on_peer_status(Connection::pointer conn, const MultiplexerMessage& mxmsg);
   void reconnect_after_timeout(TimerPointer, Target target, const asio::error_code&);
 
@@ -644,6 +707,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     if (data.routing_in_welcome != routing_version_) {
       _send_routing(conn);
     }
+    _update_confirmation();
     first_connection_over_.insert(data.target);
     // The queue took one until now: what waited on this connection for
     // room moves in under the peer type's size, ahead of what waited for
@@ -694,6 +758,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // Lets go of the observer, from the thread that ends the client: a
   // ThreadedClient's io thread at its end, or a forked child's teardown.
   void release_drop_observer() { drop_observer_ = DropObserver(); }
+
+  // A receive's wait: runs the loop until a message is queued, true, or
+  // `timer` expires, false, running the callbacks of the changes
+  // acknowledged meanwhile (run_acknowledged_callbacks()), and, with
+  // `end_on_acknowledgement`, false too as soon as a change is acknowledged
+  // (take_acknowledged_wake()), what a serve loop does at once rather than
+  // at its next poll. Throws NotConnected when nothing could arrive.
+  bool wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledgement);
 
   // Runs the loop until a message is queued or `timeout` seconds pass;
   // throws OperationTimedOut, or NotConnected when nothing could arrive.
@@ -997,7 +1069,23 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   IncomingSink incoming_sink_;
   ConnectionObserver connection_observer_;
   Routing routing_;
-  unsigned int routing_version_ = 0;  // bumped by set_routing; 0 is the default routing
+  KeyFilters key_filters_;
+  google::protobuf::RepeatedPtrField<KeyFilter> key_filters_message_;  // key_filters_ as the protocol has them
+  unsigned int routing_version_ = 0;  // bumped by set_routing and set_key_filters; 0 is the default
+  // The callbacks of the changes not acknowledged yet, all run together
+  // once the latest is: an acknowledgement of a change is one of every
+  // change before it.
+  std::vector<AcknowledgedCallback> acknowledged_callbacks_;
+  // Messages through the incoming queue, counted in and out, and
+  // enqueued_ when every connection last came to confirm the current
+  // routing: what was read before that may have been routed under the
+  // routing before, and is handed out once dequeued_ reaches it.
+  std::uint64_t enqueued_ = 0;
+  std::uint64_t dequeued_ = 0;
+  bool confirmed_ = false;
+  std::uint64_t confirmed_enqueued_ = 0;
+  unsigned int acknowledged_version_ = 0;  // the last version told of (_acknowledged)
+  bool acknowledged_wake_ = false;         // see take_acknowledged_wake()
   IncomingMessagesBuffer incoming_messages_;
   unsigned int incoming_queue_max_size_;
   std::uint64_t frames_handled_ = 0;  // every frame handle_message() was given, owner thread; see poll()

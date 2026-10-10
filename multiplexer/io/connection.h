@@ -236,6 +236,20 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   inline bool accepts_all() const { return routing_.all(); }
   inline bool last_resort() const { return routing_.last_resort(); }
 
+  // The peer's key filters (Multiplexer.proto's KeyFilter), as its welcome
+  // or its last PEER_CONTROL declared them, and the number they are held
+  // under in the multiplexer's index (KeyPatterns::Owner in
+  // multiplexer/key_filters.h), which routing asks whether the peer takes
+  // a key: set by the multiplexer from the peer's registration on. A
+  // client's connections keep none.
+  inline const google::protobuf::RepeatedPtrField<KeyFilter>& key_filters() const { return key_filters_; }
+  inline std::uint32_t key_owner() const { return key_owner_; }
+  inline void set_key_filters(const google::protobuf::RepeatedPtrField<KeyFilter>& filters, std::uint32_t owner) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    key_filters_ = filters;
+    key_owner_ = owner;
+  }
+
   // Stops all I/O, tells the manager, and drops or hands back the outgoing
   // queue. Safe to call at any point of the lifecycle, including on a socket
   // that was never opened, and idempotent. Pending handlers see BROKEN. A
@@ -1021,6 +1035,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   std::uint64_t peer_id_;
   bool is_passive_;
   Routing routing_;
+  google::protobuf::RepeatedPtrField<KeyFilter> key_filters_;
+  std::uint32_t key_owner_ = 0xffffffffu;  // KeyPatterns::NO_OWNER until registered
 
   bool is_living_;
   std::shared_ptr<std::atomic<bool>> living_flag_;  // is_living_, for other threads; see living_flag()

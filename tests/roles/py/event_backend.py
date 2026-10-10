@@ -30,6 +30,7 @@ class EventBackend(servers.BaseMultiplexerServer):
             sender=mxmsg.sender,
             to=mxmsg.to,
             **common.payload_summary(mxmsg.message),
+            **common.key_fields(mxmsg),
         )
         self.no_response()
 
@@ -41,12 +42,17 @@ def main() -> None:
     p.add_argument("--for", dest="duration", type=float, default=0.0, help="exit after S seconds")
     p.add_argument("--drain-file", default=None, help="a file whose appearance starts a drain")
     p.add_argument("--drain-routing", default="", help="Routing flags kept on while draining: any,all,last_resort")
+    p.add_argument(
+        "--key-filter", action="append", help="TYPE:PATTERN, repeatable: the key filters, set before connecting"
+    )
     args = p.parse_args()
     common.stop_on_sigterm()
 
     event_backend = EventBackend(
         common.endpoints(args), type=args.type, drain_routing=drain_routing(args.drain_routing)
     )
+    if args.key_filter:
+        event_backend.set_key_filters(common.key_filters(args.key_filter))
     event_backend.connect()  # the loop below is its own; connect() is what serve_forever() would do first
     emit(
         "connected",

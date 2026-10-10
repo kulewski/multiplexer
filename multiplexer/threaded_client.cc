@@ -152,7 +152,13 @@ void ThreadedClient::set_search_policy(SearchPolicy answer) { core_->set_search_
 void ThreadedClient::set_drop_observer(DropObserver observer) { core_->set_drop_observer(observer); }
 std::uint64_t ThreadedClient::dropped() { return core_->dropped(); }
 void ThreadedClient::set_resolver(BasicClient::Resolver resolver) { core_->set_resolver(resolver); }
-void ThreadedClient::set_routing(const Routing& routing) { core_->set_routing(routing); }
+void ThreadedClient::set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged) {
+  core_->set_routing(routing, std::move(acknowledged));
+}
+void ThreadedClient::set_key_filters(const BasicClient::KeyFilters& filters,
+                                     BasicClient::AcknowledgedCallback acknowledged) {
+  core_->set_key_filters(filters, std::move(acknowledged));
+}
 bool ThreadedClient::routing_acknowledged() { return core_->routing_acknowledged(); }
 bool ThreadedClient::flush_all(float timeout) { return core_->flush_all(timeout); }
 void ThreadedClient::flush_all_with_callback(float timeout, FlushCallback done) {
@@ -586,12 +592,24 @@ std::uint64_t ThreadedClient::Core::retries() {
   });
 }
 
-void ThreadedClient::Core::set_routing(const Routing& routing) {
+void ThreadedClient::Core::set_key_filters(const BasicClient::KeyFilters& filters,
+                                           BasicClient::AcknowledgedCallback acknowledged) {
   basic_client_->check_not_orphaned();
-  _post_unless_stopped([this, routing] {  // after shutdown(), nothing
+  BasicClient::check_key_filters(filters);              // here, where the caller hears of a refusal
+  _post_unless_stopped([this, filters, acknowledged] {  // after shutdown(), nothing
     MX_DCHECK_RUN_ON(&io_thread_);
     if (!shut_down_) {
-      basic_client_->set_routing(routing);
+      basic_client_->set_key_filters(filters, acknowledged);
+    }
+  });
+}
+
+void ThreadedClient::Core::set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged) {
+  basic_client_->check_not_orphaned();
+  _post_unless_stopped([this, routing, acknowledged] {  // after shutdown(), nothing
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (!shut_down_) {
+      basic_client_->set_routing(routing, acknowledged);
     }
   });
 }
@@ -1692,6 +1710,9 @@ void ThreadedClient::Core::_search(InFlightPtr in_flight, bool keep_deadline) {
     search.set_packet_type(in_flight->prototype.type());
     msg = new_message(types::BACKEND_FOR_PACKET_SEARCH, std::string());
     search.SerializeToString(msg.mutable_message());
+    if (in_flight->prototype.has_key()) {
+      msg.set_key(in_flight->prototype.key());  // only a backend that takes the key may be found
+    }
   }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(msg));
   std::vector<ConnectionWrapper> sent;

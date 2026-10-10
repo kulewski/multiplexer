@@ -103,7 +103,14 @@ class ThreadedBackend(Leaving, threaded_server.BaseThreadedMultiplexerServer):
         self.handled += 1
         if self.memory_every and self.handled % self.memory_every == 0:
             common.memory_event(self.handled)
-        emit("request", type=mxmsg.type, id=mxmsg.id, sender=mxmsg.sender, size=len(mxmsg.message))
+        emit(
+            "request",
+            type=mxmsg.type,
+            id=mxmsg.id,
+            sender=mxmsg.sender,
+            size=len(mxmsg.message),
+            **common.key_fields(mxmsg),
+        )
         response_type = self.serves.get(mxmsg.type)
         if response_type is None:
             emit("unexpected", type=mxmsg.type, id=mxmsg.id)
@@ -164,7 +171,14 @@ class Backend(Leaving, servers.BaseMultiplexerServer):
         self.handled += 1
         if self.memory_every and self.handled % self.memory_every == 0:
             common.memory_event(self.handled)
-        emit("request", type=mxmsg.type, id=mxmsg.id, sender=mxmsg.sender, size=len(mxmsg.message))
+        emit(
+            "request",
+            type=mxmsg.type,
+            id=mxmsg.id,
+            sender=mxmsg.sender,
+            size=len(mxmsg.message),
+            **common.key_fields(mxmsg),
+        )
         response_type = self.serves.get(mxmsg.type)
         if response_type is None:
             emit("unexpected", type=mxmsg.type, id=mxmsg.id)
@@ -210,6 +224,9 @@ def main() -> None:
     p.add_argument("--drain-routing", default="", help="Routing flags kept on while draining: any,all,last_resort")
     p.add_argument("--exit-on-exception", action="store_true", help="a handler exception ends the process (4)")
     p.add_argument("--threaded", action="store_true", help="serve on BaseThreadedMultiplexerServer instead")
+    p.add_argument(
+        "--key-filter", action="append", help="TYPE:PATTERN, repeatable: the key filters, set before connecting"
+    )
     args = p.parse_args()
     common.stop_on_sigterm()
 
@@ -227,6 +244,8 @@ def main() -> None:
         args.exit_on_exception,
         drain_routing(args.drain_routing),
     )
+    if args.key_filter:
+        backend.set_key_filters(common.key_filters(args.key_filter))
     backend.connect()  # the harness waits for this event's connection count before it sends
     client = backend.client if isinstance(backend, ThreadedBackend) else backend.conn
     emit("connected", instance_id=client.instance_id, connections=client.connections_count(), name=args.name)

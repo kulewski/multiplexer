@@ -126,7 +126,20 @@ class ThreadedClient : public ExceptionDefinitions {
   // multiplexer and carried in every welcome from now on; see
   // BasicClient::set_routing. A backend draining sets `any` and `all` off.
   // From any thread; in effect on the io thread right after.
-  void set_routing(const Routing& routing);
+  // `acknowledged`, when given, is called once this change, or a later
+  // one, is acknowledged (routing_acknowledged()): on the io thread, as
+  // the other callbacks, so quick, after everything routed to this peer
+  // before the change went to on_message or to its query. Never after
+  // shutdown().
+  void set_routing(const Routing& routing,
+                   BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback());
+  // Which keys of each message type reach this peer by the rules, told and
+  // carried as the routing is; see BasicClient::set_key_filters. Checked
+  // on the calling thread, which gets std::invalid_argument; set before
+  // connect() to be in effect from the first message. `acknowledged` as
+  // for set_routing().
+  void set_key_filters(const BasicClient::KeyFilters& filters,
+                       BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback());
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();

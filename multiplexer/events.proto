@@ -60,4 +60,8 @@ message Event {
     // "draining": the backend stopped answering searches and will exit
     // after this many seconds
     optional double drain_seconds = 34;
+
+    // "request" and "received": the key the message carried
+    // (Multiplexer.proto's KeyFilter), when it had one
+    optional string key = 35;
 }

@@ -29,6 +29,9 @@ class EventBackendServer : public multiplexer::backend::BaseMultiplexerServer {
     received.set_sender(mxmsg.sender());
     received.set_to(mxmsg.to());
     set_payload(received, mxmsg.message());
+    if (mxmsg.has_key()) {
+      received.set_key(mxmsg.key());
+    }
     emit(received);
     no_response();
   }
@@ -46,7 +49,7 @@ class EventBackendRole : public mxcontrol::Task {
   virtual std::string short_description() const { return "receive events in a loop and report them"; }
   virtual int run() {
     install_signal_handlers();
-    std::unique_ptr<Client> client = common_.connect();
+    std::unique_ptr<Client> client = common_.connect(parse_key_filters(key_filters_));
     EventBackendServer server(client.get(), common_.type);
     server.set_drain_routing(parse_drain_routing(drain_routing_));
     emit(common_.connected_event(*client));
@@ -91,6 +94,7 @@ class EventBackendRole : public mxcontrol::Task {
     options.add("for", &duration_, 0.0, "exit after S seconds");
     options.add("drain-file", &drain_file_, "", "a file whose appearance starts a drain");
     options.add("drain-routing", &drain_routing_, "", "Routing flags kept on while draining: any,all,last_resort");
+    options.add("key-filter", &key_filters_, "TYPE:PATTERN, repeatable: the key filters, set before connecting");
   }
 
  private:
@@ -99,6 +103,7 @@ class EventBackendRole : public mxcontrol::Task {
   double duration_;
   std::string drain_file_;
   std::string drain_routing_;
+  std::vector<std::string> key_filters_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_backend, EventBackendRole);

@@ -331,6 +331,33 @@ cc_test(
     ],
 )
 
+# The patterns of the peers' key filters and the matching of keys: the
+# multiplexer's alone, the one target that links RE2.
+cc_library(
+    name = "key_filters",
+    srcs = ["key_filters.cc"],
+    hdrs = ["key_filters.h"],
+    deps = [
+        ":defaults",
+        ":multiplexer_cc_constants",
+        ":multiplexer_cc_proto",
+        "@com_googlesource_code_re2//:re2",
+    ],
+)
+
+cc_test(
+    name = "key_filters_test",
+    size = "small",
+    srcs = ["key_filters_test.cc"],
+    deps = [
+        ":defaults",
+        ":key_filters",
+        ":multiplexer_cc_proto",
+        "@com_google_googletest//:gtest_main",
+        "@com_googlesource_code_re2//:re2",  # exact() is checked against RE2 itself
+    ],
+)
+
 cc_library(
     name = "connections_manager",
     srcs = ["connections_manager.cc"],
@@ -860,6 +887,7 @@ cc_library(
     visibility = ["//mxcontrol:__pkg__"],
     deps = [
         ":connections_manager",
+        ":key_filters",
         ":log_summary",
         ":multiplexer_cc_proto",
         ":recorder",
@@ -1291,6 +1319,18 @@ py_test(
 )
 
 py_test(
+    name = "key_routing_test",
+    size = "small",
+    srcs = ["key_routing_test.py"],
+    deps = [
+        ":_native",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
     name = "all_types_test",
     size = "small",
     srcs = ["all_types_test.py"],
@@ -1531,6 +1571,23 @@ py_library(
         ":servers",
         ":threaded_client_py",
         "//multiplexer/mxlog",
+    ],
+)
+
+py_test(
+    name = "acknowledged_test",
+    size = "medium",
+    srcs = ["acknowledged_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
     ],
 )
 

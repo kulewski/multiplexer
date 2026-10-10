@@ -7,8 +7,9 @@
 // A BaseMultiplexerServer is driven by serve_forever(): it blocks in the
 // client's read, so heartbeats and reconnects happen on their own and the
 // peer type need not be passive. One message is handled at a time. After every
-// iteration, message or poll timeout, periodic_task() runs: the place for
-// work on the backend's own schedule and for noticing a request to leave.
+// iteration, message, poll timeout or a change of routing or key filters
+// acknowledged, periodic_task() runs: the place for work on the backend's
+// own schedule and for noticing a request to leave.
 // The library installs no signal handlers; a handler of your own should
 // only set a sig_atomic_t that periodic_task() reads.
 #ifndef MX_MULTIPLEXER_BACKEND_BASE_MULTIPLEXER_SERVER_H_
@@ -116,6 +117,21 @@ class BaseMultiplexerServer {
   // `last_resort` keeps a lone backend serving through its drain.
   void set_drain_routing(const Routing& routing) { drain_routing_ = routing; }
   const Routing& drain_routing() const { return drain_routing_; }
+  // Which keys of each message type reach this backend by the rules; see
+  // BasicClient::set_key_filters. Set before serve_forever() to be in
+  // effect from the first request; set later, every multiplexer is told,
+  // and a drain keeps them. `acknowledged`, when given, is called on the
+  // loop's thread, between two messages, once every multiplexer has the
+  // change, or a later one, and every request routed under the filters
+  // before has been handled: the loop's wait ends at the acknowledgement,
+  // as it does for a drain's. Throws std::logic_error after close().
+  void set_key_filters(const BasicClient::KeyFilters& filters,
+                       BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback()) {
+    if (!conn) {
+      throw std::logic_error("set_key_filters() after close()");
+    }
+    conn->set_key_filters(filters, std::move(acknowledged));
+  }
   // Asks serve_forever() to return, from any thread: it notices within one
   // poll, closes the connections and returns.
   void stop() { working = false; }
@@ -134,7 +150,9 @@ class BaseMultiplexerServer {
   virtual void handle_message(MultiplexerMessage&) = 0;
 
   // Called after every iteration of serve_forever(), message or not, so at
-  // least once per `poll` seconds. Override for work on your own schedule
+  // least once per `poll` seconds, and at once when a change of the
+  // routing or the key filters is acknowledged, a drain's included.
+  // Override for work on your own schedule
   // and for noticing a request to leave: call start_draining() or clear
   // `working`. Does nothing by default.
   virtual void periodic_task() {}
@@ -219,11 +237,11 @@ class BaseMultiplexerServer {
   // Ends the reply defaults once a message has been handled.
   void _forget_request();
   // The two steps of loop_iter(): wait up to `timeout` seconds for a
-  // message and keep it as the one to handle, false when the time passed;
-  // then handle it, the reply defaults holding only meanwhile.
-  // serve_forever() calls them apart, so that only the wait running out is
-  // its poll's timeout.
-  bool _receive_one(float timeout);
+  // message and keep it as the one to handle, false when the time passed,
+  // or, for serve_forever(), a change was acknowledged; then handle it, the
+  // reply defaults holding only meanwhile. serve_forever() calls them
+  // apart, so that only the wait running out is its poll's timeout.
+  bool _receive_one(float timeout, bool end_on_acknowledgement = false);
   void _handle_received();
 
  public:

@@ -73,3 +73,18 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "acknowledged_test",
+    size = "small",
+    srcs = ["acknowledged_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":base_multiplexer_server",
+        ":base_threaded_multiplexer_server",
+        "//multiplexer:in_process_multiplexer",
+        "//multiplexer:multiplexer_cc_constants",
+        "//multiplexer:threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

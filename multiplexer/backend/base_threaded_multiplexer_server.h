@@ -104,6 +104,8 @@ class Request {
   IncomingMessage incoming_;
   std::atomic<bool> answered_{false};
   bool dropped_ = false;  // the server said why; no warning from the destructor
+  std::uint64_t accepted_ =
+      0;  // its place among the requests the queue took, which a change's acknowledgement waits for
 };
 typedef std::shared_ptr<Request> RequestPtr;
 
@@ -170,6 +172,16 @@ class BaseThreadedMultiplexerServer {
   // arrives, leave once drained().
   void start_draining();
   bool draining() const { return draining_.load(); }
+  // Which keys of each message type reach this backend by the rules, as
+  // on BaseMultiplexerServer: set before connect() to be in effect from
+  // the first request; see BasicClient::set_key_filters. `acknowledged`,
+  // when given, is called on serve_forever()'s thread, before
+  // periodic_task(), once every multiplexer has the change, or a later
+  // one, and the workers have finished every request routed under the
+  // filters before; the acknowledgement wakes serve_forever() as a drain's
+  // does.
+  void set_key_filters(const BasicClient::KeyFilters& filters,
+                       BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback());
   // Ask serve_forever() to return, from any thread.
   void stop();
   // Requests waiting for a worker plus those being handled, and the
@@ -188,7 +200,9 @@ class BaseThreadedMultiplexerServer {
   // a DELIVERY_ERROR; either may happen later, from any thread, as long as
   // it happens.
   virtual void handle_message(const RequestPtr& request) = 0;
-  // Called from serve_forever() after every poll, on its thread.
+  // Called from serve_forever() after every poll, on its thread, and at
+  // once when a change of the routing or the key filters is acknowledged,
+  // a drain's included.
   virtual void periodic_task() {}
   // Whether the drain is over: by default once `drain_seconds` have
   // passed since start_draining(), or, when the drain routing turns every
@@ -220,6 +234,13 @@ class BaseThreadedMultiplexerServer {
   void _work();
   void _handle(const RequestPtr& request);
   void _fail(std::exception_ptr failure);
+  // Ends serve_forever()'s wait, now or, when it is elsewhere, at its next.
+  void _wake();
+  // On the io thread: a change acknowledged by every multiplexer; its
+  // callback waits for the requests the queue took before it.
+  void _acknowledged(BasicClient::AcknowledgedCallback callback);
+  // On serve_forever()'s thread: the callbacks whose requests are done.
+  void _run_acknowledged();
   std::exception_ptr _failure() const;
 
   const Options options_;
@@ -229,6 +250,16 @@ class BaseThreadedMultiplexerServer {
   std::condition_variable_any cond_;
   std::deque<RequestPtr> queue_ MX_GUARDED_BY(mutex_);
   unsigned int busy_ MX_GUARDED_BY(mutex_) = 0;
+  std::uint64_t accepted_ MX_GUARDED_BY(mutex_) = 0;  // requests the queue took so far
+  // A change acknowledged, waiting for the requests the queue took before
+  // it (Request::accepted_ < before) that workers still hold or have not
+  // taken: `remaining` of them; at 0 serve_forever() runs the callback.
+  struct Acknowledged {
+    std::uint64_t before;
+    std::size_t remaining;
+    BasicClient::AcknowledgedCallback callback;
+  };
+  std::vector<Acknowledged> acknowledged_ MX_GUARDED_BY(mutex_);
   bool accepting_ MX_GUARDED_BY(mutex_) = true;
   std::vector<std::thread> threads_ MX_GUARDED_BY(mutex_);
   // Every worker's id, kept once close() has taken threads_ to join them:

@@ -16,7 +16,7 @@ import math
 import time
 import traceback
 import warnings
-from typing import Any, Callable, ClassVar, Literal, overload
+from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping, overload
 
 import google.protobuf.message
 
@@ -24,6 +24,7 @@ import multiplexer._native as _mxclient
 from multiplexer._native import (
     CLOSE_FLUSH_SECONDS,
     DEFAULT_TIMEOUT,
+    MAX_KEY_SIZE,
     MAX_SECONDS,
     ConnectionWrapper,
     DropReason,
@@ -133,12 +134,40 @@ def wait_seconds(seconds: float) -> float:
     return min(seconds, MAX_SECONDS)
 
 
+def key_filters_argument(filters: Mapping[int, Iterable[str]]) -> dict[int, list[str]]:
+    """`filters` as every class's set_key_filters() hands them to the native
+    side: a dict of message type to its list of patterns. One string where
+    the list goes is a TypeError, not a list of one-letter patterns."""
+    result: dict[int, list[str]] = {}
+    for type_, patterns in filters.items():
+        if isinstance(patterns, (str, bytes)):
+            raise TypeError("the patterns of message type %d: a list of strings, not one string" % type_)
+        result[int(type_)] = list(patterns)
+        for pattern in result[int(type_)]:
+            if not isinstance(pattern, str):
+                raise TypeError("a key pattern is a str, not %s" % pattern.__class__.__name__)
+    return result
+
+
+def checked_key(mxmsg: MultiplexerMessage) -> MultiplexerMessage:
+    """`mxmsg`, its key at most MAX_KEY_SIZE bytes; a ValueError for a
+    longer one, which a multiplexer would drop. Where every class builds a
+    message, new_message() and stamped(), as the C++ libraries refuse one
+    where they frame it (RawMessage::FromMessage)."""
+    if mxmsg.HasField("key") and len(mxmsg.key.encode("utf-8")) > MAX_KEY_SIZE:
+        raise ValueError(
+            "a key of %d bytes, over the limit of %d (MAX_KEY_SIZE)" % (len(mxmsg.key.encode("utf-8")), MAX_KEY_SIZE)
+        )
+    return mxmsg
+
+
 def stamped(mxmsg: MultiplexerMessage, instance_id: int, fresh_id: Callable[[], int]) -> MultiplexerMessage:
     """`mxmsg` as every send that takes a whole message sends it: itself
     when it has an id and a sender, else a copy with an empty id made fresh
     by `fresh_id` and an empty sender set to `instance_id`, as new_message()
     and a reply fill them, since every receiver drops a message without an
     id. The C++ clients frame it the same way (frame_stamped)."""
+    checked_key(mxmsg)
     if mxmsg.id and mxmsg.sender:
         return mxmsg
     filled = MultiplexerMessage()
@@ -377,7 +406,7 @@ class Client(_mxclient.Client):
         shutdown(), as connect() does."""
         return super(Client, self).disconnect_from(endpoint[0], endpoint[1])
 
-    def set_routing(self, routing: Routing) -> None:
+    def set_routing(self, routing: Routing, on_acknowledged: Callable[[], None] | None = None) -> None:
         """Which of a multiplexer's routing paths reach this peer, a
         `Routing` from Multiplexer.proto: `any` for rules with whom ANY,
         `all` for whom ALL, both True by default, and `last_resort` for
@@ -385,25 +414,50 @@ class Client(_mxclient.Client):
         `to` always arrives. Told to every multiplexer as the loop runs
         and carried in the welcome of every connection made from now on;
         routing_acknowledged() says when it is in effect everywhere. A
-        backend draining sets any and all False; see docs/leaving.md."""
-        super(Client, self).set_routing_serialized(routing.SerializeToString())
+        backend draining sets any and all False; see docs/leaving.md.
+
+        `on_acknowledged()`, when given, is called once this change, or a
+        later one, is acknowledged, from inside a receive_message(): the
+        next one after every message read before the acknowledgement was
+        received, so that a loop of receives has handled them, or the one
+        waiting when it came. It must not receive or query through this
+        client; what it raises goes to sys.unraisablehook."""
+        super(Client, self).set_routing_serialized(routing.SerializeToString(), on_acknowledged)
+
+    def set_key_filters(
+        self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
+    ) -> None:
+        """Which keys of each message type reach this peer by the rules:
+        `filters` maps a message type to RE2 patterns, one of which must
+        match a message's key whole; a type left out takes every key, one
+        with an empty list none, and a message without a key arrives
+        whatever its type. Replaces the
+        filters set before and leaves the routing as it is; told and carried
+        as set_routing() is, so set before connecting to be in effect from
+        the first message, and acknowledged with it, `on_acknowledged` as
+        for set_routing(). Raises ValueError for a protocol message type or
+        a pattern over MAX_KEY_PATTERN_SIZE bytes; a multiplexer refuses a
+        pattern that does not compile, and logs why. See docs/keys.md."""
+        super(Client, self).set_key_filters(key_filters_argument(filters), on_acknowledged)
 
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to
-        set_routing() in effect, so that nothing routed by a path turned
-        off is on its way from them, except as a last resort."""
+        set_routing(), and the filters given to set_key_filters(), in
+        effect, so that nothing routed by a path turned off, or under a
+        filter replaced, is on its way from them, except as a last
+        resort."""
         return super(Client, self).routing_acknowledged()
 
     def wait_for_connection(self, connection: ConnectionWrapper, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """wait for connection initiated with async_connect"""
         return super(Client, self).wait_for_connection(connection, timeout)
 
-    def __receive_message(self, timeout: float = -1):
+    def __receive_message(self, timeout: float = -1, end_on_acknowledgement: bool = False):
         """
         blocking read from all the sockets (or from incoming message queue)
         returns (MultiplexerMessage, ConnectionWrapper)
         """
-        next = super(Client, self).read_raw_message(timeout)
+        next = super(Client, self).receive_raw_message(timeout, end_on_acknowledgement)
         assert isinstance(next[0], bytes)
         mxmsg = parse_message(MultiplexerMessage, next[0])
         return (mxmsg, next[1])
@@ -416,11 +470,16 @@ class Client(_mxclient.Client):
         from the previous thread."""
         super(Client, self).bind_to_current_thread()
 
-    def receive_message(self, timeout=-1):
+    def receive_message(self, timeout=-1, *, end_on_acknowledgement: bool = False):
         """The next message from any connection as (MultiplexerMessage,
         connection); waits up to `timeout` (-1: forever). Raises
-        OperationTimedOut, NotConnected."""
-        return self.__receive_message(timeout)
+        OperationTimedOut, NotConnected. Runs the on_acknowledged callbacks
+        of set_routing() and set_key_filters() whose time came. With
+        `end_on_acknowledgement` the wait also ends, raising
+        OperationTimedOut as if the time had run out, as soon as a change
+        is acknowledged: what a loop of receives, the server classes'
+        among them, acts on at once rather than at its next poll."""
+        return self.__receive_message(timeout, end_on_acknowledgement)
 
     def handle_drop(self, mxmsg, connwrap=None):
         """A message a synchronous query read while it waited for another,
@@ -477,6 +536,7 @@ class Client(_mxclient.Client):
         with_connection: Literal[False] = ...,
         *,
         on_received: "Callable[[int], None] | None" = ...,
+        key: "str | None" = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -490,6 +550,7 @@ class Client(_mxclient.Client):
         *,
         with_connection: Literal[True],
         on_received: "Callable[[int], None] | None" = ...,
+        key: "str | None" = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     def query(
@@ -502,6 +563,7 @@ class Client(_mxclient.Client):
         with_connection: bool = False,
         *,
         on_received: "Callable[[int], None] | None" = None,
+        key: "str | None" = None,
     ) -> "MultiplexerMessage | tuple[MultiplexerMessage, ConnectionWrapper]":
         """Send a request and return its reply, a MultiplexerMessage.
 
@@ -549,8 +611,14 @@ class Client(_mxclient.Client):
         (notify_start()): once, normally, or again when a retry reached a
         backend, the same or another. Nothing about the query changes for
         it; one that raises has its traceback printed.
+
+        `key`, for a request built from a payload, is what the request is
+        about: a backend whose key filter for the type does not take it
+        never gets the request (set_key_filters(), docs/keys.md); the
+        search of stage 2 carries it too. A whole message carries its own
+        key.
         """
-        request = self.__request(message, type, to)
+        request = self.__request(message, type, to, key)
         _check_size_sent_again(request)
         # Held for the query's duration, where the acknowledgements are met;
         # whatever was there before is back afterwards.
@@ -564,26 +632,29 @@ class Client(_mxclient.Client):
             self.__on_received = previous
         return (response, connwrap) if with_connection else response
 
-    def __request(self, message: Any, type: "int | None", to: int) -> MultiplexerMessage:
+    def __request(self, message: Any, type: "int | None", to: int, key: "str | None") -> MultiplexerMessage:
         """A query's request, a message of its own that the stages may set
         fields of: a copy of `message` when it is a whole MultiplexerMessage,
         an empty sender filled in and an id of its own, as every attempt gets,
         so that one message may be queried again and again; else one built
-        from the payload, `type` and `to`. TypeError for `type` or `to`
-        beside a whole message, and for a payload without its type."""
+        from the payload, `type`, `to` and `key`. TypeError for `type`, `to`
+        or `key` beside a whole message, and for a payload without its type."""
         if isinstance(message, MultiplexerMessage):
-            if type is not None or to:
+            if type is not None or to or key is not None:
                 raise TypeError(
-                    "a whole MultiplexerMessage is the request itself: set its type and to, not type= or to="
+                    "a whole MultiplexerMessage is the request itself: set its type, to and key,"
+                    " not type=, to= or key="
                 )
             request = MultiplexerMessage()
             request.CopyFrom(message)
             request.id = self.random()
             if not request.sender:
                 request.sender = self.instance_id
-            return request
+            return checked_key(request)
         if type is None:
             raise TypeError("a query of a payload needs its type")
+        if key is not None:
+            return self.new_message(type=type, message=message, to=to, key=key)
         return self.new_message(type=type, message=message, to=to)
 
     def __again(self, request: MultiplexerMessage, to: int) -> MultiplexerMessage:
@@ -630,6 +701,8 @@ class Client(_mxclient.Client):
         search = BackendForPacketSearch()
         search.packet_type = query.type
         mxmsg = self.new_message(message=search, type=types.BACKEND_FOR_PACKET_SEARCH)
+        if query.HasField("key"):
+            mxmsg.key = query.key  # only a backend that takes the key may be found
         ticker = TimeoutTicker(timeout)
         pinned_connection = self.__send_search(mxmsg, ticker, lane, ledger)
         outcome, answer = self.__await(ledger, ticker, _SEARCH, pinned_connection, lane)
@@ -1118,4 +1191,4 @@ class Client(_mxclient.Client):
             elif not isinstance(kwargs["message"], bytes):
                 kwargs["message"] = kwargs["message"].SerializeToString()
 
-        return make_message(MultiplexerMessage, **kwargs)
+        return checked_key(make_message(MultiplexerMessage, **kwargs))

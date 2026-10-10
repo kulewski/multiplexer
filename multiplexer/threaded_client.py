@@ -27,7 +27,7 @@ a reply came through, preferred while it is live. docs/api_python.md,
 """
 
 import pickle
-from typing import Any, Callable, Iterable, Literal, TypeVar, overload
+from typing import Any, Callable, Iterable, Literal, Mapping, TypeVar, overload
 
 from multiplexer import _native
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
@@ -40,6 +40,8 @@ from multiplexer.mxclient import (
     NotConnected,
     OperationTimedOut,
     UsedAfterFork,
+    checked_key,
+    key_filters_argument,
     make_message,
     renamed_sender,
     stamped,
@@ -72,6 +74,7 @@ class ThreadedClient:
         with_connection: bool = False,
         search_policy: Callable[[], object] | None = None,
         on_drop: Callable[[int, DropReason], None] | None = None,
+        key_filters: Mapping[int, Iterable[str]] | None = None,
     ):
         """Start the io thread and connect to every (host, port) in `addresses`.
 
@@ -90,6 +93,8 @@ class ThreadedClient:
         reason)` runs on the io thread for every message the client gives
         up on, each copy of one sent to ALL, with a DropReason; `dropped`
         counts them. Like `on_message`, it is held until shutdown().
+        `key_filters` is set_key_filters() made before the first
+        connection, so that its welcome carries them.
         """
 
         def native_callback(raw: bytes, connection: Any) -> None:
@@ -106,6 +111,8 @@ class ThreadedClient:
             self._native.set_search_policy(search_policy)
         if on_drop is not None:
             self._native._set_drop_observer(on_drop)
+        if key_filters is not None:
+            self.set_key_filters(key_filters)
         for host, port in addresses:
             self.connect((host, port), timeout)
 
@@ -175,7 +182,7 @@ class ThreadedClient:
         ThreadedClient::forget_finished_ids()."""
         self._native.forget_finished_ids()
 
-    def set_routing(self, routing: Routing) -> None:
+    def set_routing(self, routing: Routing, on_acknowledged: Callable[[], None] | None = None) -> None:
         """Which of a multiplexer's routing paths reach this peer, a
         `Routing` from Multiplexer.proto: `any` for rules with whom ANY,
         `all` for whom ALL, both True by default, and `last_resort` for
@@ -183,14 +190,36 @@ class ThreadedClient:
         `to` always arrives. Told to every multiplexer at once and carried
         in the welcome of every connection made from now on;
         routing_acknowledged() says when it is in effect everywhere. A
-        backend draining sets any and all False; see docs/leaving.md."""
-        self._native.set_routing_serialized(routing.SerializeToString())
+        backend draining sets any and all False; see docs/leaving.md.
+
+        `on_acknowledged()`, when given, is called once this change, or a
+        later one, is acknowledged: on the io thread, as the other
+        callbacks, so quick, after everything routed to this peer before
+        the change went to on_message or to its query. Never after
+        shutdown(); what it raises goes to sys.unraisablehook."""
+        self._native.set_routing_serialized(routing.SerializeToString(), on_acknowledged)
+
+    def set_key_filters(
+        self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
+    ) -> None:
+        """Which keys of each message type reach this peer by the rules:
+        `filters` maps a message type to RE2 patterns, one of which must
+        match a message's key whole; a type left out takes every key, one
+        with an empty list none, and a message without a key arrives
+        whatever its type. Replaces the
+        filters set before and leaves the routing as it is; told and carried
+        as set_routing() is, acknowledged with it, `on_acknowledged` as for
+        set_routing(). Raises ValueError for a protocol message type or a
+        pattern over MAX_KEY_PATTERN_SIZE bytes; a multiplexer refuses a
+        pattern that does not compile, and logs why. See docs/keys.md."""
+        self._native.set_key_filters(key_filters_argument(filters), on_acknowledged)
 
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to
-        set_routing() in effect, so that nothing routed by a path turned
-        off is on its way from them, except as a last resort. Not from
-        the io thread."""
+        set_routing(), and the filters given to set_key_filters(), in
+        effect, so that nothing routed by a path turned off, or under a
+        filter replaced, is on its way from them, except as a last resort.
+        Not from the io thread."""
         return self._native.routing_acknowledged()
 
     def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
@@ -230,7 +259,7 @@ class ThreadedClient:
                 kwargs["message"] = kwargs["message"].encode("utf-8")
             elif not isinstance(kwargs["message"], bytes):
                 kwargs["message"] = kwargs["message"].SerializeToString()
-        return make_message(MultiplexerMessage, **kwargs)
+        return checked_key(make_message(MultiplexerMessage, **kwargs))
 
     def send_message(
         self,
@@ -354,6 +383,7 @@ class ThreadedClient:
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[False] = ...,
         on_received: Callable[[int], None] | None = ...,
+        key: str | None = ...,
     ) -> MultiplexerMessage: ...
 
     @overload
@@ -367,6 +397,7 @@ class ThreadedClient:
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: Literal[True],
         on_received: Callable[[int], None] | None = ...,
+        key: str | None = ...,
     ) -> tuple[MultiplexerMessage, ConnectionWrapper]: ...
 
     @overload
@@ -381,6 +412,7 @@ class ThreadedClient:
         multiplexer: int | Lane | ConnectionWrapper = ...,
         with_connection: bool = ...,
         on_received: Callable[[int], None] | None = ...,
+        key: str | None = ...,
     ) -> None: ...
 
     def query(
@@ -393,6 +425,7 @@ class ThreadedClient:
         multiplexer: int | Lane | ConnectionWrapper = ONE,
         with_connection: bool = False,
         on_received: Callable[[int], None] | None = None,
+        key: str | None = None,
     ) -> Any:
         """Send a request: `message` itself when it is a whole
         MultiplexerMessage, typed by its own `type` and addressed by its own
@@ -432,16 +465,23 @@ class ThreadedClient:
         the request with REQUEST_RECEIVED (notify_start()): once, normally,
         or again when a retry reached a backend, the same or another.
         Nothing about the query changes for it; what it raises goes to
-        sys.unraisablehook, as every callback's does."""
+        sys.unraisablehook, as every callback's does.
+
+        `key`, for a request built from a payload, is what the request is
+        about: a backend whose key filter for the type does not take it
+        never gets the request (set_key_filters(), docs/keys.md); the
+        search a query falls back to carries it too. A whole message carries
+        its own key."""
         if multiplexer is ThreadedClient.ALL:
             raise ValueError("a query goes through one connection; multiplexer=ALL is for events")
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
         if isinstance(message, MultiplexerMessage):
-            if type is not None or to:
+            if type is not None or to or key is not None:
                 raise TypeError(
-                    "a whole MultiplexerMessage is the request itself: set its type and to, not type= or to="
+                    "a whole MultiplexerMessage is the request itself: set its type, to and key,"
+                    " not type=, to= or key="
                 )
             request = stamped(message, self.instance_id, self.random)
         elif type is None:
@@ -450,6 +490,8 @@ class ThreadedClient:
             fields: dict[str, Any] = {"message": message, "type": type}
             if to:
                 fields["to"] = to
+            if key is not None:
+                fields["key"] = key
             request = self.new_message(**fields)
         raw_request = request.SerializeToString()
         if callback is None:

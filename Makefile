@@ -14,7 +14,7 @@
 #   make RULES=your.rules ...   generate the constants from your rules file
 #
 # Debian and Ubuntu packages: g++ make protobuf-compiler libprotobuf-dev
-# libasio-dev python3-dev python3-protobuf
+# libasio-dev libre2-dev python3-dev python3-protobuf
 # pybind11-dev python3-pybind11; libgtest-dev for `make check`;
 # python3-pip python3-setuptools python3-wheel for `make wheel`.
 
@@ -43,7 +43,8 @@ NATIVE_PYI := $(if $(shell $(PYTHON) -c "import pybind11_stubgen" 2>/dev/null &&
 
 ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread -DASIO_STANDALONE
 ALL_CPPFLAGS := -I. -I$(GEN) $(CPPFLAGS)
-ALL_LDLIBS := -lprotobuf -pthread $(LDLIBS)
+# RE2 for the multiplexer's key filters, which only mxcontrol links in.
+ALL_LDLIBS := -lprotobuf -lre2 -pthread $(LDLIBS)
 
 include make/sources.mk
 

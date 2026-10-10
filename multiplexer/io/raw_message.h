@@ -86,8 +86,13 @@ class RawMessage {
   // will not serialize, over 2 GiB, raises std::length_error as one over
   // MAX_MESSAGE_SIZE does, its size measured: protobuf leaves the string
   // empty, which went out as a frame with no body, and the multiplexer
-  // closed the connection.
+  // closed the connection. A key over MAX_KEY_SIZE raises
+  // std::length_error too: the multiplexer would drop the message.
   static RawMessage* FromMessage(const MultiplexerMessage& mxmsg) {
+    if (mxmsg.key().size() > MAX_KEY_SIZE) {
+      throw std::length_error("a key of " + std::to_string(mxmsg.key().size()) + " bytes, over the limit of " +
+                              std::to_string(MAX_KEY_SIZE) + " (MAX_KEY_SIZE)");
+    }
     std::string serialized;
     if (!mxmsg.SerializeToString(&serialized)) {
       check_message_size(mxmsg.ByteSizeLong());

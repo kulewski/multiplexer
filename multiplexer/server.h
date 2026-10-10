@@ -13,8 +13,10 @@
 // carried by the message; protocol (meta) types below 100; the rules file's
 // entries for the type. Nobody to deliver to produces a DELIVERY_ERROR back
 // to the sender when the rule asks for it. A peer's Routing (its welcome,
-// then PEER_CONTROL) says which rule-routed paths reach it; `to` always
-// does. docs/wire_format.md describes the same order from the outside.
+// then PEER_CONTROL) says which rule-routed paths reach it, and its key
+// filters (KeyPatterns, multiplexer/key_filters.h) which keys of a type
+// do; `to` always does. docs/wire_format.md describes the same order from
+// the outside, docs/keys.md the keys.
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
@@ -35,6 +37,7 @@
 #include "multiplexer/connections_manager.h"
 #include "multiplexer/defaults.h"
 #include "multiplexer/io/connection.h"
+#include "multiplexer/key_filters.h"
 #include "multiplexer/log_summary.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 #include "multiplexer/recorder.h"
@@ -181,18 +184,13 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // has ended.
   void stop(float drain_seconds = 0, std::function<void()> stopped = nullptr);
 
-  // ConnectionsManager hooks. A welcome after stop() is refused; a
-  // connection that ended leaves the set stop() closes, and a stop that
-  // was waiting for it may be over. While stopping, what a connection
-  // ending dropped, from its queue or as it read on, is counted for the
-  // stop's last line.
-  void register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
-    if (stopping_) {
-      conn->shutdown();
-      return;
-    }
-    Base::register_connection(conn, welcome);
-  }
+  // ConnectionsManager hooks. A welcome after stop() is refused, and so is
+  // one whose key filters KeyPatterns refuses; the filters of one that is
+  // accepted are in effect before anything is routed. A connection that
+  // ended leaves the set stop() closes, and a stop that was waiting for it
+  // may be over. While stopping, what a connection ending dropped, from
+  // its queue or as it read on, is counted for the stop's last line.
+  void register_connection(Connection::pointer conn, const WelcomeMessage& welcome);
   void connection_closed(Connection* conn);
   void handle_orphaned_outgoing_messages(Connection*, Connection::MessagesBuffer& queue) {
     if (stopping_) {
@@ -237,12 +235,15 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
 
   // A registered peer's connection ended for routing; a tap it held ends
-  // with it. Its DISCONNECTED is recorded when the connection closes
+  // with it, and its key filters' patterns are given back. Its
+  // DISCONNECTED is recorded when the connection closes
   // (connection_closed): after a failed write it reads on to the peer's
   // end, delivering what it reads, whose records come before it.
   void connection_unregistered(Connection* conn) {
     departed_.insert(conn);
     _untap(conn);
+    key_patterns_.remove_owner(conn->key_owner());
+    conn->set_key_filters(google::protobuf::RepeatedPtrField<KeyFilter>(), KeyPatterns::NO_OWNER);
     _peers_changed();
   }
 
@@ -290,7 +291,28 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     // A BACKEND_FOR_PACKET_SEARCH, forwarded to every peer of the type
     // that takes rule-routed requests (Routing.any), not every one.
     bool search = false;
+    // A keyed message routed by the rules of a type some peer filters
+    // (KeyPatterns::match): `key_type` is the type the filters are for, the
+    // message's own or, for a search, the searched-for one, and
+    // `key_evaluation` the match of its key against them, which
+    // KeyPatterns::takes() answers for each peer. Unset, the filters do not
+    // apply, as for a message without a key.
+    bool keyed = false;
+    std::uint32_t key_type = 0;
+    std::uint64_t key_evaluation = 0;
   };
+
+  // Whether a peer takes a keyed message (MessageMetaHandler::keyed): a
+  // key filter is a filter on what its peer receives, so the peer takes
+  // the message when its filter for the type takes the key, and when it has
+  // none for the type, which is every key. Routing passes over a peer that
+  // does not, and treats the rest as it treats every peer.
+  bool _takes_key(const Connection& connection, const MessageMetaHandler& meta_handler) const {
+    return key_patterns_.takes(connection.key_owner(), meta_handler.key_type, meta_handler.key_evaluation);
+  }
+  // A keyed message's MessageMetaHandler fields for the filters of `type`;
+  // nothing for a type no peer filters.
+  void _match_key(MessageMetaHandler& meta_handler, std::uint32_t type);
 
   // The per-message path; see the file comment for the order of the cases.
   void _handle_message(Connection::pointer conn, const MultiplexerMessage& msg, std::shared_ptr<const RawMessage> raw);
@@ -313,30 +335,34 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
   // whom: ALL and whom: ANY over one peer type's connections, to the peers
   // whose Routing takes the path; the last resorts among the others get
-  // the message when no such peer could.
+  // the message when no such peer could. A keyed message skips the peers
+  // whose filter does not take its key (_takes_key).
   unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
   unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
 
-  // Why a rule queued a message nowhere: no living peer of the type,
-  // routing off on every one, or the queue full on every one that takes it.
-  // `by_any` names the Routing flag the rule tests. Only on that failure
-  // path. _unrouted_text() is the log line for it.
-  enum Unrouted : unsigned int { NONE_PRESENT, ROUTING_OFF, ALL_FULL };
-  Unrouted _unrouted(const MultiplexerMessageDescription::RoutingRule& rule, bool by_any) const;
-  std::string _unrouted_text(Unrouted why, std::uint32_t peer_type) const;
-  // How a recording says it: NO_RECIPIENT, NOT_ACCEPTED or QUEUE_FULL.
+  // Why a rule queued a message nowhere: no living peer of the type, no
+  // filter of one that takes its key, routing off on every one that does,
+  // or the queue full on every one that takes it. `by_any` names the
+  // Routing flag the rule tests. Only on that failure path.
+  // _unrouted_text() is the log line for it.
+  enum Unrouted : unsigned int { NONE_PRESENT, ROUTING_OFF, ALL_FULL, KEY_NOT_TAKEN };
+  Unrouted _unrouted(const MessageMetaHandler& meta_handler, const MultiplexerMessageDescription::RoutingRule& rule,
+                     bool by_any) const;
+  std::string _unrouted_text(Unrouted why, std::uint32_t peer_type, const MessageMetaHandler& meta_handler) const;
+  // How a recording says it: NO_RECIPIENT, NOT_ACCEPTED, QUEUE_FULL or KEY_NOT_TAKEN.
   static RoutedMessage::Disposition _unrouted_disposition(Unrouted why);
 
-  // What drops_ tells apart, besides the three above: the kinds of line
+  // What drops_ tells apart, besides the four above: the kinds of line
   // about a message that went nowhere (LogSummary::Kind::reason).
   enum Dropped : unsigned int {
-    NOT_CONNECTED = ALL_FULL + 1,  // `to` names no connected peer
-    QUEUE_FULL,                    // one peer's copy, to it or under whom ALL
+    NOT_CONNECTED = KEY_NOT_TAKEN + 1,  // `to` names no connected peer
+    QUEUE_FULL,                         // one peer's copy, to it or under whom ALL
     UNKNOWN_TYPE,
     NO_RULE,
     UNKNOWN_PROTOCOL_TYPE,
     BAD_SEARCH,
     ACCEPT_FAILED,  // not a message: the accept loop out of descriptors
+    KEY_TOO_LONG,   // a key over MAX_KEY_SIZE
   };
   // A peer's copy its full queue refused; the line names the peer.
   void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection);
@@ -422,9 +448,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
   // RULES_CONTROL from a peer: reload if asked, answer RULES_STATUS.
   void _handle_rules_control(MessageMetaHandler& meta_handler);
-  // PEER_CONTROL from a peer: its routing from now on, answered with
-  // PEER_STATUS once in effect.
+  // PEER_CONTROL from a peer: its routing and key filters from now on,
+  // answered with PEER_STATUS once in effect, or with the error that left
+  // both as they were.
   void _handle_peer_control(MessageMetaHandler& meta_handler);
+  // A message type's name for a log line: from the rules, or its number.
+  std::string _type_name(std::uint32_t type) const;
   void _fill_rules_status(RulesStatus& status);
   // The file's bytes, or false with `error` set: no file named,
   // unreadable, or empty (nothing at all, or caught between a truncate
@@ -498,6 +527,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   std::uint64_t stop_dropped_read_ = 0;
   // The lines about messages that went nowhere: see LogSummary.
   LogSummary drops_;
+  // The patterns of every connected peer's key filters, by message type.
+  KeyPatterns key_patterns_;
 };  // class Server
 
 };  // namespace multiplexer

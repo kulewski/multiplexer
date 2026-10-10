@@ -42,7 +42,8 @@ class ThreadedClient::Core {
   void set_drop_observer(DropObserver observer);
   std::uint64_t dropped();
   void set_resolver(BasicClient::Resolver resolver);
-  void set_routing(const Routing& routing);
+  void set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged);
+  void set_key_filters(const BasicClient::KeyFilters& filters, BasicClient::AcknowledgedCallback acknowledged);
   bool routing_acknowledged();
   bool flush_all(float timeout);
   void flush_all_with_callback(float timeout, FlushCallback done);

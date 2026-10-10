@@ -69,9 +69,11 @@ struct ConnectionsManagerTraits;
 
 namespace impl {
 std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id);
-// The same with the peer's Routing in the welcome, for a client that has one set.
-std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type, std::uint64_t instance_id,
-                                                         const Routing& routing);
+// The same with the peer's Routing and key filters in the welcome, for a
+// client that has them set.
+std::shared_ptr<const RawMessage> create_welcome_message(
+    std::uint32_t peer_type, std::uint64_t instance_id, const Routing& routing,
+    const google::protobuf::RepeatedPtrField<KeyFilter>& key_filters);
 };  // namespace impl
 
 // The Routing flags as text for a log line.
@@ -84,6 +86,37 @@ inline bool restricted(const Routing& routing) { return !routing.any() || !routi
 // Whether two Routings say the same.
 inline bool same_routing(const Routing& first, const Routing& second) {
   return first.any() == second.any() && first.all() == second.all() && first.last_resort() == second.last_resort();
+}
+// Key filters as text for a log line: each type's patterns, quoted.
+inline std::string key_filters_text(const google::protobuf::RepeatedPtrField<KeyFilter>& filters) {
+  std::string text;
+  for (const KeyFilter& filter : filters) {
+    text += (text.empty() ? "type " : "; type ") + std::to_string(filter.type()) + ":";
+    for (const std::string& pattern : filter.pattern()) {
+      text += " \"" + pattern + "\"";
+    }
+  }
+  return text.empty() ? "every key" : text;
+}
+// Whether two sets of key filters say the same, in the same order.
+inline bool same_key_filters(const google::protobuf::RepeatedPtrField<KeyFilter>& first,
+                             const google::protobuf::RepeatedPtrField<KeyFilter>& second) {
+  if (first.size() != second.size()) {
+    return false;
+  }
+  for (int index = 0; index < first.size(); ++index) {
+    const KeyFilter& one = first.Get(index);
+    const KeyFilter& other = second.Get(index);
+    if (one.type() != other.type() || one.pattern_size() != other.pattern_size()) {
+      return false;
+    }
+    for (int pattern = 0; pattern < one.pattern_size(); ++pattern) {
+      if (one.pattern(pattern) != other.pattern(pattern)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 template <typename ConnectionsManagerImplementation>
@@ -374,9 +407,10 @@ class ConnectionsManager {
   inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type) const {
     return impl::create_welcome_message(peer_type, instance_id_);
   }
-  inline std::shared_ptr<const RawMessage> create_welcome_message(std::uint32_t peer_type,
-                                                                  const Routing& routing) const {
-    return impl::create_welcome_message(peer_type, instance_id_, routing);
+  inline std::shared_ptr<const RawMessage> create_welcome_message(
+      std::uint32_t peer_type, const Routing& routing,
+      const google::protobuf::RepeatedPtrField<KeyFilter>& key_filters) const {
+    return impl::create_welcome_message(peer_type, instance_id_, routing, key_filters);
   }
 
  protected:

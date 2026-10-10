@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, Mapping, TypeVar, cast
 
 from multiplexer.Multiplexer_pb2 import DeliveryError, MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import types
@@ -110,6 +110,7 @@ class Request:
         self.connection = connection
         self.answered = False
         self.dropped = False  # the server said why; no warning from __del__
+        self.accepted = 0  # its place among the requests the queue took, which a change's acknowledgement waits for
 
     @property
     def client(self) -> ThreadedClient:
@@ -190,6 +191,17 @@ class Request:
             )
 
 
+class _unraisable:
+    """sys.unraisablehook's argument for what a callback raised where
+    nothing could catch it, as CPython makes one: the default hook prints
+    the traceback, and nothing keeps it."""
+
+    def __init__(self, exc_info: Any, callback: Any) -> None:
+        self.exc_type, self.exc_value, self.exc_traceback = exc_info
+        self.err_msg = None
+        self.object = callback
+
+
 _ThreadedServerT = TypeVar("_ThreadedServerT", bound="BaseThreadedMultiplexerServer")
 
 
@@ -252,6 +264,11 @@ class BaseThreadedMultiplexerServer:
         self._queue: collections.deque[Request] = collections.deque()
         self._cond = threading.Condition()
         self._busy = 0  # workers running a handler
+        self._accepted = 0  # requests the queue took so far
+        # A change acknowledged, waiting for the requests the queue took
+        # before it: [before, remaining, callback], the callback run by
+        # serve_forever() once `remaining` of them are done.
+        self._acknowledged: list[list[Any]] = []
         self.dropped = 0  # requests dropped for a full queue, or while leaving
         self._drop_lines = _DropLines()  # what is said about the requests a full queue dropped
         self._accepting = True
@@ -288,6 +305,45 @@ class BaseThreadedMultiplexerServer:
         """This backend's instance id, what a client addresses with `to`;
         known from construction, before connect() or serve_forever() connects."""
         return self.client.instance_id
+
+    def set_key_filters(
+        self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
+    ) -> None:
+        """Which keys of each message type reach this backend by the rules;
+        see ThreadedClient.set_key_filters. Set before connect() or
+        serve_forever() to be in effect from the first request; a drain
+        keeps them. `on_acknowledged()`, when given, is called on
+        serve_forever()'s thread, before periodic_task(), once every
+        multiplexer has the change, or a later one, and the workers have
+        finished every request routed under the filters before; the
+        acknowledgement wakes serve_forever() as a drain's does."""
+        self.client.set_key_filters(filters, lambda: self._acknowledge(on_acknowledged))
+
+    def _acknowledge(self, callback: Callable[[], None] | None) -> None:
+        """The io thread: a change acknowledged by every multiplexer. Every
+        request the queue took before now is queued, held by a worker, or
+        done: the ones not done are counted, and each worker that finishes
+        one counts down (_work)."""
+        with self._cond:
+            self._acknowledged.append([self._accepted, len(self._queue) + self._busy, callback])
+        self._wake.set()
+
+    def _run_acknowledged(self) -> None:
+        """serve_forever()'s thread: the callbacks whose requests are done,
+        in order, since a later change counts the requests of an earlier
+        one too. What one raises goes to sys.unraisablehook."""
+        with self._cond:
+            done = 0
+            while done < len(self._acknowledged) and self._acknowledged[done][1] == 0:
+                done += 1
+            due = [callback for _, _, callback in self._acknowledged[:done] if callback is not None]
+            del self._acknowledged[:done]
+        for callback in due:
+            try:
+                callback()
+            except Exception:
+                # A stand-in for sys.UnraisableHookArgs, which Python makes only for itself.
+                sys.unraisablehook(cast(Any, _unraisable(sys.exc_info(), callback)))
 
     # What subclasses implement or override.
 
@@ -371,7 +427,10 @@ class BaseThreadedMultiplexerServer:
             self._draining_since = time.monotonic()
             client = self._client
             if client is not None:
-                client.set_routing(self.drain_routing)  # close()'s too; nothing on a client already shut down
+                # close()'s too; nothing on a client already shut down. The
+                # loop looks again when every multiplexer has it, rather than
+                # at its next poll.
+                client.set_routing(self.drain_routing, self._wake.set)
             self._wake.set()
 
     def drained(self) -> bool:
@@ -426,7 +485,8 @@ class BaseThreadedMultiplexerServer:
     def serve_forever(self, poll: float = 1.0, drain_seconds: float = 0.0) -> None:
         """connect(), then run
         until stop() or a drain is over: every `poll` seconds, or sooner
-        when woken, call periodic_task(); then take no new message, let
+        when woken, by a drain, a stop or a change of the routing or the
+        key filters acknowledged, call periodic_task(); then take no new message, let
         the workers finish the queue, close the connections and return.
         The calling thread only polls: the handlers run on the workers,
         which is the point."""
@@ -437,6 +497,7 @@ class BaseThreadedMultiplexerServer:
             while True:
                 self._wake.wait(wait_seconds(poll))
                 self._wake.clear()
+                self._run_acknowledged()
                 if not self.working or (self.draining and self.drained()) or self._failure is not None:
                     break  # checked after the wait: a close() meanwhile ends it before periodic_task()
                 self.periodic_task()
@@ -538,6 +599,8 @@ class BaseThreadedMultiplexerServer:
             # worker is about to take, and _busy counts only what was taken.
             accepted = accepting and len(self._queue) + self._busy < self.workers + self.queue_size
             if accepted:
+                request.accepted = self._accepted
+                self._accepted += 1
                 self._queue.append(request)
                 self._cond.notify()
             else:
@@ -597,8 +660,17 @@ class BaseThreadedMultiplexerServer:
                 self.stop()
                 return
             finally:
+                wake = False
                 with self._cond:
                     self._busy -= 1
+                    for acknowledged in self._acknowledged:
+                        if acknowledged[1] and request.accepted < acknowledged[0]:
+                            acknowledged[1] -= 1
+                            wake = wake or not acknowledged[1]  # its callback is due
+                    # A drain waits for the last request too: serve_forever() looks now.
+                    wake = wake or (self._draining_since is not None and not self._queue and not self._busy)
+                if wake:
+                    self._wake.set()
                 del request
 
     def _handle(self, request: Request) -> None:

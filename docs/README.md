@@ -254,6 +254,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
   the protocol's own messages, for peers written without the library.
 - [Semantics: delivery, failures and defaults](semantics.md): what is promised,
   what happens when things die, and every timeout and limit in one table.
+- [Keys](keys.md): a message's key and the peers' key filters, which send
+  the messages of one type to some of its peers: pools by tenant, workers
+  by loaded model, subscriptions by group.
 - [Building](building.md): the packages a clean machine needs, bringing
   your own protobuf, the build configurations, the Docker check, and the
   build without Bazel.

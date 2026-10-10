@@ -158,12 +158,27 @@ class Client : public ExceptionDefinitions {
   // Which of a multiplexer's routing paths reach this peer, and whether
   // every multiplexer has it in effect; see BasicClient::set_routing. The
   // control message goes out and the answers arrive as the loop runs,
-  // inside the calls that run it.
-  void set_routing(const Routing& routing) {
+  // inside the calls that run it. `acknowledged`, when given, is called
+  // once this change, or a later one, is acknowledged, from inside a
+  // receive_message(): the next one after every message read before the
+  // acknowledgement was received, so that a loop of receives has handled
+  // them, or the one waiting when it came. It must not receive or query
+  // through this client.
+  void set_routing(const Routing& routing,
+                   BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback()) {
     basic_client_->check_not_orphaned();
-    basic_client_->set_routing(routing);
+    basic_client_->set_routing(routing, std::move(acknowledged));
   }
   const Routing& routing() const { return basic_client_->routing(); }
+  // Which keys of each message type reach this peer by the rules; see
+  // BasicClient::set_key_filters. Acknowledged with the routing, and
+  // `acknowledged` as for set_routing().
+  void set_key_filters(const BasicClient::KeyFilters& filters,
+                       BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback()) {
+    basic_client_->check_not_orphaned();
+    basic_client_->set_key_filters(filters, std::move(acknowledged));
+  }
+  const BasicClient::KeyFilters& key_filters() const { return basic_client_->key_filters(); }
   bool routing_acknowledged() const {
     basic_client_->check_not_orphaned();  // the parent's state in a forked child: raise, as ThreadedClient's
     return basic_client_->routing_acknowledged();
@@ -212,8 +227,24 @@ class Client : public ExceptionDefinitions {
     return basic_client_->next_incoming_message();
   }
 
-  std::pair<shared_ptr<MultiplexerMessage>, ConnectionWrapper> receive_message(float timeout = DEFAULT_READ_TIMEOUT) {
-    BasicClient::IncomingMessagesBuffer::value_type raw = read_raw_message(timeout);
+  // The next message, as read_raw_message(), running the callbacks of
+  // the changes acknowledged meanwhile (set_routing()). With
+  // `end_on_acknowledgement` the wait also ends, throwing OperationTimedOut
+  // as if the time had run out, as soon as a change is acknowledged: what
+  // a loop of receives, the server classes' among them, acts on at once
+  // rather than at its next poll.
+  BasicClient::IncomingMessagesBuffer::value_type receive_raw_message(float timeout = DEFAULT_READ_TIMEOUT,
+                                                                      bool end_on_acknowledgement = false) {
+    basic_client_->check_not_orphaned();
+    std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
+    if (!basic_client_->wait_to_receive(*timer, end_on_acknowledgement)) {
+      MXTHROW(OperationTimedOut());
+    }
+    return basic_client_->next_incoming_message();
+  }
+  std::pair<shared_ptr<MultiplexerMessage>, ConnectionWrapper> receive_message(float timeout = DEFAULT_READ_TIMEOUT,
+                                                                               bool end_on_acknowledgement = false) {
+    BasicClient::IncomingMessagesBuffer::value_type raw = receive_raw_message(timeout, end_on_acknowledgement);
     return std::make_pair(raw.third, raw.second);
   }
 

@@ -96,7 +96,11 @@ bazel run //compdb                         # compile_commands.json for clangd, a
   side and must stay clean. The analysis only sees instantiated code, so a
   template method nobody calls is not checked. See `lib/thread_checker.h`.
 - Include guards are `MX_<PATH>_H_` derived from the file path; no
-  `#pragma once`.
+  `#pragma once`. An external library's header that its BUILD exposes
+  without `includes`, RE2's, is included in quotes, `#include "re2/re2.h"`:
+  this repository's `.bazelrc` puts external repositories on the
+  `-isystem` path (`external_include_paths`), a workspace that builds
+  `@mx` may not, and there angle brackets do not find it.
 - Names, not numbers: scenarios, documents, decision entries.
 - No empty `__init__.py`; Bazel creates them in runfiles.
 - Formatting is not optional: run `./format.sh` before finishing. It also

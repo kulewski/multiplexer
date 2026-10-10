@@ -96,6 +96,7 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     return;  // drop
   }
   incoming_messages_.push_back(incoming);
+  ++enqueued_;
 }
 
 // After the socket's connect: the handshake, or the next address the
@@ -120,12 +121,56 @@ void BasicClient::_connected(Connection::pointer conn, const asio::error_code& e
   }
 }
 
-void BasicClient::set_routing(const Routing& routing) {
+void BasicClient::set_routing(const Routing& routing, AcknowledgedCallback acknowledged) {
   MX_DCHECK_RUN_ON(&owner_thread());
   routing_ = routing;
-  ++routing_version_;
-  welcome_message_.reset();  // the next connection's welcome carries the new routing
   MX_LOG(INFO, LOWVERBOSITY, CTX("BasicClient") TEXT("routing " + routing_text(routing)));
+  if (acknowledged) {
+    acknowledged_callbacks_.push_back(std::move(acknowledged));
+  }
+  _routing_changed();
+}
+
+void BasicClient::set_key_filters(const KeyFilters& filters, AcknowledgedCallback acknowledged) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  check_key_filters(filters);
+  if (acknowledged) {
+    acknowledged_callbacks_.push_back(std::move(acknowledged));
+  }
+  key_filters_ = filters;
+  key_filters_message_.Clear();
+  for (const KeyFilters::value_type& filter : filters) {
+    KeyFilter* message = key_filters_message_.Add();
+    message->set_type(filter.first);
+    for (const std::string& pattern : filter.second) {
+      message->add_pattern(pattern);
+    }
+  }
+  MX_LOG(INFO, LOWVERBOSITY, CTX("BasicClient") TEXT("key filters " + key_filters_text(key_filters_message_)));
+  _routing_changed();
+}
+
+// What a library can check without RE2; the multiplexer checks the rest.
+void BasicClient::check_key_filters(const KeyFilters& filters) {
+  for (const KeyFilters::value_type& filter : filters) {
+    if (filter.first <= types::MAX_MULTIPLEXER_META_PACKET) {
+      throw std::invalid_argument("a key filter for message type " + std::to_string(filter.first) +
+                                  ", a protocol type");
+    }
+    for (const std::string& pattern : filter.second) {
+      if (pattern.size() > MAX_KEY_PATTERN_SIZE) {
+        throw std::invalid_argument("a key pattern of " + std::to_string(pattern.size()) +
+                                    " bytes, over the limit of " + std::to_string(MAX_KEY_PATTERN_SIZE) +
+                                    " (MAX_KEY_PATTERN_SIZE)");
+      }
+    }
+  }
+}
+
+void BasicClient::_routing_changed() {
+  ++routing_version_;
+  confirmed_ = false;
+  welcome_message_.reset();  // the next connection's welcome carries the new routing
   for (ConnectionById::iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
     if (Connection::pointer conn = entry->second.lock()) {
       if (conn->living()) {
@@ -133,6 +178,7 @@ void BasicClient::set_routing(const Routing& routing) {
       }
     }
   }
+  _update_confirmation();  // with no connection, at once
 }
 
 // Forced past a full outgoing queue, since the peer that steps out is
@@ -141,6 +187,7 @@ void BasicClient::set_routing(const Routing& routing) {
 void BasicClient::_send_routing(Connection::pointer conn) {
   PeerControl control;
   *control.mutable_routing() = routing_;
+  *control.mutable_key_filter() = key_filters_message_;
   MultiplexerMessage mxmsg;
   mxmsg.set_id(random_());
   mxmsg.set_sender(instance_id_);
@@ -157,27 +204,27 @@ void BasicClient::_send_routing(Connection::pointer conn) {
 }
 
 // The answer to the last PEER_CONTROL sent on this connection confirms the
-// current routing; the answer to an older one, when two changes were made
-// in a row, confirms nothing, whatever flags it carries.
+// current routing and key filters; the answer to an older one, when two
+// changes were made in a row, confirms nothing, whatever it carries. A
+// refusal is logged as an error: a key pattern of the program's that does
+// not compile, most likely, which the program should hear of.
 void BasicClient::_on_peer_status(Connection::pointer conn, const MultiplexerMessage& mxmsg) {
   PeerStatus status;
   if (!status.ParseFromString(mxmsg.message()) || status.has_error()) {
-    MX_LOG(WARNING, LOWVERBOSITY,
+    MX_LOG(ERROR, LOWVERBOSITY,
            CTX("BasicClient") TEXT("PEER_STATUS from " + repr(conn->peer_id()) + ": " +
                                    (status.has_error() ? status.error() : "garbled")));
     return;
   }
   auto& data = conn->managers_private_data();
-  if (mxmsg.references() == data.routing_request_id && same_routing(status.routing(), routing_)) {
+  if (mxmsg.references() == data.routing_request_id && same_routing(status.routing(), routing_) &&
+      same_key_filters(status.key_filter(), key_filters_message_)) {
     data.routing_acknowledged = routing_version_;
+    _update_confirmation();
   }
 }
 
-bool BasicClient::routing_acknowledged() const {
-  MX_DCHECK_RUN_ON(&owner_thread());
-  if (has_incoming_messages()) {
-    return false;  // read, not yet handed out: still on its way
-  }
+bool BasicClient::_all_confirmed() const {
   for (ConnectionByTarget::const_iterator entry = connection_by_target_.begin(); entry != connection_by_target_.end();
        ++entry) {
     if (Connection::pointer conn = entry->second.lock()) {
@@ -193,6 +240,80 @@ bool BasicClient::routing_acknowledged() const {
     }
   }
   return true;
+}
+
+// A message a multiplexer routed under the routing before reaches this
+// client before that multiplexer's confirmation, both down one connection
+// in order, so once every connection has confirmed, what came before is in
+// the queue up to the count noted then, and nothing after it is old: a
+// count where waiting for the queue to be empty would wait for as long as
+// work keeps coming. A connection that registers with the current routing
+// in its welcome brings nothing older, and one whose welcome was older is
+// unconfirmed until its PEER_STATUS, which then moves the count on.
+void BasicClient::_update_confirmation() {
+  if (!_all_confirmed()) {
+    confirmed_ = false;
+    return;
+  }
+  if (!confirmed_) {
+    confirmed_ = true;
+    confirmed_enqueued_ = enqueued_;
+  }
+  if (routing_acknowledged() && (acknowledged_version_ != routing_version_ || !acknowledged_callbacks_.empty())) {
+    acknowledged_version_ = routing_version_;
+    _acknowledged();
+  }
+}
+
+void BasicClient::_acknowledged() {
+  acknowledged_wake_ = true;
+  if (incoming_sink_) {
+    run_acknowledged_callbacks();  // everything before went to the sink already
+  }
+}
+
+bool BasicClient::routing_acknowledged() const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  return confirmed_ && dequeued_ >= confirmed_enqueued_ && _all_confirmed();
+}
+
+void BasicClient::run_acknowledged_callbacks() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (acknowledged_callbacks_.empty() || shuts_down_ || !routing_acknowledged()) {
+    return;
+  }
+  std::vector<AcknowledgedCallback> due;
+  due.swap(acknowledged_callbacks_);  // a callback's own change waits for its own acknowledgement
+  for (AcknowledgedCallback& callback : due) {
+    try {
+      callback();
+    } catch (const std::exception& error) {
+      MX_LOG(ERROR, LOWVERBOSITY,
+             CTX("BasicClient") TEXT(std::string("a callback of an acknowledged change threw: ") + error.what()));
+    }
+  }
+}
+
+bool BasicClient::wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledgement) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  for (;;) {
+    run_acknowledged_callbacks();
+    if (has_incoming_messages()) {
+      return true;
+    }
+    if (end_on_acknowledgement && take_acknowledged_wake()) {
+      return false;
+    }
+    if (timer.expired()) {
+      break;
+    }
+    if (run_one() == 0) {
+      MXTHROW(NotConnected());
+    }
+  }
+  poll();  // a last look, without waiting, as in wait_for_incoming_message
+  run_acknowledged_callbacks();
+  return has_incoming_messages();
 }
 
 // Idempotent, and the second call may come from any thread: a client that
@@ -225,7 +346,8 @@ void BasicClient::shutdown() {
       conn->close_gracefully(CLOSE_READ_SECONDS);  // among those closing then, see connection_destroyed
     }
   }
-  _drop_outbox();  // what still waits goes nowhere now
+  _drop_outbox();                   // what still waits goes nowhere now
+  acknowledged_callbacks_.clear();  // never called now
   drop_lines_.flush();
 }
 
@@ -340,6 +462,9 @@ void BasicClient::connection_destroyed(Connection* conn) {
   if (connection_observer_) {
     connection_observer_(
         ConnectionWrapper(Connection::pointer(), target, conn->managers_private_data().expected_endpoint, this), false);
+  }
+  if (!shuts_down_) {
+    _update_confirmation();  // the one that had not confirmed may be this
   }
 }
 
@@ -659,6 +784,7 @@ BasicClient::IncomingMessagesBuffer::value_type BasicClient::next_incoming_messa
   Assert(has_incoming_messages());
   IncomingMessagesBuffer::value_type next = incoming_messages_.front();
   incoming_messages_.pop_front();
+  ++dequeued_;
   return next;
 }
 

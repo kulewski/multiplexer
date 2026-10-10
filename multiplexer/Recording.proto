@@ -101,6 +101,8 @@ message RoutedMessage {
                         // of the type that takes the message
     NOT_ACCEPTED = 6;   // the recipient takes no message by this path (its Routing); in a rule's record,
                         // no peer of the type does
+    KEY_NOT_TAKEN = 7;  // the recipient's key filter for the type does not take the message's key; in a
+                        // rule's record, no peer of the type takes it
   }
   // The envelope, as received. `sender` was named `from` before 2.4.0, the
   // same number, so that a recording of either reads alike.
@@ -122,6 +124,7 @@ message RoutedMessage {
   optional bool error_reported = 11;    // a DELIVERY_ERROR goes back to the sender for this
   optional bytes payload = 12;
   optional bool truncated = 13;         // payload cut at the --record-payload-bytes limit
+  optional string key = 14;             // the envelope's key (Multiplexer.proto's KeyFilter), when it has one
 }
 
 // The multiplexer put another rules file in use (docs/operations.md,

@@ -44,6 +44,7 @@ touch:
 | `references` | the id of the message this one answers; `query()` matches replies by it |
 | `workflow` | opaque bytes copied from request to reply, for tracing |
 | `report_delivery_error` | for directly addressed messages: ask for a `DELIVERY_ERROR` when the target is gone |
+| `key` | what the message is about, at most `MAX_KEY_SIZE` (256) bytes, for peers that take only some keys of its type ([keys](keys.md)); a longer one is a `ValueError` where the message is built |
 
 ## Timeouts
 
@@ -111,7 +112,7 @@ one class that needs the mark, since nothing heartbeats between its calls;
 `ThreadedClient`, `AsyncClient` and both server classes run the loop all
 the time and their peer types are ordinary ones.
 
-- `query(message, type=None, timeout=10, to=0, multiplexer=SyncClient.ONE, with_connection=False, on_received=None)`:
+- `query(message, type=None, timeout=10, to=0, multiplexer=SyncClient.ONE, with_connection=False, on_received=None, key=None)`:
   sends a request and returns the reply, a
   `MultiplexerMessage`. `message` is bytes, a `str` (encoded as UTF-8), or a
   protocol buffer message (serialized), with `type`, which it needs, and
@@ -206,17 +207,44 @@ the time and their peer types are ordinary ones.
   keyword arguments and returns the id. The backend side
   is `MultiplexerServer`, or `parse_pickle()` and `send_pickle()` on any
   `BaseMultiplexerServer`.
-- `receive_message(timeout=-1)`: waits for the next message, with no
-  deadline by default, and returns `(message, connection)`. Raises
-  `OperationTimedOut`, or `NotConnected` at once when nothing could
-  arrive: no connection and none on its way, on a client never
-  connected, made with no address, or shut down.
-- `set_routing(routing)` and `routing_acknowledged()`: which of a
-  multiplexer's routing paths reach this peer, a `Routing` from
-  `multiplexer.Multiplexer_pb2` with `any`, `all` and `last_resort`, told
-  to every multiplexer and carried in every welcome from then on, and
-  whether every one has it in effect; what a backend's drain uses, see
-  [How a backend leaves](leaving.md#what-a-draining-backend-still-takes).
+- `receive_message(timeout=-1, *, end_on_acknowledgement=False)`: waits
+  for the next message, with no deadline by default, and returns
+  `(message, connection)`. Raises `OperationTimedOut`, or `NotConnected`
+  at once when nothing could arrive: no connection and none on its way, on
+  a client never connected, made with no address, or shut down. Runs the
+  `on_acknowledged` callbacks whose time came (below). With
+  `end_on_acknowledgement`, a change of the routing or the key filters
+  acknowledged ends the wait too, raising `OperationTimedOut` as the time
+  running out would: what a loop of receives acts on at once, the server
+  classes' loops among them.
+- `set_routing(routing, on_acknowledged=None)` and
+  `routing_acknowledged()`: which of a multiplexer's routing paths reach
+  this peer, a `Routing` from `multiplexer.Multiplexer_pb2` with `any`,
+  `all` and `last_resort`, told to every multiplexer and carried in every
+  welcome from then on, and whether every one has it in effect, with
+  everything they routed before received; what a backend's drain uses,
+  see [How a backend leaves](leaving.md#what-a-draining-backend-still-takes).
+  `on_acknowledged()`, when given, is called once the change, or a later
+  one, is acknowledged so: inside a `receive_message()`, the one after the
+  last message routed before was received, so that a loop of receives has
+  handled it, or the one waiting when the acknowledgement came. It must
+  not receive or query through this client; what it raises goes to
+  `sys.unraisablehook`.
+- `set_key_filters(filters, on_acknowledged=None)`: which keys of each message type reach this
+  peer by the rules, a mapping of message type to a list of patterns, RE2
+  regular expressions of which one must match a key whole; a type left
+  out takes every key, one with an empty list none, and a message without
+  a key arrives whatever its type. Replaces the filters set before, leaves the routing as it is, and
+  goes as `set_routing()` does: told to every multiplexer, carried in every
+  welcome, so set before connecting to be in effect from the first
+  message, and acknowledged by `routing_acknowledged()` and
+  `on_acknowledged` as the routing is. `ValueError` for
+  a protocol message type or a pattern over `MAX_KEY_PATTERN_SIZE`,
+  `TypeError` for one string where the list goes; a pattern a multiplexer
+  refuses is logged by it, and here as an error. `query(..., key=...)`
+  sends a request built from a payload with that key, and its search for a
+  backend carries it too; `send_message(..., key=...)` an event or any
+  other message. See [Keys](keys.md).
 - `refuse_arrivals()` and `refuse_unread()`: how the server classes
   leave. From the first on, a request that arrives is refused at once with
   the `DELIVERY_ERROR` a multiplexer sends for a peer that is gone, so
@@ -437,7 +465,13 @@ Echo([("10.0.0.1", 1980), ("10.0.0.2", 1980)], type=peers.ECHO_BACKEND).serve_fo
 
 The constructor, `BaseMultiplexerServer(addresses, type=None,
 drain_routing=None)`, makes the instance id; `type` may instead be the
-class attribute `multiplexer_client_type`. `connect()` connects to every
+class attribute `multiplexer_client_type`. `set_key_filters(filters,
+on_acknowledged=None)` declares which keys of each message type reach
+the backend, as on `SyncClient`; called before `connect()` or
+`serve_forever()`, it is in effect from the first request, and a drain
+keeps it ([keys](keys.md)). `on_acknowledged()` runs on the loop's thread,
+between two messages, once every multiplexer has the change and every
+request routed before it has been handled. `connect()` connects to every
 address, once: it starts every connection at once and returns when each
 has its handshake done or has failed, 10 s at most in all, so a
 multiplexer that drops the connect or never answers holds up the others'
@@ -465,7 +499,9 @@ someone sent this backend included, and then calls
 `periodic_task()`, whether a message came or the poll timed out. Each wait
 ends within `poll`, so anything checked from `periodic_task()` takes
 effect within one poll, unless `poll` sets no deadline
-([timeouts](#timeouts)). It returns, with the connections closed, when
+([timeouts](#timeouts)); a change of the routing or the key filters that
+every multiplexer has acknowledged, a drain's included, ends the wait
+too, so that `periodic_task()` and `drained()` see it at once. It returns, with the connections closed, when
 `working` is cleared or a drain is over. `loop_iter(timeout)` is the single
 step, for embedding in a loop of your own; it raises `OperationTimedOut`
 after `timeout` seconds.
@@ -644,7 +680,11 @@ through `self`.
   queue_size=1024, decline_searches_when_full=False, timeout=10,
   drain_routing=None)`
   only makes the instance id; `type` may instead be the class attribute
-  `multiplexer_client_type`. `connect()` starts the workers and connects,
+  `multiplexer_client_type`. `set_key_filters(filters,
+  on_acknowledged=None)`, as on `BaseMultiplexerServer`, goes before
+  `connect()`; `on_acknowledged()` runs on `serve_forever()`'s thread,
+  before `periodic_task()`, once every multiplexer has the change and the
+  workers have finished every request routed before it. `connect()` starts the workers and connects,
   to every address at once against one `timeout`, as
   `BaseMultiplexerServer` does, once, and `serve_forever()` calls it first, so nothing reaches
   `handle_message()` before your `__init__` has finished, and no
@@ -708,7 +748,8 @@ through `self`.
   other condition, and runs on the io thread, so it must be quick.
 - `serve_forever(poll=1.0, drain_seconds=0.0)` runs until `stop()` or a
   drain is over, calling `periodic_task()` every `poll` seconds on its own
-  thread; then it takes no new message, lets the workers finish the
+  thread, and at once when a change of the routing or the key filters is
+  acknowledged, a drain's included, or a drain's last request is done; then it takes no new message, lets the workers finish the
   queue, closes the connections and returns. `stop()`, `start_draining()`,
   `draining`, `drained()`, `drain_routing` and `on_handler_exception(exc)`
   are `BaseMultiplexerServer`'s, with the same meanings, `drained()`
@@ -754,9 +795,15 @@ client.shutdown()
 ```
 
 `on_drop=` and `dropped` are under [Messages the library gives up
-on](#messages-the-library-gives-up-on).
+on](#messages-the-library-gives-up-on). The constructor connects, so a
+client whose key filters must be in effect from its first message passes
+them as `key_filters=`; `set_key_filters()` changes them later, as on
+`SyncClient` ([keys](keys.md)). `set_routing()` and `set_key_filters()`
+take `on_acknowledged` there too, called on the io thread, as the other
+callbacks, so quick, once the change is acknowledged, after `on_message`
+had everything routed before; never after `shutdown()`.
 
-- `query(message, type=None, timeout=10, callback=None, to=0, multiplexer=ONE, with_connection=False, on_received=None)`
+- `query(message, type=None, timeout=10, callback=None, to=0, multiplexer=ONE, with_connection=False, on_received=None, key=None)`
   is the same three-stage algorithm as `SyncClient.query()`, taking
   `message` as it does, a whole `MultiplexerMessage` as the request itself;
   it raises the
@@ -912,9 +959,12 @@ await client.send_message(b"seen", type=types.SEARCH_EVENT)
 unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine function, or a plain one
 ```
 
-- `AsyncClient(addresses, type, timeout=10, loop=None, queue_size=1024, *, on_drop=None)`
+- `AsyncClient(addresses, type, timeout=10, loop=None, queue_size=1024, *, on_drop=None, key_filters=None)`
   connects and binds to the running loop (`on_drop` and `dropped`: [Messages
-  the library gives up on](#messages-the-library-gives-up-on)), blocking
+  the library gives up on](#messages-the-library-gives-up-on); `key_filters`
+  and `set_key_filters()` as on `ThreadedClient`, [keys](keys.md),
+  `on_acknowledged` of `set_routing()` and `set_key_filters()` called on the
+  loop, after the deliveries before it), blocking
   the loop while it connects: one address after another, a round trip
   each when its multiplexer is up, up to `timeout` for one that hangs, so
   `holder.get()` below costs the same;
@@ -937,7 +987,7 @@ unsubscribe = client.subscribe(types.SEARCH_EVENT, handle)   # a coroutine funct
   constructor, as `ThreadedClient.disconnect()` does, blocking the loop
   for the round trip to the io thread, as `connections_count()` does;
   `NotConnected` after `close()`.
-- `await query(message, type=None, timeout=10, to=0, multiplexer=ONE, with_connection=False, on_received=None)`
+- `await query(message, type=None, timeout=10, to=0, multiplexer=ONE, with_connection=False, on_received=None, key=None)`
   returns the reply and raises the same exceptions as `SyncClient`:
   `NotConnected`, `OperationTimedOut`, `OperationFailed`,
   `BackendError`; `to`, `multiplexer` and `with_connection` are

@@ -99,7 +99,9 @@ def run_sequential(worker: int, args: argparse.Namespace, queries: list[Query], 
                 time.sleep(args.sleep_between)
             started = time.time()
             try:
-                result = client.query(expand(payload, worker, round_, index, args), type=type_, timeout=args.timeout)
+                result = client.query(
+                    expand(payload, worker, round_, index, args), type=type_, timeout=args.timeout, key=args.key
+                )
             except Exception as error:  # report every failure kind by name
                 result = error
             if report_result(worker, round_, index, type_, started, result):
@@ -139,6 +141,7 @@ def run_async(worker: int, args: argparse.Namespace, queries: list[Query], clien
                 type=type_,
                 callback=lambda result, r=round_, i=index, t=type_, s=started: on_result(r, i, t, s, result),
                 timeout=args.timeout,
+                key=args.key,
             )
     with lock:
         while state["in_flight"]:
@@ -204,6 +207,7 @@ def run_workers(args: argparse.Namespace, queries: list[Query]) -> None:
                     type=type_,
                     callback=lambda result, r=round_, i=index, t=type_, s=started: inbox.put((r, i, t, s, result)),
                     timeout=args.timeout,
+                    key=args.key,
                 )
                 pending += 1
                 if args.sleep_between:
@@ -252,6 +256,7 @@ def main() -> None:
         "--workers", type=int, default=0, help="N threads sharing one ThreadedClient, each with its own reply queue"
     )
     parser.add_argument("--memory-every", type=int, default=0, help="emit a memory event every N answered queries")
+    parser.add_argument("--key", default=None, help="the key every request carries")
     args = parser.parse_args()
     common.start_memory_tracing(args.memory_every)
     queries = common.typed_payloads(args.query)

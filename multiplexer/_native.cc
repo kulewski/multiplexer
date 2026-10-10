@@ -214,6 +214,15 @@ static BasicClient::SendCallback send_callback_for(pybind11::function callback) 
   return python_callback<unsigned int>(callback);
 }
 
+// A change's on_acknowledged, the same in every client: a callable, called
+// once with nothing, or None for none.
+static BasicClient::AcknowledgedCallback acknowledged_callback_for(pybind11::object callback) {
+  if (callback.is_none()) {
+    return BasicClient::AcknowledgedCallback();
+  }
+  return python_callback<>(callback.cast<pybind11::function>());
+}
+
 // Client with the few signatures pybind11 needs: strings instead of
 // templates, and a read that releases the GIL.
 // One of a query's attempts, mxclient's: the tracker of the message it
@@ -261,6 +270,18 @@ struct PythonClient : public Client {
     {
       GilRelease release;
       next = Client::read_raw_message(timeout);
+    }
+    return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
+        pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
+  }
+  // receive_message's read: read_message, running the callbacks of the
+  // changes acknowledged meanwhile, each taking the GIL for itself, and
+  // with `end_on_acknowledgement` ending at an acknowledgement too.
+  mxtyping::Tuple<pybind11::bytes, ConnectionWrapper> receive_message(float timeout, bool end_on_acknowledgement) {
+    BasicClient::IncomingMessagesBuffer::value_type next;
+    {
+      GilRelease release;
+      next = Client::receive_raw_message(timeout, end_on_acknowledgement);
     }
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
         pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
@@ -513,14 +534,21 @@ struct PythonThreadedClient {
     client.forget_finished_ids();
   }
   // A serialized Routing (Multiplexer.proto), which the Python wrapper
-  // builds from the message class.
-  void set_routing_serialized(pybind11::bytes serialized) {
+  // builds from the message class; `on_acknowledged` a callable or None.
+  void set_routing_serialized(pybind11::bytes serialized, pybind11::object on_acknowledged) {
     Routing routing;
     if (!routing.ParseFromString(serialized)) {
       throw std::invalid_argument("not a serialized Routing");
     }
+    BasicClient::AcknowledgedCallback acknowledged = acknowledged_callback_for(on_acknowledged);
     GilRelease release;
-    client.set_routing(routing);
+    client.set_routing(routing, std::move(acknowledged));
+  }
+  // Message type to its patterns, from a Python dict of lists.
+  void set_key_filters(const BasicClient::KeyFilters& filters, pybind11::object on_acknowledged) {
+    BasicClient::AcknowledgedCallback acknowledged = acknowledged_callback_for(on_acknowledged);
+    GilRelease release;
+    client.set_key_filters(filters, std::move(acknowledged));
   }
   bool routing_acknowledged() {
     GilRelease release;
@@ -850,14 +878,22 @@ PYBIND11_MODULE(_native, module) {
       .def("connections_count", &multiplexer::PythonClient::connections_count)
       .def(
           "set_routing_serialized",
-          [](multiplexer::PythonClient& client, pybind11::bytes serialized) {
+          [](multiplexer::PythonClient& client, pybind11::bytes serialized, pybind11::object on_acknowledged) {
             multiplexer::Routing routing;
             if (!routing.ParseFromString(serialized)) {
               throw std::invalid_argument("not a serialized Routing");
             }
-            client.set_routing(routing);
+            client.set_routing(routing, multiplexer::acknowledged_callback_for(on_acknowledged));
           },
-          pybind11::arg("serialized"))
+          pybind11::arg("serialized"), pybind11::arg("on_acknowledged") = pybind11::none())
+      .def(
+          "set_key_filters",
+          [](multiplexer::PythonClient& client, const multiplexer::BasicClient::KeyFilters& filters,
+             pybind11::object on_acknowledged) {
+            client.set_key_filters(filters, multiplexer::acknowledged_callback_for(on_acknowledged));
+          },
+          pybind11::arg("filters"), pybind11::arg("on_acknowledged") = pybind11::none(),
+          "Which keys of each message type reach this peer; see multiplexer.mxclient.Client.set_key_filters.")
       .def("routing_acknowledged", &multiplexer::PythonClient::routing_acknowledged)
       .def("has_incoming_messages", &multiplexer::PythonClient::has_incoming_messages)
       .def("orphaned", &multiplexer::PythonClient::orphaned,
@@ -879,6 +915,10 @@ PYBIND11_MODULE(_native, module) {
       .def("bind_to_current_thread", &multiplexer::PythonClient::bind_to_current_thread)
 
       .def("read_raw_message", &multiplexer::PythonClient::read_message, pybind11::arg("timeout"))
+      .def("receive_raw_message", &multiplexer::PythonClient::receive_message, pybind11::arg("timeout"),
+           pybind11::arg("end_on_acknowledgement") = false,
+           "read_raw_message, running the callbacks of the changes acknowledged meanwhile; see "
+           "multiplexer.mxclient.Client.receive_message.")
 
       .def("_schedule_all", &multiplexer::PythonClient::schedule_all, pybind11::arg("serialized"), pybind11::arg("id"),
            pybind11::arg("type"), pybind11::arg("timeout") = multiplexer::DEFAULT_TIMEOUT)
@@ -929,7 +969,11 @@ PYBIND11_MODULE(_native, module) {
            "Forget the ids of every query that has ended; see "
            "multiplexer.threaded_client.ThreadedClient.forget_finished_ids.")
       .def("set_routing_serialized", &multiplexer::PythonThreadedClient::set_routing_serialized,
-           pybind11::arg("serialized"))
+           pybind11::arg("serialized"), pybind11::arg("on_acknowledged") = pybind11::none())
+      .def("set_key_filters", &multiplexer::PythonThreadedClient::set_key_filters, pybind11::arg("filters"),
+           pybind11::arg("on_acknowledged") = pybind11::none(),
+           "Which keys of each message type reach this peer; see "
+           "multiplexer.threaded_client.ThreadedClient.set_key_filters.")
       .def("routing_acknowledged", &multiplexer::PythonThreadedClient::routing_acknowledged)
       .def("flush_all", &multiplexer::PythonThreadedClient::flush_all, pybind11::arg("timeout"))
       .def("set_search_policy", &multiplexer::PythonThreadedClient::set_search_policy, pybind11::arg("answer"))
@@ -995,6 +1039,8 @@ PYBIND11_MODULE(_native, module) {
   module.attr("ROOM_GRACE_SECONDS") = pybind11::float_(multiplexer::ROOM_GRACE_SECONDS);
   module.attr("CLOSE_FLUSH_SECONDS") = pybind11::float_(multiplexer::CLOSE_FLUSH_SECONDS);
   module.attr("MAX_MESSAGE_SIZE") = pybind11::int_(multiplexer::MAX_MESSAGE_SIZE);
+  module.attr("MAX_KEY_SIZE") = pybind11::int_(multiplexer::MAX_KEY_SIZE);
+  module.attr("MAX_KEY_PATTERN_SIZE") = pybind11::int_(multiplexer::MAX_KEY_PATTERN_SIZE);
   module.attr("HEARTBIT_INTERVAL") = pybind11::float_(multiplexer::HEARTBIT_INTERVAL);
   module.attr("MAX_SECONDS") = pybind11::float_(mx::MAX_SECONDS);
   module.attr("CLOSE_READ_SECONDS") = pybind11::float_(multiplexer::CLOSE_READ_SECONDS);

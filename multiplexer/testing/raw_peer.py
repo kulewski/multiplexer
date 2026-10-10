@@ -11,7 +11,7 @@ import socket
 import struct
 import time
 import zlib
-from typing import Any
+from typing import Any, Mapping
 
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, WelcomeMessage
 from multiplexer.multiplexer_constants import types
@@ -93,10 +93,15 @@ class RawPeer:
             if mxmsg.type == type_:
                 return mxmsg
 
-    def handshake(self) -> tuple[MultiplexerMessage, WelcomeMessage]:
-        """Send our CONNECTION_WELCOME and wait for the multiplexer's; returns
-        its envelope and the WelcomeMessage inside (type MULTIPLEXER, its id)."""
+    def handshake(
+        self, key_filters: Mapping[int, list[str]] | None = None
+    ) -> tuple[MultiplexerMessage, WelcomeMessage]:
+        """Send our CONNECTION_WELCOME, carrying `key_filters` (message type to
+        its patterns) when given, and wait for the multiplexer's; returns its
+        envelope and the WelcomeMessage inside (type MULTIPLEXER, its id)."""
         welcome = WelcomeMessage(type=self.peer_type, id=self.instance_id)
+        for type_, patterns in (key_filters or {}).items():
+            welcome.key_filter.add(type=type_, pattern=patterns)
         self.send(welcome.SerializeToString(), types.CONNECTION_WELCOME)
         answer = self.receive_type(types.CONNECTION_WELCOME)
         theirs = WelcomeMessage()

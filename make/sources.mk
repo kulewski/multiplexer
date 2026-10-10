@@ -23,6 +23,7 @@ LIB_SRCS := \
   multiplexer/descriptor_table.cc \
   multiplexer/endpoint.cc \
   multiplexer/io/raw_message.cc \
+  multiplexer/key_filters.cc \
   multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
   multiplexer/recorder.cc \
@@ -110,6 +111,7 @@ HEADERS := \
   multiplexer/endpoint.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
+  multiplexer/key_filters.h \
   multiplexer/log_summary.h \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
@@ -171,6 +173,7 @@ CC_TEST_SRCS := \
   lib/options_test.cc \
   lib/protobuf/stream_test.cc \
   lib/thread_checker_test.cc \
+  multiplexer/backend/acknowledged_test.cc \
   multiplexer/backend/connect_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
@@ -189,6 +192,7 @@ CC_TEST_SRCS := \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
+  multiplexer/key_filters_test.cc \
   multiplexer/live_id_test.cc \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
@@ -208,6 +212,7 @@ CC_TEST_SRCS := \
 
 
 PY_TEST_FILES := \
+  multiplexer/acknowledged_test.py \
   multiplexer/aio_test.py \
   multiplexer/all_at_start_test.py \
   multiplexer/all_types_test.py \
@@ -232,6 +237,7 @@ PY_TEST_FILES := \
   multiplexer/infinite_timeout_test.py \
   multiplexer/interpreter_exit_test.py \
   multiplexer/keepalive_test.py \
+  multiplexer/key_routing_test.py \
   multiplexer/leak_test.py \
   multiplexer/lifetime_test.py \
   multiplexer/log_reader_gone_test.py \
