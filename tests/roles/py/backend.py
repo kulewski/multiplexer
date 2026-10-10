@@ -44,6 +44,24 @@ class Leaving:
         """Whether every multiplexer has the drain routing in effect."""
         return self.conn.routing_acknowledged()
 
+    def periodic_task(self):
+        """Notice a request to leave, from SIGTERM or the drain file: stop at
+        once, or start draining when a drain was configured; report the
+        multiplexers' acknowledgement of the drain routing once. Here, for
+        both classes: SIGTERM only sets common.STOP, so a class without
+        this method would never leave."""
+        if self.draining:
+            if not self.acked and self.acknowledged():
+                self.acked = True
+                emit("acked", ms=(time.monotonic() - self._draining_since) * 1000)
+            return
+        if common.STOP.is_set() or (self.drain_file and os.path.exists(self.drain_file)):
+            if not self.drain_seconds and not self.drain_min_handled:
+                self.working = False
+                return
+            self.start_draining()  # the multiplexers route it nothing new; keep serving what arrives
+            emit("draining", drain_seconds=self.drain_seconds)
+
     def drained(self):
         """The drain is over and at least --drain-min-handled requests were served."""
         return super().drained() and self.handled >= self.drain_min_handled
@@ -164,22 +182,6 @@ class Backend(Leaving, servers.BaseMultiplexerServer):
         if self.crash_after and self.handled >= self.crash_after:
             emit("crash", handled=self.handled)
             os._exit(3)
-
-    def periodic_task(self):
-        """Notice a request to leave, from SIGTERM or the drain file: stop at
-        once, or start draining when a drain was configured; report the
-        multiplexers' acknowledgement of the drain routing once."""
-        if self.draining:
-            if not self.acked and self.conn.routing_acknowledged():
-                self.acked = True
-                emit("acked", ms=(time.monotonic() - self._draining_since) * 1000)
-            return
-        if common.STOP.is_set() or (self.drain_file and os.path.exists(self.drain_file)):
-            if not self.drain_seconds and not self.drain_min_handled:
-                self.working = False
-                return
-            self.start_draining()  # the multiplexers route it nothing new; keep serving what arrives
-            emit("draining", drain_seconds=self.drain_seconds)
 
     def drained(self):
         """The drain period is over and at least --drain-min-handled requests were served."""
