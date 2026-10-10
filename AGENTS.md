@@ -51,8 +51,9 @@ bazel test --test_tag_filters=-slow //...  # the fast ones, a few seconds
 ./examples/venv.sh                         # examples/.venv, with which check.sh runs the pip examples and their type check
 ./format.sh                                # black, clang-format, buildifier, docs; --check also parses the YAML
 npx pyright                                # the Python package type-checked, after a build (stubs in bazel-bin)
-./format.sh --check                        # what CI runs on every push, with the fast tests
+./format.sh --check                        # what CI runs on every push, with the fast tests, also under libc++
 bazel build --config=clang //...           # clang thread-safety analysis (lib/thread_annotations.h)
+bazel test --config=libcxx --test_tag_filters=-slow //...  # against libc++ instead of libstdc++; needs libc++-18-dev
 bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only
 bazel build --config=asan //...            # AddressSanitizer
 ./check.sh --leaks                         # LeakSanitizer over the scenarios; soak_memory samples RSS per process

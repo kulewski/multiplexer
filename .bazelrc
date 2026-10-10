@@ -49,3 +49,16 @@ build:clang --repo_env=CC=clang-18
 build:clang --copt=-Wthread-safety
 # clang warns about K&R definitions in zlib even under -w; nothing to do about it.
 build:clang --per_file_copt=external/.*@-Wno-deprecated-non-prototype
+
+# libc++, LLVM's C++ standard library, which a build of @mx with clang may
+# use instead of libstdc++: code that compiles or behaves as intended only
+# with libstdc++ fails here first. The clang config with the toolchain's
+# own options changed, so the tools the build runs (protoc,
+# generate_constants) use libc++ too, and protobuf built from source
+# (WORKSPACE), since the system's libprotobuf is built against libstdc++.
+# Needs libc++-18-dev beside clang-18.
+build:libcxx --config=clang
+build:libcxx --repo_env=BAZEL_CXXOPTS=-stdlib=libc++
+build:libcxx --repo_env=BAZEL_LINKLIBS=-lc++:-lm
+build:libcxx --//:protoc=@com_google_protobuf//:protoc
+build:libcxx --//:protobuf_runtime=@com_google_protobuf//:protobuf

@@ -2,6 +2,47 @@
 # same way a consumer of @mx declares them, plus development-only tools.
 workspace(name = "mx")
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# protobuf from source, for --config=libcxx (.bazelrc) alone: the system's
+# libprotobuf, which every other configuration links, is built against
+# libstdc++. The version every other build of this repository uses
+# (packaging/wheels.sh), and the two repositories its BUILD needs that
+# nothing else declares. Declared ahead of mx_setup(), whose rules_python
+# would otherwise put a protobuf of its own under this name; nothing is
+# fetched unless that configuration asks for it.
+http_archive(
+    name = "com_google_protobuf",
+    canonical_id = "v21.12",
+    # Its BUILD loads cc_proto_library from rules_cc, which rules_python's
+    # rules_cc no longer has: protobuf sees the rules_cc it was released with.
+    repo_mapping = {"@rules_cc": "@protobuf_rules_cc"},
+    sha256 = "22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de",
+    strip_prefix = "protobuf-21.12",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.tar.gz"],
+)
+
+http_archive(
+    name = "protobuf_rules_cc",
+    sha256 = "0adbd6f567291ad526e82c765e15aed33cea5e256eeba129f1501142c2c56610",
+    strip_prefix = "rules_cc-818289e5613731ae410efb54218a4077fb9dbb03",
+    urls = ["https://github.com/bazelbuild/rules_cc/archive/818289e5613731ae410efb54218a4077fb9dbb03.zip"],
+)
+
+http_archive(
+    name = "zlib",
+    build_file = "@com_google_protobuf//:third_party/zlib.BUILD",
+    sha256 = "d14c38e313afc35a9a8760dadf26042f51ea0f5d154b0630a31da0540107fb98",
+    strip_prefix = "zlib-1.2.13",
+    urls = ["https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.xz"],
+)
+
+http_archive(
+    name = "rules_pkg",
+    sha256 = "8a298e832762eda1830597d64fe7db58178aa84cd5926d76d5b744d6558941c2",
+    urls = ["https://github.com/bazelbuild/rules_pkg/releases/download/0.7.0/rules_pkg-0.7.0.tar.gz"],
+)
+
 # The same two calls a consumer makes; see bazel/deps.bzl.
 load("//bazel:deps.bzl", "mx_dependencies")
 
@@ -14,8 +55,6 @@ mx_setup()
 # compile_commands.json for clangd: bazel run //compdb (see compdb/BUILD).
 # Development only; consumers of @mx do not need it. Declared after
 # mx_dependencies() so that our pinned dependencies win over its own.
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
 http_archive(
     name = "hedron_compile_commands",
     sha256 = "1b08abffbfbe89f6dbee6a5b33753792e8004f6a36f37c0f72115bec86e68724",

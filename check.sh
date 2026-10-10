@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Everything a change is checked with, in the order that fails fastest:
 #   formatting and generated docs, every Mermaid block rendered, the fast
-#   tests, the clang thread-safety analysis, ThreadSanitizer on the C++
-#   unit tests, AddressSanitizer on the threaded client's (which shut
-#   connections down in the middle of large frames), the Python package
-#   type-checked, the example workspaces, and, when examples/.venv exists
+#   tests, the clang thread-safety analysis, the fast tests built against
+#   libc++ instead of libstdc++, ThreadSanitizer on the C++ unit tests,
+#   AddressSanitizer on the threaded client's (which shut connections
+#   down in the middle of large frames), the Python package type-checked,
+#   the example workspaces, and, when examples/.venv exists
 #   (examples/venv.sh), the pip examples against the tree and pyright over
 #   every example.
 # The slow scenarios (heartbeat intervals, restarts, soak) are `bazel test //...`.
-# CI runs the formatting and the fast tests on every push (.github/workflows/checks.yml).
+# CI runs the formatting and the fast tests, also against libc++, on every
+# push (.github/workflows/checks.yml).
 #
 # ./check.sh --leaks runs the scenarios and unit tests under AddressSanitizer
 # with LeakSanitizer: the harness turns leak detection on for the C++
@@ -36,6 +38,13 @@ fi
 python3 docs/check_mermaid.py          # renders every Mermaid block with mermaid-cli
 bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 bazel build --config=clang //...
+# The fast tests again against libc++ (.bazelrc), the standard library a
+# build of @mx with clang may use instead of libstdc++.
+if ! echo '#include <vector>' | clang-18 -stdlib=libc++ -x c++ -fsyntax-only - 2>/dev/null; then
+  echo "check: --config=libcxx needs libc++: sudo apt-get install libc++-18-dev" >&2
+  exit 1
+fi
+bazel test --config=libcxx --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
 bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test //multiplexer:server_release_test
 # A workspace of its own that uses @mx from C++ alone, with no Python rules

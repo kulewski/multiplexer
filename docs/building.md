@@ -79,10 +79,14 @@ whichever the flags select.
 `bazel build //...` works with no flags. `.bazelrc` adds `--config=debug`
 (debug info, no optimisation), `--config=release` (optimised, stripped
 binaries next to the ones with symbols), `--config=asan` and
-`--config=tsan` (the sanitizers), and `--config=clang` (the static
-thread-safety analysis). `./check.sh` runs what a change is checked
-with; on every push and pull request, CI runs two of those checks,
-`./format.sh --check` and the fast tests
+`--config=tsan` (the sanitizers), `--config=clang` (the static
+thread-safety analysis), and `--config=libcxx`, the clang build against
+libc++, LLVM's standard library, instead of libstdc++, with protoc and
+libprotobuf built from source for it, since the system's are built
+against libstdc++. `./check.sh` runs what a change is checked with; on
+every push and pull request, CI runs three of those checks,
+`./format.sh --check`, the fast tests, and the fast tests under
+`--config=libcxx`
 ([.github/workflows/checks.yml](../.github/workflows/checks.yml)).
 
 ## Without Bazel
@@ -146,7 +150,8 @@ digest. CI's formatting check runs with the same tools, so it agrees with
 `python3-venv` and `examples/venv.sh` for the virtual
 environment in which `./check.sh` runs the pip examples and their type
 check against the tree, skipped with a notice without it; `clang-18` for
-the thread-safety analysis build (`--config=clang`); Node, whose `npx`
+the thread-safety analysis build (`--config=clang`), and `libc++-18-dev`
+beside it for the libc++ build (`--config=libcxx`); Node, whose `npx`
 runs mermaid-cli for the diagram check and on which pyright runs; Docker for
 [docker/check.sh](../docker/check.sh). The type check reads the stubs of the
 generated modules from `bazel-bin` (`stubPath` in `pyproject.toml`), where
