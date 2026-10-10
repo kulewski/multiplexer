@@ -1,9 +1,10 @@
 // Build-time tool: reads a rules file and writes the constants for one
-// language, multiplexer.constants.h, multiplexer_constants.py or its .pyi
-// stub, chosen by the output file's extension; multiplexer/constants_writer.h
-// does the writing, and `mxcontrol generate_constants` is the same tool for
-// a program installed from a release. Run by the genrules in
-// multiplexer/BUILD on the file selected by //:multiplexer_rules.
+// language, multiplexer.constants.h, multiplexer_constants.py, its .pyi
+// stub or multiplexer_constants.rs, chosen by the output file's extension;
+// multiplexer/constants_writer.h does the writing, and `mxcontrol
+// generate_constants` is the same tool for a program installed from a
+// release. Run by the genrules in multiplexer/BUILD on the file selected by
+// //:multiplexer_rules.
 //
 // It refuses a rules file where a name or a number repeats, which the
 // multiplexer's own Config<std::map> would silently collapse; hence the
@@ -19,7 +20,8 @@
 
 int MxMain(int argc, char** argv) {
   if (argc != 3) {
-    std::cerr << "Usage: " << argv[0] << " <multiplexer.rules file> (C++ header file | Python file | Python stub)\n"
+    std::cerr << "Usage: " << argv[0]
+              << " <multiplexer.rules file> (C++ header file | Python file | Python stub | Rust file)\n"
               << "  Program generates definition of constants found in "
                  "multiplexer.rules file.\n";
     return 1;

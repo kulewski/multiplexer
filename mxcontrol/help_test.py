@@ -25,7 +25,7 @@ class HelpTest(unittest.TestCase):
     def test_the_options_are_listed(self) -> None:
         """The help, and the refusal of an option the subcommand lacks."""
         expected = {
-            "generate_constants": ["--python ARG", "--pyi ARG", "--cxx ARG", "write the C++ header here"],
+            "generate_constants": ["--python ARG", "--pyi ARG", "--cxx ARG", "--rust ARG", "write the Rust file here"],
             "receivelogs": ["-M, --multiplexer ARG"],
         }
         for subcommand, lines in expected.items():

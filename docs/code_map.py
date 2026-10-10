@@ -151,7 +151,7 @@ INDEX = [
     (
         "Generating the constants from the rules file",
         "multiplexer/constants_writer.h",
-        "`write_cxx`, `write_python`, `write_python_stub`; run by `multiplexer/generate_constants.cc` at build time and by `mxcontrol generate_constants`",
+        "`write_cxx`, `write_python`, `write_python_stub`, `write_rust`; run by `multiplexer/generate_constants.cc` at build time and by `mxcontrol generate_constants`",
     ),
     ("Every timeout and limit", "multiplexer/defaults.h", ""),
     ("The Python binding", "multiplexer/_native.cc", "`PYBIND11_MODULE`"),

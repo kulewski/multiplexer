@@ -343,6 +343,7 @@ py_test(
         "//multiplexer:multiplexer.constants.h",
         "//multiplexer:multiplexer_constants.py",
         "//multiplexer:multiplexer_constants.pyi",
+        "//multiplexer:multiplexer_constants.rs",
         "//tests:testing.rules",
     ],
     deps = ["//multiplexer/testing"],

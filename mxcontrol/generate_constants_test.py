@@ -1,8 +1,9 @@
 """`mxcontrol generate_constants` writes the files a Bazel build writes, byte
-for byte: the Python module, its stub, and the C++ header, whose include
-guard comes from the rules fingerprint where it was random, read from
-/dev/urandom; it refuses a rules file with a repeated name or a name no
-constant can have, and a call that names no output. And it reads the rules file once, so that one given
+for byte: the Python module, its stub, the C++ header, whose include guard
+comes from the rules fingerprint where it was random, read from
+/dev/urandom, and the Rust file; it refuses a rules file with a repeated
+name or a name no constant can have, a Rust keyword included, and a call
+that names no output. And it reads the rules file once, so that one given
 as a pipe has the fingerprint of its text, where a second read for the
 fingerprint found the pipe empty and wrote 00000000."""
 
@@ -25,6 +26,7 @@ GENERATED = {
     "py": runfile("multiplexer/multiplexer_constants.py"),
     "pyi": runfile("multiplexer/multiplexer_constants.pyi"),
     "h": runfile("multiplexer/multiplexer.constants.h"),
+    "rs": runfile("multiplexer/multiplexer_constants.rs"),
 }
 
 
@@ -44,15 +46,17 @@ class GenerateConstantsTest(unittest.TestCase):
         """The subcommand with `args`, its output captured."""
         return subprocess.run([MXCONTROL, "generate_constants", *args], capture_output=True, text=True, cwd=ROOT)
 
-    def test_the_three_files_match_the_build(self):
+    def test_the_four_files_match_the_build(self):
         paths = {ext: os.path.join(self.out, "constants." + ext) for ext in GENERATED}
-        result = self.run_it(RULES, "--python", paths["py"], "--pyi", paths["pyi"], "--cxx", paths["h"])
+        result = self.run_it(
+            RULES, "--python", paths["py"], "--pyi", paths["pyi"], "--cxx", paths["h"], "--rust", paths["rs"]
+        )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([paths["py"], paths["pyi"], paths["h"]], result.stdout.split())
-        self.assertEqual(read(GENERATED["py"]), read(paths["py"]))
-        self.assertEqual(read(GENERATED["pyi"]), read(paths["pyi"]))
-        self.assertEqual(read(GENERATED["h"]), read(paths["h"]))
+        self.assertEqual([paths["py"], paths["pyi"], paths["h"], paths["rs"]], result.stdout.split())
+        for ext in GENERATED:
+            self.assertEqual(read(GENERATED[ext]), read(paths[ext]), ext)
         self.assertIn("RULES_FINGERPRINT", read(paths["py"]))
+        self.assertIn("pub const RULES_FINGERPRINT", read(paths["rs"]))
 
     def test_rules_from_a_pipe_are_read_once(self):
         """The tests' rules given on /dev/stdin, a pipe: the module carries
@@ -93,11 +97,13 @@ class GenerateConstantsTest(unittest.TestCase):
 
     def test_a_name_no_constant_can_have_is_refused(self):
         """A name the generated files cannot hold as it is: not an
-        identifier, a keyword of Python or C++, two underscores first, or a
-        name the generated code uses where the constants are. Each was
+        identifier, a keyword of Python, C++ or Rust, two underscores first,
+        or a name the generated code uses where the constants are. Each was
         written as it was, into a module that did not import, a get_name()
-        shadowed, or a header that did not compile."""
-        for name in ("MY-REQUEST", "1ST", "class", "delete", "__hidden", "idtoname", "get_name", "t", "default_"):
+        shadowed, or a header or a Rust file that did not compile."""
+        names = ("MY-REQUEST", "1ST", "class", "delete", "match", "fn", "__hidden")
+        names += ("idtoname", "get_name", "t", "default_", "number", "fallback")
+        for name in names:
             with self.subTest(name=name):
                 rules = os.path.join(self.out, "bad.rules")
                 with open(rules, "w") as handle:
@@ -111,7 +117,7 @@ class GenerateConstantsTest(unittest.TestCase):
     def test_an_unknown_extension_is_refused(self):
         result = self.run_it(RULES, "--python", os.path.join(self.out, "constants.txt"))
         self.assertNotEqual(0, result.returncode)
-        self.assertIn(".h, .py or .pyi", result.stderr)
+        self.assertIn(".h, .py, .pyi or .rs", result.stderr)
 
 
 if __name__ == "__main__":

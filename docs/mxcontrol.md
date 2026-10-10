@@ -103,14 +103,15 @@ line a second with a count ([logs](operations.md#logs)).
 
 Writes the peer and message types of a rules file as constants, for a
 program built outside Bazel: the Python module (classes `peers` and
-`types`), its stub for type checkers, and the C++ header (namespaces
-`multiplexer::peers` and `multiplexer::types`), whichever are asked for.
-The files are the ones a Bazel build generates from the same rules file,
-byte for byte; the header's include guard comes from the rules file's
-fingerprint, so the same rules give the same header in every build.
+`types`), its stub for type checkers, the C++ header (namespaces
+`multiplexer::peers` and `multiplexer::types`) and a Rust file (modules
+`peers` and `types`), whichever are asked for. The files are the ones a
+Bazel build generates from the same rules file, byte for byte; the
+header's include guard comes from the rules file's fingerprint, so the
+same rules give the same header in every build.
 
 ```
-mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE]
+mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE] [--rust FILE]
 ```
 
 | Option | Effect |
@@ -119,8 +120,13 @@ mxcontrol generate_constants RULES [--python FILE] [--pyi FILE] [--cxx FILE]
 | `--python FILE` | write the Python module, `multiplexer_constants.py` by convention, importable as `multiplexer_constants` from wherever it is put |
 | `--pyi FILE` | write the module's type stub, next to the module |
 | `--cxx FILE` | write the C++ header, as `multiplexer/multiplexer.constants.h` on the include path before the installed package's copy |
+| `--rust FILE` | write the Rust file, `multiplexer_constants.rs` by convention, a module of the program's crate (`mod multiplexer_constants;`): `pub const` names of type `u32`, each module with a `get_name()`, and `RULES_FINGERPRINT`; rustfmt leaves it as it is |
 
-A rules file where a name or a number repeats is refused, as at build time.
+A rules file where a name or a number repeats is refused, as at build time,
+and so is a name none of the four files could hold as it is: one that is
+not an identifier, a keyword of Python, C++ or Rust, or a name the
+generated code uses itself (`idtoname`, `get_name`, `t`, `default_`,
+`number`, `fallback`).
 A program installed from a release, with `pip install mx-multiplexer` or
 the Debian package, runs this once per rules file and again when the file
 changes; a Bazel build does it on its own.

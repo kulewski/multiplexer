@@ -3,9 +3,10 @@
 // generate_constants`, the same for a program installed from a release,
 // both do. multiplexer.constants.h holds namespaces multiplexer::types and
 // multiplexer::peers, multiplexer_constants.py the classes types and peers,
-// and the .pyi their stub for type checkers; each with a get_name() that
-// maps a number back to its name, for logs, and the rules file's CRC-32 as
-// RULES_FINGERPRINT, which a recording's header carries too.
+// the .pyi their stub for type checkers, and a .rs file the Rust modules
+// types and peers; each with a get_name() that maps a number back to its
+// name, for logs, and the rules file's CRC-32 as RULES_FINGERPRINT, which a
+// recording's header carries too.
 //
 // Header only, templated on the Config, because the tool compiles config.h
 // without the logging library (IS_GENERATE_CONSTANTS) and mxcontrol with
@@ -66,10 +67,11 @@ void checked_add(SetType& values, const ValueType& value, const std::string& hin
 }
 
 // Why `name` cannot be a constant of the generated files, NULL when it
-// can: the Python classes and the C++ namespaces hold every name as it is,
-// next to the names the generated code itself uses there, idtoname and
-// get_name, and the C++ get_name()'s parameters, t and default_, which
-// would hide a constant of the same name in its switch.
+// can: the Python classes, the C++ namespaces and the Rust modules hold
+// every name as it is, next to the names the generated code itself uses
+// there, idtoname and get_name, and the parameters of the C++ and the Rust
+// get_name(), t and default_, number and fallback, which would hide a
+// constant of the same name in its switch or match.
 inline const char* unusable_name(const std::string& name) {
   static const std::set<std::string> KEYWORDS = {
       // Python's
@@ -84,8 +86,12 @@ inline const char* unusable_name(const std::string& name) {
       "namespace", "new", "noexcept", "not_eq", "nullptr", "operator", "or_eq", "private", "protected", "public",
       "register", "reinterpret_cast", "requires", "short", "signed", "sizeof", "static", "static_assert", "static_cast",
       "struct", "switch", "template", "this", "thread_local", "throw", "true", "typedef", "typeid", "typename", "union",
-      "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "xor", "xor_eq"};
-  static const std::set<std::string> GENERATED = {"idtoname", "get_name", "t", "default_"};
+      "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "xor", "xor_eq",
+      // Rust's, the reserved ones included
+      "Self", "abstract", "become", "box", "crate", "dyn", "final", "fn", "gen", "impl", "let", "loop", "macro",
+      "match", "mod", "move", "mut", "override", "priv", "pub", "ref", "self", "super", "trait", "type", "typeof",
+      "unsafe", "unsized", "use", "where"};
+  static const std::set<std::string> GENERATED = {"idtoname", "get_name", "t", "default_", "number", "fallback"};
   auto letter = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'; };
   if (name.empty() || !letter(name[0])) {
     return "not an identifier";
@@ -99,7 +105,7 @@ inline const char* unusable_name(const std::string& name) {
     return "reserved, it starts with two underscores";
   }
   if (KEYWORDS.count(name)) {
-    return "a keyword of Python or C++";
+    return "a keyword of Python, C++ or Rust";
   }
   if (GENERATED.count(name)) {
     return "a name the generated code uses";
@@ -196,10 +202,35 @@ void write_cxx_mapping(std::ostream& out, const Map& map, const std::string& set
       << "\n";
 }
 
+// One module of the Rust file, in the form rustfmt leaves alone, so that a
+// committed copy never differs from a regenerated one. The constants keep
+// the rules file's names, upper case or not, and a program may use only
+// some of them, hence the allow.
+template <typename Map>
+void write_rust_mapping(std::ostream& out, const Map& map, const std::string& set_name, const char* what) {
+  out << "/// The " << what << " of the rules file, by name.\n"
+      << "#[allow(dead_code, non_upper_case_globals)]\n"
+      << "pub mod " << set_name << " {\n";
+  for (const typename Map::value_type& entry : map) {
+    out << "    pub const " << entry.second.name() << ": u32 = " << entry.second.type() << ";\n";
+  }
+  out << "\n"
+      << "    /// The name of `number`, or `fallback` when the rules file has none.\n"
+      << "    pub fn get_name(number: u32, fallback: &'static str) -> &'static str {\n"
+      << "        match number {\n";
+  for (const typename Map::value_type& entry : map) {
+    out << "            " << entry.second.name() << " => \"" << entry.second.name() << "\",\n";
+  }
+  out << "            _ => fallback,\n"
+      << "        }\n"
+      << "    }\n"
+      << "}\n";
+}
+
 }  // namespace detail
 
 // Refuses a rules file where a peer or message name or number repeats, or
-// a name could not be a constant in Python and C++ (unusable_name).
+// a name could not be a constant in Python, C++ and Rust (unusable_name).
 template <typename Config>
 void check_config(const Config& config) {
   detail::check_names_and_numbers_unique(config.message_description_by_id());
@@ -294,14 +325,29 @@ void write_cxx(const Config& config, std::ostream& out, const std::string& sourc
       << "#endif\n";
 }
 
-// Writes the file `path` in the language its extension names: .h, .py or
-// .pyi. Throws mx::Exception on a rules file with a repeated name or
+// The Rust modules types and peers, for a file of a crate (`mod
+// multiplexer_constants;`) or include!(); rustfmt leaves it as it is.
+template <typename Config>
+void write_rust(const Config& config, std::ostream& out, const std::string& source_file,
+                const std::string& fingerprint) {
+  detail::write_signature("//", out, source_file);
+  out << "/// CRC-32 of the rules file these constants were generated from; a recording's header carries the same.\n"
+      << "#[allow(dead_code)]\n"
+      << "pub const RULES_FINGERPRINT: &str = \"" << fingerprint << "\";\n"
+      << "\n";
+  detail::write_rust_mapping(out, config.message_description_by_id(), "types", "message types");
+  out << "\n";
+  detail::write_rust_mapping(out, config.peer_by_type(), "peers", "peer types");
+}
+
+// Writes the file `path` in the language its extension names: .h, .py,
+// .pyi or .rs. Throws mx::Exception on a rules file with a repeated name or
 // number, std::runtime_error on an extension it does not know or a file
 // it cannot open.
 template <typename Config>
 void write_constants(const Config& config, const std::string& rules_file, const std::string& fingerprint,
                      const std::string& path) {
-  enum Language { PYTHON, PYTHON_STUB, CXX } language;
+  enum Language { PYTHON, PYTHON_STUB, CXX, RUST } language;
   auto ends_with = [&path](const char* suffix) {
     std::string with(suffix);
     return path.size() >= with.size() && path.compare(path.size() - with.size(), with.size(), with) == 0;
@@ -312,8 +358,10 @@ void write_constants(const Config& config, const std::string& rules_file, const 
     language = PYTHON_STUB;
   } else if (ends_with(".py")) {
     language = PYTHON;
+  } else if (ends_with(".rs")) {
+    language = RUST;
   } else {
-    throw std::runtime_error("cannot tell the language from the name of " + path + ": .h, .py or .pyi expected");
+    throw std::runtime_error("cannot tell the language from the name of " + path + ": .h, .py, .pyi or .rs expected");
   }
   std::ofstream out(path.c_str(), std::ofstream::binary | std::ofstream::out);
   if (!out) {
@@ -328,6 +376,9 @@ void write_constants(const Config& config, const std::string& rules_file, const 
       break;
     case CXX:
       write_cxx(config, out, rules_file, fingerprint);
+      break;
+    case RUST:
+      write_rust(config, out, rules_file, fingerprint);
       break;
   }
 }

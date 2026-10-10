@@ -56,6 +56,15 @@ genrule(
     visibility = ["//mxcontrol:__pkg__"],  # the subcommand's test compares with these
 )
 
+genrule(
+    name = "generate_rs_multiplexer_constants",
+    srcs = ["//:multiplexer_rules"],
+    outs = ["multiplexer_constants.rs"],
+    cmd = "$(location :generate_constants) $< $@",
+    tools = [":generate_constants"],
+    visibility = ["//mxcontrol:__pkg__"],  # the subcommand's test compares with these
+)
+
 # The stub of the native extension for type checkers, from the built module;
 # manual because it needs the PyPI tool in tools/BUILD:
 #   bazel build //multiplexer:_native_pyi
