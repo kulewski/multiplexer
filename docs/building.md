@@ -230,3 +230,13 @@ builds an image from the files git knows about, with exactly the packages
 in the table, and runs the build, the fast tests and the example workspace
 in it. It is how the table above was made; run it before changing what the
 build needs.
+
+```
+./docker/runner_limits.sh
+```
+
+runs the fast tests in the ubuntu:24.04 image as a GitHub runner runs
+them: on four CPUs, Bazel running four tests at a time, with TCP buffers
+that may grow to 32 MB where a workstation's stop at a few. A test that
+fills a connection, or counts on how much a socket holds, behaves
+otherwise there; this reproduces what CI saw before a push.

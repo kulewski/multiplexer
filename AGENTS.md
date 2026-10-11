@@ -58,6 +58,8 @@ bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only
 bazel build --config=asan //...            # AddressSanitizer
 ./check.sh --leaks                         # LeakSanitizer over the scenarios; soak_memory samples RSS per process
 ./docker/check.sh [bazel|make] [debian:12] # the build and the fast tests on a clean distribution, needs Docker
+./docker/runner_limits.sh                  # the fast tests as a GitHub runner runs them: 4 CPUs, 32 MB TCP buffers
+packaging/release_check.sh [COMMIT]        # what a release checks, before the tag; an hour or two, needs Docker
 make -j && make check                      # the build without Bazel (Makefile, docs/building.md)
 ./tests/bench.sh                           # the throughput and latency numbers the README quotes
 bazel run //compdb                         # compile_commands.json for clangd, after a debug build

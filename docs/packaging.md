@@ -162,10 +162,24 @@ against it without any setup.
 
 1. Bump the version in `Makefile`, `multiplexer/release.py` and
    `lib/release.cc`, in one commit.
-2. Tag it: `git tag -a v<version> -m "..."` and `git push origin main v<version>`.
-3. The workflow runs the tests, builds every artifact, pushes the image and
+2. Check it: `packaging/release_check.sh` runs here what the workflows
+   will run, at that commit, in a worktree of its own:
+   - every test, and the release build;
+   - the binary and the image, started once and asked for its rules;
+   - the leak run;
+   - `docker/check.sh`, both paths, on each of
+     [the tested systems](building.md#tested-systems), and
+     `docker/runner_limits.sh`;
+   - the Debian packages, the wheels and their smoke tests;
+   - every pip example, against a wheel of the tree.
+
+   Each step's output goes to a file of its own in
+   `~/.cache/mx-release-check/logs`, with a line in its `summary.txt`, ok
+   or FAIL. It takes an hour or two.
+3. Tag it: `git tag -a v<version> -m "..."` and `git push origin main v<version>`.
+4. The workflow runs the tests, builds every artifact, pushes the image and
    creates the release with the files attached.
-4. Approve the upload to PyPI: the `pypi` job waits for the reviewer of
+5. Approve the upload to PyPI: the `pypi` job waits for the reviewer of
    the `pypi` environment in the Actions tab, then publishes the wheels
    through trusted publishing, which PyPI grants to this workflow file and
    that environment; no token exists anywhere.
