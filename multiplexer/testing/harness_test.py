@@ -13,6 +13,7 @@ timed, but for receive_type(), whose timeout is the thing tested: every
 other wait is a failure detector.
 """
 
+import contextlib
 import os
 import signal
 import socket
@@ -32,10 +33,12 @@ RULES = runfile("tests/testing.rules")  # the file the constants were generated 
 
 
 def alive(pid: int) -> bool:
-    """Whether process `pid` exists and is not a zombie."""
+    """Whether process `pid` exists and is neither a zombie nor dead: a
+    process the kernel is reaping shows X, and its /proc entry goes a moment
+    later."""
     try:
         with open("/proc/%d/stat" % pid) as stat:
-            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return stat.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")
     except OSError:
         return False
 
@@ -174,8 +177,10 @@ class HarnessTest(unittest.TestCase):
                 parent.wait(30)
                 wait_until(lambda: not alive(pid), 30, "the multiplexer to exit after its test process died")
             finally:
+                # It may go between the look and the kill.
                 if alive(pid):
-                    os.kill(pid, signal.SIGKILL)
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGKILL)
                 parent.stdout.close()
 
 
