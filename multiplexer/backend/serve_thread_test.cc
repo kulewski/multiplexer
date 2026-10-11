@@ -152,7 +152,7 @@ class SlowBackend : public BaseMultiplexerServer {
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", mxmsg.message())
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
   }
   void periodic_task() override {
     serving = true;
@@ -276,7 +276,7 @@ class ReplyingBackend : public BaseMultiplexerServer {
       mx::util::kwargs::Kwargs reply;
       reply.set("message", static_cast<const multiplexer::MultiplexerMessage*>(&whole));
       if (reply_ == WHOLE_WITH_TYPE) {
-        reply.set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE));
+        reply.set("type", multiplexer::types::PYTHON_TEST_RESPONSE);
       }
       send_message(reply);
       ++announcements_;
@@ -285,7 +285,7 @@ class ReplyingBackend : public BaseMultiplexerServer {
     mx::util::kwargs::Kwargs reply;
     reply.set("message", "re: " + mxmsg.message());
     if (reply_ != THROW) {  // a reply without a type throws KeyError where it is built
-      reply.set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE));
+      reply.set("type", multiplexer::types::PYTHON_TEST_RESPONSE);
     }
     if (reply_ == ANSWER_EVERYWHERE) {
       reply.set("multiplexer", ALL);  // as documented, which needs the constant's definition unoptimized
@@ -306,7 +306,7 @@ class ReplyingBackend : public BaseMultiplexerServer {
     for (; announcements_ > 0; --announcements_) {
       send_message(mx::util::kwargs::Kwargs()
                        .set("message", std::string("announced"))
-                       .set("type", static_cast<std::uint32_t>(multiplexer::types::TEST_EVENT)));
+                       .set("type", multiplexer::types::TEST_EVENT));
     }
     if (leave.load()) {
       working = false;
@@ -388,12 +388,12 @@ class Publishing : public BaseMultiplexerServer {
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", std::string("nobody"))
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::TEST_EVENT))
+                     .set("type", multiplexer::types::TEST_EVENT)
                      .set("to", std::uint64_t(0))
                      .set("references", std::uint64_t(0)));
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", "re: " + mxmsg.message())
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
   }
   void periodic_task() override {
     serving = true;
@@ -675,14 +675,14 @@ class RaisingBackend : public BaseMultiplexerServer {
       sent_event_ = true;
       send_message(mx::util::kwargs::Kwargs()
                        .set("message", std::string("unexpected"))
-                       .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_REQUEST))
+                       .set("type", multiplexer::types::PYTHON_TEST_REQUEST)
                        .set("to", to));
     }
     if (handled_report_ && !sent_marker_) {
       sent_marker_ = true;
       send_message(mx::util::kwargs::Kwargs()
                        .set("message", std::string("marker"))
-                       .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE))
+                       .set("type", multiplexer::types::PYTHON_TEST_RESPONSE)
                        .set("to", to));
     }
     if (leave.load()) {
@@ -1350,7 +1350,7 @@ class HoldingBackend : public BaseMultiplexerServer {
     }
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", "re: " + mxmsg.message())
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
   }
   void periodic_task() override {
     connections = conn->connections_count();

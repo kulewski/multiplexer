@@ -174,7 +174,7 @@ class Leaving : public BaseMultiplexerServer {
   void handle_message(MultiplexerMessage&) override {
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", std::string("ok"))
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
     start_draining();
   }
 };
@@ -222,7 +222,7 @@ class Filtering : public BaseMultiplexerServer {
     }
     send_message(mx::util::kwargs::Kwargs()
                      .set("message", std::string("ok"))
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
     handling_ = false;
   }
 

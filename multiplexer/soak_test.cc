@@ -56,9 +56,8 @@ struct EchoBackend : multiplexer::backend::BaseMultiplexerServer {
     for (char& character : payload) {
       character = std::toupper(static_cast<unsigned char>(character));
     }
-    send_message(mx::util::kwargs::Kwargs()
-                     .set("message", payload)
-                     .set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE)));
+    send_message(
+        mx::util::kwargs::Kwargs().set("message", payload).set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
   }
 };
 

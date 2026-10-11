@@ -78,7 +78,7 @@ class AnsweringBackend : public BaseMultiplexerServer {
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
     mx::util::kwargs::Kwargs reply;
     reply.set("message", "re: " + mxmsg.message());
-    reply.set("type", static_cast<std::uint32_t>(multiplexer::types::PYTHON_TEST_RESPONSE));
+    reply.set("type", multiplexer::types::PYTHON_TEST_RESPONSE);
     send_message(reply);
   }
   void periodic_task() override {
