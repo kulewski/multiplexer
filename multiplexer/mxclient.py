@@ -16,7 +16,7 @@ import math
 import time
 import traceback
 import warnings
-from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping, overload
+from typing import Any, Callable, ClassVar, Iterable, Literal, Mapping, SupportsIndex, SupportsInt, overload
 
 import google.protobuf.message
 
@@ -134,11 +134,13 @@ def wait_seconds(seconds: float) -> float:
     return min(seconds, MAX_SECONDS)
 
 
-def key_filters_argument(filters: Mapping[int, Iterable[str]]) -> dict[int, list[str]]:
+def key_filters_argument(filters: Mapping[int, Iterable[str]]) -> dict[SupportsInt | SupportsIndex, list[str]]:
     """`filters` as every class's set_key_filters() hands them to the native
-    side: a dict of message type to its list of patterns. One string where
-    the list goes is a TypeError, not a list of one-letter patterns."""
-    result: dict[int, list[str]] = {}
+    side: a dict of message type to its list of patterns, typed as the
+    native method's parameter, whose keys pybind11 annotates as anything
+    int() takes. One string where the list goes is a TypeError, not a list
+    of one-letter patterns."""
+    result: dict[SupportsInt | SupportsIndex, list[str]] = {}
     for type_, patterns in filters.items():
         if isinstance(patterns, (str, bytes)):
             raise TypeError("the patterns of message type %d: a list of strings, not one string" % type_)
@@ -424,7 +426,9 @@ class Client(_mxclient.Client):
         client; what it raises goes to sys.unraisablehook."""
         super(Client, self).set_routing_serialized(routing.SerializeToString(), on_acknowledged)
 
-    def set_key_filters(
+    # Narrower than the native method, whose keys pybind11 annotates as
+    # anything int() takes: the message types this method documents.
+    def set_key_filters(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, filters: Mapping[int, Iterable[str]], on_acknowledged: Callable[[], None] | None = None
     ) -> None:
         """Which keys of each message type reach this peer by the rules:
@@ -448,7 +452,11 @@ class Client(_mxclient.Client):
         resort."""
         return super(Client, self).routing_acknowledged()
 
-    def wait_for_connection(self, connection: ConnectionWrapper, timeout: float = DEFAULT_TIMEOUT) -> bool:
+    # Narrower than the native method, whose timeout pybind11 annotates as
+    # anything float() takes: the seconds this method documents.
+    def wait_for_connection(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, connection: ConnectionWrapper, timeout: float = DEFAULT_TIMEOUT
+    ) -> bool:
         """wait for connection initiated with async_connect"""
         return super(Client, self).wait_for_connection(connection, timeout)
 

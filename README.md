@@ -555,4 +555,5 @@ production use throughout. See [AUTHORS](AUTHORS).
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). What the binaries hold of other projects,
+compiled in, is in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).

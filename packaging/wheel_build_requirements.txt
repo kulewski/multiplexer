@@ -1,0 +1,15 @@
+# What packaging/wheels.sh installs into each CPython of the manylinux
+# container before it builds that CPython's wheel, pinned so that two runs
+# of one tag build the same wheel:
+# - pybind11, whose code the extension compiles in (THIRD_PARTY_NOTICES);
+# - pybind11-stubgen, which writes the extension's .pyi;
+# - protobuf's runtime, which the stub generator imports with the package;
+# - setuptools, wheel and auditwheel, which pack the wheel and check it.
+# Raise a pin by hand, then build and smoke-test a wheel of the oldest and
+# the newest CPython: packaging/build_wheels.sh cp310 cp314.
+pybind11==3.1.0
+pybind11-stubgen==3.0.0
+protobuf==4.25.9
+setuptools==84.0.0
+wheel==0.48.0
+auditwheel==6.8.2

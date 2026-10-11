@@ -3,7 +3,8 @@
 # base-nossl, which holds Debian 13's glibc and no shell, no package
 # manager and no OpenSSL, running as nonroot. packaging/build_image.sh
 # builds it from a context holding the binary as mxcontrol and the rules
-# as etc/mx/multiplexer.rules, with the modes they keep in the image;
+# as etc/mx/multiplexer.rules and the licenses under
+# usr/share/doc/mxcontrol, with the modes they keep in the image;
 # docs/packaging.md says how to run it.
 #
 # The base, gcr.io/distroless/base-nossl-debian13:nonroot, is pinned for
@@ -12,6 +13,7 @@
 FROM gcr.io/distroless/base-nossl-debian13:nonroot@sha256:f429b21a595de24ce7d1c34d08d5c3c6d7c3d77035a84c742a4d668eac694383
 COPY mxcontrol /mxcontrol
 COPY etc/mx /etc/mx
+COPY usr/share/doc/mxcontrol /usr/share/doc/mxcontrol
 USER nonroot
 EXPOSE 1980
 ENTRYPOINT ["/mxcontrol"]

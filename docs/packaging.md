@@ -21,6 +21,18 @@ Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
 with `mx_dependencies()` and `mx_setup()` builds the library from source
 in their workspace, as [examples/README.md](../examples/README.md) shows.
 
+## Licenses
+
+The multiplexer is MIT. The binaries also hold code of other projects,
+compiled in: protobuf in `mxcontrol` and in the wheels' extension, RE2 in
+`mxcontrol`, pybind11 in the extension, and Asio's headers in both.
+[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) has their licenses, and every
+artifact carries it with LICENSE: the wheels in their `.dist-info`, the
+release beside the binary, the image under `/usr/share/doc/mxcontrol`.
+The build scripts check that each does. glibc is the system's, or in the
+image Debian's, from the distroless base; the Debian packages link
+protobuf and RE2 from their distribution.
+
 ## The mxcontrol binary
 
 `packaging/binary.sh` builds it inside `quay.io/pypa/manylinux_2_28_x86_64`,

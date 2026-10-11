@@ -30,7 +30,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
 PYBIND11_BAZEL_TAG = "c65db0ac44ff3cd790a803e4a804e2cc806cf641"
-PYBIND11_TAG = "b389ae77cb8a872d62e96d5f38ce020480140033"
+
+# v3.1.0, the release packaging/wheel_build_requirements.txt pins for the wheels too.
+PYBIND11_TAG = "97bf890db679505a14dfe547a5e77bb2bd05dc90"
 ASIO_TAG = "asio-1-30-2"
 RE2_TAG = "2023-03-01"
 
@@ -96,7 +98,7 @@ def mx_dependencies(python = True):
             name = "pybind11",
             build_file = "@pybind11_bazel//:pybind11.BUILD",
             canonical_id = PYBIND11_TAG,
-            sha256 = "2c4b17d35ecb6255099a7d5ace357c850f8f37f6d3bf45fde4a141ede1fa1122",
+            sha256 = "6368877d3f241f283e010d858af27a6934ac45f7cbb5c68d2518b11bf64a113f",
             strip_prefix = "pybind11-{tag}".format(tag = PYBIND11_TAG),
             urls = ["https://github.com/pybind/pybind11/archive/{tag}.tar.gz".format(tag = PYBIND11_TAG)],
         )

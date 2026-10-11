@@ -8,6 +8,7 @@
 # musl one. The image runs the same file (packaging/build_image.sh).
 # Checked before it is written out: a stripped release build, nothing
 # NEEDED but glibc's own libraries, no glibc symbol newer than 2.28.
+# LICENSE and THIRD_PARTY_NOTICES go beside it, for the release.
 #
 #   packaging/binary.sh VERSION [outdir]    default outdir: build/dist
 set -euo pipefail
@@ -35,4 +36,7 @@ if [[ "$(printf '%s\n' GLIBC_2.28 "$newest" | sort -V | tail -1)" != GLIBC_2.28 
   echo "binary.sh: $name needs $newest, newer than the glibc 2.28 it promises" >&2 && exit 1
 fi
 (cd "$out" && sha256sum "$name" > "$name.sha256")
+# Beside it, what the release attaches with it: ours, and the notices of
+# protobuf and RE2, which it holds.
+cp LICENSE THIRD_PARTY_NOTICES "$out/"
 echo "$out/$name: needs ${needed% }, glibc symbols up to $newest"

@@ -265,7 +265,7 @@ wheel: python
 	$(STRIP) $(BUILD)/wheel/multiplexer/_native.so $(BUILD)/wheel/multiplexer/bin/mxcontrol
 	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@PROTOBUF_REQUIREMENT@/$(PROTOBUF_REQUIREMENT)/' make/setup.py \
 	    > $(BUILD)/wheel/setup.py
-	cp make/pyproject.toml README.md $(BUILD)/wheel/
+	cp make/pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES $(BUILD)/wheel/
 	cd $(BUILD)/wheel && $(PYTHON) -m pip wheel --no-deps --no-build-isolation -q -w ../dist .
 	@ls $(BUILD)/dist/*.whl
 

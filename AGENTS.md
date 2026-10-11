@@ -133,3 +133,7 @@ bazel run //compdb                         # compile_commands.json for clangd, a
 - A reference page: hand-written Markdown under `docs/`, linked from the
   "Reference" list in `docs/README.md` and from `llms.txt`. State behaviour
   the code has, and point at the scenario that shows it.
+- A library compiled into a published binary: its license text into
+  `THIRD_PARTY_NOTICES`, with the binaries that hold it, and its line in
+  docs/packaging.md's "Licenses". The wheels, the release binary and the
+  image carry that file, and their build scripts check it.

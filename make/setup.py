@@ -61,6 +61,9 @@ setup(
         "Issues": REPOSITORY + "/issues",
     },
     license="MIT",
+    # Ours, and those of what the binaries hold compiled in: protobuf and
+    # pybind11 in the extension, protobuf and RE2 in mxcontrol.
+    license_files=["LICENSE", "THIRD_PARTY_NOTICES"],
     keywords="message broker, request reply, publish subscribe, rpc, microservices, asio, protobuf",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
