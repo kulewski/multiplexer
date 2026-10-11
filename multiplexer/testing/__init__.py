@@ -181,6 +181,19 @@ def _end_children_at_exit(owner: int) -> None:
             proc.wait(5)
 
 
+def _wait_for_exit(proc: subprocess.Popen) -> None:
+    """Block until `proc` has exited, without reaping it: its Popen still
+    learns the exit code from poll() and wait(), and no thread holds the
+    lock Popen takes around a reaping wait, under which poll() would answer
+    None for a process that had exited. A reader thread calls it once the
+    output ends, which the exit can trail, so that a wait learns of the
+    exit as an event, as it learns of a line."""
+    try:
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+    except ChildProcessError:
+        pass  # reaped already: a poll() or a wait() of the test's saw the exit first
+
+
 def cpu_seconds(pid: int) -> float:
     """The CPU time the process has used so far, user plus system, in
     seconds, from /proc; 0 if it is gone. Exact, unlike sampling: an idle
@@ -856,7 +869,7 @@ class Role:
         argv = argv + ["--name", self.name]  # the label its events carry, in the role contract
         self.argv = executable + argv
         self.events: list[Event] = []
-        self._eof = False
+        self._exited = False  # the output ended and the process exited: what a wait ends on
         self._killed_at_stop = False  # stop() ran out of time and killed it
         self._cond = threading.Condition()
         self.stderr_path = os.path.join(output_dir(), self.name + ".stderr.log")
@@ -935,8 +948,9 @@ class Role:
                 self._cond.notify_all()
         self.proc.stdout.close()
         self._events_file.close()
+        _wait_for_exit(self.proc)
         with self._cond:
-            self._eof = True
+            self._exited = True
             self._cond.notify_all()
 
     @staticmethod
@@ -964,9 +978,9 @@ class Role:
                 self._raise_unparsed()
                 found = [event for event in self.events if self._matches(event, name, match)]
                 remaining = deadline - time.monotonic()
-                if len(found) >= count or self._eof or remaining <= 0:
+                if len(found) >= count or self._exited or remaining <= 0:
                     return found
-                self._cond.wait(min(remaining, 0.5))
+                self._cond.wait(remaining)
 
     def wait_for(self, name: str, /, timeout: float = 15, **match: Any) -> Event:
         """Block until a `name` event with fields `match` has arrived and
@@ -981,10 +995,10 @@ class Role:
                 for event in self.events:
                     if self._matches(event, name, match):
                         return event
-                if self._eof and self.proc.poll() is not None:
+                if self._exited:
                     raise RuntimeError(
                         "%s exited with %s before %r %s; events=%r; stderr:\n%s"
-                        % (self.name, self.proc.returncode, name, match, self.events[-5:], tail(self.stderr_path))
+                        % (self.name, self.proc.wait(), name, match, self.events[-5:], tail(self.stderr_path))
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -992,7 +1006,7 @@ class Role:
                         "%s: no %r %s within %ss; events=%r; stderr:\n%s"
                         % (self.name, name, match, timeout, self.events[-5:], tail(self.stderr_path))
                     )
-                self._cond.wait(min(remaining, 0.5))
+                self._cond.wait(remaining)
 
     def wait(self, timeout: float = 60) -> int:
         """Wait for the process to finish on its own and return its exit

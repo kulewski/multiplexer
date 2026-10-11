@@ -5,15 +5,17 @@ start() ran out of time closes the backend it builds after; an Event line
 that does not parse is kept as such; a Cluster that cannot start every
 multiplexer stops the ones it started; $MX_TEST_OUTPUT gives every process
 a directory of its own; a test process that is killed takes its
-multiplexers with it; and log_contains() past a log_mark() sees only what
+multiplexers with it; log_contains() past a log_mark() sees only what
 came after the mark, where it searched the whole log, so that a wait for a
-line an earlier step wrote ended at once. Each failed on the harness
-before. Counted, not
-timed, but for receive_type(), whose timeout is the thing tested: every
-other wait is a failure detector.
+line an earlier step wrote ended at once; and a role's wait that sees
+nothing blocks until its deadline once, where it woke every half second
+to see whether the role had exited. Each failed on the harness before.
+Counted, not timed, but for receive_type() and that wait, whose timeouts
+are the thing tested: every other wait is a failure detector.
 """
 
 import contextlib
+import json
 import os
 import signal
 import socket
@@ -23,10 +25,10 @@ import tempfile
 import threading
 import unittest
 
-from multiplexer import recording
+from multiplexer import recording, testing
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, Role, TestClient, runfile, wait_until
+from multiplexer.testing import BackendThread, Cluster, Role, TestClient, configure, runfile, spawn, wait_until
 from multiplexer.testing.raw_peer import RawPeer
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
@@ -41,6 +43,16 @@ def alive(pid: int) -> bool:
             return stat.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")
     except OSError:
         return False
+
+
+def voluntary_switches() -> int:
+    """How often the calling thread has blocked and been woken so far: its
+    voluntary_ctxt_switches in /proc/thread-self/status."""
+    with open("/proc/thread-self/status") as status:
+        for line in status:
+            if line.startswith("voluntary_ctxt_switches:"):
+                return int(line.split()[1])
+    raise RuntimeError("/proc/thread-self/status has no voluntary_ctxt_switches")
 
 
 class Silent(BaseMultiplexerServer):
@@ -155,6 +167,27 @@ class HarnessTest(unittest.TestCase):
             self.assertEqual((shared, shared), (os.path.dirname(first), os.path.dirname(second)))
             self.assertNotEqual(first, second)
             self.assertTrue(os.path.isdir(first), "kept")
+
+    def test_a_wait_for_an_event_blocks_until_its_deadline_once(self) -> None:
+        """A stand-in role that prints "connected" and nothing more: a wait
+        for an event it never prints wakes at its deadline and not before,
+        where it woke every half second to see whether the role had exited."""
+        stand_in = os.path.join(tempfile.mkdtemp(dir=os.environ.get("TEST_TMPDIR")), "backend")
+        with open(stand_in, "w") as out:
+            out.write(
+                "#!%s\nimport signal\nprint('event: \"connected\"', flush=True)\nwhile True:\n    signal.pause()\n"
+                % sys.executable
+            )
+        os.chmod(stand_in, 0o755)
+        configure(["--role-binaries", json.dumps({"backend": stand_in})])
+        self.addCleanup(setattr, testing, "CONFIG", None)
+        role = spawn("backend", "bin", mx=["127.0.0.1:9"], type=1)
+        role.wait_for("connected")
+        before = voluntary_switches()
+        with self.assertRaises(TimeoutError):
+            role.wait_for("never", timeout=3)
+        self.assertLessEqual(voluntary_switches() - before, 2)
+        self.assertEqual(-signal.SIGTERM, role.stop())
 
     def test_a_killed_test_process_takes_its_multiplexer_with_it(self) -> None:
         """A process that starts a cluster and is killed: its multiplexer
