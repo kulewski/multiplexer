@@ -11,7 +11,7 @@ published; [operations](operations.md#debug-symbols) says how to debug.
 
 | Artifact | For | Needs on the machine |
 |---|---|---|
-| `mxcontrol-<version>-linux-amd64` with its `.sha256` | running a multiplexer, or its tools, on any Linux | nothing: statically linked |
+| `mxcontrol-<version>-linux-amd64` with its `.sha256` | running a multiplexer, or its tools, on any Linux | x86_64 with glibc 2.28 or newer |
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
 | `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev` and `libasio-dev` to build against the library |
 | `mx_multiplexer-<version>-cp3XY-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers, and `mxcontrol`: a multiplexer, `generate_rules`, `generate_constants`, the test harness's binary | `pip` on x86_64 Linux with glibc 2.28 or newer; the `protobuf` package comes with it |
@@ -21,25 +21,30 @@ Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
 with `mx_dependencies()` and `mx_setup()` builds the library from source
 in their workspace, as [examples/README.md](../examples/README.md) shows.
 
-## The static mxcontrol
+## The mxcontrol binary
 
-`bazel build --config=release //mxcontrol:mxcontrol_static` links the same
-binary as `//mxcontrol` with `-static` and strips it: glibc, libstdc++ and
-protobuf inside, about 4 MB, and it runs on any x86_64 Linux and in an empty
-container. Static
-glibc cannot resolve host names without the running system's name-service
-modules, so inside the image, or on a system with a different glibc, give
-mxcontrol's client subcommands addresses rather than names. The
-multiplexer itself listens on an address and never resolves one. The
-wheels' `mxcontrol` is another link of the same source, against the
-system's glibc, so it resolves names.
+`packaging/binary.sh` builds it inside `quay.io/pypa/manylinux_2_28_x86_64`,
+where the wheels are built, and `packaging/build_binary.sh` runs it there
+from a workstation. It is the Makefile's `mxcontrol` with the system rules,
+with protobuf, RE2 and libstdc++ linked in, about 4 MB. glibc is the
+system's, 2.28 or newer: every mainstream x86_64 distribution since 2018
+has one, Debian 10, Ubuntu 20.04 and RHEL 8 among the oldest, but a musl
+one such as Alpine does not, and there the image or a build from source
+serves. The script checks what it built: a stripped release build that
+needs nothing but glibc's own libraries and no glibc symbol newer than
+2.28. Host names resolve as they do for any program on the system. The
+wheels' `mxcontrol` is the same build, with libstdc++ taken from the
+system, as manylinux allows.
 
 ## The container image
 
-`docker/BUILD` builds it with rules_oci, from the static binary and the
-system rules file on `gcr.io/distroless/static-debian12`, which holds no
-libc, no shell and no package manager: the only code in the image is
-mxcontrol. It runs as `nonroot`, listens on 1980, and its command is
+`docker/Dockerfile.image` puts that binary and the system rules file on
+`gcr.io/distroless/base-nossl-debian13`, which holds glibc and no shell,
+no package manager and no OpenSSL. `packaging/build_image.sh` builds it
+reproducibly, every file's time and the image's own the commit's, on a
+BuildKit release it pins, in a builder of its own that works on any
+Docker, so the same binary and commit give the same image. It runs as `nonroot`, listens
+on 1980, and its command is
 
 ```
 /mxcontrol run_multiplexer --rules /etc/mx/multiplexer.rules --address 0.0.0.0:1980
@@ -66,11 +71,11 @@ the container looking at the old one.
 
 Any other subcommand goes after the image name, `... multiplexer:<version>
 help` for the list. [Operations](operations.md#on-kubernetes) has the
-StatefulSet that runs several of them on Kubernetes. Locally, `bazel run //docker:load` puts the image into
-Docker as `multiplexer:dev`; `bazel run //docker:push` publishes it. The
-targets are tagged `manual`, so a wildcard build never fetches the rules or
-the base image, and rules_oci is declared in our WORKSPACE only, never for
-a consumer of `@mx`.
+StatefulSet that runs several of them on Kubernetes. Locally,
+`packaging/build_binary.sh` and then `packaging/build_image.sh
+build/dist/mxcontrol-<version>-linux-amd64` put the image into Docker as
+`multiplexer:dev`; the release workflow starts it once, asks it for its
+rules, and pushes it.
 
 ## The Debian packages
 
@@ -159,7 +164,7 @@ from the chosen branch, the files named after the tag given, without the
 push to ghcr.io and without a release, and with the wheels uploaded to
 test.pypi.org instead of PyPI, installed from there into a fresh
 environment and smoke-tested with the `mxcontrol` it carries and then with
-the run's own static one, whose rules and constants must be the wheel's.
+the run's own binary, whose rules and constants must be the wheel's.
 Every run, a tag's too, smoke-tests the wheels of the oldest and the newest
 CPython the same way on a distribution of their own before anything is
 published.
@@ -168,6 +173,6 @@ release candidate that will not be tagged, never the version itself. A
 failed run is re-run from its page once the fix is on the branch; the tag
 never moves.
 
-To rebuild any artifact by hand: `bazel build --config=release
-//mxcontrol:mxcontrol_static`, `bazel run --config=release //docker:load`,
+To rebuild any artifact by hand: `packaging/build_binary.sh`, then
+`packaging/build_image.sh` with the binary it wrote,
 `packaging/build_debs.sh`, `packaging/build_wheels.sh`.

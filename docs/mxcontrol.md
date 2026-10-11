@@ -3,11 +3,11 @@
 `mxcontrol` runs the multiplexer and a few tools next to it. Every way of
 getting the multiplexer brings it: `pip install mx-multiplexer` puts the
 `mxcontrol` command on the environment's PATH, `python -m
-multiplexer.mxcontrol` being the same without PATH; every release has a
-static one for any x86_64 Linux and an image that runs it; the Debian
-packages install it in `/usr/bin`; and a build makes it, `bazel build
-//mxcontrol`, `bazel build @mx//mxcontrol` from a workspace that consumes
-the repository, or `make`, into `build/bin/mxcontrol`
+multiplexer.mxcontrol` being the same without PATH; every release has one
+for any x86_64 Linux with glibc 2.28 or newer, and an image that runs it;
+the Debian packages install it in `/usr/bin`; and a build makes it, `bazel
+build //mxcontrol`, `bazel build @mx//mxcontrol` from a workspace that
+consumes the repository, or `make`, into `build/bin/mxcontrol`
 ([packaging](packaging.md)). It is a small tool with subcommands:
 
 ```

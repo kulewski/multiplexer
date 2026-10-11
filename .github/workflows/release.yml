@@ -40,34 +40,51 @@ jobs:
       # way first, so that a warning only -O2 raises fails here.
       - run: bazel build --config=release //...
 
-  static:
-    # mxcontrol linked statically, a release build, stripped: one file for
-    # any Linux, and the image. Both with the system rules: .bazelrc points
-    # the repository's own builds at the tests' rules file.
+  binary:
+    # The release's mxcontrol, built as the wheels' one is, inside the
+    # manylinux container: protobuf, RE2 and libstdc++ linked in, glibc 2.28
+    # or newer from the system, all checked by packaging/binary.sh. The
+    # image runs the same file. The system rules are the Makefile's default.
     needs: tests
+    runs-on: ubuntu-24.04
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$PWD" && packaging/binary.sh "${VERSION#v}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary
+          path: dist/
+
+  image:
+    # The image: that binary on distroless base-nossl, built reproducibly by
+    # packaging/build_image.sh, started once as a multiplexer and asked for
+    # the rules it read, and on a tag pushed to ghcr.io with the version and
+    # as latest.
+    needs: binary
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
-      - run: bazel build --config=release --//:multiplexer_rules=//:multiplexer.rules //mxcontrol:mxcontrol_static
-      - run: |
-          mkdir -p dist
-          cp bazel-bin/mxcontrol/mxcontrol_static dist/mxcontrol-${VERSION#v}-linux-amd64
-          packaging/check_binaries.sh dist/mxcontrol-${VERSION#v}-linux-amd64
-          (cd dist && sha256sum mxcontrol-* > mxcontrol-${VERSION#v}-linux-amd64.sha256)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: static
-          path: dist/
-      - name: the image, run once
+          name: binary
+          path: binary
+      - name: the image, serving once
         run: |
-          bazel run --config=release --//:multiplexer_rules=//:multiplexer.rules //docker:load
-          docker run --rm multiplexer:dev help
+          chmod +x binary/mxcontrol-*-linux-amd64
+          packaging/build_image.sh binary/mxcontrol-${VERSION#v}-linux-amd64 multiplexer:dev
+          docker run -d --name mx -p 127.0.0.1:1980:1980 multiplexer:dev
+          # Exits 1 unless the multiplexer, as nonroot, read its rules and answers.
+          binary/mxcontrol-${VERSION#v}-linux-amd64 rules status -M 127.0.0.1:1980 --timeout 30
+          docker rm -f mx
       - name: image to ghcr.io
         if: github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          bazel run --config=release --//:multiplexer_rules=//:multiplexer.rules //docker:push -- --tag "${VERSION#v}" --tag latest
+          for tag in "${VERSION#v}" latest; do
+            docker tag multiplexer:dev "ghcr.io/kulewski/multiplexer:$tag"
+            docker push "ghcr.io/kulewski/multiplexer:$tag"
+          done
 
   debs:
     # One package per release, built against that release's protobuf.
@@ -102,12 +119,12 @@ jobs:
   smoke:
     # Each end of the CPythons the wheels are for, on a distribution of its
     # own: the wheel installed into a fresh environment and smoke-tested
-    # with the mxcontrol it carries, then with the static one of the same
-    # run, whose rules and constants must be the wheel's. Twice more on
+    # with the mxcontrol it carries, then with the release's binary of the
+    # same run, whose rules and constants must be the wheel's. Twice more on
     # 3.10: with the oldest protobuf make/setup.py allows, and on Ubuntu
     # 22.04 beside the distribution's own protobuf 3.12, which that floor
     # must replace.
-    needs: [static, wheels]
+    needs: [binary, wheels]
     strategy:
       matrix:
         include:
@@ -127,18 +144,18 @@ jobs:
           path: dist
       - uses: actions/download-artifact@v4
         with:
-          name: static
-          path: static
+          name: binary
+          path: binary
       - run: |
           tag="cp$(echo "${{ matrix.python }}" | tr -d .)"
           python3 -m venv ${{ matrix.venv }} /venv
           /venv/bin/pip install -q dist/*-"$tag"-"$tag"-*.whl ${{ matrix.protobuf }}
           /venv/bin/python make/wheel_smoke.py
-          chmod +x static/mxcontrol-*-linux-amd64
-          MXCONTROL="$PWD/$(ls static/mxcontrol-*-linux-amd64)" /venv/bin/python make/wheel_smoke.py
+          chmod +x binary/mxcontrol-*-linux-amd64
+          MXCONTROL="$PWD/$(ls binary/mxcontrol-*-linux-amd64)" /venv/bin/python make/wheel_smoke.py
 
   release:
-    needs: [static, debs, wheels, smoke]
+    needs: [binary, image, debs, wheels, smoke]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
@@ -156,10 +173,10 @@ jobs:
     # The dry run's upload: the wheels to test.pypi.org through trusted
     # publishing, then `pip install` from there into a fresh environment
     # and the wheel's smoke test, with the mxcontrol it carries and then
-    # with the static one of the same run. The `testpypi` environment on
+    # with the release's binary of the same run. The `testpypi` environment on
     # GitHub and the pending publisher on test.pypi.org name this workflow
     # file and that environment.
-    needs: [static, wheels, smoke]
+    needs: [binary, wheels, smoke]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     environment: testpypi
@@ -178,8 +195,8 @@ jobs:
           packages-dir: dist/
       - uses: actions/download-artifact@v4
         with:
-          name: static
-          path: static
+          name: binary
+          path: binary
       - name: install from test.pypi.org and run the smoke test
         run: |
           python3 -m venv venv
@@ -193,9 +210,9 @@ jobs:
           done
           venv/bin/python -c "import multiplexer; print(multiplexer.__file__)"
           venv/bin/python make/wheel_smoke.py
-          chmod +x static/mxcontrol-*-linux-amd64
+          chmod +x binary/mxcontrol-*-linux-amd64
           # The smoke test changes directory before it starts the multiplexer: an absolute path.
-          MXCONTROL="$PWD/$(ls static/mxcontrol-*-linux-amd64)" venv/bin/python make/wheel_smoke.py
+          MXCONTROL="$PWD/$(ls binary/mxcontrol-*-linux-amd64)" venv/bin/python make/wheel_smoke.py
 
   pypi:
     # The wheels to PyPI, after the release exists and once the `pypi`

@@ -313,9 +313,8 @@ backend its share until its silence drops it, 90 s after its last frame
 ## Debug symbols
 
 Release builds (`--config=release`) compile with symbols and strip the
-binaries that ship: `//mxcontrol:mxcontrol` is the stripped copy of
-`//mxcontrol:mxcontrol_with_debug_symbols`, `//mxcontrol:mxcontrol_static`
-of `mxcontrol_static_with_debug_symbols`, and `_native.so` of
+binaries: `//mxcontrol:mxcontrol` is the stripped copy of
+`//mxcontrol:mxcontrol_with_debug_symbols`, and `_native.so` of
 `_native_with_debug_symbols.so`, the way `bazel/maybe_strip.bzl` describes;
 both targets of each pair are public. In other build modes the stripped
 name is a symlink to the unstripped binary.

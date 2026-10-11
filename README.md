@@ -18,7 +18,7 @@ peer among others.
 
 `pip install mx-multiplexer` installs the Python package and the
 multiplexer itself, `mxcontrol`; a release also ships `mxcontrol` as one
-static binary and as a container image, and the C++ library as a Debian or
+binary for any Linux with glibc 2.28 or newer and as a container image, and the C++ library as a Debian or
 Ubuntu package, all for Linux x86_64. Nothing needs building; the C++17
 source builds with Bazel or `make` when you want to. In Docker a
 multiplexer is one `docker run`, and on Kubernetes a StatefulSet behind a
@@ -100,8 +100,9 @@ above send to files.
 
 A multiplexer is one process, one rules file and nothing to keep, so a
 container is all it takes. The image, `ghcr.io/kulewski/multiplexer`, is
-12 MB: `mxcontrol` and the system rules on distroless, running as
-`nonroot`, listening on 1980 and reading `/etc/mx/multiplexer.rules`.
+32 MB, an 8 MB download: `mxcontrol` and the system rules on distroless's
+glibc base, running as `nonroot`, listening on 1980 and reading
+`/etc/mx/multiplexer.rules`.
 Mount the quick start's directory there, and these two lines replace the
 quick start's two `mxcontrol run_multiplexer` lines:
 
@@ -252,7 +253,7 @@ Bazel build.
   automatically, and reconnect on their own. A rolling restart of three
   multiplexers under traffic costs no request more than a millisecond
   ([rolling_restart](tests/scenarios/rolling_restart/README.md)).
-- **One `docker run`, or a StatefulSet on Kubernetes.** The image is 12 MB,
+- **One `docker run`, or a StatefulSet on Kubernetes.** The image is 32 MB,
   `mxcontrol` and the system rules on distroless, running as `nonroot`;
   mount a rules file over its own and it is a multiplexer. On Kubernetes a
   StatefulSet behind a headless Service runs as many as you want, with no
@@ -434,7 +435,8 @@ Two ways, and the choice is only whether you build it:
 - **A release.** `pip install mx-multiplexer` fetches the Python package
   from PyPI, `mxcontrol` inside, one manylinux wheel per CPython from 3.10.
   Every release on GitHub ships the same set, built from one commit and
-  stripped: those wheels, a static `mxcontrol` for any x86_64 Linux, the
+  stripped: those wheels, `mxcontrol` for any x86_64 Linux with glibc 2.28
+  or newer, the
   container image `ghcr.io/kulewski/multiplexer:<version>`, also tagged
   `latest`, with nothing in it but `mxcontrol` and the system rules, and a
   Debian package per Debian and Ubuntu release with `mxcontrol`, the C++

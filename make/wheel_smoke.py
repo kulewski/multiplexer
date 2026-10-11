@@ -12,7 +12,7 @@ rules file of the smoke's own, the system rules with a client's and a
 backend's types after them, runs two multiplexers that answer every query.
 With MXCONTROL set, the harness runs that binary instead, and its rules and
 constants must be the package's: the check that the wheel's mxcontrol and
-the static one have not drifted apart. It runs from an empty directory, so
+the release's binary have not drifted apart. It runs from an empty directory, so
 that nothing of the source tree can stand in for what the wheel must carry."""
 
 import os
