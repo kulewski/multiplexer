@@ -171,6 +171,54 @@ of those either. Bazel builds with such a `protoc` too:
 in their place stubs that make every name of the module `Any`.
 [AGENTS.md](../AGENTS.md) lists the commands.
 
+### Editing in VS Code
+
+An editor formats and checks as `./format.sh` and `./check.sh` do when its
+extensions read the same configuration and run the same tools, at the
+versions those pin:
+
+| Files | Extension | What it reads |
+|---|---|---|
+| Python | Python and Pylance (`ms-python.python`, `ms-python.vscode-pylance`) | `[tool.pyright]` in `pyproject.toml`, and the stubs in `bazel-bin` after a build |
+| Python | Black Formatter (`ms-python.black-formatter`) | `[tool.black]`, with the black of `.tools/venv` |
+| Python | Ruff (`charliermarsh.ruff`) | `[tool.ruff]`, with the ruff of `.tools/venv` |
+| C++ | clangd (`llvm-vs-code-extensions.vscode-clangd`) | `.clang-format`, and `compile_commands.json` from `bazel run //compdb` |
+| BUILD, WORKSPACE, `.bzl` | Bazel (`bazelbuild.vscode-bazel`) | the buildifier of `.tools/venv` |
+
+The settings, in `.vscode/settings.json`, which git ignores, so that each
+checkout keeps its own:
+
+```json
+{
+  "python.defaultInterpreterPath": "/usr/bin/python3",
+  "black-formatter.path": ["${workspaceFolder}/.tools/venv/bin/black"],
+  "ruff.path": ["${workspaceFolder}/.tools/venv/bin/ruff"],
+  "clangd.path": "/usr/bin/clangd-18",
+  "bazel.buildifier.executable": "/the/checkout/.tools/venv/bin/buildifier",
+  "[python]": { "editor.defaultFormatter": "ms-python.black-formatter", "editor.formatOnSave": true },
+  "[cpp]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd", "editor.formatOnSave": true },
+  "[starlark]": { "editor.defaultFormatter": "BazelBuild.vscode-bazel", "editor.formatOnSave": true }
+}
+```
+
+- **Python.** The tools in `.tools/venv` are there once `./format.sh` has
+  run. The interpreter is the system's `python3`, which has the
+  `python3-protobuf` the package and its tests import; `.tools/venv` holds
+  the tools, not protobuf. Pylance's pyright may be newer than the one
+  `./check.sh` pins: both read the same configuration, and `./check.sh`
+  decides.
+- **C++.** clangd 18 formats as the pinned clang-format 18 does; a newer
+  clangd, which the extension offers to download when none is on the PATH,
+  may format otherwise. `compile_commands.json` comes from `bazel build
+  --config=debug //...` and then `bazel run //compdb`
+  ([compdb/BUILD](../compdb/BUILD)).
+- **BUILD files.** The Bazel extension takes buildifier's path as it is
+  written, with no `${workspaceFolder}`: the absolute path of the
+  checkout's `.tools/venv/bin/buildifier`.
+- **Everything else.** Nothing formats Markdown, YAML or JSON here. A
+  formatter set to format them on save, Prettier say, rewrites the
+  hand-formatted pages and workflows.
+
 ## Checking on a clean machine
 
 ```

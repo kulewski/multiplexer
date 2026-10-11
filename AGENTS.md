@@ -108,6 +108,8 @@ bazel run //compdb                         # compile_commands.json for clangd, a
   and rejects Mermaid slips it can spot without a renderer. `./check.sh`
   renders every Mermaid block with mermaid-cli; a `;` inside a
   sequenceDiagram label is the classic mistake, use a comma.
+  VS Code set up as docs/building.md's "Editing in VS Code" says formats
+  and checks as these do.
 - Every source file opens with a comment: what it is, who uses it, the
   invariants it keeps, the places that surprise a reader. Its first
   paragraph is the file's line in the code map, so keep that paragraph
