@@ -1,88 +1,45 @@
-"""Starts a multiplexer and a backend in each language, and queries it with a client in each language."""
+"""The echo binaries end to end, as a deployment runs them: a multiplexer
+from multiplexer.testing's Cluster, a backend binary started with Process
+and waited for by its "ready" line, and a client in each language asking
+it. Leaving the Cluster's block stops the backend with SIGTERM and fails the
+test unless it ended cleanly, the way docs/recipes/test_a_service.md tests
+a service binary in any language."""
 
-import os
 import subprocess
-import time
 import unittest
 
 from multiplexer.clients import SyncClient
 from multiplexer.multiplexer_constants import peers, types
+from multiplexer.testing import Cluster, Process, runfile
 
-
-def runfile(repo: str, path: str) -> str:
-    """The absolute path of `path` in workspace `repo` under the test's runfiles."""
-    return os.path.join(os.environ["TEST_SRCDIR"], repo, path)
+RULES = runfile("echo.rules")
 
 
 class EchoTest(unittest.TestCase):
-    """One multiplexer per test, started on a free port; a backend is started
-    by the test itself and both are stopped afterwards."""
+    """One Cluster per test, and the backend binary the test names."""
 
-    def setUp(self):
-        """Start the multiplexer and learn its port."""
-        port_file = os.path.join(os.environ["TEST_TMPDIR"], "mx.port")
-        if os.path.exists(port_file):
-            os.unlink(port_file)  # a previous test's multiplexer wrote it
-        self.mx = subprocess.Popen(
-            [
-                runfile("mx", "mxcontrol/mxcontrol"),
-                "run_multiplexer",
-                "--address",
-                "127.0.0.1:0",
-                "--rules",
-                runfile("echo_example", "echo.rules"),
-                "--port-file",
-                port_file,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        deadline = time.time() + 15
-        while not os.path.exists(port_file):
-            self.assertLess(time.time(), deadline, "multiplexer did not start")
-            time.sleep(0.02)
-        with open(port_file) as f:
-            host, port = f.read().strip().rsplit(":", 1)
-        self.endpoint = (host, int(port))
-        self.backend = None
+    def run_backend(self, cluster: Cluster, backend: str) -> Process:
+        """Start one of the backend binaries against the cluster and wait
+        for its "ready" line."""
+        process = Process([runfile(backend), cluster.addresses[0]], name=backend)
+        process.wait_for_line("^ready$")
+        return process
 
-    def tearDown(self):
-        """Stop the backend, if any, and the multiplexer."""
-        for proc in (self.backend, self.mx):
-            if proc is not None:
-                proc.terminate()
-                proc.wait(10)
+    def ask(self, cluster: Cluster, client: str, *args: str) -> str:
+        """Run one of the client binaries to its end; what it printed."""
+        return subprocess.run(
+            [runfile(client), cluster.addresses[0], *args], stdout=subprocess.PIPE, timeout=60, check=True, text=True
+        ).stdout
 
-    def start_backend(self, backend_binary: str) -> None:
-        """Run one of the backend binaries and wait for its "ready" line."""
-        self.backend = subprocess.Popen(
-            [runfile("echo_example", backend_binary), "%s:%d" % self.endpoint],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        assert self.backend.stdout is not None
-        self.assertEqual(b"ready\n", self.backend.stdout.readline())
-
-    def query_in_process(self, backend_binary: str) -> None:
+    def query_in_process(self, backend: str) -> None:
         """Query the backend from this process with the Python SyncClient."""
-        self.start_backend(backend_binary)
-        client = SyncClient([self.endpoint], type=peers.ECHO_CLIENT)
-        response = client.query(b"hello multiplexer", type=types.ECHO_REQUEST, timeout=10)
-        client.shutdown()
+        with Cluster(1, rules=RULES) as cluster:
+            self.run_backend(cluster, backend)
+            client = SyncClient(cluster.endpoints, type=peers.ECHO_CLIENT)
+            response = client.query(b"hello multiplexer", type=types.ECHO_REQUEST, timeout=10)
+            client.shutdown()
         self.assertEqual(types.ECHO_RESPONSE, response.type)
         self.assertEqual(b"HELLO MULTIPLEXER", response.message)
-
-    def query_with_binary(self, backend_binary: str, client_binary: str) -> None:
-        """Query the backend by running one of the client binaries."""
-        self.start_backend(backend_binary)
-        output = subprocess.run(
-            [runfile("echo_example", client_binary), "%s:%d" % self.endpoint, "hello multiplexer"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=True,
-        ).stdout
-        self.assertEqual(b"HELLO MULTIPLEXER\n", output)
 
     def test_python_backend(self):
         self.query_in_process("backend_py")
@@ -91,22 +48,29 @@ class EchoTest(unittest.TestCase):
         self.query_in_process("backend_cc")
 
     def test_cpp_client(self):
-        self.query_with_binary("backend_py", "client_cc")
+        with Cluster(1, rules=RULES) as cluster:
+            self.run_backend(cluster, "backend_py")
+            self.assertEqual("HELLO MULTIPLEXER\n", self.ask(cluster, "client_cc", "hello multiplexer"))
 
     def test_python_client(self):
-        self.query_with_binary("backend_cc", "client_py")
+        with Cluster(1, rules=RULES) as cluster:
+            self.run_backend(cluster, "backend_cc")
+            self.assertEqual("HELLO MULTIPLEXER\n", self.ask(cluster, "client_py", "hello multiplexer"))
 
     def test_worker_threads_share_one_threaded_client(self):
-        self.start_backend("backend_cc")
-        output = subprocess.run(
-            [runfile("echo_example", "workers"), "%s:%d" % self.endpoint, "3", "4"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=60,
-            check=True,
-        ).stdout.decode()
-        lines = sorted(output.splitlines())
+        with Cluster(1, rules=RULES) as cluster:
+            self.run_backend(cluster, "backend_cc")
+            lines = sorted(self.ask(cluster, "workers", "3", "4").splitlines())
         self.assertEqual(sorted("worker-%d: W%d JOB %d" % (w, w, j) for w in range(3) for j in range(4)), lines)
+
+    def test_the_cpp_backend_answers_through_its_drain_and_exits_0(self):
+        """SIGTERM starts the C++ backend's drain. Alone, the last backend
+        of its type, it still answers, then exits 0."""
+        with Cluster(1, rules=RULES) as cluster:
+            backend = self.run_backend(cluster, "backend_cc")
+            backend.proc.terminate()
+            self.assertEqual("STILL HERE\n", self.ask(cluster, "client_py", "still here"))
+            self.assertEqual(0, backend.wait(30))
 
 
 if __name__ == "__main__":

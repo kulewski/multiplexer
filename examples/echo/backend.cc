@@ -41,8 +41,7 @@ class EchoBackend : public BaseMultiplexerServer {
     for (char& character : payload) {
       character = std::toupper(static_cast<unsigned char>(character));
     }
-    send_message(
-        Kwargs().set("message", payload).set("type", static_cast<std::uint32_t>(multiplexer::types::ECHO_RESPONSE)));
+    send_message(Kwargs().set("message", payload).set("type", multiplexer::types::ECHO_RESPONSE));
   }
 
   // Runs after every iteration: start draining once the signal flag is set.

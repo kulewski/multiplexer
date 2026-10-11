@@ -1000,5 +1000,7 @@ The tools are those of `@mx//multiplexer/testing`, from Python:
 - `FakePeer` for the peers it talks to, and `TestClient` to ask it.
 
 [Test a service binary](recipes/test_a_service.md) has the test, its
-`BUILD` and what leaving the cluster checks. Code that does not touch
-the multiplexer gets ordinary gtest `cc_test`s.
+`BUILD` and what leaving the cluster checks.
+[examples/echo/echo_test.py](../examples/echo/echo_test.py) tests the C++
+backend so. Code that does not touch the multiplexer gets ordinary gtest
+`cc_test`s.

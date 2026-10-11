@@ -71,6 +71,7 @@ py_test(
     deps = [
         "@mx//multiplexer:clients",
         "@mx//multiplexer:multiplexer_constants",
+        "@mx//multiplexer/testing",
     ],
 )
 

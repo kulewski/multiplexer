@@ -157,10 +157,16 @@ threads never touch a socket.
 
 ## Testing it with the harness
 
-[echo_test.py](echo_test.py) runs the binaries against a multiplexer
-started from `@mx//mxcontrol`: the Python and C++ backends with the
-Python and C++ clients, and the workers program, reading `ready` before
-it asks. [harness_test.py](harness_test.py) tests the same exchange
+[echo_test.py](echo_test.py) runs the binaries as a deployment runs them,
+on the multiplexer's own test infrastructure. Each test opens a `Cluster`
+and starts a backend binary with `Process`, waiting for its `ready`
+line, then asks it with the Python and C++ clients and the workers
+program. Leaving the cluster stops the backend with SIGTERM and fails
+the test unless it ended cleanly. One test sends SIGTERM itself: alone,
+the C++ backend still answers through its drain, then exits 0.
+[Test a service binary](../../docs/recipes/test_a_service.md) is this
+way for a service in any language. [harness_test.py](harness_test.py)
+tests the same exchange
 without the binaries, with the multiplexer's own test infrastructure:
 `mx_integration_test` in `BUILD` (from
 `@mx//multiplexer/testing:defs.bzl`) starts the test with this

@@ -11,6 +11,8 @@ service is written in: C++, Python or anything else.
 - `TestClient` asks it.
 
 Services in every language share one set of fakes and helpers this way.
+[examples/echo/echo_test.py](../../examples/echo/echo_test.py) tests a
+C++ and a Python backend so.
 
 ## The test
 
@@ -93,7 +95,8 @@ sandbox if the test is killed.
 
 The binary, a `cc_binary` say, is data of a `py_test`, and the
 constants come from the rules file `.bazelrc` names
-(`build --@mx//:multiplexer_rules=//:deployment.rules`):
+(`build --@mx//:multiplexer_rules=//:deployment.rules`), as in
+[examples/echo](../../examples/echo):
 
 ```python
 py_test(
