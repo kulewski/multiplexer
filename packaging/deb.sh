@@ -16,7 +16,11 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 out="$(realpath "${1:-build/dist}")"
-version="$(sed -n 's/^VERSION ?= //p' Makefile)"
+# The version make builds: a tag in the environment, the release
+# workflow's, without its v, as the Makefile takes it, else the Makefile's
+# own; a trial run's tag, a release candidate's, names its packages too.
+version="${VERSION:-$(sed -n 's/^VERSION ?= //p' Makefile)}"
+version="${version#v}"
 codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-$ID}")"
 arch="$(dpkg --print-architecture)"
 protobuf="$(dpkg-query -W -f '${Version}' libprotobuf-dev)"
