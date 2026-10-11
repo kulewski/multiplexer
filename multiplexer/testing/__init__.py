@@ -11,9 +11,10 @@ does as Event lines on stdout (events.proto, one message per line in protocol
 buffer text format); Role collects those events as dicts. The roles this
 repository ships (tests/roles, in Python and C++) play a client or a backend
 with scripted behaviour; a binary of your own plays a role by following the
-same contract, see tests/README.md. FakePeer, BackendThread and TestClient
-(fakes.py) are the in-process counterparts for unit tests; RawPeer
-(raw_peer.py) speaks the wire format by hand. Every process's stderr is saved
+same contract, see tests/README.md. Process runs a program of yours that
+is not a role, a service under test, and keeps its log. FakePeer,
+BackendThread and TestClient (fakes.py) are the in-process counterparts
+for unit tests; RawPeer (raw_peer.py) speaks the wire format by hand. Every process's stderr is saved
 under the test's undeclared outputs directory.
 
 A scenario is a unittest file that calls main(); mx_integration_test
@@ -160,15 +161,16 @@ def _child_env(native: bool) -> dict[str, str]:
 
 
 def _end_children_at_exit(owner: int) -> None:
-    """At exit: every multiplexer and role this process started that still
-    runs is asked to end (SIGTERM, and SIGCONT for a frozen one) and killed
-    when it has not within 5 s: a test that died before its Cluster stopped
-    them, or that ran them without one, leaves nothing running. Not in a
-    forked child, whose parent's children they are."""
+    """At exit: every multiplexer, role and Process this process started
+    that still runs is asked to end (SIGTERM, and SIGCONT for a frozen one)
+    and killed when it has not within 5 s: a test that died before its
+    Cluster stopped them, or that ran them without one, leaves nothing
+    running. Not in a forked child, whose parent's children they are."""
     if os.getpid() != owner:
         return
     running = [mx.proc for mx in Mx._all if mx.proc is not None and mx.proc.poll() is None]
     running += [role.proc for role in Role._all if role.proc.poll() is None]
+    running += [process.proc for process in Process._all if process.proc.poll() is None]
     for proc in running:
         proc.terminate()
         proc.send_signal(signal.SIGCONT)
@@ -667,14 +669,14 @@ class Cluster:
     every address, IPv6 and, where the system maps it, as Linux does by
     default, IPv4. Use as a context
     manager: entering starts the multiplexers, leaving stops every role
-    that is still running and then them. The in-process peers of fakes.py
+    and every Process that is still running and then them. The in-process peers of fakes.py
     are the test's to stop, inside the cluster's block, since they would
     go on reconnecting.
 
     Leaving fails the block with AssertionError when a process did not
-    end cleanly: a role still running that SIGTERM did not end within
-    10 s with 0, or by the signal itself for a role that does not catch
-    it; a multiplexer that exited on its own, exited other than 0 at a
+    end cleanly: a role or a Process still running that SIGTERM did not
+    end within 10 s with 0, or by the signal itself for one that does not
+    catch it; a multiplexer that exited on its own, exited other than 0 at a
     stop (the test's own, a restart()'s or the cluster's), or had to be
     killed when a stop ran out of time, 10 s, or drain_seconds + 5 s for a
     cluster that drains longer; a process pause() froze is continued
@@ -788,11 +790,11 @@ class Cluster:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        """Stop every role still running and then the multiplexers, and
-        raise AssertionError naming every process that did not end cleanly
-        (see the class comment), with the end of its log. When the block is
-        failing already its own error goes on, and the report goes to
-        stderr."""
+        """Stop every role and every Process still running and then the
+        multiplexers, and raise AssertionError naming every process that did
+        not end cleanly (see the class comment), with the end of its log.
+        When the block is failing already its own error goes on, and the
+        report goes to stderr."""
         unclean: list[str] = []
         for role in list(Role.running_roles()):
             problem = role._stop_checked()
@@ -805,6 +807,15 @@ class Cluster:
                 role._reader.join(5)
                 role._stderr.close()
         Role._all = [role for role in Role._all if role.proc.poll() is None]
+        # The programs a test ran with Process, the same way.
+        for process in list(Process.running()):
+            problem = process._stop_checked()
+            if problem:
+                unclean.append(problem)
+        for process in Process._all:
+            if process.proc.poll() is not None:
+                process._reader.join(5)
+        Process._all = [process for process in Process._all if process.proc.poll() is None]
         for multiplexer in self.mx:
             multiplexer.stop()
             unclean += multiplexer.unclean_ends()
@@ -1097,6 +1108,180 @@ class Role:
     def rss_kb(self) -> int:
         """The process's resident set size in KiB right now."""
         return rss_kb(self.proc.pid)
+
+
+class Process:
+    """A program of yours that a test runs as production runs it, a service
+    under test with its own flags: a binary in any language, which prints
+    no Event lines (Role is for those that do).
+
+    Its stdout and stderr, together, go line by line to `lines` and to
+    `<name>.log` under the test's outputs; wait_for_line() blocks on a
+    condition variable until a line matches or the program has exited, so
+    a test never polls. It
+    gets the harness's environment, MX_TEST_PARENT_FD among it: a program
+    that reads that pipe, as mxcontrol and the roles do, ends itself
+    however the test process ends. One that does not is ended when the
+    test process exits, with the multiplexers and the roles, and under
+    Bazel by the sandbox when it is killed. Leaving a Cluster's block
+    stops it as it stops a role, before the multiplexers, and reports it
+    unless SIGTERM ended it within 10 s with 0, or by the signal itself
+    for a program that does not catch it.
+    """
+
+    _all: ClassVar[list["Process"]] = []
+    _counter = 0
+
+    def __init__(
+        self,
+        argv: list[str],
+        name: str | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ):
+        """Start `argv`, its first word a path or a name on PATH, with the
+        harness's environment and `env` over it, in `cwd` (the test's own
+        when None). `name` labels its log and the reports, the program's
+        file name and a counter when None."""
+        Process._counter += 1
+        self.argv = list(argv)
+        self.name = name or "%s-%d" % (os.path.basename(self.argv[0]), Process._counter)
+        self.lines: list[str] = []
+        self._exited = False  # the output ended and the program exited: what a wait ends on
+        self._killed_at_stop = False  # stop() ran out of time and killed it
+        self._cond = threading.Condition()
+        self.log_path = os.path.join(output_dir(), self.name + ".log")
+        self._log = open(self.log_path, "w")
+        environment = _child_env(native=True)
+        environment.update(env or {})
+        self.proc = subprocess.Popen(
+            self.argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            cwd=cwd,
+            pass_fds=(_watch_fd(),),
+        )
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        Process._all.append(self)
+
+    @classmethod
+    def running(cls) -> list["Process"]:
+        """Every Process started so far whose program is still alive."""
+        return [process for process in cls._all if process.proc.poll() is None]
+
+    @property
+    def pid(self) -> int:
+        """The program's process id."""
+        return self.proc.pid
+
+    @property
+    def returncode(self) -> int | None:
+        """The exit code, or None while the program runs."""
+        return self.proc.poll()
+
+    def _read(self) -> None:
+        """The reader thread: every line of output into `lines` and the log."""
+        assert self.proc.stdout is not None
+        for raw in self.proc.stdout:
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            self._log.write(line + "\n")
+            self._log.flush()
+            with self._cond:
+                self.lines.append(line)
+                self._cond.notify_all()
+        self.proc.stdout.close()
+        self._log.close()
+        _wait_for_exit(self.proc)
+        with self._cond:
+            self._exited = True
+            self._cond.notify_all()
+
+    def wait_for_line(self, pattern: str, timeout: float = 15) -> str:
+        """Block until a line of output matches the regular expression
+        `pattern` (re.search) and return it: the first such line the
+        program ever printed, so a second wait for the same returns at
+        once. Raises RuntimeError if the program exits first and
+        TimeoutError after `timeout`, with the end of its log."""
+        compiled = re.compile(pattern)
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                for line in self.lines:
+                    if compiled.search(line):
+                        return line
+                if self._exited:
+                    raise RuntimeError(
+                        "%s exited with %s before printing a line that matches %r; the end of its log:\n%s"
+                        % (self.name, exit_status(self.proc.wait()), pattern, tail(self.log_path))
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "%s printed no line that matches %r within %ss; the end of its log:\n%s"
+                        % (self.name, pattern, timeout, tail(self.log_path))
+                    )
+                self._cond.wait(remaining)
+
+    def wait(self, timeout: float = 60) -> int:
+        """Wait for the program to finish on its own and return its exit
+        code; raises subprocess.TimeoutExpired after `timeout`."""
+        exit_code = self.proc.wait(timeout)
+        self._reader.join(5)
+        return exit_code
+
+    def pause(self) -> None:
+        """Freeze the program (SIGSTOP): its sockets stay open and nothing
+        it would do happens until resume()."""
+        self.proc.send_signal(signal.SIGSTOP)
+
+    def resume(self) -> None:
+        """Unfreeze the program (SIGCONT)."""
+        self.proc.send_signal(signal.SIGCONT)
+
+    def stop(self, timeout: float = 10) -> int | None:
+        """Ask the program to exit (SIGTERM, and SIGCONT, so that one pause()
+        froze handles it), wait up to `timeout`, kill it if it has not
+        exited, and return the exit code: what a deployment's stop does."""
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.send_signal(signal.SIGCONT)
+            try:
+                self.proc.wait(timeout)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(5)
+                self._killed_at_stop = True
+        self._reader.join(5)
+        return self.proc.returncode
+
+    def _stop_checked(self, timeout: float = 10) -> str | None:
+        """stop() the program, as a Cluster does when it stops, and say what
+        was wrong with its end, with the end of its log: None when it exited
+        0 or of the SIGTERM itself, and when it had exited before, which is
+        the test's to check."""
+        was_running = self.proc.poll() is None
+        self._killed_at_stop = False
+        code = self.stop(timeout)
+        if not was_running:
+            return None
+        if self._killed_at_stop:
+            what = "did not exit within %ss of SIGTERM and was killed" % timeout
+        elif code in (0, -signal.SIGTERM):
+            return None
+        else:
+            what = "exited with %s on SIGTERM" % exit_status(code)
+        return "%s %s; the end of %s:\n%s" % (self.name, what, os.path.basename(self.log_path), tail(self.log_path))
+
+    def kill(self) -> int | None:
+        """End the program at once (SIGKILL), a crash, and return its exit
+        code."""
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(5)
+        self._reader.join(5)
+        return self.proc.returncode
 
 
 def mxcontrol(*args: str, timeout: float = 30, expect: int | None = 0) -> subprocess.CompletedProcess:

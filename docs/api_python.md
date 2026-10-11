@@ -1454,6 +1454,19 @@ class SearchTest(unittest.TestCase):
   `RawPeer` speaks the wire format by hand; both are described in
   [tests/README.md](../tests/README.md), with `mx_integration_test`, the
   macro that runs a scenario against the shipped roles or a binary of yours.
+- `Process(argv, name=None, env=None, cwd=None)` runs a program of yours
+  that is not a role, a service under test in any language, with
+  production's flags.
+  - Its stdout and stderr go to `lines` and `<name>.log` under the
+    test's outputs, and `wait_for_line(pattern)` waits for a line that
+    matches.
+  - `stop()` sends SIGTERM and returns the exit code; `kill()`,
+    `pause()`, `resume()` and `wait()` are as for a role.
+  - Leaving a `Cluster` stops one still running and reports it unless
+    it exited 0, or of the SIGTERM itself, within 10 s.
+
+  [Test a service binary](recipes/test_a_service.md) is the whole way
+  of it.
 
 Everything in-process uses the client library as your code does, so what a
 test sees is what production sees, including the thread rules: a

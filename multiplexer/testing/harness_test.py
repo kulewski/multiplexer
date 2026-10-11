@@ -8,10 +8,11 @@ a directory of its own; a test process that is killed takes its
 multiplexers with it; log_contains() past a log_mark() sees only what
 came after the mark, where it searched the whole log, so that a wait for a
 line an earlier step wrote ended at once; and a role's wait that sees
-nothing blocks until its deadline once, where it woke every half second
-to see whether the role had exited. Each failed on the harness before.
-Counted, not timed, but for receive_type() and that wait, whose timeouts
-are the thing tested: every other wait is a failure detector.
+nothing, and a program's, blocks until its deadline once, where a role's
+woke every half second to see whether the role had exited. Each failed on
+the harness before. Counted, not timed, but for receive_type() and those
+waits, whose timeouts are the thing tested: every other wait is a failure
+detector.
 """
 
 import contextlib
@@ -28,7 +29,17 @@ import unittest
 from multiplexer import recording, testing
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, Role, TestClient, configure, runfile, spawn, wait_until
+from multiplexer.testing import (
+    BackendThread,
+    Cluster,
+    Process,
+    Role,
+    TestClient,
+    configure,
+    runfile,
+    spawn,
+    wait_until,
+)
 from multiplexer.testing.raw_peer import RawPeer
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
@@ -167,6 +178,50 @@ class HarnessTest(unittest.TestCase):
             self.assertEqual((shared, shared), (os.path.dirname(first), os.path.dirname(second)))
             self.assertNotEqual(first, second)
             self.assertTrue(os.path.isdir(first), "kept")
+
+    # A program that prints, to both streams, waits, and exits with `code`
+    # on SIGTERM.
+    WAITING = (
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(sys.argv[1])))\n"
+        "print('to stderr', file=sys.stderr, flush=True)\n"
+        "print('parent fd', os.environ['MX_TEST_PARENT_FD'], flush=True)\n"
+        "print('ready', flush=True)\n"
+        "while True:\n"
+        "    time.sleep(60)\n"
+    )
+
+    def test_a_process_is_waited_for_by_its_line_and_stopped_cleanly(self) -> None:
+        """Process: the program's stdout and stderr, together, reach
+        wait_for_line() and its log; it gets MX_TEST_PARENT_FD; stop() sends
+        SIGTERM and returns the program's exit code."""
+        process = Process([sys.executable, "-c", self.WAITING, "0"], name="waiting-program")
+        self.assertEqual("ready", process.wait_for_line("^ready$"))
+        self.assertRegex(process.wait_for_line("^parent fd "), r"^parent fd \d+$")
+        self.assertIn("to stderr", process.lines)
+        self.assertEqual(0, process.stop())
+        with open(process.log_path) as log:
+            self.assertIn("ready\n", log.read())
+
+    def test_a_process_that_exits_first_fails_the_wait_with_its_log(self) -> None:
+        """wait_for_line() raises once the program has exited without the
+        line, with its exit code and the end of its output."""
+        process = Process([sys.executable, "-c", "print('starting'); raise SystemExit(3)"])
+        with self.assertRaisesRegex(
+            RuntimeError, r"exited with 3 before printing a line that matches 'ready'(.|\n)*starting"
+        ):
+            process.wait_for_line("ready")
+
+    def test_a_wait_for_a_line_blocks_until_its_deadline_once(self) -> None:
+        """A program that prints nothing more: a wait for a line it never
+        prints wakes at its deadline and not before, as a role's does."""
+        process = Process([sys.executable, "-c", self.WAITING, "0"], name="quiet-program")
+        process.wait_for_line("^ready$")
+        before = voluntary_switches()
+        with self.assertRaises(TimeoutError):
+            process.wait_for_line("^never$", timeout=3)
+        self.assertLessEqual(voluntary_switches() - before, 2)
+        self.assertEqual(0, process.stop())
 
     def test_a_wait_for_an_event_blocks_until_its_deadline_once(self) -> None:
         """A stand-in role that prints "connected" and nothing more: a wait

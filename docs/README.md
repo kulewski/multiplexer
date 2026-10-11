@@ -287,6 +287,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Check a backend's health](recipes/check_backend_health.md): a
   Kubernetes liveness probe that sees the serve loop through
   `periodic_task()`, and why a health thread or a TCP probe does not.
+- [Test a service binary](recipes/test_a_service.md): a backend or a
+  client in any language, its binary started with production's flags
+  on `multiplexer.testing`'s `Cluster`, `Process`, `FakePeer` and
+  `TestClient`.
 - [Add an integration test scenario](recipes/add_a_scenario.md)
 - [Add an mxcontrol subcommand](recipes/add_an_mxcontrol_subcommand.md)
 - [Change a timeout or a limit](recipes/change_a_default.md)

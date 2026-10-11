@@ -989,3 +989,16 @@ from any thread; `serve_forever()` notices within one poll. A
 the workers, its `Request` may be answered from any thread, and
 `serve_forever()` only polls.
 
+## Testing
+
+A C++ service is tested as it runs: its binary, as the data of a
+`py_test`, against real multiplexers, through what it does over them.
+The tools are those of `@mx//multiplexer/testing`, from Python:
+- `Cluster` for the multiplexers;
+- `Process` for the binary, its log kept and its clean exit on SIGTERM
+  checked;
+- `FakePeer` for the peers it talks to, and `TestClient` to ask it.
+
+[Test a service binary](recipes/test_a_service.md) has the test, its
+`BUILD` and what leaving the cluster checks. Code that does not touch
+the multiplexer gets ordinary gtest `cc_test`s.

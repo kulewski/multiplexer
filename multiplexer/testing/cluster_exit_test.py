@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 from multiplexer import testing
-from multiplexer.testing import Cluster, Mx, configure, runfile, spawn
+from multiplexer.testing import Cluster, Mx, Process, configure, runfile, spawn
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 
@@ -136,6 +136,21 @@ class ClusterExitTest(unittest.TestCase):
             with Cluster(1, rules=RULES) as cluster:
                 spawn("backend", "bin", mx=cluster.addresses, type=1).wait_for("connected")  # its handler is in place
         self.assertRegex(str(raised.exception), r"backend-bin-\d+ exited with 3 on SIGTERM; the end of backend-bin-")
+
+    def test_a_process_exiting_other_than_0_on_sigterm_fails_the_block(self):
+        """A Process still running when the block ends is stopped with
+        SIGTERM as a role is, and must exit 0 or die of the signal."""
+        code = "import signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *_: sys.exit(4))\nprint('ready', flush=True)\ntime.sleep(600)\n"
+        with self.assertRaises(AssertionError) as raised:
+            with Cluster(1, rules=RULES):
+                Process([sys.executable, "-c", code], name="unclean-program").wait_for_line("ready")
+        self.assertIn("unclean-program exited with 4 on SIGTERM; the end of unclean-program.log", str(raised.exception))
+
+    def test_a_process_that_does_not_catch_sigterm_ends_cleanly(self):
+        """A program that dies of the SIGTERM itself has ended as asked."""
+        with Cluster(1, rules=RULES):
+            code = "import time\nprint('ready', flush=True)\ntime.sleep(600)\n"
+            Process([sys.executable, "-c", code]).wait_for_line("ready")
 
     def test_an_end_the_test_expected_is_not_reported(self):
         """expect_exit(): the test ends the multiplexer with a signal of its own."""
