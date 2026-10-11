@@ -26,7 +26,7 @@ and how many types they name, then the address. The time, the host's
 name that starts the context and the checkout's path are left out.
 
 ```
-[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo/echo.rules: 451122fa, 19 message types, 7 peer types"  from=external/mx/multiplexer/server.cc:618
+[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo/echo.rules: cf6eea04, 19 message types, 7 peer types"  from=external/mx/multiplexer/server.cc:618
 [INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer  flw=""  txt="starting MX server on 127.0.0.1:1980"  from=external/mx/mxcontrol/start_multiplexer_server.cc:128
 ```
 
@@ -77,7 +77,7 @@ connection's start and end around that line, left out here:
 
 ```
 $ bazel run @mx//mxcontrol -- rules status -M 127.0.0.1:1980
-multiplexer 10174158592712911242: rules 451122fa (19 message types, 7 peer types) from …/examples/echo/echo.rules, loaded …
+multiplexer 10174158592712911242: rules cf6eea04 (19 message types, 7 peer types) from …/examples/echo/echo.rules, loaded …
 ```
 
 `bazel run //:client_cc -- 127.0.0.1:1980 "hello multiplexer"` does the

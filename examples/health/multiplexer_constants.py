@@ -3,7 +3,7 @@
 #
 
 # CRC-32 of the rules file these constants were generated from; a recording's header carries the same.
-RULES_FINGERPRINT = "209a2e6a"
+RULES_FINGERPRINT = "55eb4354"
 
 
 class _constants_base:

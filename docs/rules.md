@@ -156,12 +156,12 @@ The system rules also hold six ordinary types, which the libraries and
 
 | Type | Value | Used by |
 |---|---|---|
-| peer `LOG_STREAMER` | 108 | `mxcontrol stream_logs`, which the Python library's log streaming starts |
-| peer `LOG_RECEIVER_EXAMPLE` | 111 | `mxcontrol receive_logs`, which prints the stream |
+| peer `LOG_STREAMER` | 108 | `mxcontrol streamlogs`, which the Python library's log streaming starts |
+| peer `LOG_RECEIVER_EXAMPLE` | 111 | `mxcontrol receivelogs`, which prints the stream |
 | `PICKLE_RESPONSE` | 112 | the reply `send_pickle()` and `reply_pickle()` send by default |
 | `REQUEST_RECEIVED` | 113 | what a backend on `BaseMultiplexerServer` sends with `notify_start()`, to say it is working on a request |
 | `BACKEND_ERROR` | 114 | what the server classes send when a handler raised |
-| `LOGS_STREAM` | 115 | the log entries `stream_logs` sends, to every `LOG_RECEIVER_EXAMPLE` |
+| `LOGS_STREAM` | 115 | the log entries `streamlogs` sends, to every `LOG_RECEIVER_EXAMPLE` |
 
 A Bazel build pointed at your file takes their numbers from it, and needs
 all six: `@mx//mxcontrol` is compiled with every subcommand, and the Python

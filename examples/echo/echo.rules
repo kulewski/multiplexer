@@ -29,9 +29,9 @@ peer {
     comment: "this only defines a constant"
 }
 
-# Log streaming: what `mxcontrol stream_logs` connects as, sending the log
+# Log streaming: what `mxcontrol streamlogs` connects as, sending the log
 # entries of the Python library's log streaming, and what `mxcontrol
-# receive_logs` connects as, printing them.
+# receivelogs` connects as, printing them.
 
 peer {
     type: 108
@@ -140,7 +140,7 @@ type {
     comment: "packet sent by the backend when request handling function finishes and no response packet is sent"
 }
 
-# Log streaming: the log entries `mxcontrol stream_logs` sends, to every
+# Log streaming: the log entries `mxcontrol streamlogs` sends, to every
 # receiver.
 
 type {

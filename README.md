@@ -288,7 +288,7 @@ Bazel build.
 - **High performance, low latency.** One thread and one event loop per multiplexer, frames forwarded
   as they arrived, never re-serialized, one write per frame with Nagle's
   algorithm off on every connection: over 120,000 request/reply round
-  trips per second through one multiplexer on 70% of one core, 19 µs per
+  trips per second through one multiplexer on 70% of one core, 17 µs per
   round trip when idle, 7 MB resident, measured with
   [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX.
 - **Stateless and lightweight.** No external coordination service, no
