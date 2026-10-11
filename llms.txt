@@ -24,7 +24,7 @@ The README's quick start: a rules file that starts from the system rules and add
 
 ```
 python3 -m venv mx && . mx/bin/activate
-pip install "mx-multiplexer>=2.5.0"
+pip install "mx-multiplexer>=2.6.0"
 mxcontrol generate_rules multiplexer.rules
 cat >> multiplexer.rules <<'END'
 peer { type: 200 name: "WEB" }
