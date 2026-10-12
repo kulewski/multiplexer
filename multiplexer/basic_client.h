@@ -1,7 +1,8 @@
 // The client side of the protocol: connections to one or more multiplexers,
 // an incoming queue, and reconnection. Used by Client (client.h), which adds
-// the query algorithm and the calls peers actually make; nothing else
-// includes this directly.
+// the query algorithm and the calls peers actually make, and by
+// ThreadedClient (threaded_client.h), which runs one on an io thread of its
+// own; a peer uses one of those, never a BasicClient directly.
 //
 // A BasicClient is a ConnectionsManager whose peers are all multiplexers.
 // It runs no thread of its own: every wait_* or flush call runs the shared
