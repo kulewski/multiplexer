@@ -111,16 +111,15 @@ impl Multiplexer {
     }
 
     /// Sends `signal` to the process.
-    fn signal(&self, signal: &str) {
-        let status = Command::new("kill").args([signal, &self.pid().to_string()]).status().expect("kill runs");
-        assert!(status.success());
+    fn signal(&self, signal: libc::c_int) {
+        send_signal(self.pid(), signal);
     }
 
     /// Stops it with SIGTERM, as an operator would, and waits for it.
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = Command::new("kill").args(["-CONT", &child.id().to_string()]).status();
-            let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+            send_signal(child.id(), libc::SIGCONT);
+            send_signal(child.id(), libc::SIGTERM);
             let _ = child.wait();
         }
     }
@@ -142,13 +141,24 @@ impl Multiplexer {
     /// Freezes it with SIGSTOP: it reads and writes nothing, its sockets
     /// open.
     pub fn freeze(&self) {
-        self.signal("-STOP");
+        self.signal(libc::SIGSTOP);
     }
 
     /// Thaws it.
     pub fn thaw(&self) {
-        self.signal("-CONT");
+        self.signal(libc::SIGCONT);
     }
+}
+
+/// Sends `signal` to `pid`, a child of this process not reaped yet, with
+/// kill(2) itself: a kill program is not on every system, Debian's images
+/// having no procps, and a stop that could not signal waited for good.
+fn send_signal(pid: u32, signal: libc::c_int) {
+    let pid = libc::pid_t::try_from(pid).expect("a process id fits pid_t");
+    // SAFETY: kill(2) reads and writes no memory of this process, and `pid`
+    // is a child not reaped yet, so it names no other process.
+    let result = unsafe { libc::kill(pid, signal) };
+    assert_eq!(0, result, "kill({pid}, {signal}): {}", std::io::Error::last_os_error());
 }
 
 impl Drop for Multiplexer {
