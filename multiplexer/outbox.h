@@ -1,6 +1,7 @@
 // BasicClient's outbox: the structures behind what a client's connections
-// cannot take yet. Internal to basic_client.cc and outbox.cc; the design is
-// described in outbox.cc.
+// cannot take yet. Internal to basic_client.cc and the outbox's files,
+// outbox.cc, outbox_handover.cc, outbox_expiry.cc and outbox_flush.cc; the
+// design is described in outbox.cc.
 #ifndef MX_MULTIPLEXER_OUTBOX_H_
 #define MX_MULTIPLEXER_OUTBOX_H_
 

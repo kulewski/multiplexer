@@ -3,7 +3,8 @@
 // ends, so a handle destroyed on the io thread itself, from a callback or by
 // the last reference dropped there, leaves the Core alive under the
 // handlers still running; see ThreadedClient::shutdown. Internal to
-// threaded_client.cc; the calls are described in threaded_client.h.
+// threaded_client.cc and its parts, threaded_client_io.cc and
+// threaded_client_query.cc; the calls are described in threaded_client.h.
 #ifndef MX_MULTIPLEXER_THREADED_CLIENT_CORE_H_
 #define MX_MULTIPLEXER_THREADED_CLIENT_CORE_H_
 
@@ -14,6 +15,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <future>
 #include <list>
@@ -25,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "lib/logging/logging.h"
 #include "lib/mutex.h"
 #include "lib/random.h"
 #include "lib/thread_checker.h"
@@ -146,6 +149,7 @@ class ThreadedClient::Core {
 
   void _on_incoming(const BasicClient::IncomingMessagesBuffer::value_type& incoming) MX_RUN_ON(io_thread_);
   void _on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
+  void _queries_on_connection(const ConnectionWrapper& connection, bool up) MX_RUN_ON(io_thread_);
 
   void _start_query(InFlightPtr in_flight, bool keep_deadline) MX_RUN_ON(io_thread_);
   void _wait_for_connection(const InFlightPtr& in_flight, int resume) MX_RUN_ON(io_thread_);
@@ -168,6 +172,7 @@ class ThreadedClient::Core {
   void _on_deadline(InFlightPtr in_flight, unsigned int generation, const asio::error_code& error)
       MX_RUN_ON(io_thread_);
   void _finish(InFlightPtr in_flight, Outcome outcome, const IncomingMessage* reply) MX_RUN_ON(io_thread_);
+  void _finish_every_query() MX_RUN_ON(io_thread_);
   void _track(InFlightPtr in_flight, std::uint64_t id) MX_RUN_ON(io_thread_);
   void _remember_finished(std::uint64_t id, std::chrono::steady_clock::time_point until) MX_RUN_ON(io_thread_);
   void _on_unmatched(const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
@@ -244,6 +249,80 @@ class ThreadedClient::Core {
   std::condition_variable_any posted_;  // posting_ fell to 0 once stopped_ was set
   std::thread thread_;
 };
+
+// The structs and member templates the parts of ThreadedClient share.
+
+// A deadline in expiring_, a heap whose top is the earliest deadline.
+struct ThreadedClient::Core::Expiring {
+  std::chrono::steady_clock::time_point deadline;
+  std::weak_ptr<PendingSend> send;
+  // The heap's order, which puts the largest on top: a later deadline is
+  // the smaller.
+  bool operator<(const Expiring& other) const { return deadline > other.deadline; }
+};
+
+// flush_all(): BasicClient's flush, which counts what waits for room and
+// what this client holds waiting for a connection, with the timer of the
+// call's timeout and the promise its caller waits on.
+struct ThreadedClient::Core::FlushWait {
+  BasicClient::FlushPtr flush;
+  FlushCallback done;
+  std::unique_ptr<asio::steady_timer> timer;
+};
+
+// connect(): a connection on its way, until the observer says up or down,
+// or the timer runs out.
+struct ThreadedClient::Core::ConnectWaiter {
+  ConnectionWrapper connection;
+  std::shared_ptr<std::promise<bool>> done;
+  std::unique_ptr<asio::steady_timer> timer;
+};
+
+// Runs a callback of the caller's on the io thread. One that throws is
+// logged, with `description()` of what it was called for, and the client
+// goes on: the exception would otherwise unwind through the handler that
+// read the frame and leave that connection unread. Costs nothing while
+// nothing throws.
+template <typename F, typename D>
+void ThreadedClient::Core::_guarded(F function, D description) {
+  try {
+    function();
+  } catch (const std::exception& e) {
+    MX_LOG(ERROR, LOWVERBOSITY, CTX("ThreadedClient") TEXT(description() + " threw: " + e.what()));
+  }
+}
+
+template <typename F>
+void ThreadedClient::Core::_post(F function) {
+  io_service_.post(function);
+}
+
+// Posts `function` unless shutdown() came first, and says which. A call
+// counts itself in posting_ before it reads stopped_, and shutdown() sets
+// stopped_ before it reads posting_, all sequentially consistent, so one of
+// the two sees the other: a call that found the client up has posted
+// before shutdown() posts its own handler, which the loop runs before it
+// can end, and no caller waits on a loop that has ended. The first read
+// keeps the calls made after shutdown() off posting_, which shutdown()
+// waits on. The function is moved in, so that no copy of the caller's
+// callbacks runs while shutdown() may wait; what a call prepares, it
+// prepares before.
+template <typename F>
+bool ThreadedClient::Core::_post_unless_stopped(F function) {
+  if (stopped_.load()) {
+    return false;
+  }
+  posting_.fetch_add(1);
+  struct Posting {
+    Core* core;
+    ~Posting() { core->_end_posting(); }
+  } posting{this};
+  if (stopped_.load()) {
+    return false;
+  }
+  io_service_.post(std::move(function));
+  return true;
+}
 
 }  // namespace multiplexer
 

@@ -386,6 +386,8 @@ cc_library(
     srcs = [
         "threaded_client.cc",
         "threaded_client_core.h",
+        "threaded_client_io.cc",
+        "threaded_client_query.cc",
     ],
     hdrs = ["threaded_client.h"],
     visibility = ["//visibility:public"],
@@ -852,8 +854,13 @@ cc_library(
     name = "basic_client",
     srcs = [
         "basic_client.cc",
+        "basic_client_connect.cc",
+        "basic_client_routing.cc",
         "outbox.cc",
         "outbox.h",
+        "outbox_expiry.cc",
+        "outbox_flush.cc",
+        "outbox_handover.cc",
     ],
     hdrs = ["basic_client.h"],
     deps = [
@@ -876,7 +883,10 @@ cc_library(
 
 cc_library(
     name = "client",
-    srcs = ["client.cc"],
+    srcs = [
+        "client.cc",
+        "client_query.cc",
+    ],
     hdrs = ["client.h"],
     visibility = ["//visibility:public"],
     deps = [

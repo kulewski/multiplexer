@@ -838,11 +838,11 @@ instead, the late wait's included, and the search goes through the
 lane's one connection.
 
 Where this lives: `Client::_query` and `Client::_query_addressed` in
-`multiplexer/client.cc`, `Client.query` in `multiplexer/mxclient.py`, and
-the state machine of `multiplexer/threaded_client.cc` for the threaded and
-asyncio clients, what comes back read by `Client::_await`, `Client.__await`
-and `ThreadedClient::Core::_advance`. The search is routed in
-`Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
+`multiplexer/client_query.cc`, `Client.query` in `multiplexer/mxclient.py`,
+and the state machine of `multiplexer/threaded_client_query.cc` for the
+threaded and asyncio clients, what comes back read by `Client::_await`,
+`Client.__await` and `ThreadedClient::Core::_advance`. The search is routed
+in `Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
 `query_one.py`, `round_robin.py`, `backend_dies.py`,
 `two_mx_backends_on_each.py` and `unrouted_type.py` under
 `tests/scenarios/` exercise the typed pictures;

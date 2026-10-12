@@ -13,11 +13,11 @@ what it is and where the tricky parts are; `docs/code_map.md` collects them.
   received, never re-serialized.
 - Input from the network is checked with `if` and answered by closing the
   connection. `Assert` is for our own invariants only.
-- The query algorithm exists three times, `Client::_query` in `client.cc`,
-  `ThreadedClient` in `threaded_client.cc` and `Client.query` in
-  `mxclient.py`, and so does the backend loop,
-  `backend/base_multiplexer_server.cc` and `servers.py`. A change to one is
-  a change to both, and a scenario under `tests/scenarios/` that runs in both
+- The query algorithm exists three times, `Client::_query` in
+  `client_query.cc`, `ThreadedClient` in `threaded_client_query.cc` and
+  `Client.query` in `mxclient.py`, and so does the backend loop,
+  `backend/base_multiplexer_server.cc` and `servers.py`. A change to one is a
+  change to both, and a scenario under `tests/scenarios/` that runs in both
   languages is how it is checked.
 - Constants come from the rules file at build time (`generate_constants.cc`).
   A new protocol message type goes into `multiplexer.rules`, the reserved

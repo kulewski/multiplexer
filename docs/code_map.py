@@ -62,13 +62,14 @@ INDEX = [
     ),
     (
         "An addressed query: one instance, located when it moved",
-        "multiplexer/client.cc",
-        "`Client::_query_addressed`; `__query_addressed` in `multiplexer/mxclient.py`; `_search` in `multiplexer/threaded_client.cc`",
+        "multiplexer/client_query.cc",
+        "`Client::_query_addressed`; `__query_addressed` in `multiplexer/mxclient.py`; `_search` in "
+        "`multiplexer/threaded_client_query.cc`",
     ),
     (
         "Lanes: a stream on one connection, pinned or following a failover",
         "multiplexer/basic_client.h",
-        "`Lane`; `_schedule` in `multiplexer/threaded_client.cc`, `_send_one` in `multiplexer/client.cc`",
+        "`Lane`; `_schedule` in `multiplexer/threaded_client_query.cc`, `_send_one` in `multiplexer/client.cc`",
     ),
     (
         "A client with its own io thread, queries in flight at once",
@@ -97,7 +98,8 @@ INDEX = [
     (
         "A client's messages waiting for room, and flush_all()",
         "multiplexer/outbox.cc",
-        "`BasicClient::outgoing_queue_has_room`, `BasicClient::begin_flush`",
+        "`BasicClient::outgoing_queue_has_room`; `begin_flush` in `multiplexer/outbox_flush.cc`; what a dead "
+        "connection had not written, `handle_orphaned_outgoing_messages` in `multiplexer/outbox_handover.cc`",
     ),
     (
         "Reading what a closed peer sent after a write failed",
@@ -120,10 +122,14 @@ INDEX = [
         "multiplexer/io/connection.h",
         "`Connection::close_gracefully`; `BasicClient::shutdown`",
     ),
-    ("Reconnecting after a connection drops", "multiplexer/basic_client.cc", "`BasicClient::connection_destroyed`"),
+    (
+        "Reconnecting after a connection drops",
+        "multiplexer/basic_client_connect.cc",
+        "`BasicClient::connection_destroyed`",
+    ),
     (
         "Dropping a multiplexer a client was given: no reconnect, the connection closed",
-        "multiplexer/basic_client.cc",
+        "multiplexer/basic_client_connect.cc",
         "`BasicClient::_disconnect`; `disconnect()` on every client class",
     ),
     ("Dropping duplicate messages by id", "multiplexer/basic_client.cc", "`BasicClient::handle_message`"),
@@ -144,7 +150,7 @@ INDEX = [
     ),
     (
         "Which rule-routed paths reach a peer, told in its welcome and by PEER_CONTROL",
-        "multiplexer/basic_client.cc",
+        "multiplexer/basic_client_routing.cc",
         "`BasicClient::set_routing`, `routing_acknowledged`; `Server::send_to_one`, `send_to_all`, `_handle_peer_control` apply it",
     ),
     ("Reading the rules file", "multiplexer/config.h", "`Config::read_configuration`"),

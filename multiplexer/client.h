@@ -435,7 +435,7 @@ class Client : public ExceptionDefinitions {
 
  protected:
   // The query algorithm, its stages and the one reader of what comes back
-  // that they share live in client.cc; see the comments there.
+  // that they share live in client_query.cc; see the comments there.
   // One of a query's attempts, the request or the request sent again: the
   // id it goes out under, the tracker of its message once it is placed,
   // which says whether the client gave it up, and whether it is struck

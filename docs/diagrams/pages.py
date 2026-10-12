@@ -420,11 +420,11 @@ lane's one connection.
     ],
     outro="""
 Where this lives: `Client::_query` and `Client::_query_addressed` in
-`multiplexer/client.cc`, `Client.query` in `multiplexer/mxclient.py`, and
-the state machine of `multiplexer/threaded_client.cc` for the threaded and
-asyncio clients, what comes back read by `Client::_await`, `Client.__await`
-and `ThreadedClient::Core::_advance`. The search is routed in
-`Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
+`multiplexer/client_query.cc`, `Client.query` in `multiplexer/mxclient.py`,
+and the state machine of `multiplexer/threaded_client_query.cc` for the
+threaded and asyncio clients, what comes back read by `Client::_await`,
+`Client.__await` and `ThreadedClient::Core::_advance`. The search is routed
+in `Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
 `query_one.py`, `round_robin.py`, `backend_dies.py`,
 `two_mx_backends_on_each.py` and `unrouted_type.py` under
 `tests/scenarios/` exercise the typed pictures;
@@ -759,11 +759,11 @@ the caller.
             outro="""
 Where this lives: `multiplexer/io/connection.h` for the welcome exchange and
 the heartbeat timers, `multiplexer/connections_manager.h` for registration,
-`multiplexer/basic_client.cc` for the reconnect timer, `multiplexer/defaults.h`
-for the intervals. The `raw_protocol` scenario in `tests/scenarios/` performs
-the handshake byte by byte; the `mx_restarts`, `mx_restarts_under_idle_client`
-and `threaded_mx_restarts` scenarios record what a backend and a client see
-across a restart.
+`multiplexer/basic_client_connect.cc` for the reconnect timer,
+`multiplexer/defaults.h` for the intervals. The `raw_protocol` scenario in
+`tests/scenarios/` performs the handshake byte by byte; the `mx_restarts`,
+`mx_restarts_under_idle_client` and `threaded_mx_restarts` scenarios record
+what a backend and a client see across a restart.
 """,
         ),
     ],

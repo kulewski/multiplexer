@@ -242,7 +242,7 @@ def parse_message(type, buffer):
 
 # A synchronous query's stages, as __await reads what ends each.
 _REQUEST, _SEARCH, _DIRECT, _LATE = "request", "search", "direct", "late"
-# How a stage's wait ended, as Client::Outcome in client.cc: an answer, a
+# How a stage's wait ended, as Client::Outcome in client.h: an answer, a
 # delivery error for the stage's own attempt, the search's PING, nobody
 # anywhere, or in the late wait no attempt left, or the watched connection
 # lost.
@@ -252,7 +252,7 @@ _ANSWER, _REFUSED, _FOUND, _NOBODY, _LOST = "answer", "refused", "found", "nobod
 class _Ledger(object):
     """What a synchronous query sent, for __await to read what comes back
     by the table every client follows (docs/query.md), as Client::Ledger
-    in client.cc: its attempts, the request and the request sent again, by
+    in client.h: its attempts, the request and the request sent again, by
     id in the order sent, those struck off, refused by a delivery error or
     found given up on as the late wait begins, and its search, or locating
     PING, with the connections it went through that have not said nobody
@@ -297,7 +297,8 @@ def _check_size_sent_again(request: MultiplexerMessage) -> None:
     copy of `request` with an id of its own, for a typed query the `to` of
     the backend found, and a delivery error asked for, would be over
     MAX_MESSAGE_SIZE: measured at its largest, as every client measures it
-    (check_size_sent_again in client.cc). `request` is as it was afterwards."""
+    (check_size_sent_again in client_query.cc). `request` is as it was
+    afterwards."""
     largest = 2**64 - 1
     id_, had_to, to = request.id, request.HasField("to"), request.to
     asked, asked_value = request.HasField("report_delivery_error"), request.report_delivery_error
@@ -678,9 +679,9 @@ class Client(_mxclient.Client):
 
     def __query_typed(self, query, timeout, multiplexer):
         """The three stages of a typed query, docs/query.md, `query` the
-        request; the same as Client::_query in client.cc, every stage's wait
-        reading what comes back by the one table every client follows
-        (__await)."""
+        request; the same as Client::_query in client_query.cc, every
+        stage's wait reading what comes back by the one table every client
+        follows (__await)."""
         lane = multiplexer if isinstance(multiplexer, Lane) else None
         if isinstance(multiplexer, ConnectionWrapper):
             lane = Lane(multiplexer)  # preferred, then any
@@ -741,7 +742,7 @@ class Client(_mxclient.Client):
 
     def __query_addressed(self, request, timeout, multiplexer):
         """An addressed query, docs/query.md "An addressed query"; the same
-        as Client::_query_addressed in client.cc. One deadline for the
+        as Client::_query_addressed in client_query.cc. One deadline for the
         three stages: the request, the PING that locates the addressee when
         a multiplexer said it is not behind it or the connection died, the
         request again through the connection that found it, its second and
@@ -790,8 +791,8 @@ class Client(_mxclient.Client):
         """Sends one attempt of a query, the request or the request sent
         again, through one connection, `preferred` while it is live, waiting
         for a connection if none is; the same as Client::_send_attempt in
-        client.cc. The ledger records it before the send, its tracker once
-        it is placed: a send that runs out of time leaves the message
+        client_query.cc. The ledger records it before the send, its tracker
+        once it is placed: a send that runs out of time leaves the message
         queued, to be written later, and a reply to it still answers.
         Returns the connection that wrote it."""
         attempt = ledger.attempts[mxmsg.id] = _mxclient.Attempt()
@@ -800,11 +801,11 @@ class Client(_mxclient.Client):
     def __send_search(self, mxmsg, ticker, lane, ledger):
         """Sends the search, or the locating PING: a copy on every live
         connection, waiting for one when none is, or through a pinned lane
-        its one connection; the same as Client::_send_search in client.cc.
-        The copies wait for room, or for a connection, as long as the stage
-        has left and a moment more. The ledger records its id and the
-        connections it went through. Returns the pinned lane's connection,
-        None without one."""
+        its one connection; the same as Client::_send_search in
+        client_query.cc. The copies wait for room, or for a connection, as
+        long as the stage has left and a moment more. The ledger records its
+        id and the connections it went through. Returns the pinned lane's
+        connection, None without one."""
         ledger.search_id = mxmsg.id
         raw = mxmsg.SerializeToString()
         if lane is not None and lane.pinned:
@@ -825,7 +826,7 @@ class Client(_mxclient.Client):
     ) -> "tuple[str, tuple[MultiplexerMessage, ConnectionWrapper]]":
         """Waits for what ends a query's stage, reading each message by the
         one table every client follows (docs/query.md), as ThreadedClient
-        does; the same as Client::_await in client.cc. A reply to any
+        does; the same as Client::_await in client_query.cc. A reply to any
         attempt is the answer; a delivery error for an attempt strikes it
         off, and ends the stage only when it is the stage's own, the last
         attempt sent in the request's stage or the direct request's, the
@@ -881,9 +882,9 @@ class Client(_mxclient.Client):
         """The query's last wait: a reply to an attempt a backend may still
         have, one placed and neither refused nor given up on, until `ticker`
         runs out; none left, nothing can answer any more, OperationFailed.
-        The same as Client::_late in client.cc, which says why the trackers
-        are read once, as the wait begins, and why a pinned lane's lost
-        connection is NotConnected."""
+        The same as Client::_late in client_query.cc, which says why the
+        trackers are read once, as the wait begins, and why a pinned lane's
+        lost connection is NotConnected."""
         ledger.strike_given_up()
         if not ledger.any_left():
             raise OperationFailed

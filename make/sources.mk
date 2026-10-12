@@ -18,7 +18,10 @@ LIB_SRCS := \
   multiplexer/backend/base_multiplexer_server.cc \
   multiplexer/backend/base_threaded_multiplexer_server.cc \
   multiplexer/basic_client.cc \
+  multiplexer/basic_client_connect.cc \
+  multiplexer/basic_client_routing.cc \
   multiplexer/client.cc \
+  multiplexer/client_query.cc \
   multiplexer/connections_manager.cc \
   multiplexer/descriptor_table.cc \
   multiplexer/endpoint.cc \
@@ -26,9 +29,14 @@ LIB_SRCS := \
   multiplexer/key_filters.cc \
   multiplexer/log_summary.cc \
   multiplexer/outbox.cc \
+  multiplexer/outbox_expiry.cc \
+  multiplexer/outbox_flush.cc \
+  multiplexer/outbox_handover.cc \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
   multiplexer/threaded_client.cc \
+  multiplexer/threaded_client_io.cc \
+  multiplexer/threaded_client_query.cc \
 
 
 # The multiplexer binary and its subcommands.
