@@ -16,7 +16,8 @@
 # - every pip example against a wheel of the tree.
 # Each step's output goes to a file of its own and a line to the summary,
 # ok or FAIL; a failed step does not stop the rest. The worktree stays
-# between runs, so that its Bazel cache does too.
+# between runs, so that its Bazel cache does too. The steps are COMMIT's
+# own: once the worktree is at COMMIT, its copy of this script runs them.
 #
 #   packaging/release_check.sh [COMMIT] [DIR]     default: HEAD, ~/.cache/mx-release-check
 set -uo pipefail
@@ -32,6 +33,9 @@ summary="$out/summary.txt"
 cd "$wt" || { echo "release_check.sh: no worktree at $wt" >&2 && exit 1; }
 [[ "$(git rev-parse --show-toplevel)" == "$(pwd -P)" ]] || { echo "release_check.sh: $wt is not a worktree" >&2 && exit 1; }
 git checkout -q --detach "$commit" || exit 1
+if [[ "${MX_RELEASE_CHECK_AT:-}" != "$commit" ]]; then
+  MX_RELEASE_CHECK_AT="$commit" exec "$wt/packaging/release_check.sh" "$commit" "$dir"
+fi
 # What an earlier run built, an earlier version's wheels say, would be
 # smoke-tested beside this one's.
 rm -rf build/dist
