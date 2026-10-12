@@ -26,7 +26,7 @@ PROTOC ?= protoc
 CXX ?= g++
 AR ?= ar
 STRIP ?= strip
-VERSION ?= 2.6.0
+VERSION ?= 3.0.0
 # A version given as its tag, v2.3.1, as the release workflow passes it in
 # the environment, is taken without the v: the .pc file carries the number,
 # which pkg-config compares.

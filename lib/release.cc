@@ -3,8 +3,8 @@
 
 namespace mx {
 namespace release {
-const char* const version = "2.6.0";
-const char* const version_hash = "v2.6.0";
-const char* const version_short_hash = "2.6";
+const char* const version = "3.0.0";
+const char* const version_hash = "v3.0.0";
+const char* const version_short_hash = "3.0";
 }  // namespace release
 }  // namespace mx

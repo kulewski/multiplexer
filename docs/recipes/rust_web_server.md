@@ -13,7 +13,7 @@ API](../api_rust.md#threadedclient-awaited-rusts-asyncclient).
 [dependencies]
 axum = "0.8"
 futures-util = "0.3"
-mx-multiplexer = { git = "https://github.com/kulewski/multiplexer" }
+mx-multiplexer = "3.0"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 ```
 
