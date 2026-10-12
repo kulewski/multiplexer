@@ -44,7 +44,10 @@ a pool of interchangeable workers, and publish/subscribe for events.
   the server classes, run a `serve_forever()` loop that calls your
   `handle_message()`. "Client" in a class name is part of the name, not
   the role, and "server" names no role here: which class a program is
-  built on says nothing about what it does.
+  built on says nothing about what it does. The Rust library has the same
+  classes but `AsyncClient`: there `ThreadedClient`'s calls are awaited,
+  and a server class serves a `Handler` whose `handle_message()` is
+  called.
 - **Peer type**: what kind of program a peer is, chosen from the rules file
   when it connects. Backends of one type are interchangeable; routing is by
   peer type.
@@ -103,8 +106,9 @@ requests must find belongs on a server class or on a `ThreadedClient`
 given a search policy, and one reached only by `to` can be built on any
 of the other four.
 
-[Using the Python library](api_python.md) and [the C++ library](api_cpp.md)
-describe each.
+[Using the Python library](api_python.md), [the C++ library](api_cpp.md)
+and [the Rust library](api_rust.md) describe each; in Rust the `AsyncClient`
+column is `ThreadedClient` awaited.
 
 ## The healthy deployment
 
@@ -172,7 +176,8 @@ graph LR
 3. **Write a backend**, here on `BaseMultiplexerServer`: subclass it,
    implement `handle_message`, reply with `send_message` when the message is
    a request, and call `serve_forever()`. Python and C++ versions of a complete one are in
-   [examples/echo](../examples/echo).
+   [examples/echo](../examples/echo), and a Rust one in
+   [examples/echo-rust](../examples/echo-rust).
 4. **Write a client.** Create a `SyncClient` with the addresses of all your
    multiplexers and call `query()` for requests or `send_message()` for events.
 5. **Build against it** from your own Bazel workspace as `@mx`, with the two
@@ -254,6 +259,9 @@ Each page is one fixed picture whose arrows light up one step at a time.
   [forking with clients alive](api_python.md#threads-exit-and-fork); the
   Python page also covers [testing](api_python.md#testing) with
   `multiplexer.testing` and reading a recording.
+- [Using the Rust library](api_rust.md): the crate `mx-multiplexer`, the
+  same classes, every call and every error, awaiting on any executor,
+  lanes, drops, keys and acknowledgements, lifetimes, fork and testing.
 - [mxcontrol](mxcontrol.md): running a multiplexer, the log tools, dumping
   and driving a recording.
 - [The wire format](wire_format.md): frames, the envelope, the handshake and
@@ -284,6 +292,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
   backpressure.
 - [Use the client from a threaded web server](recipes/web_server.md): one
   `ThreadedClient` per process, request threads, events without a receiver thread, fork and exit.
+- [Use the client from a Rust web server](recipes/rust_web_server.md): one
+  `ThreadedClient` per process under tokio and axum, queries awaited in the
+  handlers, events pushed to browsers, a shutdown that ends the streams
+  first.
 - [Check a backend's health](recipes/check_backend_health.md): a
   Kubernetes liveness probe that sees the serve loop through
   `periodic_task()`, and why a health thread or a TCP probe does not.

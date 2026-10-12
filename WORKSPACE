@@ -2,7 +2,7 @@
 # same way a consumer of @mx declares them, plus development-only tools.
 workspace(name = "mx")
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
 # protobuf from source, for --config=libcxx (.bazelrc) alone: the system's
 # libprotobuf, which every other configuration links, is built against
@@ -88,3 +88,67 @@ http_archive(
     type = "zip",
     url = "https://files.pythonhosted.org/packages/4f/e4/4f2d41881fae547f06ffa4c9748fa8ed13c4db5c830ff268b84175546b3c/pybind11_stubgen-2.5.5-py3-none-any.whl",
 )
+
+# Rust (rust/README.md): rules_rust 0.27.0, the last release for Bazel
+# 6.2.x, development only like the rest of this section, so a consumer of
+# @mx never fetches it. A C++ build fetches only this archive and the
+# toolchains' stubs; the compiler and the crates come when a Rust target is
+# built.
+#
+# platforms is declared here so that its version is ours, the one
+# rules_rust asks for: without rules_rust Bazel 6.2.1 used a copy of its own.
+http_archive(
+    name = "platforms",
+    sha256 = "3a561c99e7bdbe9173aa653fd579fe849f1d8d67395780ab4770b1f381431d51",
+    urls = ["https://github.com/bazelbuild/platforms/releases/download/0.0.7/platforms-0.0.7.tar.gz"],
+)
+
+http_archive(
+    name = "rules_rust",
+    # 0.27.0 turned experimental_use_coverage_metadata_files on by default,
+    # which passes instrumented_files_info(metadata_files = ...), a parameter
+    # Bazel 6.2.1 does not have; the patch turns it back off.
+    patch_cmds = [
+        "sed -i '/name = \"experimental_use_coverage_metadata_files\"/{n;s/True/False/}' rust/settings/BUILD.bazel",
+    ],
+    sha256 = "db89135f4d1eaa047b9f5518ba4037284b43fc87386d08c1d1fe91708e3730ae",
+    urls = ["https://github.com/bazelbuild/rules_rust/releases/download/0.27.0/rules_rust-v0.27.0.tar.gz"],
+)
+
+load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_register_toolchains")
+
+rules_rust_dependencies()
+
+# The compiler rust-toolchain.toml pins for cargo, with its digests
+# from https://static.rust-lang.org/dist/channel-rust-1.99.0.toml: rules_rust
+# 0.27.0 knows them only up to 1.72.0 and would download unverified.
+rust_register_toolchains(
+    edition = "2021",
+    sha256s = {
+        "rustc-1.99.0-x86_64-unknown-linux-gnu.tar.gz": "238e72b8617f79bc96f27a5bfeb1a208b5755fe1a48f8bc190fe403ef6d54ab8",
+        "cargo-1.99.0-x86_64-unknown-linux-gnu.tar.gz": "c2b8ba1f59e7a230aa5522684f3f7aa620b98e5ad37683a5e5cf9b41f534fa1e",
+        "clippy-1.99.0-x86_64-unknown-linux-gnu.tar.gz": "4b3b972738f6b8e0e55065e273a972cc25fccf53629b4308eec67d6a66a8cf4a",
+        "rust-std-1.99.0-x86_64-unknown-linux-gnu.tar.gz": "1dcaa01beb6bc78fdb13815b4f15214719167c58e3d79fbdf214591f8c195ee1",
+        "llvm-tools-1.99.0-x86_64-unknown-linux-gnu.tar.gz": "128135fdcb3dec851861c952c1d9f97159446387860d5d5a633b7dcc3a1d4997",
+        "rust-src-1.99.0.tar.gz": "82b978093b33c71bcbe69005b92181bfb76d3d0e434ef303e637812e21badcd7",
+    },
+    versions = ["1.99.0"],
+)
+
+load("@rules_rust//crate_universe:repositories.bzl", "crate_universe_dependencies")
+
+crate_universe_dependencies()
+
+# The release's own cargo-bazel, which rust/vendor.sh runs; fetched only then.
+http_file(
+    name = "cargo_bazel_prebuilt",
+    executable = True,
+    sha256 = "76cd8f797b42ac8297f903d2d0165d0cb0072e08c10fa9c0ac49593ef66d516e",
+    urls = ["https://github.com/bazelbuild/rules_rust/releases/download/0.27.0/cargo-bazel-x86_64-unknown-linux-gnu"],
+)
+
+# The crates rust/vendor.sh vendored: one http_archive per crate, each
+# fetched when a target needs it.
+load("//rust/3rdparty/crates:crates.bzl", "crate_repositories")
+
+crate_repositories()

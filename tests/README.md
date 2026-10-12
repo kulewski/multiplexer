@@ -1,8 +1,11 @@
 # Integration tests
 
 `bazel test //...` runs everything. `--test_tag_filters=-slow` skips the
-scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
-`lang-cc` select by the language of the role binaries.
+scenarios that wait out heartbeat and reconnect intervals; `lang-py`,
+`lang-cc` and `lang-rust` select by the language of the role binaries. A
+target with a Rust role is also tagged `rust`, as every Rust target is:
+`--build_tag_filters=-rust --test_tag_filters=-rust` leaves Rust out, and
+with it the Rust toolchain Bazel would fetch.
 
 ## Layout
 
@@ -39,12 +42,17 @@ scenarios that wait out heartbeat and reconnect intervals; `lang-py` and
   `harness/` here re-exports it with the constants of `testing.rules`.
   `FakePeer`, `BackendThread`, `TestClient` and `ThreadedTestClient` are the in-process peers for
   unit tests, described in [docs/api_python.md](../docs/api_python.md#testing).
-- `roles/py/` and `roles/cc/`: the same four roles in both languages, with the
-  same options and the same Event events, so a scenario can be run with any
-  mix. `backend` answers requests and `event_backend` only receives events;
-  `client` sends requests and waits for answers, `event_client` sends events
-  and does not. The shipped client roles are built on `SyncClient` unless
-  given `--threaded` or `--workers`, so their usual peer types are passive.
+- `roles/py/`, `roles/cc/` and `roles/rust/`: the same four roles in the
+  three languages, with the same options and the same Event events, so a
+  scenario can be run with any mix. `backend` answers requests and
+  `event_backend` only receives events; `client` sends requests and waits
+  for answers, `event_client` sends events and does not. The shipped client
+  roles are built on `SyncClient` unless given `--threaded` or `--workers`,
+  so their usual peer types are passive; the backends on
+  `BaseMultiplexerServer` unless given `--threaded`. The Rust roles print
+  their events with a text-format printer of their own (`event.rs`), the
+  message being flat, and are a Cargo workspace of their own beside the
+  library's (`roles/rust/Cargo.toml` says why).
 - `multiplexer/testing/raw_peer.py`: a peer that speaks the wire format
   directly, for protocol and robustness scenarios.
 - `Cluster(record=True)` makes every multiplexer write a recording of what
@@ -143,8 +151,8 @@ is no default, so a test always says which rules it runs with.
 
 ## Playing a role with your own binary
 
-A value in `roles` may be the label of a binary instead of `"py"` or
-`"cc"`: it is added to the test's data and the scenario sees `"bin"` for
+A value in `roles` may be the label of a binary instead of `"py"`, `"cc"`
+or `"rust"`: it is added to the test's data and the scenario sees `"bin"` for
 that role, so `spawn(role, cfg.lang(role), ...)` runs it like a shipped
 role. The contract is the command line and the events:
 

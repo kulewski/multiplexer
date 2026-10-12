@@ -1,0 +1,34 @@
+# The echo example in Rust: the backend and the client of examples/echo on
+# the crate mx-multiplexer, which this workspace takes from the repository;
+# a program of yours takes it from crates.io or from git
+# (docs/api_rust.md). A Cargo workspace of its own, the files at its top as
+# examples/echo has them. libc is for the backend's signals, the one crate
+# beside the library, which depends on it already.
+[package]
+name = "echo-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "backend"
+path = "backend.rs"
+
+[[bin]]
+name = "client"
+path = "client.rs"
+
+[[test]]
+name = "echo_test"
+path = "echo_test.rs"
+
+[dependencies]
+libc = "0.2"
+mx-multiplexer = { path = "../../rust/mx-multiplexer" }
+
+# Beyond clippy's defaults, in every cargo clippy, check.sh's, CI's or an
+# editor's: an unsafe block without its SAFETY comment is an error.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[workspace]

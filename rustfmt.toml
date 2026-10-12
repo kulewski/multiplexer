@@ -1,0 +1,7 @@
+# rustfmt for the Rust code of every Cargo workspace here: the 120 columns
+# clang-format and black use for the C++ and the Python of this repository,
+# and short constructs kept on one line as long as they fit in them. At the
+# root, where rustfmt finds it from every Rust file, in format.sh and in an
+# editor alike.
+max_width = 120
+use_small_heuristics = "Max"

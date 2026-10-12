@@ -1,3 +1,7 @@
 # Example workspaces are separate Bazel workspaces; keep them out of //...
 examples
 tests/cc_only_consumer
+# cargo's build output: no BUILD files, many files
+rust/target
+rust/codegen/target
+tests/roles/rust/target

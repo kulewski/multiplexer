@@ -72,6 +72,7 @@ class RoleExecutableTest(unittest.TestCase):
     def test_shipped_roles(self):
         self.assertEqual([mx_runfile("tests/roles/py/backend")], Role.executable("backend", "py"))
         self.assertEqual([mx_runfile("tests/roles/cc/mxtestroles"), "client"], Role.executable("client", "cc"))
+        self.assertEqual([mx_runfile("tests/roles/rust/mxtestroles"), "client"], Role.executable("client", "rust"))
 
     def test_named_binary(self):
         with mock.patch.dict(os.environ, {"TEST_SRCDIR": "/rf", "TEST_WORKSPACE": "app"}):
@@ -80,7 +81,7 @@ class RoleExecutableTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Role.executable("client", "bin")
         with self.assertRaises(ValueError):
-            Role.executable("client", "rust")
+            Role.executable("client", "go")
 
 
 if __name__ == "__main__":

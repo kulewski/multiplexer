@@ -7,14 +7,15 @@ kinds. The building blocks are what a service needs and would otherwise
 get from Redis, an HTTP pool or a task queue: a replicated cache, a
 channel layer, a pool of model workers, workers that each hold some of
 the models, an answer streamed token by token. The others show what a broker with this latency makes possible,
-starting with an audio room where every 10 ms frame is a request. Three
+starting with an audio room where every 10 ms frame is a request. Four
 small ones come first: the shape of a backend and a client in both
-languages, an asyncio gateway, and a health check that sees a backend's
-serve loop.
+languages, the same in Rust, an asyncio gateway, and a health check that
+sees a backend's serve loop.
 
 | example | what it shows | languages | built with | walkthrough |
 |---|---|---|---|---|
 | [echo](echo/) | the smallest backend and client, in Python and in C++, and threads sharing one client | Python, C++ | Bazel | [walkthrough.md](echo/walkthrough.md) runs it |
+| [echo-rust](echo-rust/) | the same backend and client in Rust: a `BaseMultiplexerServer` that drains on `SIGTERM`, a `SyncClient` that asks | Rust | Cargo | [walkthrough.md](echo-rust/walkthrough.md) |
 | [aio](aio/) | an asyncio TCP gateway in front of a chat backend: a reply to the one who asked, a broadcast to everyone | Python | Bazel | [walkthrough.md](aio/walkthrough.md) |
 | [health](health/) | a backend's health check that sees its serve loop: a Kubernetes liveness probe on an endpoint that answers 503 once `periodic_task()` has not run for a while, beside the drain on a preStop hook | Python | pip | [walkthrough.md](health/walkthrough.md) |
 | [cache](cache/) | a replicated cache as a Django cache backend: a write to every replica, a read from any; and a journal added by changing the rules under the running multiplexers | Python | pip | [walkthrough.md](cache/walkthrough.md) |
@@ -54,9 +55,17 @@ brings the multiplexer, `mxcontrol`, with it, with a `requirements.txt`, a
 and runs it on that `mxcontrol`, unless `MXCONTROL` names another. Each
 README's first block is the commands.
 
+A Cargo example is a Cargo workspace of its own that takes the crate
+`mx-multiplexer` from this repository by path, as yours would from
+crates.io or git ([docs/api_rust.md](../docs/api_rust.md)); its `test.sh`
+runs `cargo test` against the `mxcontrol` that `MXCONTROL` names, or this
+repository's, built with Bazel.
+
 `./test_all.sh` runs every example: the Bazel tests always, the pip
 examples with `EXAMPLES_PIP=1`, as the examples workflow sets against the
-tree's wheel, mxcontrol inside. `check.sh` at the root runs them against
+tree's wheel, mxcontrol inside, and the Cargo examples with
+`EXAMPLES_RUST=1`, which `check.sh` sets; CI's Rust job runs their
+`test.sh` too. `check.sh` at the root runs them against
 the tree itself, its library and its multiplexer, when `examples/.venv`
 exists, which `venv.sh` makes from every example's
 requirements, and types them all with pyright through
@@ -107,7 +116,9 @@ covers it. A pip example: copy `cache/`, with a `requirements.txt`, a
 An example can be both, as `audio/` is, with a `WORKSPACE` for its C++
 side and a `test.sh` for its Python side. Either way, list the example's
 paths in `pyrightconfig.json`, which types every example against the
-tree, and give it the two pages in the shape above. The walkthrough
+tree. A Cargo example: copy `echo-rust/`, a Cargo workspace of its own
+with its tests and a `test.sh` that runs them, so `test_all.sh` covers
+it. Every example gets the two pages in the shape above. The walkthrough
 shows the files in fenced blocks marked `file=`, a rules file from its
 own part on with `from=`, and `check_walkthroughs.py`, which `format.sh
 --check` runs, keeps those blocks identical to the files. Every Mermaid

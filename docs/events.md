@@ -1,8 +1,8 @@
 # Sending an event
 
-An event is a message nobody answers: `send_message()` in Python, and in C++
+An event is a message nobody answers: `send_message()` in Python, in C++
 `queue()` or `queue_all()` on `SyncClient`, `send()` or `send_all()` on
-`ThreadedClient`. The client chooses how many of its multiplexer
+`ThreadedClient`, and in Rust `send()` on either client. The client chooses how many of its multiplexer
 connections carry the message; each multiplexer then delivers it to the
 backends its rules name. Nothing comes back unless no backend receives
 it: then the sender gets `DELIVERY_ERROR` when the rule says
@@ -17,8 +17,8 @@ write is an event to every replica, and its walkthrough counts the copies.
 
 ## Through one connection
 
-The default, `multiplexer=ONE` in Python and `queue()` or `send()` in C++, and
-the normal way to send an event. One connection is chosen round robin among the
+The default, `multiplexer=ONE` in Python, `queue()` or `send()` in C++ and
+`send()` in Rust, and the normal way to send an event. One connection is chosen round robin among the
 live ones.
 
 ### 1. The client picks one connection
@@ -81,8 +81,8 @@ graph LR
 
 Round robin spreads consecutive events over the connections, and order holds
 per connection only, so a stream of events to one receiver can arrive out of
-order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
-keeps a stream on one connection, a soft and late pin: the first event
+order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++
+and Rust, keeps a stream on one connection, a soft and late pin: the first event
 through it pins it to the connection the library chose, and every later
 one follows. When that connection dies, the events it had not written
 move, in order, to one other connection, the lane follows them there, and
@@ -148,8 +148,8 @@ graph LR
 
 ## Through every connection
 
-`multiplexer=ALL` in Python, also available as `SyncClient.event()`, and
-`queue_all()` or `send_all()` in C++. The same message goes out on each connection. Use it
+`multiplexer=ALL` in Python, also available as `SyncClient.event()`,
+`queue_all()` or `send_all()` in C++, and a send's `all()` in Rust. The same message goes out on each connection. Use it
 when the event must get through even if a multiplexer is unreachable from some
 backends; it costs one copy per multiplexer on every link.
 

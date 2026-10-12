@@ -18,6 +18,10 @@ build --copt=-Wextra
 build --features=external_include_paths
 build --per_file_copt=external/.*@-w
 build --per_file_copt=.*,-external/.*@-Werror
+# The same for the Rust code: rustc's warnings are errors. The vendored
+# crates are built with --cap-lints=allow (rust/3rdparty/crates), which no
+# flag here overrides, so nothing in them can fail a build.
+build --@rules_rust//:extra_rustc_flag=-Dwarnings
 
 build:debug -c dbg
 

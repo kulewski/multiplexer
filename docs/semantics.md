@@ -102,7 +102,8 @@ that changes.
   query's `on_received` is called with each backend that acknowledged the
   request, so a second call says the request may be running twice
   ([Python](api_python.md#knowing-a-backend-took-the-request),
-  [C++](api_cpp.md#knowing-a-backend-took-the-request)).
+  [C++](api_cpp.md#knowing-a-backend-took-the-request),
+  [Rust](api_rust.md#knowing-a-backend-took-the-request)).
 - **`references` means "this is the reply".** A client matches replies to
   its queries by the id they reference, and a threaded or asyncio client
   drops what references a query that has ended, for twice the longer of
@@ -295,9 +296,11 @@ that changes.
   ended with nothing else allowed to take it (a pinned lane's, a copy sent
   to `ALL`), and what a client's shutdown leaves are dropped, and every one
   is counted and told to the program with its id and why: `on_drop` and
-  `dropped` in Python, `set_drop_observer()` and `dropped()` in C++
+  `dropped` in Python, `set_drop_observer()` and `dropped()` in C++,
+  `on_drop` and `dropped()` in Rust
   ([Python](api_python.md#messages-the-library-gives-up-on),
-  [C++](api_cpp.md#messages-the-library-gives-up-on)). Each is logged too.
+  [C++](api_cpp.md#messages-the-library-gives-up-on),
+  [Rust](api_rust.md#messages-the-library-gives-up-on)). Each is logged too.
 - **A written message is lost.** Written means handed to the kernel on a
   live connection, which is what a flushing send waits for and all a
   library can know: a multiplexer that dies before reading what its socket
@@ -308,7 +311,8 @@ that changes.
   answers the search with a delivery error, and the client learns at once
   rather than by timeout.
 - **A message is bigger than 128 MiB.** The sending library refuses it at
-  the call, `ValueError` in Python and `std::length_error` in C++, before
+  the call, `ValueError` in Python, `std::length_error` in C++ and
+  `TooLarge` in Rust, before
   anything is queued, and a query's request too when the copy the query
   may send again, with an id of its own, the `to` of the backend found and
   a delivery error asked for, would be over the limit; a sender that frames
@@ -344,8 +348,9 @@ that changes.
 ## Defaults
 
 All in [multiplexer/defaults.h](../multiplexer/defaults.h), compiled into the
-multiplexer and both libraries, and exported to Python as attributes of
-`multiplexer.mxclient`.
+multiplexer and the C++ library, exported to Python as attributes of
+`multiplexer.mxclient`, and to Rust as constants at the crate's root,
+generated from the header.
 
 | Constant | Value | Where it applies |
 |---|---|---|
@@ -377,7 +382,9 @@ A negative timeout given to a client or server class sets no deadline
 either, exactly as `math.inf`. 0 and NaN are no time at all: a call
 given one waits for nothing, a message sent with one goes now or is
 dropped at once, and a drain with one is over as it begins
-([Python](api_python.md#timeouts), [C++](api_cpp.md#timeouts)).
+([Python](api_python.md#timeouts), [C++](api_cpp.md#timeouts)); in Rust
+a timeout is an `Option<Duration>`, `None` for no deadline
+([Rust](api_rust.md#timeouts)).
 
 The silence intervals count whole frames: the clock restarts when a
 frame's header has arrived and when its body has, never in between, so a

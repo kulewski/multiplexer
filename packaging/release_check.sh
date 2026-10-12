@@ -13,6 +13,7 @@
 # - the build and the fast tests on each supported distribution, with
 #   Bazel and with make, and at GitHub's runner limits;
 # - the Debian packages, the wheels and their smoke tests;
+# - the crate, packaged as crates.io gets it, with a dry run of its upload;
 # - every pip example against a wheel of the tree.
 # Each step's output goes to a file of its own and a line to the summary,
 # ok or FAIL; a failed step does not stop the rest. The worktree stays
@@ -92,6 +93,12 @@ smoke() {  # IMAGE PYTHON [PIP EXTRA] [APT] [VENV FLAG], as the release workflow
     cp build/dist/mxcontrol-*-linux-amd64 /tmp/mxcontrol && chmod +x /tmp/mxcontrol
     MXCONTROL=/tmp/mxcontrol /venv/bin/python make/wheel_smoke.py"
 }
+crate() {  # the release workflow's crate job, as a dry run of the upload: at the release's version, built from the package
+  local crate_version
+  crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' rust/mx-multiplexer/Cargo.toml)"
+  [[ "$crate_version" == "$version" ]] || { echo "the crate is $crate_version, the release $version" && return 1; }
+  (cd rust && cargo publish --dry-run -p mx-multiplexer)
+}
 pip_examples() {  # the examples workflow's job, in ubuntu:24.04: a make wheel, then every pip example's test.sh
   local directory result
   directory="$(context)"
@@ -133,6 +140,7 @@ step smoke_3.10 smoke python:3.10-slim 3.10
 step smoke_3.14 smoke python:3.14-slim 3.14
 step smoke_3.10_protobuf_floor smoke python:3.10-slim 3.10 protobuf==3.20.3
 step smoke_ubuntu_22.04 smoke ubuntu:22.04 3.10 "" "python3-venv python3-protobuf" --system-site-packages
+step crate crate
 step pip_examples pip_examples
 echo "done $(date -u +%T)" >> "$summary"
 bazel shutdown

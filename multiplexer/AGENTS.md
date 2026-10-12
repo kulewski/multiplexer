@@ -13,12 +13,15 @@ what it is and where the tricky parts are; `docs/code_map.md` collects them.
   received, never re-serialized.
 - Input from the network is checked with `if` and answered by closing the
   connection. `Assert` is for our own invariants only.
-- The query algorithm exists three times, `Client::_query` in
-  `client_query.cc`, `ThreadedClient` in `threaded_client_query.cc` and
-  `Client.query` in `mxclient.py`, and so does the backend loop,
-  `backend/base_multiplexer_server.cc` and `servers.py`. A change to one is a
-  change to both, and a scenario under `tests/scenarios/` that runs in both
-  languages is how it is checked.
+- The query algorithm exists four times, `Client::_query` in
+  `client_query.cc`, `ThreadedClient` in `threaded_client_query.cc`,
+  `Client.query` in `mxclient.py` and `core/query.rs` in
+  `rust/mx-multiplexer/src`, and the backend loop three,
+  `backend/base_multiplexer_server.cc`, `servers.py` and the Rust crate's
+  `servers/`; the outbox (`outbox.cc` and its parts) and the connection
+  (`io/connection.h`) exist again in the Rust core, `core/outbox/` and
+  `core/connection.rs`. A change to one is a change to all, and a scenario
+  under `tests/scenarios/` that runs in every language is how it is checked.
 - Constants come from the rules file at build time (`generate_constants.cc`).
   A new protocol message type goes into `multiplexer.rules`, the reserved
   range below 100, and into `docs/wire_format.md`.

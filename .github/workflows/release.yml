@@ -1,7 +1,8 @@
 # The release: on a version tag, every artifact from the same commit, each
 # checked the way the tree is checked, then attached to the GitHub release,
-# the image pushed to ghcr.io, and the wheels to PyPI once the `pypi`
-# environment's reviewer approves. docs/packaging.md describes the
+# the image pushed to ghcr.io, the wheels to PyPI once the `pypi`
+# environment's reviewer approves, and the Rust crate to crates.io once the
+# `crates-io` environment's does. docs/packaging.md describes the
 # artifacts; the scripts under packaging/ build them the same way locally.
 name: release
 on:
@@ -116,6 +117,28 @@ jobs:
           name: wheels
           path: dist/*.whl
 
+  crate:
+    # The Rust crate as crates.io gets it: `cargo package` builds it from the
+    # packaged files alone, as a user's cargo will. On a tag its version must
+    # be the tag's; a run by hand only packages it, an rc's name being none
+    # the crate carries.
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' mx-multiplexer/Cargo.toml)"
+          if [ "${{ github.event_name }}" = push ] && [ "$version" != "${VERSION#v}" ]; then
+            echo "the crate is $version, the tag ${VERSION#v}: the Version commit raises both" >&2
+            exit 1
+          fi
+          cargo package -p mx-multiplexer
+        working-directory: rust
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crate
+          path: rust/target/package/mx-multiplexer-*.crate
+
   smoke:
     # Each end of the CPythons the wheels are for, on a distribution of its
     # own: the wheel installed into a fresh environment and smoke-tested
@@ -155,7 +178,7 @@ jobs:
           MXCONTROL="$PWD/$(ls binary/mxcontrol-*-linux-amd64)" /venv/bin/python make/wheel_smoke.py
 
   release:
-    needs: [binary, image, debs, wheels, smoke]
+    needs: [binary, image, debs, wheels, smoke, crate]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
@@ -235,3 +258,28 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  crates-io:
+    # The crate to crates.io, after the release exists and once the
+    # `crates-io` environment's reviewer approves in the Actions tab;
+    # trusted publishing, the run's OIDC token exchanged for a crates.io
+    # token that lasts half an hour, no token kept anywhere. crates.io
+    # trusts a publisher only for a crate that exists: the first version
+    # was published by hand (docs/packaging.md).
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/mx-multiplexer
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish -p mx-multiplexer
+        working-directory: rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

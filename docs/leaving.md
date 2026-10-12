@@ -169,8 +169,8 @@ out its timeout and searches. It is not lost unsaid: the backend's log
 has a `WARNING`, `N message(s) from multiplexer M arrived after the
 connection began closing, and were dropped`, and every client and server
 class counts them; `dropped_while_closing()` says how many on the
-`SyncClient` in both languages and on the C++ `BaseMultiplexerServer`,
-after the close too.
+`SyncClient` in every language and on the C++ and Rust
+`BaseMultiplexerServer`, after the close too.
 
 The finishing has no time bound of its own: what was taken before the
 line is served, however long its handlers run. What was taken is bounded

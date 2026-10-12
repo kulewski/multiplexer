@@ -13,7 +13,8 @@ QUERY = Page(
     title="How a query is answered",
     intro="""
 A query is a request that expects exactly one answer: `SyncClient.query()`
-in Python, `SyncClient::query()` in C++. Almost always it is one message out and one
+in Python, `SyncClient::query()` in C++, a query's `wait()` or `.await` in
+Rust. Almost always it is one message out and one
 message back. If the backend that took the request fails, the client finds
 another one and asks again, once. The three pictures below show the normal case, the
 recovery, and what happens when no backend of the right type exists at all;
@@ -346,8 +347,8 @@ Two instances of the type exist; the request is for instance 2.
             "Every way a stage ends",
             """
 The pictures show the common paths; this is all of them, the same in
-every client, `SyncClient`, `ThreadedClient` and `AsyncClient`, in Python
-and C++. A query has three stages at most and never goes back one, and its
+every client, `SyncClient`, `ThreadedClient` and `AsyncClient`, in Python,
+C++ and Rust. A query has three stages at most and never goes back one, and its
 request goes out at most twice, at the first stage and the third. A typed
 query gives each stage its own `timeout`; an addressed query has one
 deadline for all three. A reply to either attempt ends the query at any
@@ -398,7 +399,7 @@ its search, and what it is.
 | the search, or the locating `PING` | `PING` | in stage 2, the instance found, to which stage 3 goes; later, nothing |
 | | `DELIVERY_ERROR` | in stage 2, nobody behind the multiplexer it came through, counted once for each connection the search went through, and nobody anywhere once every one of them has said so; later, nothing |
 | | anything else | nothing |
-| nothing the query sent | anything | not the query's: what the client does with any other message, `on_message` in the threaded and asyncio clients, `handle_drop()` in the Python `SyncClient`, a log line in the C++ one |
+| nothing the query sent | anything | not the query's: what the client does with any other message, `on_message` in the threaded and asyncio clients, `handle_drop()` in the Python `SyncClient`, a log line in the C++ one, `on_unexpected` or a log line in the Rust one |
 
 A wait for a late reply waits for the attempts a backend may have: the
 request, unless it drew a `DELIVERY_ERROR`, and the request sent again,
@@ -437,9 +438,9 @@ EVENTS = Page(
     file="events.md",
     title="Sending an event",
     intro="""
-An event is a message nobody answers: `send_message()` in Python, and in C++
+An event is a message nobody answers: `send_message()` in Python, in C++
 `queue()` or `queue_all()` on `SyncClient`, `send()` or `send_all()` on
-`ThreadedClient`. The client chooses how many of its multiplexer
+`ThreadedClient`, and in Rust `send()` on either client. The client chooses how many of its multiplexer
 connections carry the message; each multiplexer then delivers it to the
 backends its rules name. Nothing comes back unless no backend receives
 it: then the sender gets `DELIVERY_ERROR` when the rule says
@@ -456,8 +457,8 @@ write is an event to every replica, and its walkthrough counts the copies.
         Section(
             "Through one connection",
             """
-The default, `multiplexer=ONE` in Python and `queue()` or `send()` in C++, and
-the normal way to send an event. One connection is chosen round robin among the
+The default, `multiplexer=ONE` in Python, `queue()` or `send()` in C++ and
+`send()` in Rust, and the normal way to send an event. One connection is chosen round robin among the
 live ones.
 """,
             columns=[
@@ -498,8 +499,8 @@ live ones.
             """
 Round robin spreads consecutive events over the connections, and order holds
 per connection only, so a stream of events to one receiver can arrive out of
-order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++,
-keeps a stream on one connection, a soft and late pin: the first event
+order. A lane, `multiplexer=client.lane()` in Python and a `Lane` in C++
+and Rust, keeps a stream on one connection, a soft and late pin: the first event
 through it pins it to the connection the library chose, and every later
 one follows. When that connection dies, the events it had not written
 move, in order, to one other connection, the lane follows them there, and
@@ -545,8 +546,8 @@ the reply came through, so the events after a request follow the request.
         Section(
             "Through every connection",
             """
-`multiplexer=ALL` in Python, also available as `SyncClient.event()`, and
-`queue_all()` or `send_all()` in C++. The same message goes out on each connection. Use it
+`multiplexer=ALL` in Python, also available as `SyncClient.event()`,
+`queue_all()` or `send_all()` in C++, and a send's `all()` in Rust. The same message goes out on each connection. Use it
 when the event must get through even if a multiplexer is unreachable from some
 backends; it costs one copy per multiplexer on every link.
 """,

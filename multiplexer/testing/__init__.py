@@ -295,8 +295,9 @@ class Config:
                 self.rest.append(argument)
 
     def lang(self, role: str, default: str = "py") -> str:
-        """Who plays `role` in this configuration: "py" or "cc" for the roles
-        this repository ships, "bin" for a binary named in the BUILD file."""
+        """Who plays `role` in this configuration: "py", "cc" or "rust" for
+        the roles this repository ships, "bin" for a binary named in the
+        BUILD file."""
         return self.roles.get(role, default)
 
     def param(self, name: str, default: Any = None) -> Any:
@@ -874,7 +875,7 @@ class Role:
         if os.path.exists(self.drain_file):
             os.unlink(self.drain_file)  # an earlier run's, which would have the role leave at once
         if drain_file is None:
-            drain_file = role == "backend" and lang in ("py", "cc")
+            drain_file = role == "backend" and lang in ("py", "cc", "rust")
         if drain_file:
             argv = argv + ["--drain-file", self.drain_file]
         argv = argv + ["--name", self.name]  # the label its events carry, in the role contract
@@ -900,18 +901,20 @@ class Role:
 
     @staticmethod
     def executable(role: str, lang: str) -> list[str]:
-        """The command that plays `role`: this repository's Python or C++
-        role for "py" and "cc", the binary the BUILD file named for it (see
-        mx_integration_test) for "bin"."""
+        """The command that plays `role`: this repository's Python, C++ or
+        Rust role for "py", "cc" and "rust", the binary the BUILD file named
+        for it (see mx_integration_test) for "bin"."""
         if lang == "py":
             return [mx_runfile("tests/roles/py/" + role)]
         if lang == "cc":
             return [mx_runfile("tests/roles/cc/mxtestroles"), role]
+        if lang == "rust":
+            return [mx_runfile("tests/roles/rust/mxtestroles"), role]
         if lang == "bin":
             if CONFIG is None or role not in CONFIG.role_binaries:
                 raise ValueError("no binary was named for role %r; see mx_integration_test's roles" % role)
             return [runfile(CONFIG.role_binaries[role])]
-        raise ValueError("unknown role language %r; expected py, cc or bin" % lang)
+        raise ValueError("unknown role language %r; expected py, cc, rust or bin" % lang)
 
     @classmethod
     def running_roles(cls) -> list["Role"]:
@@ -1372,10 +1375,10 @@ def spawn(
     drain_file: bool | None = None,
     **opts: Any,
 ) -> Role:
-    """Launch a role process. `lang` is who plays it ("py", "cc" or "bin",
-    see Role.executable), `mx` the list of host:port addresses, `type` the
-    peer type id, `opts` the role's options as keyword arguments (see _argv
-    for how they become flags)."""
+    """Launch a role process. `lang` is who plays it ("py", "cc", "rust" or
+    "bin", see Role.executable), `mx` the list of host:port addresses,
+    `type` the peer type id, `opts` the role's options as keyword arguments
+    (see _argv for how they become flags)."""
     return Role(role, lang, _argv(mx, type, opts), name=name, drain_file=drain_file)
 
 

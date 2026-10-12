@@ -15,6 +15,7 @@ published; [operations](operations.md#debug-symbols) says how to debug.
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
 | `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev` and `libasio-dev` to build against the library |
 | `mx_multiplexer-<version>-cp3XY-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers, and `mxcontrol`: a multiplexer, `generate_rules`, `generate_constants`, the test harness's binary | `pip` on x86_64 Linux with glibc 2.28 or newer; the `protobuf` package comes with it |
+| `mx-multiplexer-<version>.crate`, on crates.io as `mx-multiplexer` | Rust peers | cargo, Rust 1.85 or newer, on Linux |
 | the source archive GitHub makes for the tag | everything else, through Bazel or `make` | [building.md](building.md) |
 
 Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
@@ -158,10 +159,26 @@ The package is typed: a `py.typed` marker and a stub next to every
 generated module and the extension, so Pylance and pyright check code
 against it without any setup.
 
+## The crate
+
+The Rust library, the crate `mx-multiplexer` in `rust/mx-multiplexer`, is
+published on crates.io under that name, its version the repository's.
+`cargo package` makes it from the crate's directory alone, as a user's
+cargo builds it: the sources, the generated protocol code and constants,
+which are committed, the README and the license, and the tests with the
+golden frames; the Bazel files are left out. It builds with no tool but
+cargo, no protoc, and needs `mxcontrol` only for its tests against a real
+multiplexer. A program generates its own constants with
+`mxcontrol generate_constants your.rules --rust multiplexer_constants.rs`,
+from the wheel or the Debian package ([the Rust API](api_rust.md)).
+
 ## Cutting a release
 
-1. Bump the version in `Makefile`, `multiplexer/release.py` and
-   `lib/release.cc`, in one commit.
+1. Bump the version in `Makefile`, `multiplexer/release.py`,
+   `lib/release.cc`, `rust/mx-multiplexer/Cargo.toml` and
+   `rust/mx-multiplexer/BUILD`, with the lockfiles cargo then writes, in
+   one commit; `//rust/mx-multiplexer:generated_test` fails while the
+   crate's version is not the repository's.
 2. Check it: `packaging/release_check.sh` runs here what the workflows
    will run, at that commit, in a worktree of its own:
    - every test, and the release build;
@@ -171,6 +188,7 @@ against it without any setup.
      [the tested systems](building.md#tested-systems), and
      `docker/runner_limits.sh`;
    - the Debian packages, the wheels and their smoke tests;
+   - the crate, as a dry run of its upload;
    - every pip example, against a wheel of the tree.
 
    Each step's output goes to a file of its own in
@@ -183,6 +201,16 @@ against it without any setup.
    the `pypi` environment in the Actions tab, then publishes the wheels
    through trusted publishing, which PyPI grants to this workflow file and
    that environment; no token exists anywhere.
+6. Approve the upload to crates.io: the `crates-io` job waits for the
+   reviewer of the `crates-io` environment, then publishes the crate
+   through crates.io's trusted publishing, the run's token exchanged for
+   one that lasts half an hour. crates.io trusts a publisher only for a
+   crate that exists, so the crate's first version is published by hand,
+   `cargo publish -p mx-multiplexer` in `rust/` with a token of the
+   account that will own it, and the workflow and the environment are then
+   named as its trusted publisher in the crate's settings on crates.io.
+   Reject that release's own `crates-io` job: it would find the version
+   taken.
 
 To try the workflow before tagging, start it by hand from the Actions tab,
 or with `gh workflow run release.yml -f tag=v<version>rc1`: the same build
@@ -191,6 +219,7 @@ push to ghcr.io and without a release, and with the wheels uploaded to
 test.pypi.org instead of PyPI, installed from there into a fresh
 environment and smoke-tested with the `mxcontrol` it carries and then with
 the run's own binary, whose rules and constants must be the wheel's.
+The crate is packaged and verified, and published nowhere.
 Every run, a tag's too, smoke-tests the wheels of the oldest and the newest
 CPython the same way on a distribution of their own before anything is
 published.
@@ -201,4 +230,5 @@ never moves.
 
 To rebuild any artifact by hand: `packaging/build_binary.sh`, then
 `packaging/build_image.sh` with the binary it wrote,
-`packaging/build_debs.sh`, `packaging/build_wheels.sh`.
+`packaging/build_debs.sh`, `packaging/build_wheels.sh`, and in `rust/`,
+`cargo package -p mx-multiplexer`.

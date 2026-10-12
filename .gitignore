@@ -2,6 +2,8 @@
 bazel-*
 # make (see Makefile)
 /build/
+# cargo's build output, under rust/ and in a Rust example
+target/
 # Python
 __pycache__/
 *.pyc

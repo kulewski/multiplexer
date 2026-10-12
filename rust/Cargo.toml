@@ -1,0 +1,12 @@
+# The Cargo workspace of the Rust client library, the crate mx-multiplexer.
+# Cargo builds it for crates.io and for work on the crate alone; Bazel
+# builds the same sources with rules_rust (rust/BUILD, the WORKSPACE), from
+# the crates rust/vendor.sh vendors into rust/3rdparty.
+#
+# Cargo.lock stays at lockfile version 3, the newest the vendoring's
+# cargo-bazel reads; rust/vendor.sh writes it with cargo 1.77.2. The code
+# generator, rust/codegen, is a workspace of its own, so that its
+# dependencies never reach the crate's lockfile or Bazel.
+[workspace]
+resolver = "2"
+members = ["mx-multiplexer"]

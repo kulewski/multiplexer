@@ -74,6 +74,7 @@ mx_integration_test(
 LANGS = [
     "py",
     "cc",
+    "rust",
 ]
 
 [
@@ -141,8 +142,11 @@ LANGS = [
     for (a, b, client) in [
         ("py", "py", "py"),
         ("cc", "cc", "cc"),
+        ("rust", "rust", "rust"),
         ("py", "cc", "py"),
         ("cc", "py", "cc"),
+        ("py", "rust", "cc"),
+        ("rust", "cc", "py"),
     ]
 ]
 
@@ -199,7 +203,10 @@ LANGS = [
     for (backend, client) in [
         ("py", "py"),
         ("cc", "cc"),
+        ("rust", "rust"),
         ("py", "cc"),
+        ("rust", "py"),
+        ("cc", "rust"),
     ]
 ]
 

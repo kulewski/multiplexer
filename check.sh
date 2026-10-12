@@ -4,7 +4,8 @@
 #   tests, the clang thread-safety analysis, the fast tests built against
 #   libc++ instead of libstdc++, ThreadSanitizer on the C++ unit tests,
 #   AddressSanitizer on the threaded client's (which shut connections
-#   down in the middle of large frames), the Python package type-checked,
+#   down in the middle of large frames), clippy over the Rust code and the
+#   vendored crates' freshness (rust/vendor.sh), the Python package type-checked,
 #   the example workspaces, and, when examples/.venv exists
 #   (examples/venv.sh), the pip examples against the tree and pyright over
 #   every example.
@@ -47,6 +48,19 @@ fi
 bazel test --config=libcxx --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
 bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test //multiplexer:server_release_test
+# The Rust code: clippy's warnings are errors, as the compilers' are, and an
+# unsafe block without its SAFETY comment is one by every Cargo.toml's
+# [lints]; the crate's documentation, what docs.rs shows, builds without a
+# warning, a broken link included; the crates Bazel builds are the ones the
+# Cargo manifests ask for. cargo runs at the release rust-toolchain.toml
+# pins wherever it runs.
+(cd rust && cargo clippy --quiet --all-targets -- -D warnings)
+(cd rust && cargo clippy --quiet --manifest-path codegen/Cargo.toml -- -D warnings)
+for manifest in tests/roles/rust/Cargo.toml examples/*/Cargo.toml; do
+  cargo clippy --quiet --manifest-path "$manifest" --all-targets -- -D warnings
+done
+(cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --quiet --no-deps -p mx-multiplexer)
+rust/vendor.sh --check
 # A workspace of its own that uses @mx from C++ alone, with no Python rules
 # declared: the C++ targets build without them.
 (cd tests/cc_only_consumer && bazel build //...)
@@ -69,12 +83,12 @@ if [[ -x examples/.venv/bin/pip ]]; then
       "examples/.venv/bin/pip uninstall mx-multiplexer" >&2
     exit 1
   fi
-  PYTHONPATH="$PWD/bazel-bin:$PWD" VENV="$PWD/examples/.venv" MX_TREE=1 EXAMPLES_PIP=1 \
+  PYTHONPATH="$PWD/bazel-bin:$PWD" VENV="$PWD/examples/.venv" MX_TREE=1 EXAMPLES_PIP=1 EXAMPLES_RUST=1 \
     MXCONTROL="$PWD/bazel-bin/mxcontrol/mxcontrol" ./examples/test_all.sh
   ./examples/mxtree.sh                  # the copy of the package the examples' type check resolves from
   "$DEV_TOOLS/pyright" -p examples/pyrightconfig.json
 else
-  ./examples/test_all.sh
+  EXAMPLES_RUST=1 MXCONTROL="$PWD/bazel-bin/mxcontrol/mxcontrol" ./examples/test_all.sh
   echo "check: without examples/.venv the pip examples and their type check are skipped; examples/venv.sh makes it"
 fi
 echo "check: everything passed"

@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # The numbers in the README: request/reply round trips through one
-# multiplexer on this machine, with the C++ test roles as the peers, one
-# client in sequence and then eight in parallel, 200-byte payloads. Prints
-# throughput and the latency distribution; the multiplexer's CPU share
-# says how much of one core the broker itself needed.
+# multiplexer on this machine, with the test roles of one language or two
+# as the peers, the C++ ones by default, one client in sequence and then
+# eight in parallel, 200-byte payloads. Prints throughput and the latency
+# distribution; the multiplexer's CPU share says how much of one core the
+# broker itself needed.
 #
-#   ./tests/bench.sh [queries per client, default 20000]
+#   ./tests/bench.sh [queries per client, default 20000] [backend: cc or rust, default cc] [client: default the backend's]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 count="${1:-20000}"
-bazel build -c opt //mxcontrol //tests/roles/cc:mxtestroles > /dev/null 2>&1
+backend_lang="${2:-cc}"
+client_lang="${3:-$backend_lang}"
+for lang in "$backend_lang" "$client_lang"; do
+  [[ "$lang" == cc || "$lang" == rust ]] || { echo "bench.sh: a language is cc or rust, not $lang" >&2 && exit 2; }
+done
+bazel build -c opt //mxcontrol "//tests/roles/$backend_lang:mxtestroles" "//tests/roles/$client_lang:mxtestroles" > /dev/null 2>&1
 mxcontrol=bazel-bin/mxcontrol/mxcontrol
-roles=bazel-bin/tests/roles/cc/mxtestroles
+backend_roles="bazel-bin/tests/roles/$backend_lang/mxtestroles"
+client_roles="bazel-bin/tests/roles/$client_lang/mxtestroles"
 work="$(mktemp -d)"
 trap 'kill $backend $mx 2>/dev/null; rm -rf "$work"' EXIT
 
@@ -20,13 +27,14 @@ mx=$!
 until [[ -f "$work/port" ]]; do sleep 0.05; done
 address="$(cat "$work/port")"
 # TEST_BACKEND_A (201) answers TEST_REQUEST_A (201) with TEST_RESPONSE (203); TEST_CLIENT is 203.
-$roles backend --mx "$address" --type 201 --serves 201=203 --behaviour echo > "$work/backend.log" 2>&1 &
+$backend_roles backend --mx "$address" --type 201 --serves 201=203 --behaviour echo > "$work/backend.log" 2>&1 &
 backend=$!
 until grep -q connected "$work/backend.log"; do sleep 0.05; done
 
+echo "backend: $backend_lang, client: $client_lang"
 for parallel in 1 8; do
   start=$(date +%s.%N)
-  $roles client --mx "$address" --type 203 --query "201:hello" --count "$count" --parallel "$parallel" --payload-size 200 \
+  $client_roles client --mx "$address" --type 203 --query "201:hello" --count "$count" --parallel "$parallel" --payload-size 200 \
     > "$work/client.log" 2> /dev/null
   end=$(date +%s.%N)
   python3 - "$work/client.log" "$start" "$end" "$parallel" <<'PY'

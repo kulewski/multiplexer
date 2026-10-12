@@ -1,0 +1,9 @@
+# The Rust that cargo uses anywhere in this repository, in whichever Cargo
+# workspace it runs: the release Bazel registers too (rust_register_toolchains
+# in the WORKSPACE), with rustfmt and clippy for format.sh and check.sh, and
+# rust-src, the standard library's source, which rust-analyzer reads in an
+# editor. rustup installs it on first use.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

@@ -19,8 +19,9 @@ peer among others.
 `pip install mx-multiplexer` installs the Python package and the
 multiplexer itself, `mxcontrol`; a release also ships `mxcontrol` as one
 binary for any Linux with glibc 2.28 or newer and as a container image, and the C++ library as a Debian or
-Ubuntu package, all for Linux x86_64. Nothing needs building; the C++17
-source builds with Bazel or `make` when you want to. In Docker a
+Ubuntu package, all for Linux x86_64, and the Rust library is the crate
+`mx-multiplexer`. Nothing needs building; the C++17 source builds with
+Bazel or `make` when you want to. In Docker a
 multiplexer is one `docker run`, and on Kubernetes a StatefulSet behind a
 headless Service, with no operator, no leader and no state to keep
 ([in Docker and on Kubernetes](#in-docker-and-on-kubernetes)).
@@ -290,17 +291,20 @@ Bazel build.
   algorithm off on every connection: over 120,000 request/reply round
   trips per second through one multiplexer on 70% of one core, 17 µs per
   round trip when idle, 7 MB resident, measured with
-  [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX.
+  [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX, and as
+  fast with Rust peers as with C++ ones.
 - **Stateless and lightweight.** No external coordination service, no
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with
   Protocol Buffers ([wire format](docs/wire_format.md)).
-- **Connections for C++ and Python, and asyncio.** `SyncClient` for a
+- **Connections for C++, Python and Rust, and asyncio.** `SyncClient` for a
   program on one thread; `ThreadedClient`, with callback-based
   asynchronous queries, for servers, safe to share between threads; and
   `AsyncClient` for asyncio programs, which awaits queries and sends and
   delivers events to coroutines on the loop; all fork-aware and clean at
   interpreter exit ([Python API](docs/api_python.md), [C++ API](docs/api_cpp.md)).
+  In Rust the same classes, `ThreadedClient`'s calls awaited on any
+  executor, tokio's included ([Rust API](docs/api_rust.md)).
 - **Two server classes that run the loop for you.** `BaseMultiplexerServer`
   runs the loop and your `handle_message()` on one thread, for quick
   handlers; `BaseThreadedMultiplexerServer` runs handlers on worker threads
@@ -347,11 +351,13 @@ several of them, every peer connected to all.
 
 Complete programs under [examples/](examples/), each with a README that
 runs it and a walkthrough that builds it from nothing, echo's apart, which
-runs it step by step. Three small ones first, then building blocks, then
+runs it step by step. Four small ones first, then building blocks, then
 what the broker's latency makes possible:
 
 - [echo](examples/echo/): a backend and a client, in Python and in C++,
   and threads sharing one client.
+- [echo-rust](examples/echo-rust/): the same backend and client in Rust,
+  the backend draining on `SIGTERM`.
 - [aio](examples/aio/): an asyncio TCP gateway in front of a chat backend,
   a reply to the one who asked and a broadcast to everyone.
 - [health](examples/health/): a backend's health check that sees its
@@ -428,6 +434,20 @@ rules file come from `mxcontrol generate_constants your.rules --cxx
 multiplexer/multiplexer.constants.h`, placed on the include path before
 the package's copy ([packaging](docs/packaging.md#the-debian-packages)).
 
+## Using it from Rust
+
+The crate `mx-multiplexer` is the Rust library, written in Rust on mio
+rather than bound to the C++ one, with the classes of the other two and
+their behaviour: `SyncClient`, `ThreadedClient`, whose calls are also
+awaited on any executor, tokio's included, with no runtime of its own,
+and the server classes `BaseMultiplexerServer` and
+`BaseThreadedMultiplexerServer`, which serve a `Handler`. `cargo add
+mx-multiplexer` adds it, Rust 1.85 or newer on Linux; the constants of
+your own rules file come from `mxcontrol generate_constants your.rules
+--rust src/multiplexer_constants.rs`, written once and again whenever the
+file changes. The [Rust API](docs/api_rust.md) describes the classes, and
+[examples/echo-rust](examples/echo-rust/) is a complete backend and client.
+
 ## Getting it
 
 Two ways, and the choice is only whether you build it:
@@ -438,9 +458,10 @@ Two ways, and the choice is only whether you build it:
   stripped: those wheels, `mxcontrol` for any x86_64 Linux with glibc 2.28
   or newer, the
   container image `ghcr.io/kulewski/multiplexer:<version>`, also tagged
-  `latest`, with nothing in it but `mxcontrol` and the system rules, and a
+  `latest`, with nothing in it but `mxcontrol` and the system rules, a
   Debian package per Debian and Ubuntu release with `mxcontrol`, the C++
-  library, its headers and a pkg-config file.
+  library, its headers and a pkg-config file, and the Rust crate, which
+  crates.io serves as `mx-multiplexer`.
   [docs/packaging.md](docs/packaging.md) says how to use each;
   [in Docker and on Kubernetes](#in-docker-and-on-kubernetes) runs the
   image in both, and [docs/operations.md](docs/operations.md#on-kubernetes)
@@ -471,7 +492,7 @@ cd examples/echo && bazel test //...          # a backend and a client, built th
 ```
 
 The integration tests under [tests/](tests/) start real multiplexers and play
-peers in Python and C++; see [tests/README.md](tests/README.md). `mxcontrol
+peers in Python, C++ and Rust; see [tests/README.md](tests/README.md). `mxcontrol
 run_multiplexer` accepts `--address host:0 --port-file PATH` to pick a free
 port and report it, and on SIGTERM sends what it holds, closes its
 connections and exits with 0.
@@ -542,7 +563,7 @@ reference deployment and traces a query and an event step by step. The
 [cache](examples/cache/walkthrough.md) builds a pip project from nothing,
 and [echo](examples/echo/walkthrough.md) runs the smallest program with
 Bazel and reads what each side prints. The reference pages
-under [docs/](docs/) cover the rules file, both client libraries,
+under [docs/](docs/) cover the rules file, the client libraries,
 `mxcontrol`, the wire format and operations.
 
 ## History

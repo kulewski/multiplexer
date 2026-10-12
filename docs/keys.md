@@ -23,6 +23,8 @@ most `MAX_KEY_SIZE` bytes, 256.
   `send_message()` and `new_message()`.
 - C++: the key set on a whole `MultiplexerMessage` given to a send or a
   query. The payload forms of `query()` take none.
+- Rust: `.key(key)` on a query or a send, or `Message::key`, an
+  `Option<String>`, of a whole message.
 
 **The key filter.** A peer's filter for a message type is a list of
 patterns, RE2 regular expressions, each matched against the whole key:
@@ -76,14 +78,16 @@ keys made for it are easy:
   carries the key.
 
 **A key over `MAX_KEY_SIZE`.** The libraries refuse it where the message is
-built: `ValueError` in Python, `std::length_error` in C++. A multiplexer
+built: `ValueError` in Python, `std::length_error` in C++, `TooLarge` in
+Rust. A multiplexer
 that gets one drops the message and tells the sender.
 
 ## Declaring the filters
 
 `set_key_filters({message type: [patterns]})` is on every class:
 `SyncClient`, `ThreadedClient`, `AsyncClient` and both server classes, in
-both languages. It replaces the filters set before. Set them before the
+every language, in Rust with a `KeyFilters`, a `BTreeMap` of message type
+to patterns. It replaces the filters set before. Set them before the
 peer connects, so that its welcome carries them and nothing reaches it
 without them:
 
@@ -99,7 +103,8 @@ backend.serve_forever();
 ```
 
 `ThreadedClient` and `AsyncClient` connect in their constructors, so they
-take the filters there too, as `key_filters=`.
+take the filters there too, as `key_filters=`; in Rust every builder takes
+them, `key_filters(filters)`, so that the first welcome carries them.
 
 **Changing them while running.** A later `set_key_filters()` goes to every
 multiplexer as `PEER_CONTROL` and leaves the routing as it is. Each
@@ -109,7 +114,8 @@ routed before has been handed to the peer, the change is acknowledged:
 `routing_acknowledged()` is true, and
 
 - **`on_acknowledged`**, given to `set_key_filters()` (or to
-  `set_routing()`), is called once, where each class calls back:
+  `set_routing()`; in Rust `set_key_filters_then()` and
+  `set_routing_then()`), is called once, where each class calls back:
   - `SyncClient`: inside a `receive_message()`, the one after the last
     message routed before was received, or the one waiting when the
     acknowledgement came;
@@ -139,8 +145,8 @@ and a change of filters leaves a drain as it is
 
 ## Refusals and limits
 
-**Refused by the library**, which raises `ValueError` in Python and
-`std::invalid_argument` in C++:
+**Refused by the library**, which raises `ValueError` in Python,
+`std::invalid_argument` in C++ and returns `InvalidArgument` in Rust:
 
 - a filter for a protocol message type, 99 and below;
 - a pattern longer than `MAX_KEY_PATTERN_SIZE` bytes, 1024.

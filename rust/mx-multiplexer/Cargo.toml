@@ -1,0 +1,37 @@
+# The Rust client library of the multiplexer, published on crates.io as
+# mx-multiplexer: a Rust program as a client or a backend of the
+# multiplexers, with the classes and the behaviour of the C++ and Python
+# libraries. Its version moves with the repository's (Makefile,
+# lib/release.cc, multiplexer/release.py), raised in the same "Version"
+# commit.
+#
+# Two dependencies stand where the C++ library has asio and protobuf, mio
+# and prost; libc and log are the Rust project's own, and bytes is what
+# prost decodes payloads into. The manifest stays at edition 2021, which is
+# what the cargo-bazel of rules_rust 0.27.0 reads (rust/vendor.sh).
+[package]
+name = "mx-multiplexer"
+version = "2.6.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Client library of the multiplexer, a message broker for services on a trusted network: requests and events routed by type through several brokers at once"
+repository = "https://github.com/kulewski/multiplexer"
+readme = "README.md"
+keywords = ["broker", "messaging", "rpc", "pubsub"]
+categories = ["network-programming"]
+# This repository's own: Bazel's targets and the checks that run the Python
+# package. The golden frames stay, for the tests.
+exclude = ["BUILD", "generated_test.py", "testdata/golden.py"]
+
+[dependencies]
+bytes = "1"
+libc = "0.2"
+log = "0.4"
+mio = { version = "1", features = ["os-poll", "net"] }
+prost = "0.14"
+
+# Beyond clippy's defaults, in every cargo clippy, check.sh's, CI's or an
+# editor's: an unsafe block without its SAFETY comment is an error.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

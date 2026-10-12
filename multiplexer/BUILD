@@ -191,6 +191,16 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# The .proto files themselves, for the Rust crate's check that the code
+# rust/codegen generated from them is fresh.
+exports_files(
+    [
+        "Logging.proto",
+        "Multiplexer.proto",
+    ],
+    visibility = ["//rust:__subpackages__"],
+)
+
 genrule(
     name = "multiplexer_proto",
     srcs = [
@@ -953,7 +963,10 @@ py_library(
     name = "release",
     srcs = ["release.py"],
     imports = [".."],
-    visibility = ["//multiplexer/mxlog:__pkg__"],
+    visibility = [
+        "//multiplexer/mxlog:__pkg__",
+        "//rust/mx-multiplexer:__pkg__",
+    ],
 )
 
 py_library(

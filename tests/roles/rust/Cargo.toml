@@ -1,0 +1,31 @@
+# The Rust test roles, one binary, mxtestroles <role> <options>, on the
+# crate mx-multiplexer: the counterparts of tests/roles/cc and
+# tests/roles/py. A Cargo workspace of its own, as rust/codegen is: the
+# vendoring's cargo-bazel takes no workspace member outside rust/. Bazel
+# builds the roles from tests/roles/rust/BUILD with the crates the library
+# vendors, the two the roles use being the library's own; cargo builds
+# them with `cargo build --manifest-path tests/roles/rust/Cargo.toml`.
+# Never published.
+[package]
+name = "mx-test-roles"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "mxtestroles"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
+mx-multiplexer = { path = "../../../rust/mx-multiplexer" }
+
+# Beyond clippy's defaults, in every cargo clippy, check.sh's, CI's or an
+# editor's: an unsafe block without its SAFETY comment is an error.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[workspace]

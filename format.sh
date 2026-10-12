@@ -16,6 +16,11 @@
 #   make    -> make/generate_sources.py regenerates the Makefile's source lists
 #   rules   -> every *.rules file starts with the system rules, multiplexer.rules,
 #              as `mxcontrol generate_rules` writes them (--check)
+#   Rust    -> rustfmt (settings in rustfmt.toml, at the root), and the
+#              crate's generated files: rust/generate_defaults.py writes its
+#              defaults.rs, rust/codegen its protocol code. cargo comes from
+#              rustup, at the release rust-toolchain.toml pins; without it
+#              the Rust files are left unchecked, with a note
 #
 # Usage: ./format.sh          rewrite files in place
 #        ./format.sh --check  exit 1 if anything would change (for CI)
@@ -28,12 +33,24 @@ check=0
 source tools/dev_tools.sh
 
 # Source files only: skip Bazel's output symlinks, make's build/, the tools and anything generated.
-prune=(-path ./bazel-\* -prune -o -path ./build -prune -o -path ./.tools -prune -o -name .venv -prune -o)
+prune=(-path ./bazel-\* -prune -o -path ./build -prune -o -path ./.tools -prune -o -name .venv -prune -o
+  -name target -prune -o -path ./rust/3rdparty -prune -o)
 mapfile -t py < <(find . "${prune[@]}" \( -name '*.py' -o -name '*.ipynb' \) -print | sort)
 mapfile -t cc < <(find . "${prune[@]}" \( -name '*.h' -o -name '*.cc' \) -print | sort)
 mapfile -t bzl < <(find . "${prune[@]}" \( -name BUILD -o -name WORKSPACE -o -name '*.bzl' \) -print | sort)
 mapfile -t yml < <(find . "${prune[@]}" \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
 mapfile -t rules < <(find . "${prune[@]}" -name '*.rules' -print | sort)
+
+# cargo, from rustup, at the release rust-toolchain.toml pins wherever it
+# runs; the manifests below are named from rust/.
+cargo="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
+rust() { (cd rust && "$cargo" "$@"); }
+# The Rust test roles and the Cargo examples, workspaces of their own
+# outside rust/; rustfmt.toml at the root applies to them as to rust/.
+outside=(../tests/roles/rust/Cargo.toml)
+for manifest in examples/*/Cargo.toml; do
+  outside+=("../$manifest")
+done
 
 status=0
 if (( check )); then
@@ -42,6 +59,17 @@ if (( check )); then
   python3 make/generate_sources.py --check || status=1
   python3 docs/check_mermaid.py --fast > /dev/null || { python3 docs/check_mermaid.py --fast; status=1; }
   python3 examples/check_walkthroughs.py > /dev/null || { python3 examples/check_walkthroughs.py; status=1; }
+  python3 rust/generate_defaults.py --check || status=1
+  if [[ -x "$cargo" ]]; then
+    rust fmt --all --check || status=1
+    rust fmt --manifest-path codegen/Cargo.toml --check || status=1
+    for manifest in "${outside[@]}"; do
+      rust fmt --manifest-path "$manifest" --check || status=1
+    done
+    rust run --quiet --manifest-path codegen/Cargo.toml -- --check || status=1
+  else
+    echo "format: no cargo, so the Rust files are not checked: install rustup (https://rustup.rs)" >&2
+  fi
   "$DEV_TOOLS/black" --check --quiet "${py[@]}" || status=1
   "$DEV_TOOLS/ruff" check --quiet --force-exclude "${py[@]}" || status=1
   "$DEV_TOOLS/clang-format" --dry-run --Werror "${cc[@]}" || status=1
@@ -62,6 +90,17 @@ else
   python3 docs/diagrams/generate.py
   python3 docs/code_map.py
   python3 make/generate_sources.py
+  python3 rust/generate_defaults.py
+  if [[ -x "$cargo" ]]; then
+    rust run --quiet --manifest-path codegen/Cargo.toml > /dev/null
+    rust fmt --all
+    rust fmt --manifest-path codegen/Cargo.toml
+    for manifest in "${outside[@]}"; do
+      rust fmt --manifest-path "$manifest"
+    done
+  else
+    echo "format: no cargo, so the Rust files are not formatted: install rustup (https://rustup.rs)" >&2
+  fi
   "$DEV_TOOLS/black" --quiet "${py[@]}"
   "$DEV_TOOLS/clang-format" -i "${cc[@]}"
   "$DEV_TOOLS/buildifier" "${bzl[@]}"

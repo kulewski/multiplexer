@@ -31,7 +31,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {".git", ".cache", "external", "compdb", ".venv", ".tools", "node_modules"}
+SKIP_DIRS = {".git", ".cache", "external", "compdb", ".venv", ".tools", "node_modules", "target"}
 # Pinned, so that a committed picture compares with a fresh render of the
 # same renderer; bump it and run --write together.
 CLI = "@mermaid-js/mermaid-cli@12.0.0"

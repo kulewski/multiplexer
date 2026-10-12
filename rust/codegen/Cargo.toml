@@ -1,0 +1,21 @@
+# The generator of the Rust protocol buffer code the crate mx-multiplexer
+# commits (rust/codegen/src/main.rs says what and how). Never published,
+# and a workspace of its own, so that prost-build and what it needs stay out
+# of the crate's lockfile and out of Bazel: run it with `cargo run
+# --manifest-path codegen/Cargo.toml` in rust/, which format.sh does, with
+# --check under its --check.
+[package]
+name = "mx-codegen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+prost-build = "0.14"
+
+# Beyond clippy's defaults, in every cargo clippy, check.sh's, CI's or an
+# editor's: an unsafe block without its SAFETY comment is an error.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[workspace]

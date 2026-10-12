@@ -15,7 +15,7 @@ Docker. The commands themselves are in the [README](../README.md#building-with-b
 | protoc and libprotobuf, the same version | the wire format and the recording are protocol buffers; the generated code must match the runtime it links | `protobuf-compiler libprotobuf-dev` |
 | the Python protobuf runtime | the generated Python modules | `python3-protobuf` |
 | Python 3.10 or newer with headers | the extension (`pybind11`) and the Python library | `python3-dev` |
-| network access on the first build | Bazel fetches Asio, RE2, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
+| network access on the first build | Bazel fetches Asio, RE2, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`, and for the Rust library a Rust toolchain and the crates `rust/3rdparty` pins; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
 
 On Debian or Ubuntu, that is:
 
@@ -154,7 +154,13 @@ check against the tree, skipped with a notice without it; `clang-18` for
 the thread-safety analysis build (`--config=clang`), and `libc++-18-dev`
 beside it for the libc++ build (`--config=libcxx`); Node, whose `npx`
 runs mermaid-cli for the diagram check and on which pyright runs; Docker for
-[docker/check.sh](../docker/check.sh). The type check reads the stubs of the
+[docker/check.sh](../docker/check.sh); rustup for cargo, with which
+`./format.sh` runs rustfmt and generates the Rust protocol code again and
+`./check.sh` runs clippy and [rust/vendor.sh](../rust/vendor.sh), at the
+release [rust-toolchain.toml](../rust-toolchain.toml) pins, which
+rustup installs on first use; without it `./format.sh` leaves the Rust
+files alone with a note. Bazel needs none of it: it fetches a Rust
+toolchain of its own. The type check reads the stubs of the
 generated modules from `bazel-bin` (`stubPath` in `pyproject.toml`), where
 the build writes them next to the modules, and the stub of the native
 extension from `bazel build //multiplexer:_native_pyi`, which Bazel makes
@@ -184,6 +190,7 @@ versions those pin:
 | Python | Ruff (`charliermarsh.ruff`) | `[tool.ruff]`, with the ruff of `.tools/venv` |
 | C++ | clangd (`llvm-vs-code-extensions.vscode-clangd`) | `.clang-format`, and `compile_commands.json` from `bazel run //compdb` |
 | BUILD, WORKSPACE, `.bzl` | Bazel (`bazelbuild.vscode-bazel`) | the buildifier of `.tools/venv` |
+| Rust | rust-analyzer (`rust-lang.rust-analyzer`) | `rust-toolchain.toml`, `rustfmt.toml` and each `Cargo.toml`'s `[lints]` |
 
 The settings, in `.vscode/settings.json`, which git ignores, so that each
 checkout keeps its own:
@@ -195,9 +202,18 @@ checkout keeps its own:
   "ruff.path": ["${workspaceFolder}/.tools/venv/bin/ruff"],
   "clangd.path": "/usr/bin/clangd-18",
   "bazel.buildifier.executable": "/the/checkout/.tools/venv/bin/buildifier",
+  "rust-analyzer.linkedProjects": [
+    "rust/Cargo.toml",
+    "rust/codegen/Cargo.toml",
+    "tests/roles/rust/Cargo.toml",
+    "examples/echo-rust/Cargo.toml"
+  ],
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.targetDir": true,
   "[python]": { "editor.defaultFormatter": "ms-python.black-formatter", "editor.formatOnSave": true },
   "[cpp]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd", "editor.formatOnSave": true },
-  "[starlark]": { "editor.defaultFormatter": "BazelBuild.vscode-bazel", "editor.formatOnSave": true }
+  "[starlark]": { "editor.defaultFormatter": "BazelBuild.vscode-bazel", "editor.formatOnSave": true },
+  "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer", "editor.formatOnSave": true }
 }
 ```
 
@@ -215,6 +231,13 @@ checkout keeps its own:
 - **BUILD files.** The Bazel extension takes buildifier's path as it is
   written, with no `${workspaceFolder}`: the absolute path of the
   checkout's `.tools/venv/bin/buildifier`.
+- **Rust.** rust-analyzer finds `rust/Cargo.toml` by itself, but looks only
+  one directory deep: the other Cargo workspaces, the code generator, the
+  test roles and every Cargo example, go into `linkedProjects`.
+  `check.command` makes its diagnostics on save clippy's rather than
+  `cargo check`'s. `cargo.targetDir` gives it a target directory of its
+  own, so it never waits for the build lock of a cargo that `./check.sh`
+  or a test runs, nor rebuilds after one.
 - **Everything else.** Nothing formats Markdown, YAML or JSON here. A
   formatter set to format them on save, Prettier say, rewrites the
   hand-formatted pages and workflows.

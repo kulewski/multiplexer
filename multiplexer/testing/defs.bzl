@@ -9,6 +9,7 @@ ROLE_BINARIES = {
         Label("//tests/roles/py:event_backend"),
     ],
     "cc": [Label("//tests/roles/cc:mxtestroles")],
+    "rust": [Label("//tests/roles/rust:mxtestroles")],
 }
 
 def mx_integration_test(
@@ -25,9 +26,12 @@ def mx_integration_test(
         **kwargs):
     """Runs `scenario` (a unittest file using multiplexer.testing) as a py_test.
 
-    roles maps a role name to who plays it: "py" or "cc" for the roles this
-    repository ships, or the label of a binary of your own that follows the
-    role contract (tests/README.md); the scenario sees "bin" for it. mx is
+    roles maps a role name to who plays it: "py", "cc" or "rust" for the
+    roles this repository ships, or the label of a binary of your own that
+    follows the role contract (tests/README.md); the scenario sees "bin" for
+    it. A target with a Rust role is tagged rust, as every Rust target of
+    this repository is, so that a build that leaves Rust out
+    (--build_tag_filters=-rust) leaves it out too. mx is
     the number of multiplexers; rules the rules file they run with, by
     default the one the multiplexer_rules flag names, so that it matches
     the generated constants; params is free-form and reaches the scenario
@@ -69,6 +73,7 @@ def mx_integration_test(
         data = data,
         deps = [Label("//multiplexer/testing")] + deps,
         size = size,
-        tags = tags + ["integration"] + ["lang-" + lang for lang in sorted(langs.keys())],
+        tags = tags + ["integration"] + ["lang-" + lang for lang in sorted(langs.keys())] +
+               (["rust"] if "rust" in langs else []),
         **kwargs
     )

@@ -27,13 +27,16 @@ both talk to multiplexers. Spell out "multiplexer" in prose, "mx" only in code.
 - `multiplexer/`: the broker and the client libraries, C++ and Python side by
   side; `multiplexer/mxlog/` is the Python logging API.
 - `mxcontrol/`: the command-line tool and its subcommands.
+- `rust/`: the Rust client library, the crate `mx-multiplexer`, in a Cargo
+  workspace that Bazel builds too (rules_rust 0.27.0, the crates vendored
+  by `rust/vendor.sh`); `rust/README.md` says how.
 - `multiplexer/testing/`: the test infrastructure, public and importable by
   other workspaces as `multiplexer.testing`; changes there change every
   consumer's tests, so keep names and signatures.
 - `tests/`: integration tests; see `tests/README.md`.
 - `examples/`: complete programs, Bazel workspaces consuming this one as
-  `@mx` and pip projects on the package; `examples/README.md` says how to
-  add one.
+  `@mx`, pip projects on the package, and Cargo workspaces on the crate;
+  `examples/README.md` says how to add one.
 - `bazel/`: dependency macros and patches.
 - `docker/`: `check.sh` builds and tests the tree on a clean distribution;
   `docs/building.md` is the page it proves.
@@ -49,7 +52,7 @@ bazel test //...                           # unit and integration tests
 bazel test --test_tag_filters=-slow //...  # the fast ones, a few seconds
 ./examples/test_all.sh                     # the example workspaces
 ./examples/venv.sh                         # examples/.venv, with which check.sh runs the pip examples and their type check
-./format.sh                                # black, clang-format, buildifier, docs; --check also parses the YAML
+./format.sh                                # black, clang-format, buildifier, rustfmt, docs; --check also parses the YAML
 npx pyright                                # the Python package type-checked, after a build (stubs in bazel-bin)
 ./format.sh --check                        # what CI runs on every push, with the fast tests, also under libc++
 bazel build --config=clang //...           # clang thread-safety analysis (lib/thread_annotations.h)
@@ -61,8 +64,13 @@ bazel build --config=asan //...            # AddressSanitizer
 ./docker/runner_limits.sh                  # the fast tests as a GitHub runner runs them: 4 CPUs, 32 MB TCP buffers
 packaging/release_check.sh [COMMIT]        # what a release checks, before the tag; an hour or two, needs Docker
 make -j && make check                      # the build without Bazel (Makefile, docs/building.md)
-./tests/bench.sh                           # the throughput and latency numbers the README quotes
+./tests/bench.sh                           # the throughput and latency numbers the README quotes; tests/bench.sh 20000 rust with Rust peers
 bazel run //compdb                         # compile_commands.json for clangd, after a debug build
+bazel test //rust/...                      # the Rust library; Bazel fetches the Rust toolchain and the crates
+bazel test --test_tag_filters=rust,-slow //...  # every Rust target: the library, the roles, the scenarios with Rust roles
+(cd rust && cargo clippy --all-targets -- -D warnings)  # cargo from rustup, the release rust-toolchain.toml pins
+(cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p mx-multiplexer)  # the crate's docs as docs.rs builds them
+rust/vendor.sh                             # after a change to a Cargo.toml's dependencies; --check in check.sh
 ```
 
 ## Conventions
@@ -86,10 +94,25 @@ bazel run //compdb                         # compile_commands.json for clangd, a
   `BaseMultiplexerServer`, one thread, or a `BaseThreadedMultiplexerServer`,
   handlers on workers behind an io thread; `docs/README.md` says which class
   to use when.
+- What a client does exists twice: in the C++ library, which the Python
+  package binds (`multiplexer/basic_client.cc` and `outbox.cc` with their
+  parts, `io/connection.h`, the queries of `client_query.cc` and
+  `threaded_client_query.cc`), and in the Rust crate's core,
+  `rust/mx-multiplexer/src/core/`, written apart from it. A change to what a
+  client does, a send, a stage of a query, a heartbeat, is made in both,
+  with their tests, in one change; the scenarios that run in every language
+  check that they agree, and `docs/semantics.md` and `docs/query.md` state
+  what both do.
 - There is no peer authentication and `from` is not checked; the broker runs
   inside a trusted network. Do not add either without discussing it first.
 - Warnings are errors for our code (`-Wall -Wextra -Werror`), external code is
-  silenced. Do not add `-Wno-*` to make something compile.
+  silenced. Do not add `-Wno-*` to make something compile. The same in Rust:
+  rustc's warnings are errors in Bazel's builds (`.bazelrc`) and clippy's,
+  the vendored crates capped; the crate documents every public item
+  (`#![deny(missing_docs)]`), and every `unsafe` block has its SAFETY
+  comment (`clippy::undocumented_unsafe_blocks`, in each `Cargo.toml`'s
+  `[lints]`). `rust-toolchain.toml` and `rustfmt.toml` sit at the root, so
+  that every Cargo workspace and an editor get them.
 - Thread safety is declared, not described. A class owned by one thread has
   an `mx::ThreadChecker` and every method that touches its state starts with
   `MX_DCHECK_RUN_ON(&checker_)`; a member protected by a mutex is declared

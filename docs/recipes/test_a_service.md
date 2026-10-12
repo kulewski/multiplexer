@@ -4,7 +4,7 @@ A service you deploy is best tested the way it runs. That means its real
 binary, started with production's flags, against real multiplexers. It
 is checked only through what it does over them, its exit code and its
 log. `multiplexer.testing` does this from Python, whatever language the
-service is written in: C++, Python or anything else.
+service is written in: C++, Rust, Python or anything else.
 - `Cluster` starts the multiplexers.
 - `Process` runs the binary.
 - `FakePeer` stands in for the peers the service talks to.
@@ -93,8 +93,8 @@ sandbox if the test is killed.
 
 ## Under Bazel
 
-The binary, a `cc_binary` say, is data of a `py_test`, and the
-constants come from the rules file `.bazelrc` names
+The binary, a `cc_binary` or a `rust_binary`, is data of a `py_test`,
+and the constants come from the rules file `.bazelrc` names
 (`build --@mx//:multiplexer_rules=//:deployment.rules`), as in
 [examples/echo](../../examples/echo):
 
@@ -126,13 +126,13 @@ test with Python:
 ```
 python3 -m venv .venv && .venv/bin/pip install mx-multiplexer
 .venv/bin/mxcontrol generate_constants deployment.rules --python multiplexer_constants.py
-make                       # or cmake: the binary under test
+cargo build --release      # or make, or cmake: the binary under test
 .venv/bin/python -m unittest search_service_test
 ```
 
 The test then imports the constants from `multiplexer_constants`. Outside
 Bazel `runfile()` takes a path as given, relative to the working
-directory: `runfile("build/search_service")`. The logs go to a
+directory: `runfile("target/release/search_service")`. The logs go to a
 temporary directory, removed at exit; with `$MX_TEST_OUTPUT` set they go
 to a directory of the test's own in it, and stay.
 
@@ -142,4 +142,4 @@ Count what arrived instead of timing it: wait for the line, the peer or
 the message, and never sleep a guess
 ([tests that hold up under load](../api_python.md#tests-that-hold-up-under-load)).
 A program's own unit tests, of code that does not touch the multiplexer,
-stay where they are: gtest or `unittest`.
+stay where they are: gtest, `cargo test` or `unittest`.

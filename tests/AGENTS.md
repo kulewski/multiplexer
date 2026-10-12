@@ -13,9 +13,11 @@ workspace that tests with it: keep names and signatures.
   Mermaid sequence diagram and the checks. `scenarios/README.md` is generated
   from the docstrings by `format.sh`. One `mx_integration_test` per
   configuration in `scenarios/BUILD`.
-- Roles exist in both languages with identical options and events. A new
+- Roles exist in three languages with identical options and events. A new
   option or event is added to `roles/py/<role>.py`, to the matching class in
-  `roles/cc/<role>.cc`, and to the table in `README.md`, in one change.
+  `roles/cc/<role>.cc`, to `roles/rust/src/<role>.rs`, and to the table in
+  `README.md`, in one change; a new event field to `multiplexer/events.proto`
+  and to the field list of `roles/rust/src/event.rs`.
 - Client roles are passive unless spawned with `threaded=True`, which uses
   `ThreadedClient` and may use the active `TEST_ACTIVE_CLIENT` type. Do not
   write a scenario that needs a synchronous client running the loop between
