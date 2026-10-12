@@ -113,6 +113,7 @@ pip_examples() {  # the examples workflow's job, in ubuntu:24.04: a make wheel, 
     python3 -m venv examples/.venv && examples/.venv/bin/pip install -q build/dist/*.whl
     status=0
     for script in examples/*/test.sh; do
+      if [ -f "${script%/test.sh}/Cargo.toml" ]; then continue; fi  # a Cargo example, as test_all.sh tells them
       echo "==== $script"
       VENV="$PWD/examples/.venv" "$script" || status=1
     done
