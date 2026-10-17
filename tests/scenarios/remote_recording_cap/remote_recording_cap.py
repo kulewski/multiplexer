@@ -7,12 +7,16 @@ with `--record` has a session too, which a controller may stop.
 """
 
 import os
+import time
 import unittest
 
 from multiplexer import recording
 from multiplexer.clients import Client
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn, wait_until
+
+BOUND = 30  # s an answer, a cap's effect or a stop may take: a failure detector
+MAX_SECONDS = 1  # the time cap tried, the smallest a session takes
 
 
 class RemoteRecordingCap(unittest.TestCase):
@@ -23,7 +27,7 @@ class RemoteRecordingCap(unittest.TestCase):
         with Cluster(1, remote_recording=True) as cluster:
             controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
             try:
-                (started,) = recording.start(controller, "capped", max_bytes=3000)
+                (started,) = recording.start(controller, "capped", max_bytes=3000, timeout=BOUND)
                 self.assertTrue(started.recording)
                 spawn(  # kept by the harness, which ends it
                     "event_client",
@@ -31,14 +35,16 @@ class RemoteRecordingCap(unittest.TestCase):
                     mx=cluster.addresses,
                     type=C.peers.TEST_EVENT_CLIENT,
                     send=[(C.types.TEST_EVENT, "x" * 100)] * 60,
-                    linger=5,  # a sender that closes at once loses its unread events with the connection
+                    # A sender that closes at once loses its unread events with
+                    # the connection: this one stays until the harness ends it.
+                    linger=60,
                 )
                 # The events went in on the sender's connection, the status
                 # request on the controller's: the multiplexer may answer
                 # the latter before the last event crossed the cap.
                 status = wait_until(
                     lambda: next((s for s in recording.status(controller) if not s.recording), None),
-                    10,
+                    BOUND,
                     "the cap to close the session",
                 )
                 self.assertEqual("max_bytes reached", status.stopped)
@@ -49,10 +55,10 @@ class RemoteRecordingCap(unittest.TestCase):
                 records = list(recording.read(status.path, constants=C))
                 self.assertEqual(status.records, len(records))
                 self.assertTrue(records[0].HasField("header"))
-                (again,) = recording.start(controller, "capped", max_bytes=0)
+                (again,) = recording.start(controller, "capped", max_bytes=0, timeout=BOUND)
                 self.assertFalse(again.HasField("error"), "a session may follow a capped one")
                 self.assertNotEqual(started.path, again.path)
-                recording.stop(controller)
+                recording.stop(controller, timeout=BOUND)
             finally:
                 controller.shutdown()
 
@@ -60,13 +66,15 @@ class RemoteRecordingCap(unittest.TestCase):
         with Cluster(1, remote_recording=True) as cluster:
             controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
             try:
-                (started,) = recording.start(controller, "timed", max_seconds=1)
+                before = time.monotonic()  # the session starts after, and must stay open MAX_SECONDS from then
+                (started,) = recording.start(controller, "timed", max_seconds=MAX_SECONDS, timeout=BOUND)
                 self.assertTrue(started.recording)
                 status = wait_until(
                     lambda: next((s for s in recording.status(controller) if not s.recording), None),
-                    5,
+                    BOUND,
                     "the session to close by itself",
                 )
+                self.assertGreaterEqual(time.monotonic() - before, MAX_SECONDS, "open for its max_seconds first")
                 self.assertEqual("max_seconds reached", status.stopped)
                 self.assertEqual(started.path, status.path)
                 self.assertTrue(next(recording.read(status.path, constants=C)).HasField("header"))
@@ -80,11 +88,11 @@ class RemoteRecordingCap(unittest.TestCase):
         with Cluster(1, remote_recording=True) as cluster:
             controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
             try:
-                (started,) = recording.start(controller, "open", max_seconds=600)
+                (started,) = recording.start(controller, "open", max_seconds=600, timeout=BOUND)
                 self.assertTrue(started.recording)
             finally:
                 controller.shutdown()
-            self.assertEqual(0, cluster.mx[0].stop(timeout=5), "exited on SIGTERM, the deadline notwithstanding")
+            self.assertEqual(0, cluster.mx[0].stop(timeout=60), "exited on SIGTERM, the deadline notwithstanding")
             records = list(recording.read(started.path, constants=C))
             self.assertTrue(records[0].HasField("header"), "the session file was closed properly")
 

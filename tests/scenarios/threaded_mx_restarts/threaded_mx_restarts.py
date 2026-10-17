@@ -23,6 +23,11 @@ from tests.harness import Cluster, constants as C, spawn
 QUERIES = 40
 IN_FLIGHT = 4
 TIMEOUT = 15
+# The stage of the test whose client is frozen across the restart. Its
+# frozen time counts in its queries' ms, so what tells a query delayed by
+# the reconnect from one that waited out its stage is the stage itself, a
+# minute, and no window the restart has to fit in.
+FROZEN_TIMEOUT = 60
 
 
 class ThreadedMxRestarts(unittest.TestCase):
@@ -41,8 +46,9 @@ class ThreadedMxRestarts(unittest.TestCase):
         backend.wait_for("connected", connections=len(cluster.mx))
         return backend
 
-    def start_client(self, cluster, cfg):
-        """A threaded client with IN_FLIGHT queries in flight, 200 ms apart."""
+    def start_client(self, cluster, cfg, timeout=TIMEOUT):
+        """A threaded client with IN_FLIGHT queries in flight, 200 ms apart,
+        each stage of each query given `timeout` seconds."""
         client = spawn(
             "client",
             cfg.lang("client"),
@@ -52,7 +58,7 @@ class ThreadedMxRestarts(unittest.TestCase):
             **{"async": IN_FLIGHT},
             count=QUERIES,
             sleep_between=0.2,
-            timeout=TIMEOUT,
+            timeout=timeout,
             query=[(C.types.TEST_REQUEST_A, "q{round}")],
         )
         client.wait_for("connected", connections=len(cluster.mx))
@@ -89,7 +95,7 @@ class ThreadedMxRestarts(unittest.TestCase):
         cfg = harness.CONFIG
         with Cluster(1) as cluster:
             backend = self.start_backend(cluster, cfg)
-            client = self.start_client(cluster, cfg)
+            client = self.start_client(cluster, cfg, timeout=FROZEN_TIMEOUT)
             client.wait_for("response", round=5)
             client.pause()
             cluster.mx[0].restart()
@@ -100,7 +106,9 @@ class ThreadedMxRestarts(unittest.TestCase):
             responses = client.events_of("response")
             self.assertEqual(QUERIES, len(responses))
             self.assertEqual(sorted("Q%d" % index for index in range(QUERIES)), sorted(r["payload"] for r in responses))
-            self.assertLess(max(r["ms"] for r in responses), 10000, "delayed by the reconnect, not by a timeout")
+            self.assertLess(
+                max(r["ms"] for r in responses), FROZEN_TIMEOUT * 1000, "delayed by the reconnect, not by a timeout"
+            )
             self.assertEqual(1, client.events_of("done")[0]["connections"])
             self.assertEqual(0, backend.stop())
 

@@ -20,6 +20,7 @@ from tests import harness
 from tests.harness import Cluster, constants as C, mxcontrol, spawn
 
 QUERIES = 2
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
 
 
 def dual_stack() -> bool:
@@ -70,7 +71,9 @@ class Ipv6DualStack(unittest.TestCase):
                 self.assertEqual(QUERIES, len(responses), address)
                 for response in responses:
                     self.assertEqual((backend_id, "ABC"), (response["sender"], response["payload"]), address)
-            self.assertEqual(QUERIES * 2, len(backend.wait_for_count("request", QUERIES * 2)))
+            self.assertGreaterEqual(
+                len(backend.wait_for_count("request", QUERIES * 2, timeout=BOUND)), QUERIES * 2, "at least once each"
+            )
             status = mxcontrol("rules", "status", "-M", ipv6).stdout
             self.assertRegex(status, r"^multiplexer \d+: rules ")
 

@@ -32,6 +32,11 @@ NEW_ENTRIES = (
 )
 BROKEN_ENTRY = '\ntype {\n    type: 252\n    name: "TEST_BROKEN"\n    to {\n        peer: "NOBODY"\n    }\n}\n'
 STATUS_LINE = re.compile(r"multiplexer (\d+): (.*)")
+# A query's stage, a failure detector for those that must be answered. A
+# query that must fail at once is told by its error's kind, not by time:
+# one whose request stage ran out could still be answered late, waits
+# for that, and ends OperationTimedOut instead of OperationFailed.
+QUERY_TIMEOUT = 30
 
 
 def fingerprint(text: str) -> str:
@@ -62,10 +67,10 @@ class RulesReloadByMxcontrol(unittest.TestCase):
             harness.CONFIG.lang("client"),
             mx=cluster.addresses,
             type=C.peers.TEST_CLIENT,
-            timeout=3,
+            timeout=QUERY_TIMEOUT,
             query=[(NEW_REQUEST, payload)],
         )
-        self.assertEqual(0, client.wait())
+        self.assertEqual(0, client.wait(timeout=120))
         responses = client.events_of("response")
         return responses[0]["payload"] if responses else client.events_of("error")[0]["kind"]
 

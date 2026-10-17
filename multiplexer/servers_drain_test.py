@@ -5,14 +5,21 @@ ends on the multiplexer's confirmation or on its cap. Every request sent
 is therefore either answered or, routed after the multiplexer applied the
 drain routing, refused by the multiplexer with a delivery error: none
 vanishes into a timeout, and the backend refuses none of what it had read,
-its refusals told from the multiplexer's by their `from`.
+its refusals told from the multiplexer's by their `from`. Ordered by gates
+rather than pauses, but for the flood, which its lockstep orders: the
+backend holds its first request until the multiplexer has written every
+request into its socket (written_out()), so that the rest are read and
+waiting while it handles the first ones, where it paused 30 ms a request
+and the test had to act within a few of those pauses.
 """
 
 import threading
 import time
 import unittest
+from typing import Callable
 
-from multiplexer.Multiplexer_pb2 import Routing
+from multiplexer.clients import SyncClient
+from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
@@ -133,6 +140,70 @@ class Slow(BaseMultiplexerServer):
         return over
 
 
+class Held(Slow):
+    """Slow's drain without its pause, ordered by the test instead: the
+    first request is held until the test lets it go (`release`), once every
+    request is in the backend's socket (written_out()), so that the rest
+    are read and waiting while the first are handled, whatever the speed of
+    either side. With `hold_after_reply`, the request handled that many-th
+    is held again once its reply went, until `release_reply`; with
+    `stop_after`, the backend leaves, stop() from periodic_task(), once it
+    has handled that many. Each wait is 30 s at most, a failure detector's
+    bound."""
+
+    def __init__(self, addresses, hold_after_reply: int | None = None, stop_after: int | None = None, **kwargs):
+        super().__init__(addresses, **kwargs)
+        self.hold_after_reply = hold_after_reply
+        self.stop_after = stop_after
+        self.holding = threading.Event()  # the first request is being handled
+        self.release = threading.Event()  # the test's: go on with it
+        self.release_reply = threading.Event()  # the test's: go on after the reply held for
+
+    def handle_message(self, mxmsg):
+        if not self.handled:
+            self.holding.set()
+            self.release.wait(30)
+        self.handled.append(mxmsg.message)
+        self.send_message(message=mxmsg.message.upper(), type=RESPONSE)
+        if len(self.handled) == self.hold_after_reply:
+            self.release_reply.wait(30)
+
+    def periodic_task(self):
+        super().periodic_task()
+        if self.stop_after is not None and len(self.handled) >= self.stop_after:
+            self.stop()
+
+
+def written_out(client: SyncClient, timeout: float = 30.0) -> None:
+    """Return once the multiplexer has written out what `client` sent
+    before, to the peers it routed it to: a PING the client sends itself,
+    routed after it, came back. The multiplexer handles a connection's
+    frames one at a time, and writes a frame to a receiver's socket that
+    has room before it handles the next one from the same connection.
+    OperationTimedOut after `timeout`, a failure detector's bound."""
+    marker = client.send_message(b"written out?", type=types.PING, to=client.instance_id, flush=True)
+    deadline = time.monotonic() + timeout
+    while client.read_message(timeout=max(0.0, deadline - time.monotonic())).id != marker:
+        pass
+
+
+def read_answers(
+    client: TestClient, sent: list[int], answers: dict[int, MultiplexerMessage], done: Callable[[], bool]
+) -> None:
+    """Reads what comes to `client` into `answers`, the first message that
+    references each of `sent`, a reply or a DELIVERY_ERROR, until `done()`
+    or 30 s passed, a failure detector's bound, after which the caller's
+    count comes up short."""
+    deadline = time.monotonic() + 30
+    while not done():
+        try:
+            mxmsg = client.receive(timeout=max(0.0, deadline - time.monotonic()))
+        except OperationTimedOut:
+            return
+        if mxmsg.references in sent and mxmsg.references not in answers:
+            answers[mxmsg.references] = mxmsg
+
+
 class ServersDrainTest(unittest.TestCase):
     """The queue the drain must not drop, on the confirmation and on the cap."""
 
@@ -144,41 +215,62 @@ class ServersDrainTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.cluster.__exit__(None, None, None)
 
-    def drain(self, drain_seconds: float, drain_ends_with_waiting: bool) -> tuple[float, Slow, int]:
-        """Twelve requests at once to a backend that starts its drain once
-        it has handled two, the drain capped at `drain_seconds` and, with
-        `drain_ends_with_waiting`, over only with requests read and waiting:
-        how long the backend took to leave, from the first request, the
-        backend, and how many requests it refused itself. Every request has
-        one outcome: a response from the backend, or a delivery error, the
-        backend's or the multiplexer's, told apart by their `from`; none
-        vanishes into a timeout, and what the backend served was answered."""
-        served = BackendThread(
-            lambda: Slow(self.cluster.endpoints, drain_after=2, drain_ends_with_waiting=drain_ends_with_waiting),
-            drain_seconds=drain_seconds,
-        ).start()
+    def serve(self, drain_seconds: float, **options) -> tuple[BackendThread, Held]:
+        """A Held backend with `options` on its own thread, registered, its
+        drain capped at `drain_seconds`."""
+        served = BackendThread(lambda: Held(self.cluster.endpoints, **options), drain_seconds=drain_seconds).start()
         self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-        assert isinstance(served.backend, Slow)
-        server = served.backend
+        assert isinstance(served.backend, Held)
+        return served, served.backend
+
+    def send_held(self, client: TestClient, server: Held) -> list[int]:
+        """REQUESTS requests, sent while the backend holds the first, and
+        every one in its socket once this returns (written_out())."""
+        sent = [client.send(b"r%d" % index, REQUEST) for index in range(REQUESTS)]
+        self.assertTrue(server.holding.wait(30), "the backend took the first request")
+        written_out(client.client)
+        return sent
+
+    def drain(
+        self,
+        drain_seconds: float,
+        drain_ends_with_waiting: bool,
+        drain_after: int = 2,
+        hold_after_reply: int | None = None,
+    ) -> tuple[Held, int]:
+        """REQUESTS requests to a backend that holds the first until all are
+        in its socket and starts its drain once it has handled
+        `drain_after`, the drain capped at `drain_seconds` and, with
+        `drain_ends_with_waiting`, over only with requests read and
+        waiting; with `hold_after_reply`, the backend holds the request it
+        handled that many-th, once answered, until the test has the answer.
+        Returns the backend, and how many requests it refused itself. Every
+        request has one outcome: a response from the backend, or a delivery
+        error, the backend's or the multiplexer's, told apart by their
+        `from`; none vanishes into a timeout, and what the backend served
+        was answered."""
+        served, server = self.serve(
+            drain_seconds,
+            drain_after=drain_after,
+            drain_ends_with_waiting=drain_ends_with_waiting,
+            hold_after_reply=hold_after_reply,
+        )
         with TestClient(self.cluster, peers.WEBSITE) as client:
-            started = time.time()
-            sent = {client.send(b"r%d" % index, REQUEST) for index in range(REQUESTS)}
+            sent = self.send_held(client, server)
+            answers: dict[int, MultiplexerMessage] = {}
+            server.release.set()
+            if hold_after_reply is not None:
+                held = sent[hold_after_reply - 1]  # handled in the order sent, through one connection
+                read_answers(client, sent, answers, lambda: held in answers)
+                server.release_reply.set()
             wait_until(lambda: not served.running, 30, "serve_forever() returned")
-            took = time.time() - started
             self.assertIsNone(served.error)
+            read_answers(client, sent, answers, lambda: len(answers) == REQUESTS)
             responses = refused_by_backend = refused_by_multiplexer = 0
-            deadline = time.time() + 5
-            while sent and time.time() < deadline:
-                try:
-                    reply = client.receive(timeout=0.5)
-                except OperationTimedOut:
-                    continue
-                if reply.references not in sent:
-                    continue
-                sent.discard(reply.references)
-                if reply.type != types.DELIVERY_ERROR:
+            for answer in answers.values():
+                if answer.type != types.DELIVERY_ERROR:
                     responses += 1
-                elif reply.sender == server.instance_id:
+                elif answer.sender == server.instance_id:
                     refused_by_backend += 1
                 else:
                     refused_by_multiplexer += 1
@@ -187,26 +279,32 @@ class ServersDrainTest(unittest.TestCase):
             )
             self.assertEqual(len(server.handled), responses, "what the backend served was answered")
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
-        return took, server, refused_by_backend
+        return server, refused_by_backend
 
     def test_a_drain_on_the_confirmation_serves_what_was_read(self):
         """The drain routing turns every path off, so the drain ends on the
         multiplexer's confirmation, which comes behind every request routed
-        to the backend and counts only once those read are handled: well
-        within the cap, nothing left waiting, and nothing the backend had
-        read refused by it, where the close refused what the loop had not
-        handled."""
-        took, server, refused_by_backend = self.drain(10, drain_ends_with_waiting=False)
-        self.assertLess(took, 5, "it left on the confirmation, not at the cap")
+        to the backend and counts only once those read are handled: no cap,
+        so that nothing else can end it, where a check of its time told the
+        confirmation from a cap of 10 s; nothing left waiting; and nothing
+        the backend had read refused by it, where the close refused what the
+        loop had not handled. The confirmation waits in the backend's socket
+        behind ten requests it read and did not handle yet, by construction:
+        the backend asks for the drain once it has handled one, and holds
+        the second, answered, until the test has the answer, which the
+        multiplexer routed after it confirmed the drain."""
+        server, refused_by_backend = self.drain(-1, drain_ends_with_waiting=False, drain_after=1, hold_after_reply=2)
         self.assertFalse(server.waiting_when_drained, "the confirmation counted with requests waiting")
         self.assertEqual(0, refused_by_backend, "the backend refused what it had read when the drain ended")
 
     def test_a_drain_on_its_cap_serves_what_was_read(self):
-        """A drain on its cap, 0.2 s, that the backend says is over only
-        with requests read and waiting, so that they are waiting when it
-        ends by construction: it serves them after the drain ended, the
-        loop gone, where the close refused them."""
-        _, server, _ = self.drain(0.2, drain_ends_with_waiting=True)
+        """A drain on its cap, 0 s, which ends it at once, that the backend
+        says is over only with requests read and waiting, so that they are
+        waiting when it ends by construction, where a cap of 0.2 s had to
+        run out before the backend's pauses got through them: it serves them
+        after the drain ended, the loop gone, where the close refused
+        them."""
+        server, _ = self.drain(0, drain_ends_with_waiting=True)
         self.assertTrue(server.waiting_when_drained, "nothing waiting when the drain ended")
         assert server.handled_when_drained is not None
         self.assertGreater(
@@ -218,33 +316,23 @@ class ServersDrainTest(unittest.TestCase):
     def test_a_stop_without_a_drain_refuses_what_was_read(self):
         """stop() with requests read and not handled yet: the close refuses
         them, so that their senders retry elsewhere at once, where they
-        vanished into the senders' timeouts. Every request has one outcome."""
-        served = BackendThread(lambda: Slow(self.cluster.endpoints)).start()
-        self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-        assert isinstance(served.backend, Slow)
-        server = served.backend
+        vanished into the senders' timeouts. Every request has one outcome.
+        The backend stops itself once it has handled two, from
+        periodic_task(), the ten others read and waiting by construction,
+        where the test stopped it after two answers and had to come before
+        the backend's pauses got through the ten."""
+        served, server = self.serve(0.0, stop_after=2)
         with TestClient(self.cluster, peers.WEBSITE) as client:
-            sent = {client.send(b"r%d" % index, REQUEST) for index in range(REQUESTS)}
-            wait_until(lambda: len(server.handled) >= 2, 10, "the first replies, with the rest read into the queue")
-            server.stop()
-            wait_until(lambda: not served.running, 10, "serve_forever() returned")
+            sent = self.send_held(client, server)
+            server.release.set()
+            wait_until(lambda: not served.running, 30, "serve_forever() returned")
             self.assertIsNone(served.error)
-            responses = refused = 0
-            deadline = time.time() + 5
-            while sent and time.time() < deadline:
-                try:
-                    reply = client.receive(timeout=0.5)
-                except OperationTimedOut:
-                    continue
-                if reply.references not in sent:
-                    continue
-                sent.discard(reply.references)
-                if reply.type == types.DELIVERY_ERROR:
-                    refused += 1
-                else:
-                    responses += 1
+            answers: dict[int, MultiplexerMessage] = {}
+            read_answers(client, sent, answers, lambda: len(answers) == REQUESTS)
+            refused = sum(1 for answer in answers.values() if answer.type == types.DELIVERY_ERROR)
+            responses = len(answers) - refused
             self.assertEqual(REQUESTS, responses + refused, "none vanished into a timeout")
-            self.assertGreater(refused, 0, "refused at the close")
+            self.assertEqual((2, REQUESTS - 2), (responses, refused), "(answered, refused at the close)")
         self.cluster.wait_for_peer_gone(peers.PYTHON_TEST_SERVER)
 
     def test_a_drain_under_a_flood_ends(self):

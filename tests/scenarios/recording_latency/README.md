@@ -7,7 +7,8 @@ file a block at a time, and once a second.
 The same client runs the same queries against a multiplexer without
 `--record` and one with it. The write syscalls each multiplexer makes over
 the queries, counted in `/proc/<pid>/io` (`syscw`), differ by fewer than
-one per ten records the recording holds, and the recording holds every
+one per ten records the recording holds, and one per second the queries
+took, the writes of the once-a-second flush, and the recording holds every
 query and its response. Counted, not timed: a write per record would add
 one for each, however fast or loaded the machine; sockets are written
 with `sendmsg()`, which the count leaves out.
@@ -25,7 +26,7 @@ sequenceDiagram
     B->>C: responses, M1's write syscalls counted meanwhile
     C->>M2: 300 queries
     M2->>B: requests, each also recorded
-    B->>C: responses, M2's write syscalls counted meanwhile
+    B->>C: responses, M2's write syscalls and the seconds they took counted meanwhile
 ```
 
 ## What is checked
@@ -34,7 +35,8 @@ sequenceDiagram
 - The recording holds every request delivered to the backend and every
   response delivered to the client.
 - The multiplexer with `--record` makes fewer than one more write syscall
-  per ten records than the one without.
+  per ten records than the one without, besides one for each second the
+  queries took, the once-a-second flush's.
 
 ## Run
 

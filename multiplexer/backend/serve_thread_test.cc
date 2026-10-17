@@ -120,9 +120,12 @@ class Flood {
 };
 
 // Answers every request after a pause, so that the rest queue up; with a
-// `flood`, only once the flood's sender is far enough ahead (Flood). Given
-// `drain_after`, it starts its own drain, from periodic_task(), once it has
-// handled that many requests: a count, not another thread's timing. With
+// `flood`, only once the flood's sender is far enough ahead (Flood); with
+// `hold_first`, the first only once release() was called, so that the test
+// has every request in the backend's socket before it handles one
+// (written_out()). Given `drain_after`, it starts its own drain, from
+// periodic_task(), once it has handled that many requests, and given
+// `stop_after` it stops: counts, not another thread's timing. With
 // `drain_ends_with_waiting`, its drain is over, besides the default's cap,
 // only when requests are read and waiting, so that the drain ends with
 // something for what follows the loop to serve, by construction. Notes
@@ -131,22 +134,34 @@ class Flood {
 class SlowBackend : public BaseMultiplexerServer {
  public:
   explicit SlowBackend(const MultiplexerAddresses& addresses, int drain_after = -1,
-                       bool drain_ends_with_waiting = false)
+                       bool drain_ends_with_waiting = false, int stop_after = -1)
       : BaseMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER),
         drain_after_(drain_after),
         drain_ends_with_waiting_(drain_ends_with_waiting),
+        stop_after_(stop_after),
         instance_id_(conn->instance_id()) {}
   std::atomic<int> handled{0};
   std::atomic<bool> serving{false};                   // connected and looping: the first periodic_task() ran
   mutable std::atomic<int> handled_when_drained{-1};  // -1 until the drain ended
   mutable std::atomic<bool> waiting_when_drained{false};
   Flood* flood = nullptr;                                     // set before serving
+  bool hold_first = false;                                    // set before serving
   std::uint64_t instance_id() const { return instance_id_; }  // the `sender` of its refusals, after close() too
+  // Lets the first request's handler go on.
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    changed_.notify_all();
+  }
 
  protected:
   void handle_message(multiplexer::MultiplexerMessage& mxmsg) override {
     if (flood) {
       flood->wait_to_handle(handled.load());
+    }
+    if (hold_first && handled.load() == 0) {  // 60 s at most, a failure detector's bound
+      std::unique_lock<std::mutex> lock(mutex_);
+      changed_.wait_for(lock, std::chrono::seconds(60), [this] { return released_; });
     }
     ++handled;
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -158,6 +173,9 @@ class SlowBackend : public BaseMultiplexerServer {
     serving = true;
     if (drain_after_ >= 0 && !draining() && handled.load() >= drain_after_) {
       start_draining();
+    }
+    if (stop_after_ >= 0 && handled.load() >= stop_after_) {
+      working = false;
     }
   }
   // The default, with requests read and waiting too when asked for, noting
@@ -175,7 +193,11 @@ class SlowBackend : public BaseMultiplexerServer {
  private:
   const int drain_after_;  // -1: no drain of its own
   const bool drain_ends_with_waiting_;
+  const int stop_after_;  // -1: no stop of its own
   const std::uint64_t instance_id_;
+  std::mutex mutex_;
+  std::condition_variable changed_;
+  bool released_ = false;
 };
 
 // Once asked to leave, starts a drain that keeps a path open from
@@ -360,9 +382,15 @@ std::vector<std::string> payloads(multiplexer::Client& listener, int count) {
   return got;
 }
 
-// The next message `client` receives that references `id`, or null.
-std::shared_ptr<multiplexer::MultiplexerMessage> reply_to(multiplexer::Client& client, std::uint64_t id) {
-  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+// Seconds a message at MAX_MESSAGE_SIZE may take to go and its answer to
+// come back: some six passes over 128 MiB, which valgrind made 25 s.
+const int BIG = 120;
+
+// The next message `client` receives that references `id`, within `bound`
+// seconds, or null.
+std::shared_ptr<multiplexer::MultiplexerMessage> reply_to(multiplexer::Client& client, std::uint64_t id,
+                                                          int bound = 20) {
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(bound);
   while (std::chrono::steady_clock::now() < deadline) {
     try {
       std::shared_ptr<multiplexer::MultiplexerMessage> got = client.receive_message(1).first;
@@ -513,8 +541,9 @@ TEST(ServeThread, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   while (ping.ByteSizeLong() < multiplexer::MAX_MESSAGE_SIZE) {
     ping.mutable_message()->push_back('p');
   }
-  client.flush(client.schedule_one(ping), 10);
-  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, ping.id());
+  client.schedule_one(ping, BIG);
+  ASSERT_TRUE(client.flush_all(BIG)) << "the PING not written";
+  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(client, ping.id(), BIG);
   ASSERT_TRUE(answer) << "no answer to the PING";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
   EXPECT_NE(std::string::npos, answer->message().find("echo")) << answer->message();
@@ -568,8 +597,9 @@ TEST(ServeThread, ASearchIsAnsweredWithItsPayloadEchoed) {
   while (search.ByteSizeLong() < multiplexer::MAX_MESSAGE_SIZE) {
     search.mutable_message()->push_back('s');
   }
-  client.flush(client.schedule_one(search), 10);
-  answer = reply_to(client, search.id());
+  client.schedule_one(search, BIG);
+  ASSERT_TRUE(client.flush_all(BIG)) << "the search not written";
+  answer = reply_to(client, search.id(), BIG);
   ASSERT_TRUE(answer) << "no answer to the big search";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
   EXPECT_NE(std::string::npos, answer->message().find("echo of a search")) << answer->message();
@@ -946,25 +976,54 @@ TEST(ServeThread, AReplyMayNameItsMultiplexer) {
 
 namespace {
 
-// How a drain_twelve() went: how long the backend took to leave, from the
-// first request, the moment its drain ended, and what it refused itself.
+// Whether the multiplexer has written out what `client` sent before, to the
+// peers it routed it to: a PING the client sends itself, routed after it,
+// came back within 30 s, a failure detector's bound. The multiplexer
+// handles a connection's frames one at a time, and writes a frame to a
+// receiver's socket that has room before it handles the next one from the
+// same connection, so what came before the PING reaches its receivers
+// whatever becomes of the multiplexer afterwards.
+bool written_out(multiplexer::Client& client) {
+  multiplexer::MultiplexerMessage ping;
+  ping.set_id(client.random64());
+  ping.set_sender(client.instance_id());
+  ping.set_to(client.instance_id());
+  ping.set_type(multiplexer::types::PING);
+  ping.set_message("written out?");
+  client.flush(client.schedule_one(ping), 5);
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (std::chrono::steady_clock::now() < deadline) {
+    try {
+      if (client.receive_message(1).first->id() == ping.id()) {
+        return true;
+      }
+    } catch (const multiplexer::Client::OperationTimedOut&) {
+    }
+  }
+  return false;
+}
+
+// How a drain_twelve() went: the moment the backend's drain ended, and
+// what it refused itself.
 struct TwelveDrained {
-  std::chrono::steady_clock::duration took;
   bool waiting;       // requests read and not handled when the drain ended
   bool served_after;  // requests handled after the drain ended
   int refused_by_backend;
 };
 
-// Twelve requests at once to a SlowBackend that starts its drain once it
-// has handled two, the drain capped at `drain_seconds` and, with
-// `drain_ends_with_waiting`, over only with requests read and waiting.
-// Every request has one outcome: a response from the backend, or a
-// delivery error, the backend's or the multiplexer's, told apart by their
-// `from`; none vanishes into a timeout, and what the backend served was
-// answered.
+// Twelve requests to a SlowBackend that starts its drain once it has
+// handled two, the drain capped at `drain_seconds` and, with
+// `drain_ends_with_waiting`, over only with requests read and waiting. The
+// backend holds the first until all twelve are in its socket, so that the
+// ten after the second are read and waiting when its drain begins, by
+// construction: none arrives after the drain routing. Every request has
+// one outcome: a response from the backend, or a delivery error, the
+// backend's or the multiplexer's, told apart by their `from`; none
+// vanishes into a timeout, and what the backend served was answered.
 TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
   InProcessMultiplexer mx;
   SlowBackend backend(MultiplexerAddresses{{"127.0.0.1", mx.port}}, 2, drain_ends_with_waiting);
+  backend.hold_first = true;
   std::future<void> served =
       std::async(std::launch::async, [&backend, drain_seconds] { backend.serve_forever(0.05f, drain_seconds); });
   for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
@@ -973,7 +1032,6 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
   EXPECT_TRUE(backend.serving.load());
   multiplexer::Client client(multiplexer::peers::WEBSITE);
   EXPECT_TRUE(client.connect("127.0.0.1", mx.port, 5));
-  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   std::set<std::uint64_t> sent;
   for (int index = 0; index < 12; ++index) {
     multiplexer::MultiplexerMessage msg;
@@ -984,16 +1042,17 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
     sent.insert(msg.id());
     client.flush(client.schedule_one(msg), 5);
   }
+  EXPECT_TRUE(written_out(client)) << "the requests not in the backend's socket";
+  backend.release();
   if (served.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
     ADD_FAILURE() << "the drain never ended";
     backend.stop();
   }
   served.get();
-  const std::chrono::steady_clock::duration took = std::chrono::steady_clock::now() - started;
   int responses = 0;
   int refused_by_backend = 0;
   int refused_by_multiplexer = 0;
-  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!sent.empty() && std::chrono::steady_clock::now() < deadline) {
     try {
       std::pair<std::shared_ptr<multiplexer::MultiplexerMessage>, multiplexer::ConnectionWrapper> got =
@@ -1013,7 +1072,7 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
   }
   EXPECT_EQ(12, responses + refused_by_backend + refused_by_multiplexer) << "none vanished into a timeout";
   EXPECT_EQ(backend.handled.load(), responses) << "what the backend served was answered";
-  return TwelveDrained{took, backend.waiting_when_drained.load(),
+  return TwelveDrained{backend.waiting_when_drained.load(),
                        backend.handled.load() > backend.handled_when_drained.load(), refused_by_backend};
 }
 
@@ -1024,22 +1083,22 @@ TwelveDrained drain_twelve(float drain_seconds, bool drain_ends_with_waiting) {
 // being sent are handled before the connections close (drain_twelve). The
 // drain routing turns every path off, so the drain ends on the
 // multiplexer's confirmation, which comes behind every request routed to
-// the backend and counts only once those read are handled: well within
-// the cap, nothing left waiting, and nothing the backend had read refused
-// by it, where the close refused what the loop had not handled.
+// the backend and counts only once those read are handled: within the
+// test's 30 s, its cap an hour, nothing left waiting, and nothing the
+// backend had read refused by it, where the close refused what the loop
+// had not handled.
 TEST(ServeThread, ADrainServesWhatWasAlreadyRead) {
-  const TwelveDrained drained = drain_twelve(10.0f, false);
-  EXPECT_LT(drained.took, std::chrono::seconds(5)) << "on the confirmation, not the cap";
+  const TwelveDrained drained = drain_twelve(3600.0f, false);
   EXPECT_FALSE(drained.waiting) << "the confirmation counted with requests waiting";
   EXPECT_EQ(0, drained.refused_by_backend) << "the backend refused what it had read when the drain ended";
 }
 
-// A drain on its cap, 0.2 s, that the backend says is over only with
-// requests read and waiting, so that they are waiting when it ends by
-// construction: it serves them after the drain ended, the loop gone,
-// where the close refused them.
+// A drain on its cap, 0, over as it begins, with the ten requests after
+// the second read and waiting (drain_twelve), which the backend says too:
+// it serves them after the drain ended, the loop gone, where the close
+// refused them.
 TEST(ServeThread, ADrainOnItsCapServesWhatWasAlreadyRead) {
-  const TwelveDrained drained = drain_twelve(0.2f, true);
+  const TwelveDrained drained = drain_twelve(0.0f, true);
   ASSERT_TRUE(drained.waiting) << "nothing waiting when the drain ended";
   EXPECT_TRUE(drained.served_after) << "what it had read when the drain ended was refused, not served";
 }
@@ -1088,12 +1147,16 @@ TEST(ServeThread, ADrainWithNoTimeIsOverAtOnce) {
 
 // stop() with requests read and not handled yet: the close refuses them,
 // so that their senders retry elsewhere at once, where they vanished into
-// the senders' timeouts. Every request has one outcome.
+// the senders' timeouts. Every request has one outcome. The backend holds
+// the first request until all twelve are in its socket and stops itself
+// once it has handled two, so that ten are read and waiting then, by
+// construction.
 TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
   InProcessMultiplexer mx;
   MultiplexerAddresses addresses;
   addresses.push_back(std::make_pair("127.0.0.1", mx.port));
-  SlowBackend backend(addresses);
+  SlowBackend backend(addresses, -1, false, 2);
+  backend.hold_first = true;
   std::thread server([&backend] { backend.serve_forever(0.05f, 0.0f); });
   for (int waited = 0; waited < 500 && !backend.serving.load(); ++waited) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));  // registered before anything is sent
@@ -1111,14 +1174,12 @@ TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
     sent.insert(msg.id());
     client.flush(client.schedule_one(msg), 5);
   }
-  for (int waited = 0; waited < 500 && backend.handled.load() < 2; ++waited) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  backend.stop();
-  server.join();
+  EXPECT_TRUE(written_out(client)) << "the requests not in the backend's socket";
+  backend.release();
+  server.join();  // once it has handled two
   int responses = 0;
   int refused = 0;
-  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (!sent.empty() && std::chrono::steady_clock::now() < deadline) {
     try {
       std::pair<std::shared_ptr<multiplexer::MultiplexerMessage>, multiplexer::ConnectionWrapper> got =
@@ -1135,7 +1196,8 @@ TEST(ServeThread, AStopWithoutADrainRefusesWhatWasRead) {
     }
   }
   EXPECT_EQ(12, responses + refused) << "none vanished into a timeout";
-  EXPECT_GT(refused, 0) << "refused at the close";
+  EXPECT_EQ(2, responses) << "handled, then stopped";
+  EXPECT_EQ(10, refused) << "refused at the close";
 }
 
 // A lone backend that drains keeping its last-resort path open, under a
@@ -1366,33 +1428,6 @@ class HoldingBackend : public BaseMultiplexerServer {
   bool holding_ = false;
   bool released_ = false;
 };
-
-// Whether the multiplexer has written out what `client` sent before, to the
-// peers it routed it to: a PING the client sends itself, routed after it,
-// came back within 30 s, a failure detector's bound. The multiplexer
-// handles a connection's frames one at a time, and writes a frame to a
-// receiver's socket that has room before it handles the next one from the
-// same connection, so what came before the PING reaches its receivers
-// whatever becomes of the multiplexer afterwards.
-bool written_out(multiplexer::Client& client) {
-  multiplexer::MultiplexerMessage ping;
-  ping.set_id(client.random64());
-  ping.set_sender(client.instance_id());
-  ping.set_to(client.instance_id());
-  ping.set_type(multiplexer::types::PING);
-  ping.set_message("written out?");
-  client.flush(client.schedule_one(ping), 5);
-  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  while (std::chrono::steady_clock::now() < deadline) {
-    try {
-      if (client.receive_message(1).first->id() == ping.id()) {
-        return true;
-      }
-    } catch (const multiplexer::Client::OperationTimedOut&) {
-    }
-  }
-  return false;
-}
 
 // The messages of `sent` that a reply `client` reads references, once each
 // has one or 30 s passed, a failure detector's bound.

@@ -18,6 +18,7 @@ MULTIPLEXERS = 3
 QUERIES = 60
 BETWEEN_RESTARTS = 5.0  # AUTO_RECONNECT_TIME plus margin, so everyone is back before the next
 FAST_ENOUGH_MS = 2500  # far below a timeout, and below the 3 s reconnect: another connection served it
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
 
 
 class RollingRestart(unittest.TestCase):
@@ -56,7 +57,11 @@ class RollingRestart(unittest.TestCase):
         slow = [(r["round"], round(r["ms"])) for r in responses if r["ms"] > FAST_ENOUGH_MS]
         self.assertEqual([], slow, "queries that had to wait for a reconnect instead of using another connection")
         self.assertEqual(MULTIPLEXERS, client.events_of("done")[0]["connections"], "the client is back on all of them")
-        self.assertEqual(QUERIES, wait_for_total(backends, "request", QUERIES))
+        # At least once: a restart can lose a reply in flight, and the
+        # query then sends its request again.
+        self.assertGreaterEqual(
+            wait_for_total(backends, "request", QUERIES, timeout=BOUND), QUERIES, "every request, at least once"
+        )
         for backend in backends:
             self.assertEqual(0, backend.stop())
 

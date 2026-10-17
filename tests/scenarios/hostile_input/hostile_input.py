@@ -12,6 +12,11 @@ from tests.harness import Cluster, constants as C, spawn
 from multiplexer.Multiplexer_pb2 import WelcomeMessage
 from multiplexer.testing.raw_peer import HEADER, RawPeer, frame
 
+# Seconds a close the input must cost may take to be seen: a failure detector,
+# far below the 90 s the multiplexer gives a silent connection, so that only
+# the input could have closed it.
+BOUND = 30
+
 
 def registered(instance_id: int) -> str:
     """The start of the line the multiplexer logs when a peer with `instance_id` is in."""
@@ -46,14 +51,14 @@ class HostileInput(unittest.TestCase):
         with Cluster(1) as cluster:
             peer = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
             peer.send_raw(HEADER.pack(0xFFFFFFFF, 0))
-            self.assertTrue(peer.closed_by_peer(), "the offending connection is dropped")
+            self.assertTrue(peer.closed_by_peer(timeout=BOUND), "the offending connection is dropped")
             self.assert_still_serving(cluster)
 
     def test_zero_length_frame(self):
         with Cluster(1) as cluster:
             peer = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
             peer.send_raw(HEADER.pack(0, 0))
-            self.assertTrue(peer.closed_by_peer())
+            self.assertTrue(peer.closed_by_peer(timeout=BOUND))
             self.assert_still_serving(cluster)
 
     def test_frame_with_a_bad_checksum(self):
@@ -66,7 +71,9 @@ class HostileInput(unittest.TestCase):
             # One bit of the checksum flipped: the body is no longer what
             # the header says it is.
             peer.send_raw(good[:4] + bytes([good[4] ^ 1]) + good[5:])
-            self.assertTrue(peer.closed_by_peer(), "a body its checksum does not match costs the connection")
+            self.assertTrue(
+                peer.closed_by_peer(timeout=BOUND), "a body its checksum does not match costs the connection"
+            )
             # The backend's first message is the next peer's: CORRUPTED, had
             # it been routed, would have come before it.
             welcomed = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
@@ -94,7 +101,7 @@ class HostileInput(unittest.TestCase):
             event_backend.wait_for("connected", connections=1)
             intruder = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
             intruder.send(b"INJECTED", C.types.TEST_EVENT)  # no handshake
-            self.assertTrue(intruder.closed_by_peer())
+            self.assertTrue(intruder.closed_by_peer(timeout=BOUND))
             # The backend's first message is one a peer with a handshake
             # sends once the intruder is gone: INJECTED, had it been
             # routed, would have come before it.
@@ -122,7 +129,7 @@ class HostileInput(unittest.TestCase):
                 WelcomeMessage(type=C.peers.TEST_EVENT_CLIENT, id=owner.instance_id).SerializeToString(),
                 C.types.CONNECTION_WELCOME,
             )
-            self.assertTrue(impostor.closed_by_peer(), "a different host cannot take a live id")
+            self.assertTrue(impostor.closed_by_peer(timeout=BOUND), "a different host cannot take a live id")
             owner.send(b"still mine", C.types.TEST_EVENT)
             self.assertEqual(0, event_backend.wait())
             self.assertEqual(["still mine"], [r["payload"] for r in event_backend.events_of("received")])
@@ -139,7 +146,7 @@ class HostileInput(unittest.TestCase):
             stale.handshake()
             fresh = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT, instance_id=stale.instance_id)
             fresh.handshake()
-            self.assertTrue(stale.closed_by_peer(), "the stale connection is replaced")
+            self.assertTrue(stale.closed_by_peer(timeout=BOUND), "the stale connection is replaced")
             fresh.send(b"reconnected", C.types.TEST_EVENT)
             self.assertEqual(0, event_backend.wait())
             self.assertEqual(["reconnected"], [r["payload"] for r in event_backend.events_of("received")])

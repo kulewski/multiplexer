@@ -660,12 +660,18 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_callback_hears_how_the_message_ended_on_the_loop(self):
         """A send with a callback: 1 once written, called once, on the
         client's loop; 0 for one given up on, the multiplexer frozen with
-        the connection full."""
+        the connection full, awaited as the callback says it, where a flush
+        past the message's timeout could end first: an io thread that ran
+        only after both deadlines had passed handled the flush's before it
+        told the callback."""
         loop_thread = threading.get_ident()
         heard: list[tuple[int, int]] = []
+        given_up = asyncio.Event()
 
         def callback(written: int) -> None:
             heard.append((written, threading.get_ident()))
+            if not written:
+                given_up.set()
 
         await self.client.send_message(b"written", type=types.PYTHON_TEST_REQUEST, callback=callback)
         self.assertTrue(await self.client.flush_all(10))
@@ -674,7 +680,7 @@ class SendTest(unittest.IsolatedAsyncioTestCase):
         for payload in past_the_queue(self.CHUNK):
             await self.client.send_message(payload, type=types.PYTHON_TEST_REQUEST, timeout=60)
         await self.client.send_message(b"dropped", type=types.PYTHON_TEST_REQUEST, timeout=0.3, callback=callback)
-        await self.client.flush_all(0.6)  # past the message's timeout, whose callback the loop got first
+        await asyncio.wait_for(given_up.wait(), 10)  # a failure detector's bound
         self.assertEqual([(1, loop_thread), (0, loop_thread)], heard)
         self.assertEqual(1, self.client.dropped)
 
@@ -795,37 +801,68 @@ class HolderTest(unittest.TestCase):
     def test_a_cancelled_first_aget_costs_nobody_else(self):
         """The first caller gives up while the client is being made: the
         caller behind it still gets it; a caller alone giving up leaves it
-        made and kept for the next one; a close meanwhile closes it."""
+        made and kept for the next one; a close meanwhile closes it. The
+        constructor holds until the scenario lets it go, and the scenario
+        acts once it holds, where the constructor slept 0.2 s and the
+        callers 0.05 s: a loop that came back only after the making found
+        the client kept already, and a making that outlasted the wait meant
+        for it was still under way."""
         made: list[AsyncClient] = []
+        gates: list[tuple[threading.Event, threading.Event]] = []  # (holding, released), a making each
 
-        class Slow(AsyncClient):
+        class Held(AsyncClient):
             def __init__(self, *args, **kwargs):
+                holding, released = gates[len(made)]
                 made.append(self)
-                time.sleep(0.2)  # a slow handshake: time for the first caller to give up
+                holding.set()
+                released.wait(30)  # a failure detector's bound
                 super().__init__(*args, **kwargs)
 
+        def gate() -> tuple[threading.Event, threading.Event]:
+            """The next making's (holding, released)."""
+            gates.append((threading.Event(), threading.Event()))
+            return gates[-1]
+
+        async def under_way(holding: threading.Event) -> None:
+            """Returns once the constructor holds, the loop turning meanwhile."""
+            self.assertTrue(await asyncio.to_thread(holding.wait, 30), "the making began")
+
         with Cluster(1, rules=RULES) as cluster:
-            holder = Slow.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
+            holder = Held.holder(peers.PYTHON_TEST_CLIENT, lambda: cluster.endpoints)
 
             async def give_up_first() -> AsyncClient:
+                holding, released = gate()
                 first, second = asyncio.ensure_future(holder.aget()), asyncio.ensure_future(holder.aget())
-                await asyncio.sleep(0.05)
-                first.cancel()
+                try:
+                    await under_way(holding)
+                    first.cancel()
+                finally:
+                    released.set()
                 client = await second
                 self.assertTrue(first.cancelled(), "the first caller's own wait ended")
                 return client
 
             async def give_up_alone() -> None:
+                holding, released = gate()
                 alone = asyncio.ensure_future(holder.aget())
-                await asyncio.sleep(0.05)
-                alone.cancel()
-                await asyncio.sleep(0.3)  # the making goes on without anybody waiting
+                try:
+                    await under_way(holding)
+                    making = holder._creating  # what nobody awaits once the caller gave up
+                    assert making is not None
+                    alone.cancel()
+                finally:
+                    released.set()
+                await asyncio.to_thread(making.result, 30)  # the making goes on without anybody waiting
                 self.assertIs(made[-1], await holder.aget(), "kept, not made again")
 
             async def close_meanwhile() -> None:
+                holding, released = gate()
                 waiting = asyncio.ensure_future(holder.aget())
-                await asyncio.sleep(0.05)
-                holder.close()
+                try:
+                    await under_way(holding)
+                    holder.close()
+                finally:
+                    released.set()
                 with self.assertRaises(RuntimeError):
                     await waiting
 
@@ -838,8 +875,10 @@ class HolderTest(unittest.TestCase):
                 holder.close()
                 asyncio.run(close_meanwhile())
                 self.assertEqual(3, len(made))
-                cluster.wait_for_peer_gone(peers.PYTHON_TEST_CLIENT, 5)  # the disowned one closed itself
+                cluster.wait_for_peer_gone(peers.PYTHON_TEST_CLIENT)  # the disowned one closed itself
             finally:
+                for _, released in gates:
+                    released.set()
                 holder.close()
 
     def test_first_uses_on_several_threads_at_once_make_one_client(self):

@@ -44,7 +44,9 @@ sequenceDiagram
   well after the reconnect, are all answered; the connection is back.
 - One multiplexer, the backend first: the client process is paused with
   SIGSTOP across the restart and resumed once the backend is registered
-  again, so every query is answered and none fails.
+  again, so every query is answered and none fails, each within its 60 s
+  stage, the frozen time included, which a query that waited for it
+  would take whole.
 - One of two multiplexers: every query is answered, none fails, and none
   waited for the reconnect: the other connection served it; the client is
   back on both at the end.

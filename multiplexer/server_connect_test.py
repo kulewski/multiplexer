@@ -12,7 +12,10 @@ what the multiplexer routes to it while the listener holds, where
 serve_forever() first waited in connect() for every handshake. Counted,
 not timed: the accepts, the return, the registration and the answer are
 events; the bounds on waiting for them only detect a failure, each shorter
-than the timeout it tells apart.
+than the timeout it tells apart. The threaded server is given a minute to
+connect, which its constructor takes, and its test half of that; the
+plain server's connect() takes no timeout, DEFAULT_TIMEOUT always, so its
+tests keep half of that, HALF.
 """
 
 import select
@@ -31,6 +34,7 @@ from multiplexer.threaded_server import BaseThreadedMultiplexerServer
 RULES = runfile("tests/testing.rules")
 # Half of what serve_forever() first waited in connect() for a welcome that never comes.
 HALF = mxclient.DEFAULT_TIMEOUT / 2
+CONNECT_TIMEOUT = 60.0  # what the threaded server is given to connect: a minute, which only a failure uses up
 
 
 class ConnectingBackend(BaseMultiplexerServer):
@@ -110,12 +114,14 @@ class ServerConnectTest(unittest.TestCase):
         self.tried_at_once(
             lambda addresses: ConnectingBackend(addresses, peers.PYTHON_TEST_SERVER),
             lambda backend: backend.conn.connections_count(),
+            HALF,  # of DEFAULT_TIMEOUT, which connect() always waits
         )
 
     def test_a_threaded_server_tries_every_address_at_once_too(self) -> None:
         self.tried_at_once(
-            lambda addresses: ThreadedConnectingBackend(addresses, peers.PYTHON_TEST_SERVER),
+            lambda addresses: ThreadedConnectingBackend(addresses, peers.PYTHON_TEST_SERVER, timeout=CONNECT_TIMEOUT),
             lambda backend: backend.client.connections_count(),
+            CONNECT_TIMEOUT / 2,
         )
 
     def test_serve_forever_serves_while_a_handshake_hangs(self) -> None:
@@ -136,10 +142,14 @@ class ServerConnectTest(unittest.TestCase):
                 backend.leave = True
                 serving.join(30)
 
-    def tried_at_once(self, make: Callable[[list[tuple[str, int]]], Any], connections: Callable[[Any], int]) -> None:
+    def tried_at_once(
+        self, make: Callable[[list[tuple[str, int]]], Any], connections: Callable[[Any], int], bound: float
+    ) -> None:
         """A backend `make(addresses)` makes for two silent listeners: both
         get their connection while connect() still waits, and once both hang
-        up it returns, `connections(backend)` none."""
+        up it returns, `connections(backend)` none; each wait for one of
+        those `bound` seconds at most, under the backend's connect timeout,
+        which it tells apart."""
         first, second = SilentListener(), SilentListener()
         self.addCleanup(first.close)
         self.addCleanup(second.close)
@@ -160,12 +170,12 @@ class ServerConnectTest(unittest.TestCase):
 
         connecting = threading.Thread(target=connect, daemon=True)
         connecting.start()
-        self.assertTrue(first.accepted_within(5))
-        self.assertTrue(second.accepted_within(5), "the second address waited for the first's handshake")
+        self.assertTrue(first.accepted_within(bound))
+        self.assertTrue(second.accepted_within(bound), "the second address waited for the first's handshake")
         self.assertFalse(returned.is_set(), "connect() still waits")
         first.hang_up()
         second.hang_up()
-        self.assertTrue(returned.wait(5), "connect() ends with the last connection, not at its timeout")
+        self.assertTrue(returned.wait(bound), "connect() ends with the last connection, not at its timeout")
         self.assertEqual(["returned, 0 connected"], outcome)
         connecting.join(30)
 

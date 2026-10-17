@@ -75,6 +75,24 @@ fn logged(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The queue-full drops the lines logged so far say: one for each first
+/// line, "request #...", and N for each summary's "[N more".
+fn said_queue_full() -> usize {
+    logged("dropped: queue full")
+        .iter()
+        .map(|line| {
+            if line.starts_with("request #") {
+                1
+            } else {
+                line.split_once('[')
+                    .and_then(|(_, rest)| rest.split_once(" more"))
+                    .and_then(|(count, _)| count.parse().ok())
+                    .unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
 /// Waits, BOUND at most, for `done`; whether it came.
 fn eventually(done: impl Fn() -> bool) -> bool {
     let until = Instant::now() + BOUND;
@@ -632,7 +650,9 @@ fn a_threaded_servers_queue_full_drops_are_said_once_the_burst_is_over() {
     // One worker and no queue: the worker holds the first request, and the
     // four behind it are dropped. The first drop is logged at once, the
     // other three in the client's drop lines' summary a second later, with
-    // no later drop needed to bring it.
+    // no later drop needed to bring it. Counted over every line, as the
+    // C++ twin counts, so that drops a summary's second apart, said as two
+    // first lines, still add up.
     capture_lines();
     let mx = Multiplexer::start();
     let server = Arc::new(
@@ -652,11 +672,7 @@ fn a_threaded_servers_queue_full_drops_are_said_once_the_burst_is_over() {
         client.send(types::TEST_REQUEST_A, "burst").wait().unwrap();
     }
     assert!(eventually(|| server.handle().dropped() == 4), "dropped: {}", server.handle().dropped());
-    let summary = "requests dropped: queue full [3 more in the last";
-    assert!(eventually(|| !logged(summary).is_empty()), "{:?}", logged("queue full"));
-    let first: Vec<String> =
-        logged("dropped: queue full").into_iter().filter(|line| line.starts_with("request #")).collect();
-    assert_eq!(1, first.len(), "the first drop, logged at once: {first:?}");
+    assert!(eventually(|| said_queue_full() == 4), "{:?}", logged("queue full"));
     server.handler().release();
     server.handle().stop();
     serving.join().unwrap().unwrap();

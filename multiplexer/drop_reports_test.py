@@ -139,6 +139,12 @@ class DropReportsTest(unittest.TestCase):
                     self.assertEqual([DropReason.NO_CONNECTION], [reason for _, reason in drops.heard])
 
     def test_a_message_that_waited_for_room_past_its_timeout(self) -> None:
+        """A message behind a full connection to a frozen multiplexer is
+        given up on at its 0.3 s timeout, NO_ROOM. The loop runs in short
+        turns until on_drop has heard of it: a SyncClient tells of a drop
+        inside a later call that runs the loop, which one flush past the
+        deadline could end first, its own deadline expired in the same pass
+        of the loop as the message's."""
         drops = Drops()
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
             client = Client(cluster.endpoints, type=peers.WEBSITE, on_drop=drops)
@@ -148,7 +154,9 @@ class DropReportsTest(unittest.TestCase):
                     for payload in past_the_queue(CHUNK):
                         client.send_message(payload, type=EVENT, timeout=FILLER_TIMEOUT)
                     late = client.send_message(b"late", type=EVENT, timeout=0.3)
-                    client.flush_all(0.6)  # the loop runs past its deadline
+                    heard_by = time.monotonic() + 10  # a failure detector's bound
+                    while not drops.heard and time.monotonic() < heard_by:
+                        client.flush_all(0.05)  # a turn of the loop, on_drop run inside it
                 finally:
                     cluster.mx[0].resume()
                 self.assertEqual([(late, DropReason.NO_ROOM)], drops.heard)
@@ -191,7 +199,9 @@ class DropReportsTest(unittest.TestCase):
     def test_every_message_is_delivered_or_reported_at_shutdown(self) -> None:
         """Sent to a frozen multiplexer, then the client shuts down: what was
         written arrives, the rest is reported, and nothing is both. The
-        multiplexer reads again at the first drop reported, while the
+        shutdown waits for no write, timeout 0, so that the multiplexer
+        reads again at once, at the first drop reported, where it stayed
+        frozen for the shutdown's second of flushing first, and the
         client's close still reads on for the multiplexer's end, so that it
         takes what was written within the close's bound, however long the
         freeze took: one still stalled past CLOSE_READ_SECONDS may lose what
@@ -214,7 +224,7 @@ class DropReportsTest(unittest.TestCase):
                     sent = set()
                     for payload in past_the_queue(CHUNK):
                         sent.add(client.send_message(payload, type=EVENT, timeout=FILLER_TIMEOUT))
-                    client.shutdown()
+                    client.shutdown(timeout=0)
                     frozen.resume()  # thawed already, unless nothing was dropped
                     reported = {message_id for message_id, _ in drops.heard}
                     self.assertTrue(reported, "a frozen multiplexer left something to report")

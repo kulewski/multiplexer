@@ -181,7 +181,13 @@ class DeadConnectionTest(unittest.TestCase):
         those with time left wait for the next connection. Sent with no
         time at all, timeout 0, the message is past its timeout from the
         start, queued since the queue had room. The threaded client's io
-        thread hears of it at once; every client shares the outbox."""
+        thread hears of it at once; every client shares the outbox. At
+        once, counted rather than timed: the io thread hands the dead
+        connection's queue over, and reports what it drops, in the turn
+        that counts the connection gone, and tells on_drop in the next, so
+        that a call into the io thread made once it counts none comes back
+        after on_drop was told; a message given 10 s from the failover is
+        not reported by then."""
         drops = Drops()
         with Cluster(1, rules=RULES) as cluster:
             client = ThreadedClient(cluster.endpoints, type=peers.TEST_ACTIVE_CLIENT, on_drop=drops)
@@ -191,8 +197,11 @@ class DeadConnectionTest(unittest.TestCase):
                     client.send_message(payload, type=EVENT, timeout=60)
                 late = client.send_message(b"late", type=EVENT, timeout=0)
                 cluster.mx[0].kill()
-                # 5 s at most: less than the 10 s from the failover it tells apart.
-                self.assertEqual([(late, DropReason.CONNECTION_LOST)], drops.wait_for(late, timeout=5))
+                wait_until(lambda: client.connections_count() == 0, 30, "the connection gone")
+                client.connections_count()  # one more turn of the io thread, after the one that told on_drop
+                with drops.lock:
+                    heard = list(drops.heard)
+                self.assertEqual([(late, DropReason.CONNECTION_LOST)], heard)
             finally:
                 client.shutdown(0)
 

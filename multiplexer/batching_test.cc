@@ -225,19 +225,30 @@ class SilentMultiplexer {
   std::thread handshake_;
 };
 
+// Sends `msg` through `lane` with no deadline, so that it waits for room
+// as long as the test needs: a send without a timeout gives it
+// DEFAULT_TIMEOUT, after which a fill would end, and with it the fullness
+// the test relies on. Of the sends that return at once, only the
+// serialized ones take a timeout.
+void send_unbounded(ThreadedClient& sender, const MultiplexerMessage& msg,
+                    multiplexer::LanePtr lane = multiplexer::LanePtr()) {
+  sender.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), lane, -1);
+}
+
 // Fills `sender`'s one connection, to a SilentMultiplexer, through a pinned
 // lane, lost with the connection rather than handed over or held: frames
 // that fill the sockets, and as many more as the connection's queue holds,
-// so that it has no room and messages wait for it.
+// so that it has no room and messages wait for it, none of them with a
+// deadline.
 void fill(ThreadedClient& sender) {
   const multiplexer::LanePtr pinned = std::make_shared<multiplexer::Lane>(true);
   const std::string large(multiplexer::testing::fill_size(), 'f');
   for (int frame = 0; frame < multiplexer::testing::FILL_FRAMES; ++frame) {
-    sender.send(sender.new_message(types::TEST_UNROUTED, large), pinned);
+    send_unbounded(sender, sender.new_message(types::TEST_UNROUTED, large), pinned);
   }
   for (unsigned int frame = 0;
        frame <= multiplexer::ConnectionsManager<multiplexer::BasicClient>::DEFAULT_OUT_QUEUE_SIZE; ++frame) {
-    sender.send(sender.new_message(types::TEST_UNROUTED, "f"), pinned);
+    send_unbounded(sender, sender.new_message(types::TEST_UNROUTED, "f"), pinned);
   }
 }
 
@@ -758,6 +769,7 @@ TEST(Batching, WithNoDelayMessagesSentWhileTheConnectionIsBusyGoTogether) {
   batching.batch = true;
   batching.max_records = 100;
   batching.max_delay = 0;
+  batching.timeout = -1;
   sender.set_delivery(types::TEST_EVENT, batching);
   SyncClient poke(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(poke.connect("127.0.0.1", mx.port, BOUND));
@@ -805,6 +817,7 @@ TEST(Batching, WithNoDelayABatchGoesWhenTheBusyConnectionDies) {
   ThreadedClient::Delivery batching;
   batching.batch = true;
   batching.max_delay = 0;
+  batching.timeout = -1;
   sender.set_delivery(types::TEST_EVENT, batching);
   for (int number = 0; number < 3; ++number) {
     sender.send(sender.new_message(types::TEST_EVENT, "event " + std::to_string(number)));
@@ -820,18 +833,21 @@ TEST(Batching, ABatchAConnectionLetGoGoesOnThatConnection) {
   // Two connections, both busy, their far ends reading nothing: the batch
   // waits. The second's end starts reading, and once that connection has
   // written everything, the batch goes on it, where the round robin would
-  // have put it on the first, behind writes that never end.
+  // have put it on the first, behind writes that never end. The batch has
+  // no deadline, at which it would go the round robin's way, as a message
+  // that waited for room does, however long the second takes to read.
   SilentMultiplexer first, second;
   ThreadedClient sender(peers::TEST_ACTIVE_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", first.port, BOUND));
   ASSERT_TRUE(sender.connect("127.0.0.1", second.port, BOUND));
   const std::string large(multiplexer::testing::fill_size(), 'f');
   for (int frame = 0; frame < 2 * multiplexer::testing::FILL_FRAMES; ++frame) {
-    sender.send(sender.new_message(types::TEST_UNROUTED, large));  // each connection in turn: both full
+    send_unbounded(sender, sender.new_message(types::TEST_UNROUTED, large));  // each connection in turn: both full
   }
   ThreadedClient::Delivery batching;
   batching.batch = true;
   batching.max_delay = 0;
+  batching.timeout = -1;
   sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
@@ -867,6 +883,7 @@ TEST(Batching, WithNoDelayABatchGoesWhenAConnectionComesUp) {
   ThreadedClient::Delivery batching;
   batching.batch = true;
   batching.max_delay = 0;
+  batching.timeout = -1;
   sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
@@ -910,6 +927,7 @@ TEST(Batching, ABatchThatGoesLetsTheBatchesWaitingForAConnectionGoFirst) {
   ThreadedClient::Delivery no_delay;
   no_delay.batch = true;
   no_delay.max_delay = 0;
+  no_delay.timeout = -1;
   sender.set_delivery(types::TEST_EVENT, "a", no_delay);
   sender.set_delivery(types::TEST_EVENT, "b", by_count(3));
   SyncClient poke(peers::TEST_EVENT_CLIENT);
@@ -984,21 +1002,40 @@ TEST(Batching, WithNoDelayABatchGoesAtItsDeadline) {
 }
 
 TEST(Batching, ABatchGoesAtItsDelay) {
-  // No flush and no other send: the batch goes once its delay is over.
+  // No flush and no other send: the batch goes once its delay is over. The
+  // sender's io thread is held in a callback while the three sends are
+  // posted behind it, so that all three join the batch before its 50 ms
+  // can run out, however late this thread is between two of them.
   InProcessMultiplexer mx;
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
-  ThreadedClient sender(peers::TEST_ACTIVE_CLIENT);
+  std::promise<void> entered, release;
+  std::shared_future<void> released = release.get_future().share();
+  bool held = false;
+  ThreadedClient sender(peers::TEST_ACTIVE_CLIENT, [&](const IncomingMessage&) {
+    if (!held) {
+      held = true;
+      entered.set_value();
+      released.wait();
+    }
+  });
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
   ThreadedClient::Delivery batching;
   batching.batch = true;
   batching.max_delay = 0.05f;
   sender.set_delivery(types::TEST_EVENT, batching);
+  SyncClient poke(peers::TEST_EVENT_CLIENT);
+  ASSERT_TRUE(poke.connect("127.0.0.1", mx.port, BOUND));
+  MultiplexerMessage hold = event(poke, 0);
+  hold.set_to(sender.instance_id());
+  poke.send(hold, BOUND);
+  ASSERT_EQ(std::future_status::ready, entered.get_future().wait_for(std::chrono::seconds(BOUND)));
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
     MultiplexerMessage msg = sender.new_message(types::TEST_EVENT, "event " + std::to_string(number));
     sent.push_back(msg.id());
     sender.send(msg);
   }
+  release.set_value();
   std::vector<Frame> frames = frames_until(receiver, 3);
   ASSERT_EQ(1u, frames.size());
   EXPECT_TRUE(frames[0].batch);

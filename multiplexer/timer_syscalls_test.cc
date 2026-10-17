@@ -41,6 +41,14 @@ using multiplexer::testing::InProcessMultiplexer;
 const int MESSAGES = 100;
 const std::size_t FEW = 5;  // what may move the timer for reasons of its own: none per message
 
+// What the timers may move themselves besides FEW over `elapsed`: the
+// heartbeat's and the drop's, each when it comes due, about once a
+// HEARTBIT_INTERVAL. The clock read as data, so that a run stretched by
+// load or valgrind allows for them, where a fixed FEW failed it.
+std::size_t due_over(std::chrono::steady_clock::duration elapsed) {
+  return 2 * static_cast<std::size_t>(std::chrono::duration<double>(elapsed).count() / multiplexer::HEARTBIT_INTERVAL);
+}
+
 // An event nobody receives, said to nobody: the multiplexer drops it.
 multiplexer::MultiplexerMessage event(std::uint64_t id, std::uint64_t sender) {
   multiplexer::MultiplexerMessage msg;
@@ -56,12 +64,14 @@ TEST(TimerSyscalls, ASyncClientsMessagesMoveNoTimer) {
   InProcessMultiplexer mx;
   multiplexer::Client client(multiplexer::peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(client.connect("127.0.0.1", mx.port, 5));
+  const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   const std::size_t before = settimes;
   for (int index = 0; index < MESSAGES; ++index) {
     // Written before the next: the queue empties at every message.
     client.flush(client.schedule_one(event(client.random64(), client.instance_id())), 30);
   }
-  EXPECT_LT(settimes - before, FEW) << "the timer moved for messages";
+  const std::size_t moved = settimes - before;
+  EXPECT_LT(moved, FEW + due_over(std::chrono::steady_clock::now() - started)) << "the timer moved for messages";
 }
 
 // Frames read move no timer either: each frame read runs the handlers of

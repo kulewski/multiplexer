@@ -32,8 +32,8 @@ sequenceDiagram
 
 ## What is checked
 
-- The leaving backend exits with 0 well before its 10 s period, once the multiplexer confirmed and its work was done, and no request reached it after the confirmation.
-- Every query is answered, none fails, and none took anywhere near a timeout: the restart was invisible to the client.
+- The leaving backend exits with 0 once the multiplexer confirmed and its work was done, within 30 s of the confirmation, where its period is 120 s, and no request reached it after the confirmation.
+- Every query is answered, none fails, and each took less than its 60 s stage, which a query that waited for it would take whole: the restart was invisible to the client.
 
 ## Run
 

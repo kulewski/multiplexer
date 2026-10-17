@@ -55,12 +55,9 @@ if [[ "${1:-}" == "--valgrind" ]]; then
   memcheck="valgrind --tool=memcheck --error-exitcode=99 --track-origins=yes --leak-check=no"
   memcheck+=" --suppressions=$PWD/tools/memcheck.supp"
   # The tests that cannot run under valgrind: those that count allocations
-  # by an operator new of their own, which valgrind replaces, one that runs
-  # a renamed child, which valgrind refuses to start, and one whose sends
-  # wait for room within the default deadline, ten seconds, which memcheck's
-  # pace outlasts while the test holds a multiplexer frozen.
+  # by an operator new of their own, which valgrind replaces, and one that
+  # runs a renamed child, which valgrind refuses to start.
   cannot="ProcessName.*:ParseTarget.*:ReceiveAllocations.*:SendAllocations.*:RouteAllocations.*"
-  cannot+=":ThreadedClient.EveryMultiplexerGetsItsCopyOfASendToAll"
   bazel test --run_under="$memcheck" --test_lang_filters=cc --test_arg=--gtest_filter="-$cannot" \
     --test_timeout=3600 --test_tag_filters=-slow //lib/... //multiplexer/...
   bazel build //mxcontrol

@@ -24,7 +24,7 @@ sequenceDiagram
 ## What is checked
 
 - Every worker gets exactly its own replies: the payload names the worker, and no reply crosses over.
-- The backend handled every request.
+- The backend handled every request, at least once.
 
 ## Run
 

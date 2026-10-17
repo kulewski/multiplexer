@@ -1311,8 +1311,9 @@ TEST(QueryStagesSync, ALeavingClientsQueryTakesItsAnswers) {
     MultiplexerMessage request;
     request.set_type(types::PYTHON_TEST_REQUEST);
     request.set_message("question");
+    // 30 s a stage, none of which runs out here: a failure detector's bound.
     payload = client
-                  .query(request, 2, multiplexer::LanePtr(),
+                  .query(request, 30, multiplexer::LanePtr(),
                          [&acknowledged](std::uint64_t backend) { acknowledged.push_back(backend); })
                   .third->message();
     if (client.has_incoming_messages()) {

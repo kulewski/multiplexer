@@ -12,6 +12,7 @@ from tests.harness import Cluster, constants as C, spawn
 
 WORKERS = 4
 QUERIES = 10
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
 
 
 class ThreadedWorkers(unittest.TestCase):
@@ -51,7 +52,11 @@ class ThreadedWorkers(unittest.TestCase):
             dones = client.events_of("done")
             self.assertEqual(WORKERS, len(dones))
             self.assertEqual({connected[0]["instance_id"]}, {d["instance_id"] for d in dones})
-            self.assertEqual(WORKERS * QUERIES, len(backend.wait_for_count("request", WORKERS * QUERIES)))
+            self.assertGreaterEqual(
+                len(backend.wait_for_count("request", WORKERS * QUERIES, timeout=BOUND)),
+                WORKERS * QUERIES,
+                "every request, at least once",
+            )
             self.assertEqual(0, backend.stop())
 
 

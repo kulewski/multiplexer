@@ -33,7 +33,10 @@ from multiplexer.threaded_server import BaseThreadedMultiplexerServer
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 COUNT = 3000  # messages that go nowhere in each test
 TURNS = 40  # turns of a threaded server's queue full by turns, each a request taken and one dropped
-FEW = 50  # lines at most for COUNT messages: about two a second per kind, for far less than 25 s
+# Lines at most for what a check counts: COUNT messages, or at least COUNT // 10 for a full queue, of which
+# the code before logged a line or more each; LogSummary's, about two a second per kind, stay under it unless
+# the drops span more than a minute, where 50 failed once they spanned 25 s.
+FEW = COUNT // 20
 BATCH = 100  # messages a RawPeer sends before reading what came back for them
 NOBODY = "of type 207 (TEST_TINY_QUEUE)"
 

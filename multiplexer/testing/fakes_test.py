@@ -5,18 +5,28 @@ PYTHON_TEST_REQUEST, WEBSITE is the passive peer type a synchronous client
 needs.
 """
 
+import re
 import threading
-import time
 import unittest
 
 from multiplexer.clients import BackendError, MxClient
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationFailed, OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
-from multiplexer.testing import BackendThread, Cluster, FakePeer, TestClient, ThreadedTestClient, wait_until
+from multiplexer.testing import BackendThread, Cluster, FakePeer, Mx, TestClient, ThreadedTestClient, wait_until
 from multiplexer.testing import runfile
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
+
+
+def registrations(multiplexer: Mx, instance_id: int, since: int) -> int:
+    """How many connections of the peer `instance_id` the multiplexer's log
+    says it registered past `since`, a log_mark(); an "unregistered" line
+    is not one."""
+    with open(multiplexer.log_path, "rb") as log:
+        log.seek(since)
+        text = log.read().decode(errors="replace")
+    return len(re.findall(r"\bregistered connection id=%d\b" % instance_id, text))
 
 
 class FakePeerTest(unittest.TestCase):
@@ -252,16 +262,36 @@ class SendAfterRestartTest(unittest.TestCase):
 
     def test_a_restarted_multiplexer_lists_no_peer_until_it_reconnects(self):
         """The peers file of the old process must not survive the restart:
-        a wait for the peer would return on a registration that is gone."""
-        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER):
+        a wait for the peer would return on a registration that is gone.
+        The fake cannot reconnect while the list is read: its thread is held
+        in a handler from before the restart, its loop, and so its
+        reconnect timer, not running, where the timer's 3 s could run out
+        first once the stop and the start took that long."""
+        holding, released = threading.Event(), threading.Event()
+
+        def held(mxmsg):
+            """Holds the fake's thread until the test lets it go; no reply."""
+            holding.set()
+            released.wait(30)  # a failure detector's bound
+
+        with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
+            peer.on(types.PYTHON_TEST_REQUEST, held)
             cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-            cluster.mx[0].restart()
-            self.assertEqual([], cluster.mx[0].connected_peers(), "the old list outlived the process")
-            cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)  # the reconnect, about 3 s
+            with TestClient(cluster, peers.WEBSITE) as client:
+                client.send(b"hold", types.PYTHON_TEST_REQUEST)
+            try:
+                self.assertTrue(holding.wait(30), "the fake took the request")
+                cluster.mx[0].restart()
+                self.assertEqual([], cluster.mx[0].connected_peers(), "the old list outlived the process")
+            finally:
+                released.set()
+            cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)  # the reconnect, about 3 s after the fake's loop runs
 
     def test_with_one_multiplexer_the_send_waits_for_the_reconnect(self):
         """The only multiplexer restarted: the send notices, waits for the
-        client's reconnect timer, and the message arrives."""
+        client's reconnect timer, and the message arrives, the client
+        registered once since, as the multiplexer's log counts, where a
+        bound of 9 s on the send told what its raising already did."""
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             client = TestClient(cluster, peers.WEBSITE)
             try:
@@ -269,17 +299,18 @@ class SendAfterRestartTest(unittest.TestCase):
                 peer.wait_for(types.PYTHON_TEST_REQUEST, matching=lambda m: m.message == b"warm-up")
                 cluster.mx[0].restart()
                 cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-                started = time.monotonic()
-                client.send(b"after", types.PYTHON_TEST_REQUEST)
-                self.assertLess(time.monotonic() - started, 9, "sent after one reconnect delay, not a timeout")
+                since = cluster.mx[0].log_mark()
+                client.send(b"after", types.PYTHON_TEST_REQUEST)  # raises unless written within its time
                 peer.wait_for(types.PYTHON_TEST_REQUEST, matching=lambda m: m.message == b"after")
+                self.assertEqual(1, registrations(cluster.mx[0], client.instance_id, since), "the reconnects")
             finally:
                 client.shutdown()
 
     def test_the_holder_keeps_one_client_across_a_restart(self):
         """MxClient hands out the same Client after a multiplexer restart;
-        the client reconnects inside the next call, within the reconnect
-        delay, and the query goes through."""
+        the client reconnects inside the next call, once, as the
+        multiplexer's log counts, and the query goes through, where a bound
+        of 9 s told one reconnect delay from a timeout, which raises."""
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
             peer.reply_with(types.PYTHON_TEST_REQUEST, b"pong", types.PYTHON_TEST_RESPONSE)
             holder = MxClient(peers.WEBSITE, lambda: cluster.endpoints)
@@ -288,11 +319,11 @@ class SendAfterRestartTest(unittest.TestCase):
                 self.assertEqual(b"pong", first.query(b"ping", types.PYTHON_TEST_REQUEST).message)
                 cluster.mx[0].restart()
                 cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
-                started = time.monotonic()
+                since = cluster.mx[0].log_mark()
                 again = holder.get()
                 self.assertIs(first, again, "no rebuild: the client reconnects itself")
                 self.assertEqual(b"pong", again.query(b"ping again", types.PYTHON_TEST_REQUEST).message)
-                self.assertLess(time.monotonic() - started, 9, "one reconnect delay, not a timeout")
+                self.assertEqual(1, registrations(cluster.mx[0], first.instance_id, since), "the reconnects")
             finally:
                 holder.shutdown()
 

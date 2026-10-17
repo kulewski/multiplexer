@@ -35,9 +35,9 @@ sequenceDiagram
 
 ## What is checked
 
-- Strict: after the confirmation, and with the backend still in the multiplexer's peers file, three queries fail with `OperationFailed` at once, each in less than half its timeout, which one that waited for it would take whole; the backend served only what came before.
+- Strict: after the confirmation, and with the backend still in the multiplexer's peers file, three queries fail with `OperationFailed` at once, each in less than half its timeout, which one that waited for it would take whole; the backend served what came before and no request after the confirmation.
 - Last resort: five queries after the confirmation are served, and the backend leaves when its period is up, not before it served the five (`--drain-min-handled 5`), so that a client a loaded machine starts late still finds it.
-- Events: the staying backend and the one keeping `all` receive all 200 events, the strict one receives none after its confirmation, and a lone last-resort event backend receives every event sent to it.
+- Events: one sender's five events go before the drains, another's 195 once both drains are confirmed; the staying backend and the one keeping `all` receive all 200, the strict one the five and none after its confirmation, and a lone last-resort event backend receives every event sent to it.
 - Two multiplexers: no `acked` while one multiplexer is frozen, `acked` and a clean exit once it is resumed.
 
 ## Run

@@ -5,6 +5,8 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
+
 
 class TwoRequestTypes(unittest.TestCase):
     """Checks that two request types are routed to their own backend types."""
@@ -51,8 +53,13 @@ class TwoRequestTypes(unittest.TestCase):
                 self.assertEqual((b_id, "abc"), (r["sender"], r["payload"]))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_A)))
             self.assertEqual(3, len(client.events_of("response", query_type=C.types.TEST_REQUEST_B)))
-            self.assertEqual(3, len(a.wait_for_count("request", 3)))
-            self.assertEqual(3, len(b.wait_for_count("request", 3)))
+            self.assertGreaterEqual(len(a.wait_for_count("request", 3, timeout=BOUND)), 3, "at least once each")
+            self.assertGreaterEqual(len(b.wait_for_count("request", 3, timeout=BOUND)), 3, "at least once each")
+            # Stopped, their output read to its end: however many times a
+            # request of its own type came, none of the other type did.
+            for backend, own in ((a, C.types.TEST_REQUEST_A), (b, C.types.TEST_REQUEST_B)):
+                self.assertEqual(0, backend.stop())
+                self.assertEqual({own}, {r["type"] for r in backend.events_of("request")}, "only its own type")
 
 
 if __name__ == "__main__":

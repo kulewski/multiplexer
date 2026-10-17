@@ -147,7 +147,7 @@ TEST(DisconnectedRecord, ComesAfterThePeersLastFrames) {
     msg.set_to(PEER_ID);
     msg.set_type(multiplexer::types::TEST_EVENT);
     msg.set_message(index < FILL_FRAMES ? fill : chunk);
-    sender.queue(msg);
+    sender.queue(msg, 60);  // a minute to wait for room: some 20 MiB go before the last
   }
   MultiplexerMessage marker;
   marker.set_id(sender.random64());
@@ -155,7 +155,7 @@ TEST(DisconnectedRecord, ComesAfterThePeersLastFrames) {
   marker.set_to(sender.instance_id());
   marker.set_type(multiplexer::types::TEST_EVENT);
   marker.set_message("marker");
-  sender.queue(marker);
+  sender.queue(marker, 60);
   bool marked = false;
   while (!marked) {
     marked = sender.receive_message(WAIT_MS / 1000.0f).first->message() == "marker";

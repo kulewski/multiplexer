@@ -1,10 +1,12 @@
 """the multiplexer restarts between two events; a flushing sender loses none of its calls.
 
-A passive event client sends one event every second and flushes each. The
-multiplexer restarts after the second one. The send that finds its
-connection dead waits for the reconnect inside the call and writes the
-event again, so every send succeeds; the backend, which reconnects on its
-own, receives every event sent after both are back.
+A passive event client sends one event every second and flushes each. It
+is frozen after the second one, the multiplexer restarts, and the sender
+is resumed once the backend, which reconnects on its own, is registered
+again. Its next send finds the connection dead before it writes, waits
+for the reconnect inside the call and writes the event then, so every
+send succeeds, and the backend receives every event sent after both are
+back.
 """
 
 import unittest
@@ -13,7 +15,7 @@ from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
 EVENTS = 6
-INTERVAL = 1.0
+INTERVAL = 1.0  # s between two sends, in which the test freezes the sender after the second
 
 
 class MxRestartsUnderEvents(unittest.TestCase):
@@ -40,7 +42,10 @@ class MxRestartsUnderEvents(unittest.TestCase):
             self.assertGreaterEqual(
                 len(client.wait_for_count("sent", 2, timeout=30)), 2, "two events before the restart"
             )
+            client.pause()
             cluster.mx[0].restart()
+            cluster.wait_for_peer(C.peers.TEST_EVENT_BACKEND)
+            client.resume()
             self.assertEqual(0, client.wait(timeout=120))
             self.assertEqual([], client.events_of("error"), "no send fails across the restart")
             sent = client.events_of("sent")
@@ -50,7 +55,7 @@ class MxRestartsUnderEvents(unittest.TestCase):
             # The backend is stopped once the last event, the latest to
             # arrive, is in: the sender's end says it was written, not that
             # it was delivered.
-            backend.wait_for("received", payload="e%d" % (EVENTS - 1))
+            backend.wait_for("received", payload="e%d" % (EVENTS - 1), timeout=30)
             self.assertEqual(0, backend.stop())
             received = [event["payload"] for event in backend.events_of("received")]
             self.assertGreaterEqual(len(received), 3, "events after both peers reconnected must arrive: %s" % received)

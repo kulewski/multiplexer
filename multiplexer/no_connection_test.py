@@ -11,7 +11,6 @@ the loop had no work and spun, and math.inf's waited 31 years.
 import math
 import os
 import threading
-import time
 import unittest
 from collections.abc import Callable
 
@@ -22,34 +21,9 @@ from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import Cluster, runfile
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
-
-
-class NoConnectionTest(unittest.TestCase):
-    """Repeated timed waits on a connection-less Client."""
-
-    def test_read_message_times_out_every_time(self) -> None:
-        """Three reads in a row each raise OperationTimedOut after about the
-        timeout, and each costs CPU time in the microseconds, not the whole
-        wait: a wait that spins burns as much CPU as it lasts."""
-        client = Client(1)
-        for _ in range(3):
-            started, cpu_started = time.monotonic(), time.process_time()
-            with self.assertRaises(OperationTimedOut):
-                client.read_message(timeout=0.1)
-            self.assertLess(time.monotonic() - started, 1.0)
-            self.assertLess(time.process_time() - cpu_started, 0.02, "the wait spun instead of sleeping")
-        client.shutdown()
-
-    def test_query_raises_not_connected_every_time(self) -> None:
-        """Two queries in a row each raise NotConnected within their timeout, without spinning."""
-        client = Client(1)
-        for _ in range(2):
-            started, cpu_started = time.monotonic(), time.process_time()
-            with self.assertRaises(NotConnected):
-                client.query(b"", type=1, timeout=0.2)
-            self.assertLess(time.monotonic() - started, 1.5)
-            self.assertLess(time.process_time() - cpu_started, 0.04, "the wait spun instead of sleeping")
-        client.shutdown()
+# Times a timed read may block and be woken: once, at its deadline, asleep
+# until then; a loop that polled every few milliseconds, tens of times.
+WAKEUPS = 5
 
 
 def thread_cpu_seconds(native_id: int) -> float:
@@ -59,6 +33,16 @@ def thread_cpu_seconds(native_id: int) -> float:
     with open("/proc/self/task/%d/stat" % native_id) as stat:
         fields = stat.read().rsplit(")", 1)[1].split()  # after the name, which may hold spaces
     return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")  # utime, stime
+
+
+def voluntary_switches() -> int:
+    """How often the calling thread has blocked and been woken so far: its
+    voluntary_ctxt_switches in /proc/thread-self/status."""
+    with open("/proc/thread-self/status") as status:
+        for line in status:
+            if line.startswith("voluntary_ctxt_switches:"):
+                return int(line.split()[1])
+    raise RuntimeError("/proc/thread-self/status has no voluntary_ctxt_switches")
 
 
 class EndsTest(unittest.TestCase):
@@ -85,6 +69,62 @@ class EndsTest(unittest.TestCase):
             assert thread.native_id is not None
             self.fail("the wait never ended: its thread used %.1f s of CPU" % thread_cpu_seconds(thread.native_id))
         return outcome[0]
+
+
+class NoConnectionTest(EndsTest):
+    """Repeated timed waits on a connection-less Client, made and driven on
+    a thread of its own, which must end within ended()'s 10 s, where a wait
+    that spins for good never ends. Counted, not timed, where each wait had
+    a second and a few milliseconds of the process's CPU, which load could
+    exceed and a spin starved by load could keep under."""
+
+    def test_read_message_times_out_every_time(self) -> None:
+        """Three reads in a row each raise OperationTimedOut, woken a few
+        times at most, where a loop that polls wakes again and again; and at
+        least one of them blocked, where a wait that spins its timeout
+        through blocks none: a read asleep until its deadline blocks once,
+        unless its thread came back only after the deadline."""
+        reads: list[tuple[str, int]] = []
+
+        def three_reads() -> None:
+            client = Client(1)
+            try:
+                for _ in range(3):
+                    woken = voluntary_switches()
+                    try:
+                        client.read_message(timeout=0.1)
+                        outcome = "returned"
+                    except OperationTimedOut:
+                        outcome = "OperationTimedOut"
+                    reads.append((outcome, voluntary_switches() - woken))
+            finally:
+                client.shutdown()
+
+        self.assertEqual("None", self.ended(three_reads))
+        self.assertEqual(["OperationTimedOut"] * 3, [outcome for outcome, _ in reads])
+        self.assertLessEqual(max(woken for _, woken in reads), WAKEUPS, "a read woke again and again")
+        self.assertGreater(sum(woken for _, woken in reads), 0, "no read blocked: each spun its timeout through")
+
+    def test_query_raises_not_connected_every_time(self) -> None:
+        """Two queries in a row each raise NotConnected at once, whatever
+        their timeout, an hour here: a query that waited for it, or spun
+        through it, would not end within ended()'s 10 s."""
+        outcomes: list[str] = []
+
+        def two_queries() -> None:
+            client = Client(1)
+            try:
+                for _ in range(2):
+                    try:
+                        client.query(b"", type=1, timeout=3600)
+                        outcomes.append("returned")
+                    except NotConnected:
+                        outcomes.append("NotConnected")
+            finally:
+                client.shutdown()
+
+        self.assertEqual("None", self.ended(two_queries))
+        self.assertEqual(["NotConnected"] * 2, outcomes)
 
 
 class NothingToReceiveFromTest(EndsTest):

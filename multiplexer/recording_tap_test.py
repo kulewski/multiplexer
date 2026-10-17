@@ -38,8 +38,11 @@ class RecordingTapTest(unittest.TestCase):
                 client.shutdown()
 
     def test_a_tap_a_multiplexer_does_not_answer_raises_and_is_ended(self) -> None:
-        """One of two multiplexers frozen: TapFailed naming the one that did
-        not answer, and once it runs again neither has the tap."""
+        """One of two multiplexers frozen: TapFailed saying that one did not
+        answer, its status not among those that came back, and once it runs
+        again neither has the tap. Told by whose statuses came back, not by
+        how many, where "1 of 2" needed the running one to answer within the
+        tap's second too, the frozen one's to run out."""
         with Cluster(2, rules=RULES, remote_recording=True) as cluster:
             client = Client(cluster.endpoints, type=RECORDING_CONTROLLER)
             try:
@@ -47,11 +50,15 @@ class RecordingTapTest(unittest.TestCase):
                 try:
                     with self.assertRaises(TapFailed) as raised:
                         recording.tap(client, timeout=1)
-                    self.assertIn("1 of 2 multiplexer(s) did not answer", str(raised.exception))
+                    self.assertIn("did not answer", str(raised.exception))
                 finally:
                     cluster.mx[1].resume()
                 statuses = recording.status(client, timeout=30)
                 self.assertEqual([0, 0], [status.taps for status in statuses])
+                with Client([cluster.endpoints[1]], type=RECORDING_CONTROLLER) as asking_the_frozen_one:
+                    (frozen,) = recording.status(asking_the_frozen_one, timeout=30)
+                answered = [status.multiplexer_id for status in raised.exception.statuses]
+                self.assertNotIn(frozen.multiplexer_id, answered, "the frozen multiplexer answered")
             finally:
                 client.shutdown()
 
@@ -64,7 +71,7 @@ class RecordingTapTest(unittest.TestCase):
             try:
                 records = recording.tap(client, timeout=10)
                 sent = {client.send_message(b"%d" % index, type=types.TEST_UNROUTED, flush=True) for index in range(3)}
-                (status,) = recording.status(client)
+                (status,) = recording.status(client, timeout=30)
                 self.assertTrue(status.tapping)
                 seen: set[int] = set()
                 for record in records:

@@ -28,7 +28,8 @@ sequenceDiagram
 ## What is checked
 
 - With `max_bytes=3000` the session closes right after the record that crossed the cap; the status says `max_bytes reached`, its byte count is the file's size, its record count matches the file, and a new session may follow.
-- With `max_seconds=1` the session closes by itself within a few seconds with `max_seconds reached`.
+- With `max_seconds=1` the session stays open for its second, then closes by itself with `max_seconds reached`.
+- A multiplexer stopped with a session whose deadline is ten minutes away exits with 0 at once, well within the minute its stop allows, the session file closed properly.
 - A multiplexer started with `--record` reports that session, without a label; a controller stops it and may start another in the directory.
 
 ## Run

@@ -23,8 +23,9 @@ sequenceDiagram
 
 ## What is checked
 
-- Both queries end within 2 s with a backend error, never a timeout.
-- The backend served both and still exits cleanly.
+- Both queries end with a backend error, never a timeout: each in less
+  than its 60 s stage, which a query that waited for it would take whole.
+- The backend served both, at least once each, and still exits cleanly.
 - A second run starts the backend with `--exit-on-exception`, whose `on_handler_exception()` returns false: the requester is still told at once, and the process ends with status 4 after the exception left `serve_forever()`.
 
 ## Run

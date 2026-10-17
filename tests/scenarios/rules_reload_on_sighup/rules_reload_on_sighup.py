@@ -19,6 +19,8 @@ import zlib
 from tests import harness
 from tests.harness import Cluster, constants as C, output_dir, spawn, wait_until
 
+BOUND = 30  # s a wait for a backend's request event may take: a failure detector
+
 REROUTE = re.compile(r'(name: "TEST_REQUEST_A"\s*to \{\s*peer: )"TEST_BACKEND_A"')
 PEER_A = re.compile(r'peer \{\s*type: 201\s*name: "TEST_BACKEND_A"\s*\}\n')
 BROKEN_ENTRY = '\ntype {\n    type: 252\n    name: "TEST_BROKEN"\n    to {\n        peer: "NOBODY"\n    }\n}\n'
@@ -94,8 +96,14 @@ class RulesReloadOnSighup(unittest.TestCase):
             multiplexer.reload_rules()
             wait_until(lambda: multiplexer.log_contains("rules reloaded from", since=mark), 15, "the reload in the log")
             self.ask(cluster, "three")
-            second.wait_for_count("request", 1)
-            self.assertEqual(2, len(first.events_of("request")), "the first backend gets nothing more")
+            # Told apart by their sizes, the queries are counted by none:
+            # a request whose stage ran out goes again.
+            second.wait_for("request", size=len("three"), timeout=BOUND)
+            self.assertEqual(
+                [],
+                [event for event in first.events_of("request") if event["size"] == len("three")],
+                "the first backend gets nothing more",
+            )
 
             mark = multiplexer.log_mark()
             multiplexer.reload_rules()
@@ -144,7 +152,7 @@ class RulesReloadOnSighup(unittest.TestCase):
                 send=[(C.types.TEST_REQUEST_A, "for-first")],
             )
             self.assertEqual(0, addressed.wait())
-            self.assertEqual(3, len(first.wait_for_count("request", 3)), "addressed messages still arrive")
+            first.wait_for("request", size=len("for-first"), timeout=BOUND)  # addressed messages still arrive
             late = spawn(
                 "backend",
                 cfg.lang("backend"),

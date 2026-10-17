@@ -5,6 +5,8 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
+
 
 class QueryOne(unittest.TestCase):
     """Checks that one multiplexer, one backend, one client, one query."""
@@ -36,7 +38,11 @@ class QueryOne(unittest.TestCase):
             self.assertEqual(1, len(responses))
             self.assertEqual(C.types.TEST_RESPONSE, responses[0]["type"])
             self.assertEqual("HELLO MULTIPLEXER", responses[0]["payload"])
-            self.assertEqual(1, len(backend.wait_for_count("request", 1, type=C.types.TEST_REQUEST_A)))
+            # At least once: a request whose stage ran out goes again, which a
+            # loaded machine can make happen (docs/api_python.md, Testing).
+            self.assertGreaterEqual(
+                len(backend.wait_for_count("request", 1, timeout=BOUND, type=C.types.TEST_REQUEST_A)), 1
+            )
             self.assertEqual(0, backend.stop(), "backend exits cleanly on SIGTERM")
 
 

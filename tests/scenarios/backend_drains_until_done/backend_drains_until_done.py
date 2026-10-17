@@ -4,8 +4,10 @@ The only backend is asked to leave after a few requests, with a drain period
 of half a second but a rule of its own: it refuses to leave before it has
 served every request of the run. Being alone of its type it drains as the
 last resort, so the multiplexer keeps routing to it what nobody else could
-take. The drain lasts as long as the rule says, the backend serves
-everything, and exits cleanly only then.
+take. A first client's five requests come before it is asked, a second
+client's twenty after its drain began, one every 100 ms, the last of them
+seconds after the period is over. The drain lasts as long as the rule
+says, the backend serves everything, and exits cleanly only then.
 """
 
 import unittest
@@ -13,11 +15,29 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
-QUERIES = 25
+QUERIES = 25  # the backend's rule: it does not leave before it served this many
+BEFORE = 5  # of them from a first client, before the backend is asked to leave
+TIMEOUT = 30  # s a query's stage: a failure detector
 
 
 class BackendDrainsUntilDone(unittest.TestCase):
     """Checks that an overridden drained() keeps the backend serving past the drain period."""
+
+    def ask(self, cluster: Cluster, name: str, count: int, sleep_between: float = 0.0):
+        """`count` queries from a fresh client, answered or failed: the client role."""
+        client = spawn(
+            "client",
+            harness.CONFIG.lang("client"),
+            mx=cluster.addresses,
+            name=name,
+            type=C.peers.TEST_CLIENT,
+            count=count,
+            sleep_between=sleep_between,
+            timeout=TIMEOUT,
+            query=[(C.types.TEST_REQUEST_A, "q{round}")],
+        )
+        self.assertEqual(0, client.wait(timeout=120))
+        return client
 
     def test_drain_waits_for_the_backends_own_condition(self):
         cfg = harness.CONFIG
@@ -34,22 +54,14 @@ class BackendDrainsUntilDone(unittest.TestCase):
                 drain_routing="last_resort",
             )
             backend.wait_for("connected", connections=1)
-            client = spawn(
-                "client",
-                cfg.lang("client"),
-                mx=cluster.addresses,
-                type=C.peers.TEST_CLIENT,
-                count=QUERIES,
-                sleep_between=0.1,
-                timeout=10,
-                query=[(C.types.TEST_REQUEST_A, "q{round}")],
-            )
-            client.wait_for("response", round=4)
+            before = self.ask(cluster, "before", BEFORE)
             backend.request_drain()
             backend.wait_for("draining")
-            self.assertEqual(0, client.wait(timeout=60))
-            self.assertEqual(QUERIES, len(client.events_of("response")), "every query was answered")
-            self.assertEqual([], client.events_of("error"))
+            after = self.ask(cluster, "after", QUERIES - BEFORE, sleep_between=0.1)
+            clients = (before, after)
+            responses = [event for client in clients for event in client.events_of("response")]
+            self.assertEqual(QUERIES, len(responses), "every query was answered")
+            self.assertEqual([], [event for client in clients for event in client.events_of("error")])
             self.assertEqual(0, backend.wait(timeout=30), "the backend exits cleanly once its own condition holds")
             self.assertEqual(QUERIES, backend.events_of("stopped")[0]["handled"])
             served_after_drain = [
@@ -57,7 +69,9 @@ class BackendDrainsUntilDone(unittest.TestCase):
                 for event in backend.events[backend.events.index(backend.events_of("draining")[0]) :]
                 if event["event"] == "request"
             ]
-            self.assertGreater(len(served_after_drain), 10, "it kept serving well past the half-second period")
+            self.assertGreaterEqual(
+                len(served_after_drain), QUERIES - BEFORE, "it kept serving well past the half-second period"
+            )
 
 
 if __name__ == "__main__":

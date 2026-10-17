@@ -20,7 +20,7 @@ sequenceDiagram
 ## What is checked
 
 - One response, of type TEST_RESPONSE, with the upper-cased payload.
-- The backend saw exactly one request and exits cleanly on SIGTERM.
+- The backend saw the request, at least once, and exits cleanly on SIGTERM.
 
 ## Run
 

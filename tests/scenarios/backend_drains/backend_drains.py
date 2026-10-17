@@ -10,14 +10,19 @@ period is up. Every query is answered and the client never waited for a
 timeout: the graceful shape of a backend restart.
 """
 
-import time
+import subprocess
 import unittest
 
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
 QUERIES = 60
-DRAIN_SECONDS = 10.0  # the cap; the drain ends when the multiplexer has confirmed and the work is done
+# The cap, longer than any wait here: the drain ends when the multiplexer
+# has confirmed and the work is done, and one that waited for its cap
+# would outlast the wait for the backend's exit.
+DRAIN_SECONDS = 120.0
+TIMEOUT = 60  # s a query's stage, which a query that waited for it would take whole
+BOUND = 30  # s a wait for something that must happen may take: a failure detector
 
 
 class BackendDrains(unittest.TestCase):
@@ -56,16 +61,20 @@ class BackendDrains(unittest.TestCase):
                 **{"async": 4},
                 count=QUERIES,
                 sleep_between=0.1,
-                timeout=10,
+                timeout=TIMEOUT,
                 query=[(C.types.TEST_REQUEST_A, "q{round}")],
             )
             client.wait_for("response", round=8)
-            asked = time.time()
             leaving.request_drain()
             leaving.wait_for("draining")
             acked = leaving.wait_for("acked")
-            self.assertEqual(0, leaving.wait(timeout=30), "the backend exits cleanly once drained")
-            self.assertLess(time.time() - asked, DRAIN_SECONDS, "it left once confirmed and idle, not after the period")
+            try:
+                code = leaving.wait(timeout=BOUND)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "the backend did not leave once confirmed and idle: it waits for its %d s period" % DRAIN_SECONDS
+                )
+            self.assertEqual(0, code, "the backend exits cleanly once drained")
             after_ack = leaving.events[leaving.events.index(acked) + 1 :]
             self.assertEqual(
                 [], [event for event in after_ack if event["event"] == "request"], "nothing new after the confirmation"
@@ -74,9 +83,10 @@ class BackendDrains(unittest.TestCase):
             self.assertEqual([], client.events_of("error"))
             responses = client.events_of("response")
             self.assertEqual(QUERIES, len(responses))
-            self.assertLess(max(r["ms"] for r in responses), 2000, "no query paid a timeout for the restart")
-            served = len(staying.wait_for_count("request", QUERIES - leaving.events_of("stopped")[0]["handled"]))
-            self.assertGreaterEqual(served + leaving.events_of("stopped")[0]["handled"], QUERIES)
+            self.assertLess(max(r["ms"] for r in responses), TIMEOUT * 1000, "no query paid a timeout for the restart")
+            handled = leaving.events_of("stopped")[0]["handled"]
+            served = len(staying.wait_for_count("request", QUERIES - handled, timeout=BOUND))
+            self.assertGreaterEqual(served + handled, QUERIES)
             self.assertEqual(0, staying.stop())
 
 

@@ -45,7 +45,9 @@ class Recording(unittest.TestCase):
                 cfg.lang("client"),
                 mx=cluster.addresses,
                 type=C.peers.TEST_CLIENT,
-                timeout=5,
+                # A stage, a failure detector: the request nobody serves fails
+                # at once, on its delivery error, whatever the stage's length.
+                timeout=30,
                 query=[(C.types.TEST_REQUEST_A, "hello"), (C.types.TEST_REQUEST_B, "nobody serves this")],
             )
             self.assertEqual(0, client.wait())

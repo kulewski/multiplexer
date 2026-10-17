@@ -55,12 +55,14 @@ TEST(ConnectByName, ANameThatDoesNotResolveYetIsRetriedNotFatal) {
     }
     return found;
   });
+  // A minute to connect: back within half of it is at once, not after the
+  // timeout, however slow the machine.
   std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-  EXPECT_FALSE(client.connect("mx", 1980, 5)) << "no address yet";
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2)) << "at once, not after the timeout";
+  EXPECT_FALSE(client.connect("mx", 1980, 60)) << "no address yet";
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(30)) << "at once, not after the timeout";
   EXPECT_EQ(0u, client.connections_count());
   published = true;
-  EXPECT_TRUE(connections_become(client, 1, AUTO_RECONNECT_TIME + 3.0f)) << "found once the name resolves";
+  EXPECT_TRUE(connections_become(client, 1, AUTO_RECONNECT_TIME + 30.0f)) << "found once the name resolves";
   client.shutdown();
 }
 
@@ -75,8 +77,8 @@ TEST(ConnectByName, AMultiplexerThatMovedIsFoundAtTheNextReconnect) {
   ASSERT_TRUE(client.connect("mx", 1980, 5));
   where = second.port;  // the name now points at the other multiplexer
   first.reset();        // and the one the client is on goes away
-  EXPECT_TRUE(connections_become(client, 0, 5));
-  EXPECT_TRUE(connections_become(client, 1, AUTO_RECONNECT_TIME + 3.0f))
+  EXPECT_TRUE(connections_become(client, 0, 30));
+  EXPECT_TRUE(connections_become(client, 1, AUTO_RECONNECT_TIME + 30.0f))
       << "reconnected to the address the name resolves to now; the old one is gone";
   client.shutdown();
 }

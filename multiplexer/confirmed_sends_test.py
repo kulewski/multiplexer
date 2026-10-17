@@ -163,7 +163,7 @@ class ConfirmedSendsTest(unittest.TestCase):
         ended: queue.Queue[int] = queue.Queue()
         producer = ThreadedClient(self.cluster.endpoints, peers.TEST_EVENT_CLIENT)
         self.addCleanup(producer.shutdown)
-        producer.set_delivery(EVENT, confirm=True)
+        producer.set_delivery(EVENT, confirm=True, retry_after=HOUR, timeout=-1)
         ids = [producer.send_message(b"%d" % n, type=EVENT, callback=ended.put) for n in range(3)]
         for number, message_id in enumerate(ids, start=1):
             messages, given = self.next_batch(consumer)
@@ -318,7 +318,9 @@ class ConfirmedSendsTest(unittest.TestCase):
         with SyncClient(self.cluster.endpoints, type=peers.TEST_EVENT_BACKEND) as consumer:
             producer = ThreadedClient(self.cluster.endpoints, peers.TEST_EVENT_CLIENT)
             self.addCleanup(producer.shutdown)
-            producer.set_delivery(EVENT, batch=True, max_records=10, max_delay=HOUR, confirm=True, timeout=-1)
+            producer.set_delivery(
+                EVENT, batch=True, max_records=10, max_delay=HOUR, confirm=True, retry_after=HOUR, timeout=-1
+            )
             for number in range(50):
                 producer.send_message(b"%d" % number, type=EVENT, callback=ended.put)
             producer.flush_all(timeout=0)  # the last batch goes

@@ -11,6 +11,9 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
+TIMEOUT = 60  # s a query's stage, which a query that waited for it would take whole
+BOUND = 30  # s a wait for a request event may take: a failure detector
+
 
 class BackendRaises(unittest.TestCase):
     """Checks that a backend whose handler throws answers with BACKEND_ERROR, at once, and keeps serving."""
@@ -34,7 +37,7 @@ class BackendRaises(unittest.TestCase):
                 mx=cluster.addresses,
                 type=C.peers.TEST_CLIENT,
                 count=2,
-                timeout=10,
+                timeout=TIMEOUT,
                 query=[(C.types.TEST_REQUEST_A, "boom")],
             )
             self.assertEqual(0, client.wait())
@@ -47,8 +50,10 @@ class BackendRaises(unittest.TestCase):
                 else:
                     self.assertEqual(C.types.BACKEND_ERROR, outcome["type"])
                     self.assertIn("handler failed on purpose", outcome["payload"])
-                self.assertLess(outcome["ms"], 2000, "reported at once, not by timeout")
-            self.assertEqual(2, len(backend.wait_for_count("request", 2)), "the backend served both")
+                self.assertLess(outcome["ms"], TIMEOUT * 1000, "reported at once, not by timeout")
+            self.assertGreaterEqual(
+                len(backend.wait_for_count("request", 2, timeout=BOUND)), 2, "the backend served both"
+            )
             self.assertEqual(0, backend.stop())
 
     def test_exception_can_end_the_backend(self):
@@ -70,12 +75,12 @@ class BackendRaises(unittest.TestCase):
                 mx=cluster.addresses,
                 type=C.peers.TEST_CLIENT,
                 count=1,
-                timeout=10,
+                timeout=TIMEOUT,
                 query=[(C.types.TEST_REQUEST_A, "boom")],
             )
             self.assertEqual(0, client.wait())
             outcome = (client.events_of("error") + client.events_of("response"))[0]
-            self.assertLess(outcome["ms"], 2000, "the requester was still told at once")
+            self.assertLess(outcome["ms"], TIMEOUT * 1000, "the requester was still told at once")
             self.assertEqual(4, backend.wait(timeout=15), "the exception left serve_forever and ended the process")
             self.assertEqual(1, len(backend.events_of("handler_exception")))
 

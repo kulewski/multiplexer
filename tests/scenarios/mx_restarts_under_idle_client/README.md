@@ -3,8 +3,9 @@
 The multiplexer restarts while a passive client is idle; its next call still works.
 
 The client learns of the dead connection inside that call, before it
-writes, waits for the reconnect there and sends then. A fresh client
-works too.
+writes, waits for the reconnect there and sends then. It is frozen in its
+idle time across the restart, until the backend is registered again, so
+that its next call comes after both. A fresh client works too.
 
 ## What happens
 
@@ -15,8 +16,10 @@ sequenceDiagram
     participant B as backend
     C->>M: request 1
     B->>C: reply 1
+    Note over C: idle, frozen (SIGSTOP)
     Note over M: restart while the client sleeps
     B-->>M: reconnects
+    Note over C: resumed once the backend is in the peers file
     Note over C: the next call notices the dead connection before it writes, and reconnects
     C->>M: request 2 after idling, once reconnected
     B->>C: reply 2

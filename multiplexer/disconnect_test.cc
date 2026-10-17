@@ -108,7 +108,9 @@ TEST(Disconnect, ASyncClientsReconnectEndsWithItsTarget) {
 // dropped, everything waiting behind a frozen multiplexer's full socket,
 // goes to the other connection, which writes it: the last message
 // reaches a backend behind the other multiplexer only, the lane it went
-// through following it, and nothing is given up on.
+// through following it, and nothing is given up on. Queued with no
+// deadline: tens of megabytes go through the other multiplexer before the
+// last message, and how long that takes is no part of the test.
 TEST(Disconnect, WhatALiveConnectionHadNotWrittenGoesToAnother) {
   InProcessMultiplexer dropped_mx;
   InProcessMultiplexer other_mx;
@@ -126,9 +128,9 @@ TEST(Disconnect, WhatALiveConnectionHadNotWrittenGoesToAnother) {
     // The sockets full however far the kernel grew them, then twice the queue.
     for (int index = 0; index < FILL_FRAMES + 2 * 1024; ++index) {
       const std::string& payload = index < FILL_FRAMES ? fill : chunk;
-      client.queue(message(client, types::TEST_UNROUTED, payload), multiplexer::DEFAULT_TIMEOUT, lane);
+      client.queue(message(client, types::TEST_UNROUTED, payload), -1, lane);
     }
-    const Client::ScheduledMessageTracker tracker = client.queue(last, multiplexer::DEFAULT_TIMEOUT, lane);
+    const Client::ScheduledMessageTracker tracker = client.queue(last, -1, lane);
     ASSERT_TRUE(tracker);
     ASSERT_TRUE(tracker.in_queue()) << "behind the frozen multiplexer's full socket";
     EXPECT_TRUE(client.disconnect("127.0.0.1", dropped_mx.port));

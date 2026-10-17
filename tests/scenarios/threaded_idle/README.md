@@ -3,7 +3,10 @@
 A ThreadedClient of an active peer type idles past the drop intervals and still works.
 
 Its io thread answers heartbeats while the program does nothing, which is
-what lets the peer type be non-passive. Slow: waits out 30 s + 60 s and more.
+what lets the peer type be non-passive. A client the multiplexer dropped
+would reconnect on its own and answer just the same, so the multiplexer's
+log is what tells: the client, and the backend idling beside it,
+registered once each. Slow: waits out 30 s + 60 s and more.
 
 ## What happens
 
@@ -20,6 +23,10 @@ sequenceDiagram
 ## What is checked
 
 - The connection is never dropped although the peer type is not passive, and the query after idling works.
+- The multiplexer's log registers the client once and the backend once:
+  neither was dropped and reconnected, which the answer and the
+  connection count alone could not tell, since a dropped peer reconnects
+  3 s later on its own.
 - Slow: it really waits.
 
 ## Run

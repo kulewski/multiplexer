@@ -16,6 +16,7 @@ sequenceDiagram
     M->>P: CONNECTION_WELCOME{MULTIPLEXER, id}
     P->>M: TEST_EVENT frames, including a 1 MiB one
     M->>L: delivered intact
+    Note over P: closes once the backend has the 1 MiB one
 ```
 
 ## What is checked

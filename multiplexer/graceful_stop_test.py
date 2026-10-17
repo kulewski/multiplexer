@@ -77,19 +77,22 @@ class GracefulStopTest(unittest.TestCase):
         """The receiver starts reading only once the stop began: it gets
         every message, then the end of the stream, and the multiplexer says
         it dropped nothing. The code before closed the connection with the
-        queue in it."""
-        with Cluster(1, rules=RULES) as cluster:
+        queue in it. The drain may last a minute, which only a failure uses
+        up, where the default's 5 s had to cover this reader's taking tens
+        of megabytes, more with a runner's TCP buffers; the stop still ends
+        once everything was read."""
+        with Cluster(1, rules=RULES, drain_seconds=60) as cluster:
             multiplexer = cluster.mx[0]
             receiver, sender, sent = queue_for_a_receiver(cluster)
             codes = []
-            stopping = threading.Thread(target=lambda: codes.append(multiplexer.stop(timeout=60)))
+            stopping = threading.Thread(target=lambda: codes.append(multiplexer.stop(timeout=90)))
             stopping.start()
             wait_until(lambda: multiplexer.log_contains("stopping:"), 20, "the stop began")
             self.assertEqual(sent, count_until_the_end(receiver, types.PYTHON_TEST_REQUEST))
             receiver.close()
             self.assertEqual(0, count_until_the_end(sender, types.PYTHON_TEST_REQUEST))
             sender.close()
-            stopping.join(60)
+            stopping.join(90)
             self.assertEqual([0], codes)
             log = read(multiplexer.log_path)
             self.assertIn("stopped: every connection closed in", log)

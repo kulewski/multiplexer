@@ -11,6 +11,8 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
+BOUND = 30  # s a wait for the peers files to change may take: a failure detector
+
 
 class ConnectedPeers(unittest.TestCase):
     """Checks the peers file and wait_for_peer on a two-multiplexer cluster."""
@@ -37,7 +39,7 @@ class ConnectedPeers(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 cluster.wait_for_peer("TEST_BACKEND_B", timeout=0.5)
             self.assertEqual(0, backend.stop())
-            cluster.wait_for_peer_gone("TEST_BACKEND_A", timeout=5)
+            cluster.wait_for_peer_gone("TEST_BACKEND_A", timeout=BOUND)
             self.assertTrue(all(multiplexer.connected_peers() == [] for multiplexer in cluster.mx))
 
 

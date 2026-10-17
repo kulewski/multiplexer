@@ -948,6 +948,8 @@ TEST(ConfirmedSends, WithoutBatchEachMessageGoesAloneAndIsConfirmed) {
   RawPeer consumer(mx.port, peers::TEST_EVENT_BACKEND, CONSUMER);
   SyncClient::Delivery delivery;
   delivery.confirm = true;
+  delivery.retry_after = NEVER;  // a confirmation late by seconds is no resend here
+  delivery.timeout = -1;
   producer.set_delivery(types::TEST_EVENT_ANY, delivery);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {

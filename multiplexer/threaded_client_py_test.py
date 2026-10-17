@@ -31,9 +31,13 @@ def runfile(path: str) -> str:
 
 # A program whose client is kept alive only by its own pending query: the
 # last reference goes when the query's callback has run, on the io thread.
+# The program goes on once the client is let go, which a finalizer tells,
+# 30 s at most, a failure detector's bound, where it slept 2 s and a query
+# that outlasted them printed "still running" first.
 DROPPED_IN_A_CALLBACK = """
 import sys
-import time
+import threading
+import weakref
 
 from multiplexer.threaded_client import ThreadedClient
 
@@ -42,12 +46,14 @@ host, port = sys.argv[1].rsplit(":", 1)
 
 def ask_and_forget():
     client = ThreadedClient([(host, int(port))], type=%(website)d)
+    gone = threading.Event()
+    weakref.finalize(client, gone.set)
     client.query(b"x", %(request)d, timeout=1, callback=lambda result: print("callback ran", flush=True))
+    return gone
 
 
-ask_and_forget()
-time.sleep(2)
-print("still running", flush=True)
+gone = ask_and_forget()
+print("still running" if gone.wait(30) else "the client was never let go", flush=True)
 """
 
 
@@ -224,7 +230,8 @@ class ThreadedClientTest(unittest.TestCase):
     def test_a_client_dropped_in_its_own_callback_ends_quietly(self) -> None:
         """A client whose last reference goes in its own callback, as when a
         callback query outlives the caller's reference, used to abort the
-        process: its destructor joined the io thread it ran on."""
+        process: its destructor joined the io thread it ran on. The program
+        says "still running" once the client is gone, its callback first."""
         env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
         program = DROPPED_IN_A_CALLBACK % {"website": peers.WEBSITE, "request": types.PYTHON_TEST_REQUEST}
         result = subprocess.run(

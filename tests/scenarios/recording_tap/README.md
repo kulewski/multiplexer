@@ -35,7 +35,7 @@ sequenceDiagram
 - Both multiplexers report one tap; an event sent through both connections arrives in the tap's output twice, once per multiplexer id, along with the backend's arrival; the output has no file header and no file appears on the multiplexers' side.
 - SIGINT makes the tap untap and exit 0, reporting how many records it wrote.
 - A tap whose output nobody reads falls behind, the multiplexer drops records for it, and on SIGINT it writes every record it was sent, loses none on the way out, says how many the multiplexer dropped and exits 1.
-- A tap that does not read loses records once its queue is full: the status counts the drops, the answer to its UNTAP carries the count, the queries all succeed, and a file session opened beside it has every one of them.
+- A tap that does not read loses records once its queue is full: the status, taken once the queries are done, counts the drops, and the stream holds the rest, read until the two cover the traffic's 1600 records rather than until a silence; the answer to its UNTAP carries the count, the queries all succeed, and a file session opened beside it has every one of them.
 
 ## Run
 

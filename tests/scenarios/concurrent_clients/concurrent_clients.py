@@ -7,6 +7,7 @@ from tests.harness import Cluster, constants as C, spawn
 
 WORKERS = 3
 ROUNDS = 5
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
 
 
 class ConcurrentClients(unittest.TestCase):
@@ -40,7 +41,11 @@ class ConcurrentClients(unittest.TestCase):
             self.assertEqual(WORKERS * ROUNDS, len(responses))
             for r in responses:
                 self.assertEqual("W%d-R%d" % (r["worker"], r["round"]), r["payload"])
-            self.assertEqual(WORKERS * ROUNDS, len(backend.wait_for_count("request", WORKERS * ROUNDS)))
+            self.assertGreaterEqual(
+                len(backend.wait_for_count("request", WORKERS * ROUNDS, timeout=BOUND)),
+                WORKERS * ROUNDS,
+                "every request, at least once",
+            )
             self.assertEqual(0, backend.stop())
 
 

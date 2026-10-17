@@ -4,7 +4,10 @@ the file, where each arrival and each departure rewrote the whole file,
 O(N^2) on the io thread at start, in reconnect storms and at stop.
 Counted, not timed: the multiplexer logs each write, and the bursts are
 made by freezing it (SIGSTOP) while the peers send their welcomes, or
-close, so that it meets them all at once. And a reload that renames a peer
+close, so that it meets them all at once, in one turn of its loop: the
+peers connected, and were accepted, before it froze, where it accepted
+the backlog one connection at a time, which load could stretch past the
+10 ms a write waits for. And a reload that renames a peer
 type rewrites the file with the new name, where it kept the old one until
 the next arrival or departure.
 """
@@ -38,17 +41,24 @@ class PeersFileTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MX_LOG_VERBOSITY": "DEBUG:HIGH"}), Cluster(1, rules=RULES) as cluster:
             mx = cluster.mx[0]
             connected: list[RawPeer] = []
+            later: RawPeer | None = None
             try:
+                for _ in range(PEERS):
+                    connected.append(RawPeer(cluster.endpoints[0], peers.PYTHON_TEST_SERVER))
+                # Accepted in order: once a later peer is answered, every one
+                # before it is the multiplexer's, reading, not the backlog's.
+                later = RawPeer(cluster.endpoints[0], peers.PYTHON_TEST_CLIENT)
+                before = writes(mx)
+                later.handshake()
+                wait_until(lambda: writes(mx) > before, 30, "the file written for the later peer")
                 before = writes(mx)
                 mx.pause()
-                for _ in range(PEERS):
-                    peer = RawPeer(cluster.endpoints[0], peers.PYTHON_TEST_SERVER)
+                for peer in connected:
                     # The welcome, waiting in the socket for the frozen multiplexer.
                     peer.send(
                         WelcomeMessage(type=peer.peer_type, id=peer.instance_id).SerializeToString(),
                         types.CONNECTION_WELCOME,
                     )
-                    connected.append(peer)
                 mx.resume()
                 cluster.wait_for_peer(peers.PYTHON_TEST_SERVER, count=PEERS)
                 arrivals = writes(mx) - before
@@ -62,6 +72,8 @@ class PeersFileTest(unittest.TestCase):
             finally:
                 for peer in connected:
                     peer.close()
+                if later is not None:
+                    later.close()
             print("writes for %d arrivals: %d, for %d departures: %d" % (PEERS, arrivals, PEERS, departures))
             self.assertLessEqual(arrivals, PEERS // 4, "writes of the file for %d arrivals at once" % PEERS)
             self.assertLessEqual(departures, PEERS // 4, "writes of the file for %d departures at once" % PEERS)

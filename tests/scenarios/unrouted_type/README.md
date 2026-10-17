@@ -21,7 +21,9 @@ sequenceDiagram
 
 ## What is checked
 
-- The query fails quickly with OperationFailed rather than hanging for its timeout.
+- The query fails with OperationFailed rather than hanging for its timeout:
+  the kind says so without a clock, since a query whose request stage ran
+  out waits for a late reply and ends `OperationTimedOut`.
 
 ## Run
 

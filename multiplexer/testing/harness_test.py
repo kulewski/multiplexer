@@ -114,13 +114,25 @@ class HarnessTest(unittest.TestCase):
 
     def test_a_recording_outlives_a_restart(self) -> None:
         """A message recorded before a restart is in the file after it,
-        with one recorded after, each process's records after its header."""
+        with one recorded after, each process's records after its header.
+        Each is routed, and so recorded, before its process stops: the
+        DELIVERY_ERROR a message no rule routes draws came back, where the
+        client's close, a second at most, was taken to be long enough."""
+
+        def recorded(client: TestClient, payload: bytes) -> int:
+            """`payload` sent, as a message no rule routes, and its id once
+            the multiplexer has routed it, which its DELIVERY_ERROR says."""
+            sent = client.send(payload, types.TEST_UNROUTED)
+            while client.receive(timeout=30).references != sent:
+                pass
+            return sent
+
         with Cluster(1, rules=RULES, record=True) as cluster:
             with TestClient(cluster, peers.WEBSITE) as client:
-                before = client.send(b"before", types.TEST_UNROUTED)
+                before = recorded(client, b"before")
             cluster.mx[0].restart()
             with TestClient(cluster, peers.WEBSITE) as client:
-                after = client.send(b"after", types.TEST_UNROUTED)
+                after = recorded(client, b"after")
             cluster.mx[0].stop()
             records = list(recording.read(cluster.mx[0].record_file))
         self.assertEqual(2, sum(1 for record in records if record.HasField("header")))

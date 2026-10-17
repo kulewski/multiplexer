@@ -19,6 +19,9 @@ from tests import harness
 from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
 LONG_TIMEOUT = 60  # seconds, a query's timeout where a check says it failed at once
+BOUND = 30  # seconds a wait for something that must happen may take: a failure detector
+EVENTS = 200  # the event backends' run: the ones that get every event leave after the last
+BEFORE = 5  # of them sent before the event backends drain
 
 
 def request_types(backend_events: list) -> list:
@@ -75,7 +78,13 @@ class DrainRouting(unittest.TestCase):
             self.assertLess(
                 max(error["ms"] for error in errors), LONG_TIMEOUT * 1000 / 2, "at once, not after a timeout"
             )
-            self.assertEqual(3, len(backend.events_of("request")), "it served only what came before")
+            # What came before is served, a request a stage that ran out sent
+            # again included; nothing after the confirmation is.
+            acked = backend.events.index(backend.events_of("acked")[0])
+            self.assertGreaterEqual(len(backend.events_of("request")), 3, "it served what came before")
+            self.assertEqual(
+                [], [event for event in backend.events[acked:] if event["event"] == "request"], "and nothing after"
+            )
             backend.kill()  # its rule never lets it leave
 
     def test_the_drain_waits_for_every_multiplexer(self):
@@ -106,6 +115,19 @@ class DrainRouting(unittest.TestCase):
             self.assertEqual(0, backend.wait(timeout=30), "and it leaves when its period is up")
             self.assertEqual(5, backend.events_of("stopped")[0]["handled"])
 
+    def send(self, cluster: Cluster, name: str, payloads: list[str]) -> None:
+        """TEST_EVENT `payloads` from a fresh event client, every one sent."""
+        sender = spawn(
+            "event_client",
+            harness.CONFIG.lang("event_client"),
+            mx=cluster.addresses,
+            name=name,
+            type=C.peers.TEST_EVENT_CLIENT,
+            send=[(C.types.TEST_EVENT, payload) for payload in payloads],
+        )
+        self.assertEqual(0, sender.wait(timeout=60))
+        self.assertEqual(len(payloads), len(sender.events_of("sent")))
+
     def test_an_event_backend_draining_gets_no_more_events_unless_all_is_kept(self):
         cfg = harness.CONFIG
         with Cluster(1) as cluster:
@@ -113,7 +135,8 @@ class DrainRouting(unittest.TestCase):
             # waited for, not stopped: a SIGTERM can find a Python role
             # that is leaving on its own past its handler, and kill it. The
             # strict one, whose share ends when its drain takes effect, is
-            # stopped after the checks.
+            # stopped before what it received is checked, so that its
+            # output is read to the end.
             strict = spawn(
                 "event_backend",
                 cfg.lang("event_backend"),
@@ -130,7 +153,7 @@ class DrainRouting(unittest.TestCase):
                 name="keeping",
                 drain_file=True,
                 drain_routing="all",
-                until=200,
+                until=EVENTS,
             )
             staying = spawn(
                 "event_backend",
@@ -138,33 +161,38 @@ class DrainRouting(unittest.TestCase):
                 mx=cluster.addresses,
                 type=C.peers.TEST_EVENT_BACKEND,
                 name="staying",
-                until=200,
+                until=EVENTS,
             )
             for backend in (strict, keeping, staying):
                 backend.wait_for("connected", connections=1)
-            sender = spawn(
-                "event_client",
-                cfg.lang("event_client"),
-                mx=cluster.addresses,
-                type=C.peers.TEST_EVENT_CLIENT,
-                send=[(C.types.TEST_EVENT, "e%d" % index) for index in range(200)],
-                interval=0.02,
+            # A few events from one sender before the drains, the rest from
+            # another once both are confirmed: the strict one gets the few
+            # and none of the rest, however the machine schedules them.
+            payloads = ["e%d" % index for index in range(EVENTS)]
+            self.send(cluster, "before-the-drains", payloads[:BEFORE])
+            self.assertGreaterEqual(
+                wait_for_total([strict], "received", BEFORE, timeout=BOUND), BEFORE, "events before the drain"
             )
-            self.assertGreaterEqual(wait_for_total([strict], "received", 5), 5, "events before the drain")
             strict.request_drain()
             keeping.request_drain()
-            acked_strict = strict.wait_for("acked")
-            acked_keeping = keeping.wait_for("acked")
-            self.assertEqual(0, sender.wait(timeout=60))
-            self.assertEqual(200, len(staying.wait_for_count("received", 200, timeout=15)), "the staying one got all")
+            acked_strict = strict.wait_for("acked", timeout=BOUND)
+            acked_keeping = keeping.wait_for("acked", timeout=BOUND)
+            self.send(cluster, "after-the-drains", payloads[BEFORE:])
             self.assertEqual(
-                200, len(keeping.wait_for_count("received", 200, timeout=15)), "so did the one keeping all"
+                EVENTS, len(staying.wait_for_count("received", EVENTS, timeout=BOUND)), "the staying one got all"
             )
-            after = strict.events[strict.events.index(acked_strict) + 1 :]
-            self.assertEqual([], [event for event in after if event["event"] == "received"], "none after confirmation")
-            self.assertLess(len(strict.events_of("received")), 200)
+            self.assertEqual(
+                EVENTS, len(keeping.wait_for_count("received", EVENTS, timeout=BOUND)), "so did the one keeping all"
+            )
             self.assertIn(acked_keeping, keeping.events)
             self.assertEqual(0, strict.stop())
+            after = strict.events[strict.events.index(acked_strict) + 1 :]
+            self.assertEqual([], [event for event in after if event["event"] == "received"], "none after confirmation")
+            self.assertEqual(
+                payloads[:BEFORE],
+                [event["payload"] for event in strict.events_of("received")],
+                "the strict one got what was sent before its drain, and nothing else",
+            )
             for backend in (keeping, staying):
                 self.assertEqual(0, backend.wait(), "it leaves on its own after the last event")
 

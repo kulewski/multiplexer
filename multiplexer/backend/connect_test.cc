@@ -52,11 +52,19 @@ class ConnectingBackend : public BaseMultiplexerServer {
   void handle_message(multiplexer::MultiplexerMessage&) override { no_response(); }
 };
 
-// A threaded backend that is only connected.
+// The threaded server's options with a minute to connect: windows of 30 s,
+// a failure detector's bound, then stay under the timeout they tell apart.
+multiplexer::backend::ThreadedServerOptions a_minute_to_connect() {
+  multiplexer::backend::ThreadedServerOptions options;
+  options.connect_timeout = 60;
+  return options;
+}
+
+// A threaded backend that is only connected, within a minute.
 class ThreadedConnectingBackend : public BaseThreadedMultiplexerServer {
  public:
   explicit ThreadedConnectingBackend(const MultiplexerAddresses& addresses)
-      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER) {}
+      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER, a_minute_to_connect()) {}
   ~ThreadedConnectingBackend() override { close(); }
   unsigned int connections() { return client().connections_count(); }
 
@@ -136,9 +144,10 @@ class SilentListener {
 };
 
 // Two silent listeners each get their connection while the connect() of a
-// `Backend` made for both still waits, and once both hang up it returns.
+// `Backend` made for both still waits, and once both hang up it returns;
+// each wait for that `window` seconds at most, under the connect's timeout.
 template <typename Backend>
-void every_address_tried_at_once() {
+void every_address_tried_at_once(int window) {
   SilentListener first;
   SilentListener second;
   std::promise<std::string> outcome;
@@ -154,12 +163,12 @@ void every_address_tried_at_once() {
       outcome.set_value(std::string("threw ") + error.what());
     }
   });
-  EXPECT_TRUE(first.accepted_within(5));
-  EXPECT_TRUE(second.accepted_within(5)) << "the second address waited for the first's handshake";
+  EXPECT_TRUE(first.accepted_within(window));
+  EXPECT_TRUE(second.accepted_within(window)) << "the second address waited for the first's handshake";
   EXPECT_EQ(std::future_status::timeout, connected.wait_for(std::chrono::seconds(0))) << "connect() still waits";
   first.hang_up();
   second.hang_up();
-  EXPECT_EQ(std::future_status::ready, connected.wait_for(std::chrono::seconds(5)))
+  EXPECT_EQ(std::future_status::ready, connected.wait_for(std::chrono::seconds(window)))
       << "connect() ends with the last connection, not at its timeout";
   EXPECT_EQ("returned, 0 connected", connected.get());
   connecting.join();
@@ -167,10 +176,12 @@ void every_address_tried_at_once() {
 
 }  // namespace
 
-TEST(ServerConnect, EveryAddressIsTriedAtOnceAgainstOneDeadline) { every_address_tried_at_once<ConnectingBackend>(); }
+// BaseMultiplexerServer::connect() waits DEFAULT_TIMEOUT, 10 s, which a
+// test cannot lengthen: windows of 5 s.
+TEST(ServerConnect, EveryAddressIsTriedAtOnceAgainstOneDeadline) { every_address_tried_at_once<ConnectingBackend>(5); }
 
 TEST(ServerConnect, AThreadedServerTriesEveryAddressAtOnceToo) {
-  every_address_tried_at_once<ThreadedConnectingBackend>();
+  every_address_tried_at_once<ThreadedConnectingBackend>(30);
 }
 
 // serve_forever() waits for no handshake: what the in-process multiplexer

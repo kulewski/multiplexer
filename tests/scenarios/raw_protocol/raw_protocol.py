@@ -6,7 +6,6 @@ value and one of 1 MiB, must reach a backend intact.
 
 import hashlib
 import os
-import time
 import unittest
 
 from tests import harness
@@ -32,7 +31,10 @@ class RawProtocol(unittest.TestCase):
             big = os.urandom(1024 * 1024)
             peer.send(every_byte, C.types.TEST_EVENT)
             peer.send(big, C.types.TEST_EVENT)
-            time.sleep(0.5)  # let the multiplexer read everything before we close
+            # Closed once the multiplexer has read everything: a close with
+            # its heartbeats unread here resets the connection, which can
+            # throw away what the multiplexer has not read yet.
+            event_backend.wait_for("received", size=len(big), timeout=30)
             peer.close()
 
             self.assertEqual(0, event_backend.wait())

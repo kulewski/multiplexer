@@ -1,8 +1,9 @@
 """the multiplexer restarts while a passive client is idle; its next call still works.
 
 The client learns of the dead connection inside that call, before it
-writes, waits for the reconnect there and sends then, once. A fresh client
-works too.
+writes, waits for the reconnect there and sends then, once. It is frozen
+in its idle time across the restart, until the backend is registered
+again, so that its next call comes after both. A fresh client works too.
 """
 
 import unittest
@@ -10,7 +11,8 @@ import unittest
 from tests import harness
 from tests.harness import Cluster, constants as C, spawn
 
-PAUSE = 8
+PAUSE = 8  # s the client idles between queries, in which the test freezes it after an answer
+TIMEOUT = 30  # s a query's stage: a failure detector
 
 
 class MxRestartsUnderIdleClient(unittest.TestCase):
@@ -36,12 +38,15 @@ class MxRestartsUnderIdleClient(unittest.TestCase):
                 type=C.peers.TEST_CLIENT,
                 count=2,
                 sleep_between=PAUSE,
-                timeout=5,
+                timeout=TIMEOUT,
                 query=[(C.types.TEST_REQUEST_A, "q{round}")],
             )
             client.wait_for("response", round=0)
+            client.pause()
             cluster.mx[0].restart()
-            self.assertEqual(0, client.wait(timeout=60))
+            cluster.wait_for_peer(C.peers.TEST_BACKEND_A)
+            client.resume()
+            self.assertEqual(0, client.wait(timeout=120))
             self.assertEqual([], client.events_of("error"), "the call after the restart succeeds")
             self.assertEqual("Q1", client.events_of("response", round=1)[0]["payload"])
 
@@ -51,10 +56,10 @@ class MxRestartsUnderIdleClient(unittest.TestCase):
                 mx=cluster.addresses,
                 name="fresh",
                 type=C.peers.TEST_CLIENT,
-                timeout=10,
+                timeout=TIMEOUT,
                 query=[(C.types.TEST_REQUEST_A, "again")],
             )
-            self.assertEqual(0, fresh.wait())
+            self.assertEqual(0, fresh.wait(timeout=120))
             self.assertEqual("AGAIN", fresh.events_of("response")[0]["payload"])
 
 

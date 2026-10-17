@@ -8,7 +8,10 @@ the heartbeat drop interval the client's own timers close the connection
 and nothing is slow any more. When the multiplexer comes back, the client
 reconnects. This characterizes the cost: every query is answered, the slow
 ones happen only before the drop, and none is slower than timeout plus a
-little. Slow: it waits out the drop interval.
+little. That the client closed the frozen connection itself, which the
+resume would hide, is in the thawed multiplexer's log: the connection
+leaves, and the client comes back on one of its own. Slow: it waits out
+the drop interval.
 """
 
 import time
@@ -20,6 +23,16 @@ from tests.harness import Cluster, constants as C, spawn
 QUERIES = 80
 TIMEOUT = 4.0
 HANG_FOR = 100  # past NO_HEARTBIT_SO_PREPARE_DROP + NO_HEARTBIT_SO_REALLY_DROP (30 + 60)
+
+
+def registered(instance_id: int) -> str:
+    """The start of the line the multiplexer logs each time a peer with `instance_id` is in."""
+    return '"registered connection id=%d ' % instance_id
+
+
+def unregistered(instance_id: int) -> str:
+    """The start of the line the multiplexer logs when a peer with `instance_id` leaves."""
+    return '"unregistered connection id=%d ' % instance_id
 
 
 class MxHangs(unittest.TestCase):
@@ -49,6 +62,8 @@ class MxHangs(unittest.TestCase):
                 query=[(C.types.TEST_REQUEST_A, "q{round}")],
             )
             client.wait_for("response", round=1)
+            client_id = client.events_of("connected")[0]["instance_id"]
+            mark = cluster.mx[0].log_mark()  # a frozen process logs nothing: what comes after is the thaw's
             frozen_at = time.time()
             cluster.mx[0].pause()
             time.sleep(HANG_FOR)
@@ -73,6 +88,17 @@ class MxHangs(unittest.TestCase):
             self.assertEqual(
                 2, client.events_of("done")[0]["connections"], "reconnected after the multiplexer came back"
             )
+            # A client that kept the frozen connection would have used it on
+            # once the multiplexer was back, and never registered again; its
+            # own end, a departure, comes last. One that closed it is
+            # registered on a connection of its own after the freeze, the
+            # frozen one's departure logged before that.
+            with open(cluster.mx[0].log_path, "rb") as log:
+                log.seek(mark)
+                thawed = log.read().decode("utf-8", "replace")
+            back = thawed.find(registered(client_id))
+            self.assertNotEqual(-1, back, "the client came back to the thawed multiplexer on a new connection")
+            self.assertIn(unregistered(client_id), thawed[:back], "the frozen one gone first: the client had closed it")
             self.assertEqual(0, backend.stop())
 
 

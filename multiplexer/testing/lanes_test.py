@@ -9,7 +9,6 @@ fails instead, and FakePeer.via() says which way each message came.
 
 import random
 import threading
-import time
 import unittest
 
 from multiplexer.multiplexer_constants import peers, types
@@ -24,9 +23,7 @@ RESPONSE = types.PYTHON_TEST_RESPONSE
 
 
 def answer(mxmsg):
-    """The fakes' script: the payload upper-cased, after a pause when it says so."""
-    if mxmsg.message.startswith(b"slow"):
-        time.sleep(1.0)
+    """The fakes' script: the payload upper-cased."""
     return mxmsg.message.upper()
 
 
@@ -107,21 +104,30 @@ class AddressedQueryUnderFailureTest(unittest.TestCase):
     def test_a_multiplexer_dying_under_the_wait_costs_the_query_nothing(self):
         """The request went through a multiplexer that is killed while the
         fake is still working on it: the reply comes anyway, through the
-        other multiplexer."""
+        other multiplexer. Ordered by events, where a timer killed the
+        multiplexer 0.3 s in while the fake slept a second: the fake holds
+        the request until its multiplexer is gone, then answers."""
+        holding, released = threading.Event(), threading.Event()
+
+        def held(mxmsg):
+            """Holds "slow" until the test has killed the multiplexer it came through."""
+            if mxmsg.message == b"slow":
+                holding.set()
+                released.wait(30)
+            return mxmsg.message.upper()
+
         with Cluster(2, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:
-            peer.on(REQUEST, answer, RESPONSE)
+            peer.on(REQUEST, held, RESPONSE)
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 lane = client.lane()
                 client.query(b"warm-up", REQUEST, to=peer.instance_id, multiplexer=lane)
                 victim = cluster.multiplexer_at(lane.connection.endpoint)
-                killer = threading.Timer(0.3, victim.kill)
+                killer = threading.Thread(target=self.kill_when_held, args=(victim, holding, released))
                 killer.start()
-                started = time.monotonic()
-                reply = client.query(b"slow", REQUEST, to=peer.instance_id, multiplexer=lane, timeout=10)
+                reply = client.query(b"slow", REQUEST, to=peer.instance_id, multiplexer=lane, timeout=30)
                 killer.join()
                 self.assertEqual(b"SLOW", reply.message)
-                self.assertLess(time.monotonic() - started, 6, "the locate phase, not a timeout")
                 # The fake saw the request once or twice: the client locates
                 # it at once and sends the request a second and last time
                 # through the other multiplexer, but the fake's reply to the
@@ -334,7 +340,8 @@ class LaneTest(unittest.TestCase):
             client = TestClient(cluster, peers.WEBSITE)
             try:
                 wrong = client.client.connect(cluster.mx[0].endpoint)
-                started = time.monotonic()
+                # OperationFailed, which only the delivery errors bring, a
+                # query that ran out of its time raising OperationTimedOut.
                 with self.assertRaises(OperationFailed):
                     client.query(
                         b"x",
@@ -343,7 +350,6 @@ class LaneTest(unittest.TestCase):
                         multiplexer=client.lane(connection=wrong, pinned=True),
                         timeout=5,
                     )
-                self.assertLess(time.monotonic() - started, 3)
                 self.assertEqual([], peer.received)
             finally:
                 client.shutdown()

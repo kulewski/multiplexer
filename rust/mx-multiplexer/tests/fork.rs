@@ -306,7 +306,7 @@ fn burst() {
         assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
         if pid == 0 {
             // SAFETY: alarm(2) arms this process's timer and nothing else.
-            unsafe { libc::alarm(3) };
+            unsafe { libc::alarm(ALARM) };
             let _lane = Lane::new();
             // SAFETY: _exit(2) ends the child at once.
             unsafe { libc::_exit(0) }

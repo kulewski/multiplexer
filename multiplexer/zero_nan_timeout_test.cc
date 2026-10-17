@@ -122,8 +122,8 @@ TEST(ZeroOrNanTimeout, ASyncSendToAFullConnectionIsDroppedAtOnce) {
     Freeze frozen(mx);
     // The sockets full however far the kernel grew them, then twice the queue.
     for (int index = 0; index < FILL_FRAMES + 2 * 1024; ++index) {
-      // DEFAULT_TIMEOUT: past the queue, these wait for room
-      client.schedule_one(unrouted(client, index < FILL_FRAMES ? fill : chunk));
+      // A minute: past the queue, these wait for room, none given up on here
+      client.schedule_one(unrouted(client, index < FILL_FRAMES ? fill : chunk), 60);
     }
     ASSERT_EQ(0u, client.dropped());
     const MultiplexerMessage zero = unrouted(client, "zero");

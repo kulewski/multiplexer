@@ -525,24 +525,34 @@ class ThreadedServerTest(unittest.TestCase):
         self.assertEqual(0, server.dropped)
         self.assertIsNone(served.error)
 
-    def test_a_drain_keeping_a_path_open_lasts_its_period(self):
-        """With `all` kept on, work may keep arriving, so the drain runs to
-        its cap: an event the multiplexer sends every backend of the type,
-        sent after it confirmed the drain routing, is still handled, which
-        a closing server would refuse, and serve_forever() returns once the
-        cap has passed since the drain began, on the monotonic clock. The
-        cap is far above what the confirmation and the event take, where
-        the check slept 0.5 s of a 1.5 s cap and a slow confirmation
-        failed it."""
-        cap = 5.0
-        served, server = self.serve(drain_seconds=cap, drain_routing=Routing(any=False), type=peers.TEST_EVENT_BACKEND)
-        started = time.monotonic()
+    def test_a_drain_keeping_a_path_open_serves_what_arrives(self):
+        """With `all` kept on, work may keep arriving, so the drain goes on:
+        an event the multiplexer sends every backend of the type, sent after
+        it confirmed the drain routing, is still handled, which a closing
+        server would refuse. The cap, a minute, only a failure reaches,
+        where the event had to be handled within a cap of 5 s, and before
+        that of 1.5 s, which a slow confirmation once ate; the test stops
+        the server itself."""
+        served, server = self.serve(drain_seconds=60, drain_routing=Routing(any=False), type=peers.TEST_EVENT_BACKEND)
         server.start_draining()
         wait_until(server.client.routing_acknowledged, 10, "the multiplexer confirmed")
         with TestClient(self.cluster, peers.WEBSITE) as client:
             client.send(b"event", types.TEST_EVENT)
-            wait_until(lambda: b"event" in server.handled, cap, "the event through the path kept open, handled")
-        wait_until(lambda: not served.running, cap + 10, "serve_forever() returned at the cap")
+            wait_until(lambda: b"event" in server.handled, 30, "the event through the path kept open, handled")
+        self.assertTrue(served.running, "the drain goes on")
+        served.stop()
+        self.assertIsNone(served.error)
+
+    def test_a_drain_keeping_a_path_open_lasts_its_period(self):
+        """With `all` kept on, nothing says that no more work comes, so the
+        drain runs to its cap: serve_forever() returns once the cap has
+        passed since the drain began, on the monotonic clock, not before.
+        Only that lower bound is checked, so the cap is short."""
+        cap = 0.5
+        served, server = self.serve(drain_seconds=cap, drain_routing=Routing(any=False), type=peers.TEST_EVENT_BACKEND)
+        started = time.monotonic()
+        server.start_draining()
+        wait_until(lambda: not served.running, 30, "serve_forever() returned at the cap")
         self.assertGreaterEqual(time.monotonic() - started, cap, "not before the drain's deadline")
 
     def test_the_routing_reaches_a_multiplexer_past_a_full_queue(self):

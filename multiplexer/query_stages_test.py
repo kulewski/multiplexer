@@ -878,8 +878,10 @@ class QueryStagesTest(unittest.TestCase):
             self.assertTrue(client.has_incoming_messages(), "the request before never came")
             client.refuse_arrivals()
             try:
+                # 30 s a stage, none of which is meant to run out: a bound
+                # only a failure reaches.
                 answer = client.query(
-                    b"question", types.PYTHON_TEST_REQUEST, timeout=2, on_received=acknowledged.append
+                    b"question", types.PYTHON_TEST_REQUEST, timeout=30, on_received=acknowledged.append
                 ).message
             except (OperationTimedOut, OperationFailed) as error:
                 answer = repr(error).encode()

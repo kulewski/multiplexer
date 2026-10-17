@@ -170,9 +170,13 @@ class ServerRepliesTest(unittest.TestCase):
             client = Client(cluster.endpoints, type=peers.WEBSITE)
             try:
                 with self.assertRaises(BackendError):
-                    client.query(b"fail to reply", REQUEST, timeout=2)
-                assert served.backend is not None
-                self.assertEqual(1, len(served.backend.exceptions))
+                    client.query(b"fail to reply", REQUEST, timeout=10)
+                backend = served.backend
+                assert backend is not None
+                # on_handler_exception() is told after the report went, which
+                # the requester can read first.
+                wait_until(lambda: backend.exceptions, 10, "on_handler_exception() told")
+                self.assertEqual(1, len(backend.exceptions))
             finally:
                 client.shutdown()
 

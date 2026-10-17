@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <limits>
 #include <memory>
@@ -154,9 +155,27 @@ struct Peer {
     }
     return msg;
   }
-  void send(const multiplexer::MultiplexerMessage& msg) { client.flush(client.schedule_one(msg), 5); }
+  // Sends `msg` and runs the loop until it is written, `bound` seconds at
+  // most: false when it was not, a message near MAX_MESSAGE_SIZE taking
+  // longer than the 5 s a small one gets.
+  bool send(const multiplexer::MultiplexerMessage& msg, float bound = 5) {
+    const multiplexer::Client::ScheduledMessageTracker tracker = client.schedule_one(msg, bound);
+    client.flush(tracker, bound);
+    return tracker && tracker.is_sent();
+  }
   multiplexer::Client client;
 };
+
+// Runs `client`'s loop, as its calls do, until `done`, 30 s at most: for
+// what a later pass of the loop tells, a send's callback or a drop, which
+// a flush that ended at the message's own end could leave untold.
+bool run_until(multiplexer::Client& client, const std::function<bool()>& done) {
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (!done() && std::chrono::steady_clock::now() < deadline) {
+    client.flush_all(0.05f);
+  }
+  return done();
+}
 
 TEST(ThreadedClient, OnMessageGetsWhatIsAddressedToIt) {
   InProcessMultiplexer mx;
@@ -722,9 +741,9 @@ TEST(ThreadedClient, AddressedQueryToAGoneInstanceFailsAtOnce) {
   multiplexer::MultiplexerMessage request = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "lost");
   request.set_to(0x1234567890ull);
   std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
-  ThreadedClient::Result result = client.query(request, 10);
+  ThreadedClient::Result result = client.query(request, 60);
   EXPECT_EQ(ThreadedClient::FAILED, result.outcome);
-  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3)) << "a delivery error, not a timeout";
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(30)) << "a delivery error, not a timeout";
   EXPECT_THROW(backend.client.read_raw_message(0.3f), multiplexer::Client::OperationTimedOut)
       << "an instance of the type got it";
 }
@@ -1104,15 +1123,28 @@ class Fill {
   std::string sockets_, queue_;
 };
 
-// Sends the messages of `fill`, fire and forget; `to`, when given, the
-// instance that takes them.
+// Sends `msg` with no deadline, fire and forget: it waits for room however
+// long a frozen multiplexer and the messages before it take, where a send
+// without a timeout gives it DEFAULT_TIMEOUT and a slow run, valgrind's,
+// had part of a fill given up on. Of the sends that return at once, only
+// the serialized ones take a timeout.
+void send_unbounded(ThreadedClient& client, const multiplexer::MultiplexerMessage& msg,
+                    multiplexer::LanePtr lane = multiplexer::LanePtr()) {
+  client.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), lane, -1);
+}
+void send_all_unbounded(ThreadedClient& client, const multiplexer::MultiplexerMessage& msg) {
+  client.send_all_serialized(msg.SerializeAsString(), msg.id(), msg.type(), -1);
+}
+
+// Sends the messages of `fill`, fire and forget, with no deadline; `to`,
+// when given, the instance that takes them.
 void burst(ThreadedClient& client, const Fill& fill, std::uint64_t to = 0) {
   for (int index = 0; index < Fill::COUNT; ++index) {
     multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
     if (to) {
       msg.set_to(to);
     }
-    client.send(msg);
+    send_unbounded(client, msg);
   }
 }
 
@@ -1174,7 +1206,7 @@ TEST(ThreadedClient, ASendFromTheIoThreadDuringTheShutdownsWriteOutGoesOut) {
     for (int index = 0; index < Fill::COUNT; ++index) {
       multiplexer::MultiplexerMessage msg = answering.new_message(9999, fill[index]);  // a type nobody takes
       msg.set_report_delivery_error(false);
-      answering.send_all(msg);
+      send_all_unbounded(answering, msg);
     }
     closing = std::thread([&answering] { answering.shutdown(10); });
     for (bool stopped = false; !stopped;) {  // until the shutdown has begun
@@ -1243,14 +1275,15 @@ TEST(ThreadedClient, ASendOnTheIoThreadAsTheShutdownBeginsKeepsItsPlace) {
 }
 
 // Fills `mx`'s connection from `client` past what its sockets and its
-// queue hold, with messages nobody takes and nobody hears of: with `mx`
-// frozen, a shutdown's write-out waits for its deadline.
+// queue hold, with messages nobody takes and nobody hears of, and that
+// have no deadline: with `mx` frozen, a shutdown's write-out waits for its
+// own deadline.
 void fill_frozen(ThreadedClient& client) {
   const Fill fill(1024);
   for (int index = 0; index < Fill::COUNT; ++index) {
     multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::TEST_UNROUTED, fill[index]);
     msg.set_report_delivery_error(false);
-    client.send(msg);
+    send_unbounded(client, msg);
   }
 }
 
@@ -1341,6 +1374,7 @@ TEST(ThreadedClient, ABurstBeyondTheQueueArrivesWholeAtACostInProportion) {
     EXPECT_FALSE(client.flush_all(0.2f)) << "frozen: something waits";
   }
   EXPECT_TRUE(client.flush_all(120));
+  EXPECT_EQ(0u, client.dropped()) << "given up on";
   EXPECT_TRUE(backend.wait_for(count, 120)) << backend.received.load() << " of " << count << " arrived";
   const std::uint64_t retries = client.retries();
   EXPECT_GT(retries, 0u) << "the burst waited for room";
@@ -1361,11 +1395,12 @@ TEST(ThreadedClient, EveryMultiplexerGetsItsCopyOfASendToAll) {
   {
     Freeze freeze(second);
     for (int index = 0; index < count; ++index) {
-      client.send_all(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
+      send_all_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
     }
     EXPECT_TRUE(behind_first.wait_for(count, 60)) << behind_first.received.load() << " of " << count;
   }
   EXPECT_TRUE(client.flush_all(120));
+  EXPECT_EQ(0u, client.dropped()) << "copies given up on";
   EXPECT_TRUE(behind_second.wait_for(count, 120)) << behind_second.received.load() << " of " << count;
 }
 
@@ -1398,10 +1433,10 @@ TEST(ThreadedClient, QueriesThatFindTheQueueFullAreAnswered) {
               all_ended.set_value();
             }
           },
-          30);
+          120);
     }
   }
-  ASSERT_EQ(std::future_status::ready, all_ended.get_future().wait_for(std::chrono::seconds(60)));
+  ASSERT_EQ(std::future_status::ready, all_ended.get_future().wait_for(std::chrono::seconds(180)));
   EXPECT_EQ(count, replied.load());
 }
 
@@ -1510,14 +1545,11 @@ TEST(ThreadedClient, FlushAllWaitsOnlyForWhatWasSentBeforeIt) {
     Freeze frozen_first(first);
     Freeze frozen_second(second);
     for (int index = 0; index < count; ++index) {
-      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), to_first);
+      send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), to_first);
     }
-    client.flush_all_with_callback(30, [&flushed](bool all_written) { flushed.set_value(all_written); });
-    for (int index = 0; index < count; ++index) {  // waiting longer than the flush may
-      const multiplexer::MultiplexerMessage msg =
-          client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
-      client.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), to_second, 60,
-                             ThreadedClient::SendCallback());
+    client.flush_all_with_callback(60, [&flushed](bool all_written) { flushed.set_value(all_written); });
+    for (int index = 0; index < count; ++index) {  // waiting as long as the flush may, and longer
+      send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), to_second);
     }
     frozen_first.release();
     EXPECT_TRUE(flushed.get_future().get()) << "the flush waited for what was sent after it";
@@ -1540,15 +1572,16 @@ TEST(ThreadedClient, APinnedLaneWaitsForRoomOnItsConnection) {
   {
     Freeze freeze(mx);
     for (int index = 0; index < count; ++index) {  // the queue fills, the rest waits
-      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), pinned);
+      send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), pinned);
     }
     last = std::async(std::launch::async, [&client, pinned] {
-      return client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "last"), pinned, 30);
+      return client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "last"), pinned, 60);
     });
     EXPECT_EQ(std::future_status::timeout, last.wait_for(std::chrono::milliseconds(300))) << "waits, not refused";
   }
   EXPECT_EQ(1u, last.get());
-  EXPECT_TRUE(client.flush_all(30));
+  EXPECT_TRUE(client.flush_all(60));
+  EXPECT_EQ(0u, client.dropped()) << "given up on";
   EXPECT_FALSE(pinned->closed());
   EXPECT_TRUE(backend.wait_for(count + 2, 60)) << backend.received.load() << " of " << count + 2 << " arrived";
 }
@@ -1573,12 +1606,13 @@ TEST(ThreadedClient, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
   {
     Freeze freeze(frozen);
     for (int index = 0; index < count; ++index) {
-      client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), lane);
+      send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]), lane);
     }
     ASSERT_EQ(2u, client.connections_count());  // a round trip through the io thread: every send placed
     EXPECT_EQ(held, lane->connection().endpoint().port()) << "the lane moved";
   }
   EXPECT_TRUE(client.flush_all(60));
+  EXPECT_EQ(0u, client.dropped()) << "given up on";
   EXPECT_TRUE(its.wait_for(count + 1, 60)) << its.received.load() << " of " << count + 1;
   EXPECT_EQ(0u, other.received.load()) << "went the other way";
 }
@@ -1684,13 +1718,14 @@ TEST(Client, WhatAFullConnectionCannotTakeWaitsForItsRoom) {
   {
     Freeze freeze(mx);
     for (int index = 0; index < count; ++index) {
-      if (!sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0))) {
+      if (!sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0), -1)) {
         ++refused;
       }
     }
   }
   EXPECT_EQ(0, refused);
   EXPECT_TRUE(sender.client.flush_all(60));
+  EXPECT_EQ(0u, sender.client.dropped()) << "given up on";
   EXPECT_TRUE(backend.wait_for(count, 60)) << backend.received.load() << " of " << count;
 }
 
@@ -1703,7 +1738,7 @@ TEST(Client, AFlushingSendWaitsForRoomAsleep) {
   const Fill fill(16 * 1024);
   Freeze freeze(mx);
   for (int index = 0; index < Fill::COUNT; ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0));
+    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0), -1);
   }
   const std::chrono::nanoseconds before = thread_cpu();
   EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "last", 0), 0.5f),
@@ -1723,12 +1758,13 @@ TEST(Client, EveryMultiplexerGetsItsCopyOfASendToAll) {
   {
     Freeze freeze(second);
     for (int index = 0; index < count; ++index) {
-      EXPECT_EQ(2u,
-                sender.client.schedule_all(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0)));
+      EXPECT_EQ(
+          2u, sender.client.schedule_all(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0), -1));
     }
     EXPECT_FALSE(sender.client.flush_all(0.2f)) << "frozen: the copies for it wait";
   }
   EXPECT_TRUE(sender.client.flush_all(60));
+  EXPECT_EQ(0u, sender.client.dropped()) << "copies given up on";
   EXPECT_TRUE(behind_first.wait_for(count, 60)) << behind_first.received.load() << " of " << count;
   EXPECT_TRUE(behind_second.wait_for(count, 60)) << behind_second.received.load() << " of " << count;
 }
@@ -1757,7 +1793,7 @@ TEST(Client, ALaneWaitsForRoomOnItsConnectionWhileItLives) {
     Freeze freeze(frozen);
     for (int index = 0; index < count; ++index) {
       sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0),
-                                 lane->connection());
+                                 lane->connection(), -1);
     }
     EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "last", 0), 0.2f, lane),
                  multiplexer::Client::OperationTimedOut);
@@ -1786,7 +1822,7 @@ TEST(Client, ASendThatTimedOutHasItsMessageDropped) {
   {
     Freeze freeze(mx);
     for (int index = 0; index < Fill::COUNT; ++index) {
-      sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0));
+      sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0), -1);
     }
     EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f),
                  multiplexer::Client::OperationTimedOut);
@@ -1810,7 +1846,8 @@ TEST(Client, APinnedLaneThatRunsOutOfTimeTimesOut) {
   const Fill fill(16 * 1024);
   Freeze freeze(mx);
   for (int index = 0; index < Fill::COUNT; ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0), lane->connection());
+    sender.client.schedule_one(sender.message(multiplexer::types::TEST_UNROUTED, fill[index], 0), lane->connection(),
+                               -1);
   }
   EXPECT_THROW(sender.client.send(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0), 0.2f, lane),
                multiplexer::Client::OperationTimedOut);
@@ -3330,9 +3367,14 @@ void fill_to_the_limit(multiplexer::MultiplexerMessage* msg) {
   }
 }
 
-// The next message `peer` receives that references `id`, or null.
-std::shared_ptr<multiplexer::MultiplexerMessage> reply_to(Peer& peer, std::uint64_t id) {
-  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+// Seconds a message at MAX_MESSAGE_SIZE may take to go and its answer to
+// come back: some six passes over 128 MiB, which valgrind made 25 s.
+const int BIG = 120;
+
+// The next message `peer` receives that references `id`, within `bound`
+// seconds, or null.
+std::shared_ptr<multiplexer::MultiplexerMessage> reply_to(Peer& peer, std::uint64_t id, int bound = 20) {
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(bound);
   while (std::chrono::steady_clock::now() < deadline) {
     try {
       std::shared_ptr<multiplexer::MultiplexerMessage> got = peer.client.receive_message(1).first;
@@ -3358,8 +3400,8 @@ TEST(ThreadedClient, APingWhoseEchoWouldBeTooBigIsAnsweredWithBackendError) {
   Peer peer(mx.port, multiplexer::peers::WEBSITE);
   multiplexer::MultiplexerMessage ping = peer.message(multiplexer::types::PING, "", client.instance_id());
   fill_to_the_limit(&ping);
-  peer.send(ping);
-  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(peer, ping.id());
+  ASSERT_TRUE(peer.send(ping, BIG)) << "the PING not written";
+  std::shared_ptr<multiplexer::MultiplexerMessage> answer = reply_to(peer, ping.id(), BIG);
   ASSERT_TRUE(answer) << "no answer to the PING";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
   EXPECT_NE(std::string::npos, answer->message().find("MAX_MESSAGE_SIZE")) << answer->message();
@@ -3390,8 +3432,8 @@ TEST(ThreadedClient, ASearchIsAnsweredWithItsPayloadEchoed) {
   multiplexer::MultiplexerMessage big =
       peer.message(multiplexer::types::BACKEND_FOR_PACKET_SEARCH, "", client.instance_id());
   fill_to_the_limit(&big);
-  peer.send(big);
-  answer = reply_to(peer, big.id());
+  ASSERT_TRUE(peer.send(big, BIG)) << "the search not written";
+  answer = reply_to(peer, big.id(), BIG);
   ASSERT_TRUE(answer) << "no answer to the big search";
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, answer->type());
   EXPECT_NE(std::string::npos, answer->message().find("echo of a search")) << answer->message();
@@ -3439,8 +3481,8 @@ TEST(Server, ADeliveryErrorLeavesOutAnOriginalTooBigToCarry) {
   big.set_report_delivery_error(true);
   big.set_include_original_packet_in_report(true);
   fill_to_the_limit(&big);
-  peer.send(big);
-  std::shared_ptr<multiplexer::MultiplexerMessage> report = reply_to(peer, big.id());
+  ASSERT_TRUE(peer.send(big, BIG)) << "the message not written";
+  std::shared_ptr<multiplexer::MultiplexerMessage> report = reply_to(peer, big.id(), BIG);
   ASSERT_TRUE(report) << "no delivery error for the big message";
   ASSERT_EQ(multiplexer::types::DELIVERY_ERROR, report->type());
   multiplexer::DeliveryError error;
@@ -3890,7 +3932,7 @@ TEST(ThreadedClient, EveryMessageIsDeliveredOrReportedAtShutdown) {
     for (int index = 0; index < Fill::COUNT; ++index) {
       multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]);
       sent.insert(msg.id());
-      client.send(msg);
+      send_unbounded(client, msg);
     }
     client.shutdown(0);  // returns once the io thread is done, the drop observer with it
     frozen = nullptr;
@@ -3962,7 +4004,7 @@ TEST(Client, AQueuedMessagesCallbackHearsHowItEnded) {
                                   multiplexer::LanePtr(), record));
   ASSERT_TRUE(sender.client.queue(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "left", 0), 30,
                                   multiplexer::LanePtr(), record));
-  sender.client.flush_all(0.5f);  // past the first's timeout
+  ASSERT_TRUE(run_until(sender.client, [&heard] { return heard.size() == 3; })) << "the first never given up on";
   EXPECT_EQ(std::vector<unsigned int>({1, 1, 0}), heard) << "given up on at its timeout";
   sender.client.shutdown(0);
   EXPECT_EQ(std::vector<unsigned int>({1, 1, 0, 0}), heard) << "given up on at the shutdown";
@@ -3988,7 +4030,7 @@ TEST(ThreadedClient, AMessagesCallbackHearsHowItEnded) {
   const Fill fill(16 * 1024);
   Freeze freeze(mx);
   for (int index = 0; index < Fill::COUNT; ++index) {
-    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
+    send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
   }
   client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "left"), multiplexer::LanePtr(), record);
   client.shutdown(0);
@@ -4010,7 +4052,7 @@ TEST(ThreadedClient, AFlushingSendThatWroteNothingSaysWhy) {
   const Fill fill(16 * 1024);
   Freeze freeze(mx);
   for (int index = 0; index < Fill::COUNT; ++index) {
-    client.send(client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
+    send_unbounded(client, client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index]));
   }
   bool not_connected = true;
   const multiplexer::MultiplexerMessage late = client.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "late");
@@ -4133,9 +4175,9 @@ static void expect_shutdown_writes_what_was_sent(bool threaded) {
         sync_client.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0);
     sent.insert(msg.id());
     if (threaded) {
-      threaded_client.send(msg);
+      send_unbounded(threaded_client, msg);
     } else {
-      sync_client.client.queue(msg, 60);
+      sync_client.client.queue(msg, -1);
     }
   }
   std::thread release([&freeze] {
@@ -4169,11 +4211,11 @@ TEST(Client, AMessageThatWaitedForRoomPastItsTimeoutIsReported) {
   const Fill fill(16 * 1024);
   Freeze freeze(mx);
   for (int index = 0; index < Fill::COUNT; ++index) {
-    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0));
+    sender.client.schedule_one(sender.message(multiplexer::types::PYTHON_TEST_REQUEST, fill[index], 0), -1);
   }
   const multiplexer::MultiplexerMessage late = sender.message(multiplexer::types::PYTHON_TEST_REQUEST, "late", 0);
   sender.client.schedule_one(late, 0.3f);
-  EXPECT_FALSE(sender.client.flush_all(0.6f));  // the loop runs past its deadline
+  ASSERT_TRUE(run_until(sender.client, [&heard] { return !heard.empty(); })) << "never given up on";
   ASSERT_EQ(1u, heard.size());
   EXPECT_EQ(late.id(), heard[0].first);
   EXPECT_EQ(multiplexer::DropReason::NO_ROOM, heard[0].second);

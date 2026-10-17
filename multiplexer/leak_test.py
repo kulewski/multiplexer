@@ -209,6 +209,11 @@ class LeakTest(unittest.TestCase):
             for _ in range(QUERIES):
                 reply = client.query(b"hello", type=types.PYTHON_TEST_REQUEST, to=backend.instance_id, timeout=10)
                 self.assertEqual(b"HELLO", reply.message)
+            # A worker counts its request done once its handler returned,
+            # which the reply it sent from there can beat to the client.
+            deadline = time.monotonic() + 10
+            while backend.pending and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertEqual(0, backend.pending)
             self.assert_no_growth(before, objects_before)
             tracemalloc.stop()

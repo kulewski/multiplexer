@@ -29,6 +29,11 @@ CHECK_INTERVAL = 0.1  # seconds between the multiplexers' reads of the file
 LATE_BACKEND, LATE_REQUEST = 250, 250  # the types the file gets in place
 LATER_BACKEND, LATER_REQUEST = 251, 251  # the types it gets by the swap
 BROKEN_ENTRY = '\ntype {\n    type: 252\n    name: "TEST_BROKEN"\n    to {\n        peer: "NOBODY"\n    }\n}\n'
+# A query's stage, a failure detector for those that must be answered. A
+# query that must fail at once is told by its error's kind, not by time:
+# one whose request stage ran out could still be answered late, waits
+# for that, and ends OperationTimedOut instead of OperationFailed.
+QUERY_TIMEOUT = 30
 
 
 def fingerprint(text: str) -> str:
@@ -99,10 +104,10 @@ class RulesEditedOnDisk(unittest.TestCase):
             harness.CONFIG.lang("client"),
             mx=cluster.addresses,
             type=C.peers.TEST_CLIENT,
-            timeout=3,
+            timeout=QUERY_TIMEOUT,
             query=[(request_type, payload)],
         )
-        self.assertEqual(0, client.wait())
+        self.assertEqual(0, client.wait(timeout=120))
         responses = client.events_of("response")
         return responses[0]["payload"] if responses else client.events_of("error")[0]["kind"]
 

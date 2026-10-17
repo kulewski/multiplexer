@@ -333,7 +333,10 @@ fn what_nothing_confirmed_for_retry_after_goes_again() {
     for message in &again {
         consumer.processed(message);
     }
-    send_what_is_owed(&mut consumer);
+    // What the consumer owes, sent by a flush, not by a receive that must
+    // find nothing: a test thread late by another retry_after finds a third
+    // copy there, as sent_again() allows.
+    assert!(consumer.flush_all(Some(BOUND)).unwrap());
     assert!(producer.flush_all(Some(BOUND)).wait().unwrap());
     assert_eq!(all(&sent, true), ends_of(&ends, 3), "once each");
     assert!(ends.try_recv().is_err());

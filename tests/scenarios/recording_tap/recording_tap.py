@@ -19,6 +19,9 @@ from multiplexer.mxclient import OperationTimedOut
 from tests import harness
 from tests.harness import Cluster, child_env, constants as C, mx_runfile, output_dir, spawn, wait_until
 
+BOUND = 30  # s a record, an answer or a query's stage may take: a failure detector
+TRAFFIC = 1600  # the records of 800 requests and their replies
+
 
 class RecordingTap(unittest.TestCase):
     """Taps from mxcontrol and from the Python API."""
@@ -206,8 +209,8 @@ class RecordingTap(unittest.TestCase):
             controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
             file_controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
             try:
-                (session,) = recording.start(file_controller, "beside-the-tap")
-                stream = recording.tap(controller, timeout=1)
+                (session,) = recording.start(file_controller, "beside-the-tap", timeout=BOUND)
+                stream = recording.tap(controller, timeout=BOUND)
                 # The generator sent TAP; not reading now is what a slow consumer does.
                 client = spawn(
                     "client",
@@ -218,31 +221,41 @@ class RecordingTap(unittest.TestCase):
                     count=200,
                     payload_size=20000,
                     parallel=4,
+                    timeout=BOUND,  # a stage: no query sent twice, which the file's count would show
                 )
                 self.assertEqual(0, client.wait(60))
                 self.assertEqual(800, len(client.events_of("response")), "routing went on regardless")
 
+                # Each record was queued for the tap or dropped as its message
+                # was routed: once the client is done, the count of those
+                # dropped is final, and the stream holds the rest, read up to
+                # it rather than until a silence.
+                (status,) = recording.status(controller, timeout=BOUND)
+                self.assertTrue(status.tapping)
+                self.assertGreater(status.dropped, 0)
                 received = 0
                 try:
                     for _ in stream:
                         received += 1
+                        if status.dropped + received >= TRAFFIC:
+                            break
                 except OperationTimedOut:
-                    pass
+                    self.fail(
+                        "nothing more for %d s, with %d records received and %d dropped of the %d the traffic made"
+                        % (BOUND, received, status.dropped, TRAFFIC)
+                    )
                 self.assertGreater(received, 0)
-                self.assertLess(received, 1600, "not everything fit the queue")
-                (status,) = recording.status(controller)
-                self.assertTrue(status.tapping)
-                self.assertGreater(status.dropped, 0)
-                self.assertGreaterEqual(status.dropped + received, 1600, "dropped plus received covers the traffic")
+                self.assertLess(received, TRAFFIC, "not everything fit the queue")
+                self.assertGreaterEqual(status.dropped + received, TRAFFIC, "dropped plus received covers the traffic")
 
-                (stopped,) = recording.stop(file_controller)
+                (stopped,) = recording.stop(file_controller, timeout=BOUND)
                 routed = [r for r in recording.read(session.path, constants=C) if r.HasField("routed")]
                 self.assertEqual(
-                    1600,
+                    TRAFFIC,
                     len([r for r in routed if r.routed.type in (C.types.TEST_REQUEST_A, C.types.TEST_RESPONSE)]),
                     "the file session lost nothing",
                 )
-                (untapped,) = recording.control(controller, RecordingControl.UNTAP)
+                (untapped,) = recording.control(controller, RecordingControl.UNTAP, timeout=BOUND)
                 self.assertFalse(untapped.tapping)
                 self.assertEqual(0, untapped.taps)
                 self.assertGreaterEqual(

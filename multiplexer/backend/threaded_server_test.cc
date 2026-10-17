@@ -46,7 +46,9 @@ namespace {
 // "throw" throws, "block, then throw an int" waits for release() and
 // throws 3, "too big" replies over MAX_MESSAGE_SIZE, which throws where
 // the reply is built, "shut down and throw" shuts the client down and
-// throws, "event..." gets no reply, anything else is upper-cased.
+// throws, "event..." gets no reply, anything else is upper-cased. A wait
+// for a release or the barrier gives up after 60 s, a failure detector's
+// bound: a test's steps while a handler is held take what they take.
 // on_handler_exception() throws when asked to.
 struct Scripted : BaseThreadedMultiplexerServer {
   Scripted(unsigned short port, const ThreadedServerOptions& options = ThreadedServerOptions())
@@ -62,14 +64,14 @@ struct Scripted : BaseThreadedMultiplexerServer {
     }
     if (payload == "block") {
       std::unique_lock<std::mutex> lock(mutex);
-      released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return released; });
+      released_cv.wait_for(lock, std::chrono::seconds(60), [this] { return released; });
       request->no_response();
     } else if (payload == "wait") {
       std::unique_lock<std::mutex> lock(mutex);
       if (++waiting == 4) {
         released_cv.notify_all();
       } else {
-        released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return waiting >= 4; });
+        released_cv.wait_for(lock, std::chrono::seconds(60), [this] { return waiting >= 4; });
       }
       request->reply("passed", multiplexer::types::PYTHON_TEST_RESPONSE);
     } else if (payload == "later") {
@@ -80,7 +82,7 @@ struct Scripted : BaseThreadedMultiplexerServer {
     } else if (payload == "block, then throw an int") {
       {
         std::unique_lock<std::mutex> lock(mutex);
-        released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return released; });
+        released_cv.wait_for(lock, std::chrono::seconds(60), [this] { return released; });
       }
       throw 3;
     } else if (payload == "too big") {
@@ -93,7 +95,7 @@ struct Scripted : BaseThreadedMultiplexerServer {
     } else if (payload == "block, then close") {
       {
         std::unique_lock<std::mutex> lock(mutex);
-        released_cv.wait_for(lock, std::chrono::seconds(10), [this] { return released; });
+        released_cv.wait_for(lock, std::chrono::seconds(60), [this] { return released; });
       }
       close();  // from a worker while another thread closes: an error too
     } else if (payload.rfind("event", 0) == 0) {
@@ -535,7 +537,11 @@ TEST(ThreadedServer, AQueueOfNoneLetsEveryWorkerTakeARequest) {
 
 // The drops of a full queue said as one line and a count, not a line each:
 // fifty dropped while the worker is held, said by the time the server is
-// gone, since its client's shutdown says what is still counted.
+// gone, since its client's shutdown says what is still counted. Sent to a
+// frozen multiplexer and routed as one burst once it reads again, so that
+// they fall in one of the log summary's one-second windows however slow
+// this thread is between two sends: a kind quiet for a second is
+// forgotten, and its next drop said again in full.
 TEST(ThreadedServer, AFullQueueSaysItsDropsInOneLineAndACount) {
   InProcessMultiplexer mx;
   ::testing::internal::CaptureStderr();
@@ -549,8 +555,11 @@ TEST(ThreadedServer, AFullQueueSaysItsDropsInOneLineAndACount) {
     // In the handler, not merely queued: the queue's one place is the
     // first event's.
     ASSERT_TRUE(eventually([&] { return served.server.snapshot().size() == 1; })) << "the worker in the handler";
-    for (int index = 0; index < 51; ++index) {
-      requester.send("event-" + std::to_string(index), lane);
+    {
+      Freeze frozen(mx);
+      for (int index = 0; index < 51; ++index) {
+        requester.send("event-" + std::to_string(index), lane);
+      }
     }
     ASSERT_TRUE(eventually([&] { return served.server.dropped() == 50; }));
     served.server.release();
@@ -649,7 +658,7 @@ TEST(ThreadedServer, AReplyThatThrowsIsAnsweredWithBackendError) {
   Served served(mx.port);
   Requester requester(mx.port);
   multiplexer::IncomingMessage reply =
-      requester.client.query(requester.message("too big", multiplexer::types::PYTHON_TEST_REQUEST), 5);
+      requester.client.query(requester.message("too big", multiplexer::types::PYTHON_TEST_REQUEST), 60);
   EXPECT_EQ(multiplexer::types::BACKEND_ERROR, reply.third->type());
   EXPECT_EQ(1, served.server.exceptions_once(1));
 }
@@ -1003,8 +1012,8 @@ TEST(ThreadedServer, ADrainAskedForOnEveryPollStillEndsAtItsCap) {
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   });
-  EXPECT_TRUE(eventually([&] { return served.returned.load(); }, 4))
-      << "serve_forever() returned a second after the first call";
+  EXPECT_TRUE(eventually([&] { return served.returned.load(); }, 30))
+      << "serve_forever() never returned: each call began the drain again";
   asking = false;
   asker.join();
 }

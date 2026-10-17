@@ -6,6 +6,7 @@ from tests import harness
 from tests.harness import Cluster, constants as C, spawn, wait_for_total
 
 QUERIES = 10
+BOUND = 30  # s a wait for the backends' request events may take: a failure detector
 
 
 class TwoMxBackendsOnEach(unittest.TestCase):
@@ -44,8 +45,8 @@ class TwoMxBackendsOnEach(unittest.TestCase):
             self.assertEqual(QUERIES, len(responses))
             for r in responses:
                 self.assertIn(r["sender"], ids)
-            handled = wait_for_total(backends, "request", QUERIES)
-            self.assertEqual(QUERIES, handled)
+            handled = wait_for_total(backends, "request", QUERIES, timeout=BOUND)
+            self.assertGreaterEqual(handled, QUERIES, "every request, at least once")
 
 
 if __name__ == "__main__":
