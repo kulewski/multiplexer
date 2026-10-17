@@ -17,7 +17,7 @@ sequenceDiagram
     M-->>P: connection closed
     P->>M: a frame with an impossible length
     M-->>P: connection closed
-    P->>M: a frame with a bad CRC
+    P->>M: a frame with a bad checksum
     M-->>P: connection closed
     Note over M: still serving other peers afterwards
 ```

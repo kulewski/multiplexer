@@ -1,7 +1,7 @@
 //! The frame tests: the golden frames the Python package's protobuf wrote
 //! (testdata/golden.py), encoded byte for byte and decoded back; the limits
 //! a frame is refused at, where the message is built; the header's refusals
-//! and the CRC check a received body goes through.
+//! and the checksum check a received body goes through.
 
 use bytes::Bytes;
 use prost::Message as _;
@@ -211,14 +211,14 @@ fn a_header_of_length_zero_or_over_the_limit_is_refused() {
         unpack_header(bytes)
     };
     assert_eq!(None, header(0));
-    assert_eq!(Some(Header { length: 1, crc: 0xDEAD_BEEF }), header(1));
-    assert_eq!(Some(Header { length: MAX_MESSAGE_SIZE, crc: 0xDEAD_BEEF }), header(MAX_MESSAGE_SIZE as u32));
+    assert_eq!(Some(Header { length: 1, checksum: 0xDEAD_BEEF }), header(1));
+    assert_eq!(Some(Header { length: MAX_MESSAGE_SIZE, checksum: 0xDEAD_BEEF }), header(MAX_MESSAGE_SIZE as u32));
     assert_eq!(None, header(MAX_MESSAGE_SIZE as u32 + 1));
     assert_eq!(None, header(u32::MAX));
 }
 
 #[test]
-fn a_body_whose_crc_or_length_differs_is_refused() {
+fn a_body_whose_checksum_or_length_differs_is_refused() {
     let frame = encode(&message(1, 2, 100, b"payload".to_vec())).unwrap();
     let header = unpack_header(frame[..HEADER_LENGTH].try_into().unwrap()).unwrap();
     let mut body = frame[HEADER_LENGTH..].to_vec();
@@ -251,7 +251,7 @@ fn read_in_chunks(chunks: &[&[u8]]) -> Vec<super::Next> {
             loop {
                 match reader.next() {
                     super::Next::Nothing => break,
-                    error @ (super::Next::BadHeader | super::Next::BadCrc) => {
+                    error @ (super::Next::BadHeader | super::Next::BadChecksum) => {
                         seen.push(error);
                         return seen;
                     }
@@ -297,12 +297,12 @@ fn a_frame_larger_than_the_buffer_gets_one_of_its_own() {
 }
 
 #[test]
-fn a_reader_refuses_a_bad_header_and_a_bad_crc() {
+fn a_reader_refuses_a_bad_header_and_a_bad_checksum() {
     assert_eq!(vec![super::Next::BadHeader], read_in_chunks(&[&[0, 0, 0, 0, 1, 2, 3, 4]]));
     let mut frame = encode(&message(1, 2, 100, b"payload".to_vec())).unwrap().to_vec();
     let last = frame.len() - 1;
     frame[last] ^= 1;
-    assert_eq!(vec![super::Next::BadCrc], read_in_chunks(&[&frame]));
+    assert_eq!(vec![super::Next::BadChecksum], read_in_chunks(&[&frame]));
 }
 
 #[test]

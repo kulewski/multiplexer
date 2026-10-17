@@ -21,7 +21,7 @@ cargo run --bin client -- 127.0.0.1:1980 "hello multiplexer"     # in a third
 puts it on the path, as the Debian package does, and in this repository
 `bazel build //mxcontrol` builds it as `bazel-bin/mxcontrol/mxcontrol`,
 which `test.sh` uses unless `MXCONTROL` names another. cargo comes from
-rustup, Rust 1.85 or newer.
+rustup, Rust 1.89 or newer.
 
 The backend prints `ready` once it is connected, the client prints the
 answer, `HELLO MULTIPLEXER`. Asked to leave, `SIGTERM` or Ctrl-C, the

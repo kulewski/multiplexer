@@ -3,11 +3,11 @@
 // so that one step folds eight bytes into the CRC; the same CRC as one table
 // lookup per byte, about five times faster. See crc32.h for what is computed.
 //
-// Every frame's CRC is computed by its sender and checked by the multiplexer
-// and by the receiver, so this runs three times per message delivered, over
-// the whole body. One lookup per byte made each step wait for the one before:
-// measured on 2026-10-10, a 230-byte frame took about 330 ns that way
-// (0.67 GB/s) and takes about 65 ns this way (3.3 GB/s).
+// The frames carried this CRC up to 3.0.0 and carry XXH3 now (lib/xxh3.h);
+// this one makes the fingerprint of a rules file (lib/fingerprint.h), which
+// Python computes alike with zlib.crc32. One lookup per byte made each step
+// wait for the one before: measured on 2026-10-10, 230 bytes took about
+// 330 ns that way (0.67 GB/s) and take about 65 ns this way (3.3 GB/s).
 //
 // entries[0] is the usual table, the remainder of each byte value by the
 // polynomial; entries[slice] is entries[slice - 1] advanced by one more byte

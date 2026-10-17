@@ -1,6 +1,6 @@
 """a peer speaking the wire format directly, without the client library.
 
-Handshake, framing and CRC, then two TEST_EVENT messages, one with every byte
+Handshake, framing and checksum, then two TEST_EVENT messages, one with every byte
 value and one of 1 MiB, must reach a backend intact.
 """
 

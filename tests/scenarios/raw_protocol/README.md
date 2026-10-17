@@ -2,7 +2,7 @@
 
 A peer speaking the wire format directly, without the client library.
 
-Handshake, framing and CRC, then two TEST_EVENT messages, one with every byte
+Handshake, framing and checksum, then two TEST_EVENT messages, one with every byte
 value and one of 1 MiB, must reach a backend intact.
 
 ## What happens
@@ -12,7 +12,7 @@ sequenceDiagram
     participant P as raw peer (bytes)
     participant M as multiplexer
     participant L as event backend
-    P->>M: frame: length, CRC-32, CONNECTION_WELCOME{type, id}
+    P->>M: frame: length, checksum, CONNECTION_WELCOME{type, id}
     M->>P: CONNECTION_WELCOME{MULTIPLEXER, id}
     P->>M: TEST_EVENT frames, including a 1 MiB one
     M->>L: delivered intact

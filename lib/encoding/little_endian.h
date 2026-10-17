@@ -1,4 +1,4 @@
-// Little-endian uint32, the encoding of the frame header (length, CRC) on
+// Little-endian uint32, the encoding of the frame header (length, checksum) on
 // the wire; see multiplexer/io/raw_message.h.
 #ifndef MX_LIB_ENCODING_LITTLE_ENDIAN_H_
 #define MX_LIB_ENCODING_LITTLE_ENDIAN_H_

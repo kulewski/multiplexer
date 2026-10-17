@@ -71,6 +71,13 @@ cc_library(
 )
 
 cc_library(
+    name = "xxh3",
+    srcs = ["xxh3.cc"],
+    hdrs = ["xxh3.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "fork",
     srcs = ["fork.cc"],
     hdrs = ["fork.h"],
@@ -238,6 +245,16 @@ cc_test(
     srcs = ["kwargs_test.cc"],
     deps = [
         ":kwargs",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "xxh3_test",
+    size = "small",
+    srcs = ["xxh3_test.cc"],
+    deps = [
+        ":xxh3",
         "@com_google_googletest//:gtest_main",
     ],
 )

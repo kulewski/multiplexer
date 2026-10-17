@@ -15,7 +15,7 @@ published; [operations](operations.md#debug-symbols) says how to debug.
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
 | `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev`, `libasio-dev` and `libre2-dev`, which `pkg-config` looks for, to build against the library |
 | `mx_multiplexer-<version>-cp3XY-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers, and `mxcontrol`: a multiplexer, `generate_rules`, `generate_constants`, the test harness's binary | `pip` on x86_64 Linux with glibc 2.28 or newer; the `protobuf` package comes with it |
-| `mx-multiplexer-<version>.crate`, on crates.io as `mx-multiplexer` | Rust peers | cargo, Rust 1.85 or newer, on Linux |
+| `mx-multiplexer-<version>.crate`, on crates.io as `mx-multiplexer` | Rust peers | cargo, Rust 1.89 or newer, on Linux |
 | the source archive GitHub makes for the tag | everything else, through Bazel or `make` | [building.md](building.md) |
 
 Bazel consumers do not use any of these: `git_repository(commit = "<the

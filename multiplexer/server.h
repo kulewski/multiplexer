@@ -8,7 +8,7 @@
 // the helpers require, so that --config=clang proves no other thread
 // touches the state. All the work per message is _handle_message in
 // server.cc. A frame is forwarded as the RawMessage it arrived in, never
-// re-serialized: routing costs the frame's CRC, its parse, which copies
+// re-serialized: routing costs the frame's checksum, its parse, which copies
 // the payload once, a few map lookups and the writes. Everything is in one
 // translation unit, so the compiler inlines the per-message path as it did
 // when it lived in this header.

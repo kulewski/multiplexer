@@ -1,7 +1,8 @@
 """A peer that speaks the wire format directly, without the client library.
 
-Frame: little-endian uint32 length, uint32 CRC-32 of the body, body = a
-serialized MultiplexerMessage. Handshake: the peer sends CONNECTION_WELCOME
+Frame: little-endian uint32 length, uint32 checksum of the body (the low
+32 bits of its XXH3-64, which Python's standard library does not have),
+body = a serialized MultiplexerMessage. Handshake: the peer sends CONNECTION_WELCOME
 carrying a WelcomeMessage first; the multiplexer answers with its own.
 docs/wire_format.md is the reference; this file is its executable form.
 """
@@ -10,18 +11,24 @@ import random
 import socket
 import struct
 import time
-import zlib
 from typing import Any, Mapping
 
+from multiplexer._native import xxh3_64
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, WelcomeMessage
 from multiplexer.multiplexer_constants import types
 
 HEADER = struct.Struct("<II")
 
 
+def checksum(body: bytes) -> int:
+    """The checksum a frame's header carries for `body`: the low 32 bits of
+    its XXH3-64 (seed 0)."""
+    return xxh3_64(body) & 0xFFFFFFFF
+
+
 def frame(body: bytes) -> bytes:
     """A complete frame for `body`: the 8-byte header followed by the body."""
-    return HEADER.pack(len(body), zlib.crc32(body)) + body
+    return HEADER.pack(len(body), checksum(body)) + body
 
 
 class RawPeer:
@@ -69,12 +76,12 @@ class RawPeer:
         return data
 
     def receive(self, timeout: float = 10) -> MultiplexerMessage:
-        """Read one frame, check its CRC and return the parsed message."""
+        """Read one frame, check its checksum and return the parsed message."""
         self.sock.settimeout(timeout)
-        length, crc = HEADER.unpack(self._read_exactly(HEADER.size))
+        length, expected = HEADER.unpack(self._read_exactly(HEADER.size))
         body = self._read_exactly(length)
-        if zlib.crc32(body) != crc:
-            raise ValueError("CRC mismatch")
+        if checksum(body) != expected:
+            raise ValueError("checksum mismatch")
         mxmsg = MultiplexerMessage()
         mxmsg.ParseFromString(body)
         return mxmsg

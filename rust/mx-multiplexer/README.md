@@ -50,7 +50,7 @@ generate_constants your.rules --rust src/multiplexer_constants.rs`;
 `mxcontrol` is the multiplexer's command, from `pip install
 mx-multiplexer`, the Debian package or the binary of every
 [release](https://github.com/kulewski/multiplexer/releases). The crate
-runs on Linux, with Rust 1.85 or newer, and depends on mio, prost, bytes,
+runs on Linux, with Rust 1.89 or newer, and depends on mio, prost, bytes,
 libc and log.
 
 [Using the Rust library](https://github.com/kulewski/multiplexer/blob/main/docs/api_rust.md)

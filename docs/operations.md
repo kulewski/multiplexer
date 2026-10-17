@@ -664,7 +664,7 @@ good as their clocks.
 
 One multiplexer is one thread with one event loop. Every message is forwarded
 as the bytes it arrived in, without re-serialization: the cost per message is
-the frame's CRC, its parse, which copies the payload once while the message
+the frame's checksum, its parse, which copies the payload once while the message
 is routed, a few map lookups and the socket writes. Memory is the sum of the outgoing
 queues: up to `queue_size` messages per connection, and 64 small protocol
 frames past that, each held as long as it is unsent, so a slow backend can

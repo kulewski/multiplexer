@@ -1,7 +1,9 @@
 # The Bazel build on a clean distribution: exactly the packages the
 # documentation asks for, nothing else. docker/check.sh builds the image
-# and runs the build, the fast tests and the Bazel example workspaces in it;
-# BASE picks the distribution.
+# and runs the build, the fast tests, the build again optimized, as a
+# release is built, where the distribution's compiler warns of other
+# things than at -O0 (GCC 12 did, and -Werror failed it), and the Bazel
+# example workspaces in it; BASE picks the distribution.
 #
 #   docker build -f docker/Dockerfile.bazel --build-arg BASE=ubuntu:24.04 .
 ARG BASE=debian:12
@@ -26,4 +28,5 @@ COPY . /work
 # What ./check.sh runs, without the tools only development needs.
 CMD bazel build //... \
     && bazel test --test_tag_filters=-slow //... \
+    && bazel build -c opt //... \
     && ./examples/test_all.sh

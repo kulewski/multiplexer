@@ -826,7 +826,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     _frame_read(std::move(frame));
   }
 
-  // A whole frame read: its CRC checked, the frame handed over, and the
+  // A whole frame read: its checksum checked, the frame handed over, and the
   // next step of reading taken, as a step of the loop of its own when the
   // buffer holds the next frame whole.
   void _frame_read(std::shared_ptr<RawMessage> frame) {

@@ -450,9 +450,9 @@ impl Driver {
                     socket.read_ended = true;
                     return Some(Pulled::End(ReadEnd::BadHeader));
                 }
-                Next::BadCrc => {
+                Next::BadChecksum => {
                     socket.read_ended = true;
-                    return Some(Pulled::End(ReadEnd::BadCrc));
+                    return Some(Pulled::End(ReadEnd::BadChecksum));
                 }
                 Next::Nothing => {}
             }

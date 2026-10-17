@@ -15,6 +15,7 @@ LIB_SRCS := \
   lib/options.cc \
   lib/random.cc \
   lib/release.cc \
+  lib/xxh3.cc \
   multiplexer/backend/base_multiplexer_server.cc \
   multiplexer/backend/base_threaded_multiplexer_server.cc \
   multiplexer/basic_client.cc \
@@ -107,6 +108,7 @@ HEADERS := \
   lib/triple.h \
   lib/type_utils.h \
   lib/vector.h \
+  lib/xxh3.h \
   multiplexer/backend/base_multiplexer_server.h \
   multiplexer/backend/base_threaded_multiplexer_server.h \
   multiplexer/basic_client.h \
@@ -181,6 +183,7 @@ CC_TEST_SRCS := \
   lib/options_test.cc \
   lib/protobuf/stream_test.cc \
   lib/thread_checker_test.cc \
+  lib/xxh3_test.cc \
   multiplexer/backend/acknowledged_test.cc \
   multiplexer/backend/connect_test.cc \
   multiplexer/backend/serve_thread_test.cc \

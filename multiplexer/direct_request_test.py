@@ -13,13 +13,12 @@ C++ ThreadedClient's stages, tested in threaded_client_test.cc.
 import socket
 import threading
 import unittest
-import zlib
 
 from multiplexer.clients import SyncClient
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, WelcomeMessage
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import OperationFailed
-from multiplexer.testing.raw_peer import HEADER, frame
+from multiplexer.testing.raw_peer import HEADER, checksum, frame
 
 
 class DirectStage:
@@ -71,9 +70,9 @@ class DirectStage:
         """The client's next message of `type_` addressed `to` (0 for none),
         the rest skipped."""
         while True:
-            length, crc = HEADER.unpack(self._read_exactly(HEADER.size))
+            length, expected = HEADER.unpack(self._read_exactly(HEADER.size))
             body = self._read_exactly(length)
-            assert zlib.crc32(body) == crc
+            assert checksum(body) == expected
             mxmsg = MultiplexerMessage.FromString(body)
             if mxmsg.type == type_ and mxmsg.to == to:
                 return mxmsg

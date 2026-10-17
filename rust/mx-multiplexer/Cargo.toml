@@ -8,12 +8,14 @@
 # Two dependencies stand where the C++ library has asio and protobuf, mio
 # and prost; libc and log are the Rust project's own, and bytes is what
 # prost decodes payloads into. The manifest stays at edition 2021, which is
-# what the cargo-bazel of rules_rust 0.27.0 reads (rust/vendor.sh).
+# what the cargo-bazel of rules_rust 0.27.0 reads (rust/vendor.sh). Rust
+# 1.89 is the first with AVX-512's intrinsics, which the frames' checksum
+# uses where the processor has them (src/xxh3.rs).
 [package]
 name = "mx-multiplexer"
 version = "3.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 description = "Client library of the multiplexer, a message broker for services on a trusted network: requests and events routed by type through several brokers at once"
 repository = "https://github.com/kulewski/multiplexer"

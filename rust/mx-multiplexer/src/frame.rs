@@ -1,5 +1,6 @@
 //! One frame on the wire: a header of two little-endian u32, the body's
-//! length and its CRC-32, then the body, a serialized MultiplexerMessage.
+//! length and its checksum, the low 32 bits of its XXH3-64 (`xxh3`), then
+//! the body, a serialized MultiplexerMessage.
 //! Mirrors multiplexer/io/raw_message.h; docs/wire_format.md is the
 //! reference.
 //!
@@ -14,12 +15,12 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message as _;
 
-use crate::crc32::crc32;
 use crate::defaults::{MAX_KEY_SIZE, MAX_MESSAGE_SIZE};
 use crate::error::{Error, Limit, Result};
 use crate::proto::multiplexer::MultiplexerMessage;
+use crate::xxh3::xxh3_64;
 
-/// Bytes of the header: the body's length and its CRC-32.
+/// Bytes of the header: the body's length and its checksum.
 pub(crate) const HEADER_LENGTH: usize = 8;
 
 /// Refuses a body over `MAX_MESSAGE_SIZE`, which the receiving side would
@@ -51,17 +52,23 @@ pub(crate) fn encode(message: &MultiplexerMessage) -> Result<Bytes> {
     // A BytesMut grows as it is written to, so prost never runs out of room;
     // the error is its only other way to say so.
     message.encode(&mut buffer).map_err(|_| Error::TooLarge { what: Limit::Message, size, limit: MAX_MESSAGE_SIZE })?;
-    let crc = crc32(&buffer[HEADER_LENGTH..]);
+    let checksum = checksum(&buffer[HEADER_LENGTH..]);
     buffer[..4].copy_from_slice(&(size as u32).to_le_bytes());
-    buffer[4..HEADER_LENGTH].copy_from_slice(&crc.to_le_bytes());
+    buffer[4..HEADER_LENGTH].copy_from_slice(&checksum.to_le_bytes());
     Ok(buffer.freeze())
 }
 
-/// A frame's header as read: the body's length and its CRC-32.
+/// The checksum a frame's header carries for `body`: the low 32 bits of
+/// its XXH3-64.
+pub(crate) fn checksum(body: &[u8]) -> u32 {
+    xxh3_64(body) as u32
+}
+
+/// A frame's header as read: the body's length and its checksum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) length: usize,
-    pub(crate) crc: u32,
+    pub(crate) checksum: u32,
 }
 
 /// Decodes a header; `None` for a length of 0 or above `MAX_MESSAGE_SIZE`,
@@ -69,17 +76,17 @@ pub(crate) struct Header {
 /// closed (C++ `RawMessage::unpack_header`).
 pub(crate) fn unpack_header(header: [u8; HEADER_LENGTH]) -> Option<Header> {
     let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    let crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    let checksum = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
     if length == 0 || length > MAX_MESSAGE_SIZE {
         return None;
     }
-    Some(Header { length, crc })
+    Some(Header { length, checksum })
 }
 
-/// Whether `body` is the body `header` announced, its CRC-32 the header's
-/// (C++ `RawMessage::verify`).
+/// Whether `body` is the body `header` announced, its checksum the
+/// header's (C++ `RawMessage::verify`).
 pub(crate) fn verify(header: Header, body: &[u8]) -> bool {
-    body.len() == header.length && crc32(body) == header.crc
+    body.len() == header.length && checksum(body) == header.checksum
 }
 
 /// The message in a verified body, its payload a slice of `body`; an error
@@ -101,7 +108,7 @@ pub(crate) enum Next {
     Started,
     Nothing,
     BadHeader,
-    BadCrc,
+    BadChecksum,
 }
 
 /// A large frame read into a buffer of its own: its header, the buffer and
@@ -119,7 +126,7 @@ struct Large {
 /// gets a buffer of exactly its size, which reads fill directly and which
 /// becomes the frame's body without a copy, as C++ reads each body into a
 /// string of its size. Pure: the driver hands it what it reads. After a bad
-/// header or a bad CRC, which end the connection, it gives nothing more:
+/// header or a bad checksum, which end the connection, it gives nothing more:
 /// the stream cannot be resynchronized.
 #[derive(Debug)]
 pub(crate) struct FrameReader {
@@ -167,7 +174,7 @@ impl FrameReader {
             return Next::Nothing;
         }
         let next = self.take();
-        self.broken = matches!(next, Next::BadHeader | Next::BadCrc);
+        self.broken = matches!(next, Next::BadHeader | Next::BadChecksum);
         next
     }
 
@@ -180,7 +187,7 @@ impl FrameReader {
             let large = self.large.take().expect("checked");
             self.started = false;
             if !verify(large.header, &large.body) {
-                return Next::BadCrc;
+                return Next::BadChecksum;
             }
             return Next::Frame(Bytes::from(large.body));
         }
@@ -218,7 +225,7 @@ impl FrameReader {
         }
         self.started = false;
         if !verify(header, body) {
-            return Next::BadCrc;
+            return Next::BadChecksum;
         }
         Next::Frame(Bytes::copy_from_slice(body))
     }

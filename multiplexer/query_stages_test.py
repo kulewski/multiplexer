@@ -38,7 +38,6 @@ import socket
 import threading
 import time
 import unittest
-import zlib
 from typing import Callable
 
 from multiplexer.clients import SyncClient
@@ -47,7 +46,7 @@ from multiplexer.multiplexer_constants import peers, types
 from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.testing.buffers import fill_frames
-from multiplexer.testing.raw_peer import HEADER, frame
+from multiplexer.testing.raw_peer import HEADER, checksum, frame
 
 BACKEND = 0xBAC  # the instance a search finds, or an addressed query asks
 LEAVING = 0x1EA7  # the backend that had the request, refusing it as it leaves
@@ -92,9 +91,9 @@ class StandIn:
 
     def _frame(self) -> MultiplexerMessage:
         """The client's next frame, as a message."""
-        length, crc = HEADER.unpack(self._read_exactly(HEADER.size))
+        length, expected = HEADER.unpack(self._read_exactly(HEADER.size))
         body = self._read_exactly(length)
-        assert zlib.crc32(body) == crc
+        assert checksum(body) == expected
         return MultiplexerMessage.FromString(body)
 
     def _read(self) -> None:
@@ -248,9 +247,9 @@ class ThreeConnections:
 
     def _frame(self, connection: socket.socket) -> MultiplexerMessage:
         """The client's next frame on `connection`, as a message."""
-        length, crc = HEADER.unpack(self._read_exactly(connection, HEADER.size))
+        length, expected = HEADER.unpack(self._read_exactly(connection, HEADER.size))
         body = self._read_exactly(connection, length)
-        assert zlib.crc32(body) == crc
+        assert checksum(body) == expected
         return MultiplexerMessage.FromString(body)
 
     @staticmethod

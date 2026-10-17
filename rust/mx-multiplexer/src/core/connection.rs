@@ -50,8 +50,8 @@ pub(crate) enum ReadEnd {
     Error(String),
     /// A header of length 0 or over MAX_MESSAGE_SIZE.
     BadHeader,
-    /// A body whose CRC-32 is not its header's.
-    BadCrc,
+    /// A body whose checksum is not its header's.
+    BadChecksum,
 }
 
 /// The state of the outgoing direction (C++ ChannelState).
@@ -580,7 +580,7 @@ impl Core {
             ReadEnd::BadHeader => {
                 log::warn!("invalid frame header from the multiplexer at {:?}; dropping the connection", state.target)
             }
-            ReadEnd::BadCrc => log::error!("incoming message verification failed from {:?}", state.target),
+            ReadEnd::BadChecksum => log::error!("incoming message verification failed from {:?}", state.target),
         }
         self.shutdown_connection(conn);
     }

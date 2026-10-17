@@ -1,4 +1,4 @@
-// LittleEndian<uint32_t>, the frame header's length and CRC on the wire:
+// LittleEndian<uint32_t>, the frame header's length and checksum on the wire:
 // the least significant byte first, written and read back. The decode
 // reads its four bytes one statement each; read as the operands of one
 // expression, their order was unspecified, right only because gcc and

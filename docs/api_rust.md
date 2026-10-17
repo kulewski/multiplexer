@@ -16,7 +16,7 @@ the protocol with no socket, thread or clock of its own, the same core
 under every class, and [mio](https://crates.io/crates/mio) runs it, where
 the C++ library has asio. It depends on five crates: mio, prost for the
 protocol buffers, bytes, libc and log. It runs on Linux, as the
-multiplexer does, with Rust 1.85 or newer, and starts no runtime: nothing
+multiplexer does, with Rust 1.89 or newer, and starts no runtime: nothing
 in it needs tokio, though a tokio program awaits its calls as it awaits
 its own.
 

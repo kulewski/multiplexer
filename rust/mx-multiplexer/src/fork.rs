@@ -23,7 +23,10 @@
 //! (its targets and the connections closing) and says so once if it is
 //! ever full, the child then leaving that socket open until it exits.
 //!
-//! The only `unsafe` code of the crate is here: the two libc calls.
+//! The crate's `unsafe` code is here, the two libc calls, and in xxh3.rs:
+//! its calls to the functions built for the processor's vector
+//! instructions once the processor said it has them, and their loads and
+//! stores of the arrays they are given.
 
 #![allow(unsafe_code)]
 

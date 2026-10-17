@@ -40,6 +40,7 @@ using Callable = pybind11::function;
 #include "lib/memory.h"
 #include "lib/seconds.h"
 #include "lib/type_utils.h"
+#include "lib/xxh3.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/client.h"
 #include "multiplexer/endpoint.h"
@@ -326,8 +327,8 @@ struct PythonClient : public Client {
   void set_drop_observer(pybind11::object observer) { Client::set_drop_observer(drop_observer_for(observer)); }
   // The frame every send here queues: a serialized MultiplexerMessage,
   // with the id and the type mxclient gives beside it. A send that lets
-  // go of the GIL makes it after, so that the CRC of a large message holds
-  // no other thread.
+  // go of the GIL makes it after, so that the checksum of a large message
+  // holds no other thread.
   static std::shared_ptr<const RawMessage> _frame(std::string* serialized, std::uint64_t id, std::uint32_t type) {
     return std::shared_ptr<const RawMessage>(new RawMessage(serialized, id, type));
   }
@@ -766,6 +767,21 @@ PYBIND11_MODULE(_native, module) {
   module.def("parse_endpoint", &multiplexer::parse_endpoint, pybind11::arg("text"),
              pybind11::arg("default_port") = pybind11::none());
   module.def("format_endpoint", &multiplexer::format_endpoint, pybind11::arg("host"), pybind11::arg("port"));
+  // XXH3-64 of `data` (lib/xxh3.h), whose low 32 bits are the frame
+  // header's checksum, for what speaks the wire format by hand, the test
+  // harness's RawPeer: Python's standard library has no XXH3. Without the
+  // GIL, a body being up to MAX_MESSAGE_SIZE; `data`, immutable, stays held
+  // meanwhile.
+  module.def(
+      "xxh3_64",
+      [](const pybind11::bytes& data) {
+        char* bytes = nullptr;
+        Py_ssize_t size = 0;
+        PyBytes_AsStringAndSize(data.ptr(), &bytes, &size);
+        multiplexer::GilRelease release;
+        return mx::xxh3_64(bytes, static_cast<std::size_t>(size));
+      },
+      pybind11::arg("data"));
   // A Python level or verbosity is any int: one past the verbosity table,
   // which MX_LOG's constants never are, would read past it in a release
   // build, where impl::should_log's check is compiled out. ValueError

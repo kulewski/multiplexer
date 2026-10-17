@@ -1,13 +1,13 @@
-// RawMessage: header encoding, size check and CRC. See the header for the
+// RawMessage: header encoding, size check and checksum. See the header for the
 // object's life cycle.
 
 #include "multiplexer/io/raw_message.h"
 
 #include "lib/assertion.h"
-#include "lib/crc32.h"
 #include "lib/encoding/decode_from_range.h"
 #include "lib/encoding/encode_to_range.h"
 #include "lib/encoding/little_endian.h"
+#include "lib/xxh3.h"
 
 using namespace multiplexer;
 
@@ -28,7 +28,7 @@ bool RawMessage::unpack_header() {
   mx::encoders::DecodeFromRange<std::string::const_iterator, mx::encodings::LittleEndian> decoder(header_.begin(),
                                                                                                   header_.end());
   decoder(length_);
-  decoder(crc32_);
+  decoder(checksum_);
   // A valid MultiplexerMessage is never empty (`type` is required). Leave the
   // object consistent on failure so callers can check the result safely.
   if (length_ == 0 || length_ > MAX_MESSAGE_SIZE) {
@@ -60,7 +60,7 @@ std::uint32_t RawMessage::body_length(const char* header) {
 bool RawMessage::verify() {
   Assert(usability_ == READING);
   AssertMsg(!contents_.empty(), "You can't verify partial message.");
-  const bool ok = Crc32(contents_) == crc32_;
+  const bool ok = Checksum(contents_) == checksum_;
   if (!ok) {
     usability_ = NONE;
   } else {
@@ -70,12 +70,15 @@ bool RawMessage::verify() {
   return ok;
 }
 
-// Standard CRC-32 (the zlib one), so peers in any language can compute it.
-std::uint32_t RawMessage::Crc32(const std::string& message) { return mx::crc32(message.data(), message.size()); }
+// The low 32 bits of the body's XXH3-64, by the widest vector instructions
+// this processor has (lib/xxh3.cc).
+std::uint32_t RawMessage::Checksum(const std::string& message) {
+  return static_cast<std::uint32_t>(mx::xxh3_64(message.data(), message.size()));
+}
 
 void RawMessage::initialize_header() {
   mx::encoders::EncodeToRange<std::string::iterator, mx::encodings::LittleEndian> encoder(header_.begin(),
                                                                                           header_.end());
   encoder(length_);
-  encoder(crc32_);
+  encoder(checksum_);
 }

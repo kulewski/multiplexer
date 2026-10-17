@@ -1,6 +1,6 @@
 // One frame on the wire: a header of two little-endian uint32 (body length,
-// CRC-32 of the body) followed by the body, a serialized MultiplexerMessage.
-// docs/wire_format.md is the reference.
+// the low 32 bits of the body's XXH3-64, lib/xxh3.h) followed by the body,
+// a serialized MultiplexerMessage. docs/wire_format.md is the reference.
 //
 // The same object is used for reading (buffers for Asio to fill, or a
 // header and a body copied from a connection's read buffer, then
@@ -46,7 +46,7 @@ inline void check_key_size(std::size_t size) {
 }
 
 /**
- * RawMessage is a structured representation of wire format [length, crc, body].
+ * RawMessage is a structured representation of wire format [length, checksum, body].
  * It has well defined life cycles:
  *	    create empty -> read -> freeze -> use for writing
  *	    create frozen with message ->  use for writing
@@ -57,11 +57,11 @@ inline void check_key_size(std::size_t size) {
 class RawMessage {
  public:
   enum Usability { READING, WRITING, NONE, PRE_WRITING };
-  static const std::uint32_t HEADER_LENGTH = 8;  // for length_ and crc32_
+  static const std::uint32_t HEADER_LENGTH = 8;  // for length_ and checksum_
 
   // construct message suitable for reading input with ASIO
-  inline RawMessage() : usability_(READING), length_(0), crc32_(0), header_(HEADER_LENGTH, 0) {
-    static_assert(HEADER_LENGTH == sizeof(length_) + sizeof(crc32_), "the header is the length and the CRC");
+  inline RawMessage() : usability_(READING), length_(0), checksum_(0), header_(HEADER_LENGTH, 0) {
+    static_assert(HEADER_LENGTH == sizeof(length_) + sizeof(checksum_), "the header is the length and the checksum");
   }
 
   // construct message suitable for writing output with ASIO: `message`, a
@@ -69,7 +69,7 @@ class RawMessage {
   inline explicit RawMessage(const std::string& message, std::uint64_t id, std::uint32_t type)
       : usability_(PRE_WRITING),
         length_(message.size()),
-        crc32_(Crc32(message)),
+        checksum_(Checksum(message)),
         header_(HEADER_LENGTH, 0),
         contents_(message),
         id_(id),
@@ -83,7 +83,7 @@ class RawMessage {
   inline explicit RawMessage(std::string* message, std::uint64_t id, std::uint32_t type)
       : usability_(PRE_WRITING),
         length_(message->size()),
-        crc32_(Crc32(*message)),
+        checksum_(Checksum(*message)),
         header_(HEADER_LENGTH, 0),
         contents_(),
         id_(id),
@@ -203,18 +203,19 @@ class RawMessage {
   // The body length the header at `header` gives, before a frame is made
   // for it: 0 for one unpack_header() refuses.
   static std::uint32_t body_length(const char* header);
-  // Checks the CRC of the body read into get_body_buffer() and, on success,
-  // switches the object to WRITING so it can be forwarded as is.
+  // Checks the body read into get_body_buffer() against the header's
+  // checksum and, on success, switches the object to WRITING so it can be
+  // forwarded as is.
   bool verify();
 
  private:
-  static std::uint32_t Crc32(const std::string& message);
+  static std::uint32_t Checksum(const std::string& message);
   void initialize_header();
   void switch_to_writing();
 
  private:
   Usability usability_;
-  std::uint32_t length_, crc32_;
+  std::uint32_t length_, checksum_;
   std::string header_;
   std::string contents_;
   std::uint64_t id_ = 0;    // see id()

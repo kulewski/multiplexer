@@ -998,6 +998,7 @@ pybind_extension(
         ":threaded_client",
         "//lib:memory",
         "//lib:type_utils",
+        "//lib:xxh3",
         "//lib/logging",
     ],
 )

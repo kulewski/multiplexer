@@ -12,12 +12,29 @@ for the handshake and the framing.
 | Bytes | Content |
 |---|---|
 | 0 to 3 | length of the body, unsigned 32-bit, little-endian |
-| 4 to 7 | CRC-32 of the body, unsigned 32-bit, little-endian; the usual polynomial, `zlib.crc32` in Python |
+| 4 to 7 | checksum of the body: the low 32 bits of its XXH3-64, unsigned 32-bit, little-endian |
 | 8 onwards | the body: a serialized `MultiplexerMessage` |
 
-A body of length 0, a length over 128 MiB, or a CRC that does not match
-closes the connection. So does a body that is not a parseable
+A body of length 0, a length over 128 MiB, or a checksum that does not
+match closes the connection. So does a body that is not a parseable
 `MultiplexerMessage`.
+
+The checksum is XXH3, the 64-bit hash of xxHash 0.8, with seed 0
+(`XXH3_64bits` in xxHash's C library), cut to its low 32 bits: the nine
+bytes `123456789` hash to 0x72DCB18B67A17DFF, so their frame carries
+0x67A17DFF. XXH3's values have been fixed since xxHash 0.8.0, and libraries
+compute it in most languages: `xxhash.xxh3_64_intdigest(body) & 0xFFFFFFFF`
+with Python's `xxhash` package, `xxh3.Hash(body)` with Go's
+`github.com/zeebo/xxh3`, `LongHashFunction.xx3()` with Java's
+`zero-allocation-hashing`, `xxhash_rust::xxh3::xxh3_64` with Rust's
+`xxhash-rust`. The C++ library and the Rust crate compute it themselves,
+16, 32 or 64 bytes at a time by SSE2, AVX2 or AVX-512, the widest the
+processor has: a kilobyte in about 16 ns, a megabyte in about 8 µs
+(lib/xxh3.cc has the measurements). It is not a CRC: zlib's CRC-32, which
+the frames carried up to 3.0.0, takes twenty times as long for a kilobyte,
+and a peer of 3.0.0 or earlier and one newer cannot talk to each other.
+In the Python package `multiplexer._native.xxh3_64(data)` computes it,
+which RawPeer uses.
 
 ## MultiplexerMessage
 

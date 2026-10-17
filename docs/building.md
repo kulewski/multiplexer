@@ -34,7 +34,8 @@ in the soak tests.
 
 Each row is [docker/check.sh](../docker/check.sh) on that distribution with
 the packages above and nothing else: `bazel build //...`, the fast tests,
-and the Bazel example workspaces (aio, audio, echo).
+`bazel build -c opt //...`, the build a release is, and the Bazel example
+workspaces (aio, audio, echo).
 
 | System | Compiler | protobuf | Python | glibc | Result |
 |---|---|---|---|---|---|
@@ -252,8 +253,8 @@ checkout keeps its own:
 ```
 
 builds an image from the files git knows about, with exactly the packages
-in the table, and runs the build, the fast tests and the Bazel example
-workspaces in it. It is how the table above was made; run it before changing what the
+in the table, and runs the build, the fast tests, the optimized build and
+the Bazel example workspaces in it. It is how the table above was made; run it before changing what the
 build needs.
 
 ```

@@ -100,7 +100,7 @@ INDEX = [
         "`rust/mx-multiplexer/src/servers/threaded.rs` for Rust",
     ),
     (
-        "Frame layout, size limit, CRC",
+        "Frame layout, size limit, checksum",
         "multiplexer/io/raw_message.h",
         "`RawMessage`; `rust/mx-multiplexer/src/frame.rs` for Rust",
     ),

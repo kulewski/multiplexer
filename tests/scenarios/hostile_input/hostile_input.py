@@ -56,6 +56,27 @@ class HostileInput(unittest.TestCase):
             self.assertTrue(peer.closed_by_peer())
             self.assert_still_serving(cluster)
 
+    def test_frame_with_a_bad_checksum(self):
+        with Cluster(1) as cluster:
+            event_backend = spawn("event_backend", "py", mx=cluster.addresses, type=C.peers.TEST_EVENT_BACKEND, until=1)
+            event_backend.wait_for("connected", connections=1)
+            peer = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
+            peer.handshake()
+            good = frame(peer.message(b"CORRUPTED", C.types.TEST_EVENT).SerializeToString())
+            # One bit of the checksum flipped: the body is no longer what
+            # the header says it is.
+            peer.send_raw(good[:4] + bytes([good[4] ^ 1]) + good[5:])
+            self.assertTrue(peer.closed_by_peer(), "a body its checksum does not match costs the connection")
+            # The backend's first message is the next peer's: CORRUPTED, had
+            # it been routed, would have come before it.
+            welcomed = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)
+            welcomed.handshake()
+            welcomed.send(b"after the corrupted frame", C.types.TEST_EVENT)
+            self.assertEqual(0, event_backend.wait())
+            self.assertEqual(["after the corrupted frame"], [r["payload"] for r in event_backend.events_of("received")])
+            welcomed.close()
+            self.assert_still_serving(cluster)
+
     def test_unknown_peer_type_in_override_rules(self):
         with Cluster(1) as cluster:
             peer = RawPeer(cluster.mx[0].endpoint, C.peers.TEST_EVENT_CLIENT)

@@ -11,7 +11,7 @@ the front door.
 
 You need the multiplexer's command, `mxcontrol`, from `pip install
 mx-multiplexer`, the Debian package or this repository's `bazel build
-//mxcontrol`, and cargo from rustup, Rust 1.85 or newer. The first build
+//mxcontrol`, and cargo from rustup, Rust 1.89 or newer. The first build
 fetches the crate's dependencies from crates.io: mio, prost, bytes, libc
 and log, and what prost's derive macro needs while it compiles.
 

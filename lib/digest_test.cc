@@ -1,8 +1,8 @@
 // The CRC-32 of this library against published vectors and against the CRC
 // computed bit by bit from its definition, at every length up to 512 bytes
-// from every start within eight bytes and over a megabyte, since a wrong
-// checksum agreed on by both ends of the wire would go unnoticed; and the
-// fingerprint built on it. The lengths and starts cover the eight-byte steps
+// from every start within eight bytes and over a megabyte, since the
+// fingerprints built on it must be what Python's zlib.crc32 makes of the
+// same bytes; and the fingerprint itself. The lengths and starts cover the eight-byte steps
 // of mx::crc32, the tail it takes a byte at a time, and every alignment.
 #include <gtest/gtest.h>
 

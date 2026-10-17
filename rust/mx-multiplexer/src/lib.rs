@@ -21,7 +21,6 @@
 #[allow(missing_docs)]
 pub mod constants;
 mod core;
-mod crc32;
 mod defaults;
 mod driver;
 mod endpoint;
@@ -41,6 +40,7 @@ mod sync_client;
 #[cfg(test)]
 mod test_log;
 mod threaded_client;
+mod xxh3;
 
 pub use crate::core::client::DropReason;
 /// The type of a payload, `Message::payload`: reference-counted bytes, a

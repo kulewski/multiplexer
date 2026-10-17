@@ -444,7 +444,7 @@ their behaviour: `SyncClient`, `ThreadedClient`, whose calls are also
 awaited on any executor, tokio's included, with no runtime of its own,
 and the server classes `BaseMultiplexerServer` and
 `BaseThreadedMultiplexerServer`, which serve a `Handler`. `cargo add
-mx-multiplexer` adds it, Rust 1.85 or newer on Linux; the constants of
+mx-multiplexer` adds it, Rust 1.89 or newer on Linux; the constants of
 your own rules file come from `mxcontrol generate_constants your.rules
 --rust src/multiplexer_constants.rs`, written once and again whenever the
 file changes. The [Rust API](docs/api_rust.md) describes the classes, and
