@@ -70,6 +70,7 @@ bazel build --config=asan //...            # AddressSanitizer
 packaging/release_check.sh [COMMIT]        # what a release checks, before the tag; an hour or two, needs Docker
 make -j && make check                      # the build without Bazel (Makefile, docs/building.md)
 ./tests/bench.sh                           # the throughput and latency numbers the README quotes; tests/bench.sh 20000 rust with Rust peers, py with a Python backend
+tests/kafka/run.sh                         # docs/kafka.md's comparison with Kafka, every process in Docker; about ten minutes
 bazel run //compdb                         # compile_commands.json for clangd, after a debug build
 bazel test //rust/...                      # the Rust library; Bazel fetches the Rust toolchain and the crates
 bazel test --test_tag_filters=rust,-slow //...  # every Rust target: the library, the roles, the scenarios with Rust roles

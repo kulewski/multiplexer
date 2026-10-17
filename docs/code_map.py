@@ -57,6 +57,7 @@ SECTIONS = [
     ("tests/roles/rust", "Test roles in Rust"),
     ("tests/roles/rust/src", "Their modules"),
     ("tests/scenarios", "Scenarios"),
+    ("tests/kafka", "The Kafka comparison: one multiplexer beside one Kafka broker, in Docker"),
     ("examples", "The examples' shared scripts"),
     ("bazel", "Build machinery"),
     ("docker", "Clean-machine checks"),

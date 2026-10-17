@@ -10,6 +10,8 @@
 #   YAML    -> parsed with PyYAML in --check (the workflow files), no rewriting
 #   docs    -> docs/diagrams/generate.py regenerates the protocol pages,
 #              docs/code_map.py regenerates the code map from header comments,
+#              docs/kafka_charts.py docs/kafka.md's charts and tables from the
+#              Kafka comparison's runs,
 #              docs/check_mermaid.py --fast catches Mermaid syntax slips,
 #              examples/check_walkthroughs.py keeps the walkthroughs' code
 #              blocks identical to the examples' files
@@ -56,6 +58,7 @@ status=0
 if (( check )); then
   python3 docs/diagrams/generate.py --check || status=1
   python3 docs/code_map.py --check || status=1
+  python3 docs/kafka_charts.py --check || status=1
   python3 make/generate_sources.py --check || status=1
   python3 docs/check_mermaid.py --fast > /dev/null || { python3 docs/check_mermaid.py --fast; status=1; }
   python3 examples/check_walkthroughs.py > /dev/null || { python3 examples/check_walkthroughs.py; status=1; }
@@ -89,6 +92,7 @@ for path in sys.argv[1:]:
 else
   python3 docs/diagrams/generate.py
   python3 docs/code_map.py
+  python3 docs/kafka_charts.py
   python3 make/generate_sources.py
   python3 rust/generate_defaults.py
   if [[ -x "$cargo" ]]; then

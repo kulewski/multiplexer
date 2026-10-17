@@ -542,9 +542,13 @@ the others.
   arena's lock, which the allocating thread takes as it allocates.
 - **What it saves:** measured on a 24-core AMD Ryzen Threadripper PRO
   9965WX, one `SyncClient` sending events of 100 bytes through one
-  multiplexer to one consumer moved about 440,000 a second unbatched, the
-  multiplexer's CPU 2.3 s per million, and about 2,500,000 a second
-  with a 5 ms delay, 0.03 s per million.
+  multiplexer to one consumer moved about 460,000 a second unbatched, the
+  multiplexer's CPU 2.1 s per million, and about 3,800,000 a second
+  with a 5 ms delay, 0.04 s per million, its one consumer then the limit;
+  a `ThreadedClient` sending from the program's thread, its io thread
+  batching and writing, about 4,100,000 a second to four consumers.
+  [The multiplexer and Kafka, measured](kafka.md) has the setup and the
+  comparison.
 - **Receiving:** the library reads a batch into strings it keeps from one
   batch to the next, and each message from its string, so that a message
   costs the receiver its own allocations alone, the message and its

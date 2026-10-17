@@ -292,17 +292,17 @@ Bazel build.
   ([several event loops](docs/operations.md#several-event-loops)); frames forwarded
   as they arrived, never re-serialized, a burst of them read in one system
   call, one write per frame with Nagle's algorithm off on every connection: over 120,000 request/reply round
-  trips per second through one multiplexer on 70% of one core, 17 µs per
-  round trip when idle, 7 MB resident, measured with
-  [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX, and as
-  fast with Rust peers as with C++ ones.
+  trips per second through one multiplexer on three quarters of one core,
+  16 µs per round trip when idle, 7 MB resident, measured with
+  [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX, and about
+  the same with Rust peers.
 - **Many small events in one message.** A client may batch the events of
   a type, or of one key: several go in one message, which the receiving
   library, in every language, splits back into one message each, as if
   each had come alone. With no delay set, an event still goes at once
   whenever a connection has nothing left to write, and events gather only
   while the program sends faster than its connections write; a
-  `SyncClient` batching for 5 ms moved more than five times as many
+  `SyncClient` batching for 5 ms moved more than eight times as many
   100-byte events a second through one multiplexer ([batching](docs/delivery.md)).
 - **Knowing each event was processed.** A type may be confirmed, its
   events in batches or one by one: the sender's library keeps each event
@@ -354,6 +354,11 @@ Bazel build.
   Where a sender must know each event was processed, confirmed sends keep
   it in the sender's memory, not on a disk, until the receiver says so:
   at least once while the sender lives.
+  [Measured beside Kafka](docs/kafka.md) on one machine, both batching,
+  one multiplexer moved 1.4 to 3.8 times as many 100-byte records a second
+  as one Kafka broker and a fifth to four fifths more kilobyte ones;
+  neither batching, the multiplexer handed a record over in about 10 µs,
+  where Kafka took about 50.
 - **ZeroMQ:** a library without a broker, so peers need each other's
   addresses; here every peer knows only the multiplexers, and routing is
   configuration.

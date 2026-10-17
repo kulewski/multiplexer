@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="604" viewBox="0 0 960 604" role="img" aria-labelledby="title description" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<title id="title">100-byte records, both batching</title>
+<desc id="description">multiplexer, 1 producer, 1 consumer: 3.85 M/s; Kafka, 1 producer, 1 consumer: 1.12 M/s. multiplexer, 1 producer, 4 consumers: 4.11 M/s; Kafka, 1 producer, 4 consumers: 2.99 M/s. multiplexer, 4 producers, 4 consumers: 10.14 M/s; Kafka, 4 producers, 4 consumers: 2.68 M/s. multiplexer, 4 producers, 8 consumers: 11.02 M/s; Kafka, 4 producers, 8 consumers: 4.94 M/s.</desc>
+<rect width="960" height="604" rx="6" fill="#ffffff"/>
+<text x="24" y="44" font-size="24" font-weight="600" fill="#1f2328">100-byte records, both batching</text>
+<text x="24" y="78" font-size="17" fill="#59636e">records a second, as fast as each goes</text>
+<text x="24" y="106" font-size="14" fill="#59636e">the multiplexer newer than 3.0.0 · Kafka 4.3.1, librdkafka 2.8.0 · AMD Ryzen Threadripper PRO 9965WX</text>
+<line x1="210.0" y1="136" x2="210.0" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="210.0" y="558" font-size="14" text-anchor="middle" fill="#59636e">0</text>
+<line x1="316.7" y1="136" x2="316.7" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="316.7" y="558" font-size="14" text-anchor="middle" fill="#59636e">2</text>
+<line x1="423.3" y1="136" x2="423.3" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="423.3" y="558" font-size="14" text-anchor="middle" fill="#59636e">4</text>
+<line x1="530.0" y1="136" x2="530.0" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="530.0" y="558" font-size="14" text-anchor="middle" fill="#59636e">6</text>
+<line x1="636.7" y1="136" x2="636.7" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="636.7" y="558" font-size="14" text-anchor="middle" fill="#59636e">8</text>
+<line x1="743.3" y1="136" x2="743.3" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="743.3" y="558" font-size="14" text-anchor="middle" fill="#59636e">10</text>
+<line x1="850.0" y1="136" x2="850.0" y2="534" stroke="#d1d9e0" stroke-width="1"/>
+<text x="850.0" y="558" font-size="14" text-anchor="middle" fill="#59636e">12</text>
+<text x="530.0" y="590" font-size="15" text-anchor="middle" fill="#59636e">million records a second (higher is better)</text>
+<rect x="210" y="150" width="205.3" height="26" rx="3" fill="#2a78d6"/>
+<text x="196" y="162" font-size="17" text-anchor="end" fill="#1f2328">multiplexer</text>
+<text x="196" y="178" font-size="13" text-anchor="end" fill="#59636e">1 producer, 1 consumer</text>
+<text x="423.3" y="169" font-size="16" fill="#1f2328">3.85 M/s</text>
+<rect x="210" y="190" width="59.6" height="26" rx="3" fill="#c4c3bd"/>
+<text x="196" y="202" font-size="17" text-anchor="end" fill="#1f2328">Kafka</text>
+<text x="196" y="218" font-size="13" text-anchor="end" fill="#59636e">1 producer, 1 consumer</text>
+<text x="277.6" y="209" font-size="16" fill="#1f2328">1.12 M/s</text>
+<rect x="210" y="252" width="219.0" height="26" rx="3" fill="#2a78d6"/>
+<text x="196" y="264" font-size="17" text-anchor="end" fill="#1f2328">multiplexer</text>
+<text x="196" y="280" font-size="13" text-anchor="end" fill="#59636e">1 producer, 4 consumers</text>
+<text x="437.0" y="271" font-size="16" fill="#1f2328">4.11 M/s</text>
+<rect x="210" y="292" width="159.4" height="26" rx="3" fill="#c4c3bd"/>
+<text x="196" y="304" font-size="17" text-anchor="end" fill="#1f2328">Kafka</text>
+<text x="196" y="320" font-size="13" text-anchor="end" fill="#59636e">1 producer, 4 consumers</text>
+<text x="377.4" y="311" font-size="16" fill="#1f2328">2.99 M/s</text>
+<rect x="210" y="354" width="540.8" height="26" rx="3" fill="#2a78d6"/>
+<text x="196" y="366" font-size="17" text-anchor="end" fill="#1f2328">multiplexer</text>
+<text x="196" y="382" font-size="13" text-anchor="end" fill="#59636e">4 producers, 4 consumers</text>
+<text x="758.8" y="373" font-size="16" fill="#1f2328">10.14 M/s</text>
+<rect x="210" y="394" width="142.8" height="26" rx="3" fill="#c4c3bd"/>
+<text x="196" y="406" font-size="17" text-anchor="end" fill="#1f2328">Kafka</text>
+<text x="196" y="422" font-size="13" text-anchor="end" fill="#59636e">4 producers, 4 consumers</text>
+<text x="360.8" y="413" font-size="16" fill="#1f2328">2.68 M/s</text>
+<rect x="210" y="456" width="587.9" height="26" rx="3" fill="#2a78d6"/>
+<text x="196" y="468" font-size="17" text-anchor="end" fill="#1f2328">multiplexer</text>
+<text x="196" y="484" font-size="13" text-anchor="end" fill="#59636e">4 producers, 8 consumers</text>
+<text x="805.9" y="475" font-size="16" fill="#1f2328">11.02 M/s</text>
+<rect x="210" y="496" width="263.3" height="26" rx="3" fill="#c4c3bd"/>
+<text x="196" y="508" font-size="17" text-anchor="end" fill="#1f2328">Kafka</text>
+<text x="196" y="524" font-size="13" text-anchor="end" fill="#59636e">4 producers, 8 consumers</text>
+<text x="481.3" y="515" font-size="16" fill="#1f2328">4.94 M/s</text>
+</svg>

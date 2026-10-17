@@ -289,6 +289,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
   restarts, logs, the peers file, recording what was routed and driving
   it on a running cluster, sizing.
 - [Questions people ask](faq.md): why it is built this way.
+- [The multiplexer and Kafka, measured](kafka.md): what one multiplexer and
+  one Kafka broker move a second on one machine, both batching, how late
+  a record arrives, batching and not, why, and the scripts that run it
+  again.
 - [Code map](code_map.md): one line per source file and where each
   mechanism lives, generated from the files' header comments.
 

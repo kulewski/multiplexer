@@ -95,6 +95,7 @@ client.shutdown()
 - [Operations](docs/operations.md): several multiplexers, on Kubernetes (StatefulSet, headless Service), changing the rules without a restart, restarts, logs and the `MX_LOG_VERBOSITY` variable, the peers file, recording what was routed, starting and tapping a recording on a running cluster, sizing and several event loops
 - [Testing programs built on it](docs/api_python.md#testing): multiplexer.testing, real multiplexers on ephemeral ports, scripted peers, a test peer on `SyncClient` and one shaped like a production threaded peer, the mx_integration_test macro
 - [Questions people ask](docs/faq.md)
+- [The multiplexer and Kafka, measured](docs/kafka.md): one multiplexer and one Kafka broker on one machine, tuned for throughput (both batching: records a second and how late a record arrives) and for latency (neither: how late), with each side's design behind the numbers; tests/kafka/run.sh runs it again in Docker
 
 ## Recipes
 

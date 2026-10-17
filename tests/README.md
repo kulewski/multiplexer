@@ -107,6 +107,12 @@ with it the Rust toolchain Bazel would fetch.
   `./check.sh --valgrind`, which also runs memcheck over the C++ unit
   tests and every multiplexer of the scenarios with C++ roles; tagged
   `manual`, as valgrind is no requirement of the build.
+- `bench.sh` and `kafka/`: measurements, not tests. `bench.sh` gives the
+  round trips the README quotes; `kafka/run.sh` puts one multiplexer
+  beside one Kafka broker, in Docker, for [the Kafka
+  comparison](../docs/kafka.md), its programs built by `kafka/Dockerfile`
+  with the Makefile rather than Bazel, since Kafka's client library is no
+  dependency of this repository.
 
 ## Writing a scenario
 
