@@ -131,11 +131,11 @@ static inline const char* logging_get_verbosity_name(const unsigned int verbosit
 static inline std::string process_context() MX_ATTRIBUTE_ALWAYS_INLINE;
 
 /*
- * set_maximal_logging_verbosity(for_level, minimal_verbosity)
- *	Define what is the minimal verbosity of LogEntries with level
- *	for_level, which are emitted.
+ * set_maximal_logging_verbosity(for_level, maximal_verbosity)
+ *	The most verbose verbosity of the LogEntries at for_level that are
+ *	still emitted; ZEROVERBOSITY silences the level.
  */
-void set_maximal_logging_verbosity(const unsigned int for_level, const unsigned int minimal_verbosity);
+void set_maximal_logging_verbosity(const unsigned int for_level, const unsigned int maximal_verbosity);
 
 /*
  * apply_verbosity_spec(spec, error)

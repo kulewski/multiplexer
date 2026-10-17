@@ -57,6 +57,8 @@ pub enum DropReason {
 pub(crate) enum DropLine {
     IncomingQueueFull = 0,
     NoOnMessage = 1,
+    /// A threaded server's workers fell behind and its queue was full.
+    RequestsQueueFull = 2,
     SentNoRoom = 3,
     SentNoConnection = 4,
     SentConnectionLost = 5,
@@ -78,7 +80,7 @@ pub(crate) enum IncomingMode {
 #[derive(Debug, Clone)]
 pub(crate) struct Wrapper {
     pub(crate) conn: Option<ConnId>,
-    pub(crate) target: Target,
+    pub(crate) target: Arc<Target>,
     pub(crate) endpoint: Option<SocketAddr>,
     pub(crate) living: Option<LivingFlag>,
     /// The instance id of the client it belongs to.
@@ -125,7 +127,9 @@ pub(crate) struct ClientState {
     confirmed: bool,
     confirmed_enqueued: u64,
     acknowledged_version: u32,
-    acknowledged_wake: bool,
+    /// A serve loop's wake: a change acknowledged, or the last message held
+    /// for a connection gone (`take_acknowledged_wake()`).
+    pub(crate) acknowledged_wake: bool,
     pub(crate) incoming: VecDeque<Incoming>,
     incoming_max: usize,
     /// A leaving server's: what arrives is refused rather than queued
@@ -261,7 +265,7 @@ impl Core {
         }
         Wrapper {
             conn: Some(conn),
-            target: target.clone(),
+            target: Arc::new(target.clone()),
             endpoint: None,
             living: None,
             owner: self.instance_id,
@@ -274,7 +278,7 @@ impl Core {
         let state = &self.conns[&conn];
         Wrapper {
             conn: Some(conn),
-            target: state.target.clone(),
+            target: Arc::clone(&state.target),
             endpoint: state.expected_endpoint,
             living: Some(Arc::clone(&state.living_flag)),
             owner: self.instance_id,
@@ -299,9 +303,9 @@ impl Core {
         match self.client.mode {
             IncomingMode::Dispatch => self.dispatch_incoming(incoming),
             IncomingMode::Queue => {
-                if self.query_takes(&incoming) {
+                let Some(incoming) = self.query_takes(incoming) else {
                     return; // a query's, or a late reply to one
-                }
+                };
                 if self.client.refusing {
                     self.refuse(incoming);
                     return;
@@ -429,8 +433,9 @@ impl Core {
 
     /// The one place every message the program sent and the client gives
     /// up on goes through: counted, logged at the drop lines' rate, a flush
-    /// waiting for it told it was not all written, and the drop observer
-    /// told its id and why.
+    /// waiting for it told it was not all written, at once, and the drop
+    /// observer told its id and why in the pass that runs the sends'
+    /// callbacks, ahead of them.
     pub(crate) fn report_drop(&mut self, frame: &OutFrame, reason: DropReason) {
         self.client.dropped.fetch_add(1, Ordering::Relaxed);
         let (line, text) = match reason {
@@ -450,8 +455,20 @@ impl Core {
             log::warn!("{text}; id {}, type {}", frame.id, frame.r#type);
         }
         self.flushes_lost(frame.number);
-        if let Some(observer) = self.client.drop_observer.as_mut() {
-            let id = frame.id;
+        // Told in the pass after the handler this is in, which may be in
+        // the middle of the outbox's bookkeeping (process_callbacks).
+        if self.client.drop_observer.is_some() {
+            self.outbox.drop_events.push((frame.id, reason));
+            self.post_callbacks();
+        }
+    }
+
+    /// Each drop reported, told to the observer, in the pass that runs the
+    /// program's callbacks (process_callbacks) or before the sends still
+    /// followed hear 0 (end_follows).
+    pub(crate) fn tell_drops(&mut self) {
+        for (id, reason) in std::mem::take(&mut self.outbox.drop_events) {
+            let Some(observer) = self.client.drop_observer.as_mut() else { break };
             guarded(|| "the drop observer".to_string(), || observer(id, reason));
         }
     }

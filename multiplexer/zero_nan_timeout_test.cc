@@ -6,10 +6,10 @@
 // starts the attempt and returns, where an assertion threw. And a
 // SyncClient's flush of a message held when nothing is connected or on its
 // way returns at once, where with no deadline its loop had no work and an
-// assertion threw. Counted, not timed: the drops are told and counted
-// inside the call, or by a round trip through the io thread, and a
-// multiplexer frozen with the client's connection full keeps that
-// connection without room.
+// assertion threw. Counted, not timed: the drops are counted inside the
+// call and told to the observer in the next call that runs the loop, or
+// by a round trip through the io thread, and a multiplexer frozen with the
+// client's connection full keeps that connection without room.
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -83,9 +83,9 @@ MultiplexerMessage unrouted(multiplexer::Client& client, const std::string& payl
 }  // namespace
 
 // With no connection live, a message sent with 0 or NaN is dropped and
-// told at once, NO_CONNECTION, an ALL send once, its tracker reading
-// lost, and `done` hears 0 in the next call that runs the loop: it was held
-// for DEFAULT_TIMEOUT.
+// counted at once, NO_CONNECTION, an ALL send once, its tracker reading
+// lost, and told to the observer, as `done` hears 0, in the next call that
+// runs the loop: it was held for DEFAULT_TIMEOUT.
 TEST(ZeroOrNanTimeout, ASyncSendWithNoConnectionIsDroppedAtOnce) {
   Drops drops;  // before the client, whose observer writes into it
   std::vector<unsigned int> heard;
@@ -99,17 +99,18 @@ TEST(ZeroOrNanTimeout, ASyncSendWithNoConnectionIsDroppedAtOnce) {
   const MultiplexerMessage nan = unrouted(client, "nan");
   client.queue_all(nan, std::nanf(""));
   EXPECT_EQ(2u, client.dropped());
+  EXPECT_THROW(client.receive_message(0), multiplexer::Client::OperationTimedOut);  // runs the loop once
   EXPECT_EQ((std::vector<std::pair<std::uint64_t, DropReason>>{{zero.id(), DropReason::NO_CONNECTION},
                                                                {nan.id(), DropReason::NO_CONNECTION}}),
             drops.seen());
-  EXPECT_THROW(client.receive_message(0), multiplexer::Client::OperationTimedOut);  // runs the loop once
   EXPECT_EQ(std::vector<unsigned int>{0}, heard);
 }
 
 // With the connection full, its multiplexer frozen, a message sent or
-// scheduled with 0 or NaN is dropped and told at once, NO_ROOM, where it
-// waited for room DEFAULT_TIMEOUT; schedule_all() still counts the
-// connection it gave a copy to.
+// scheduled with 0 or NaN is dropped and counted at once, NO_ROOM, and
+// told in the next call that runs the loop, where it waited for room
+// DEFAULT_TIMEOUT; schedule_all() still counts the connection it gave a
+// copy to.
 TEST(ZeroOrNanTimeout, ASyncSendToAFullConnectionIsDroppedAtOnce) {
   InProcessMultiplexer mx;
   Drops drops;
@@ -136,6 +137,7 @@ TEST(ZeroOrNanTimeout, ASyncSendToAFullConnectionIsDroppedAtOnce) {
     const MultiplexerMessage all = unrouted(client, "all");
     EXPECT_EQ(1u, client.schedule_all(all, 0)) << "the connection given a copy";
     EXPECT_EQ(3u, client.dropped());
+    EXPECT_THROW(client.receive_message(0), multiplexer::Client::OperationTimedOut);  // runs the loop once
     EXPECT_EQ((std::vector<std::pair<std::uint64_t, DropReason>>{
                   {zero.id(), DropReason::NO_ROOM}, {nan.id(), DropReason::NO_ROOM}, {all.id(), DropReason::NO_ROOM}}),
               drops.seen());
@@ -144,9 +146,10 @@ TEST(ZeroOrNanTimeout, ASyncSendToAFullConnectionIsDroppedAtOnce) {
 }
 
 // ThreadedClient's sends with 0 or NaN, with no connection live, are
-// dropped and told by the time the io thread has handled them: a round
+// dropped and counted by the time the io thread has handled them: a round
 // trip through it finds nothing waiting, where each was held a
-// millisecond.
+// millisecond; and told to the observer by the time a flush after them
+// ends.
 TEST(ZeroOrNanTimeout, AThreadedSendWithNoConnectionIsDroppedAtOnce) {
   Drops drops;
   std::promise<unsigned int> zero_ended;
@@ -159,6 +162,7 @@ TEST(ZeroOrNanTimeout, AThreadedSendWithNoConnectionIsDroppedAtOnce) {
   client.send_all_serialized(nan.SerializeAsString(), nan.id(), nan.type(), std::nanf(""));
   EXPECT_EQ(0u, client.waiting_messages()) << "held for a connection";
   EXPECT_EQ(2u, client.dropped());
+  client.flush_all(30);
   EXPECT_EQ((std::vector<std::pair<std::uint64_t, DropReason>>{{zero.id(), DropReason::NO_CONNECTION},
                                                                {nan.id(), DropReason::NO_CONNECTION}}),
             drops.seen());

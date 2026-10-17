@@ -33,8 +33,8 @@ message LogEntry {
     // data class name
     optional string data_class = 9;
 
-    // workflow
-    optional bytes workflow = 10;
+    // workflow: the work flow of the message the entry is about, text
+    optional string workflow = 10;
 
     // pid
     optional uint32 pid = 11;

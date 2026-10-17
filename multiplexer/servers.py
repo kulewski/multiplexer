@@ -190,7 +190,11 @@ class BaseMultiplexerServer(MultiplexerPeer):
         Default: the `drain_seconds` given to serve_forever() have passed
         since start_draining(), or, when the drain routing turns every
         path off and asks for no last resort, every connected multiplexer
-        has confirmed it, so nothing more is on its way; a drain that
+        has confirmed it, so nothing more is on its way, and nothing the
+        server sent waits for a connection to come up
+        (Client.held_for_a_connection()): a reply made while every
+        multiplexer was down goes out once one is back, where the close
+        would drop it, its going ending the loop's wait; a drain that
         keeps a path open lasts the whole period, since work keeps
         arriving. Override to wait for your own condition, for example
         `super().drained() and not self.in_flight`."""
@@ -201,7 +205,22 @@ class BaseMultiplexerServer(MultiplexerPeer):
         # alone ending the drain; 0 and NaN end it at once (wait_seconds).
         if time.monotonic() - since >= mxclient.wait_seconds(self._drain_seconds):
             return True
-        return nothing_more_arrives(self.drain_routing) and self.conn.routing_acknowledged()
+        # With no connection live the confirmation holds at once, so what
+        # is held for the next connection is waited for too.
+        return (
+            nothing_more_arrives(self.drain_routing)
+            and self.conn.routing_acknowledged()
+            and self.conn.held_for_a_connection() == 0
+        )
+
+    def __wait(self, poll: float) -> float:
+        """What serve_forever()'s next wait may last: `poll`, and while a
+        drain with a cap runs, no longer than what is left of the cap."""
+        since = self._draining_since
+        if since is None or self._drain_seconds < 0:
+            return poll  # no drain, or one with no cap: the poll alone
+        left = max(0.0, mxclient.wait_seconds(self._drain_seconds) - (time.monotonic() - since))
+        return left if poll < 0 or left < poll else poll
 
     def should_respond_to_backend_for_packet_search(self) -> bool:
         """Whether to answer a client's search for a backend; True unless
@@ -249,9 +268,13 @@ class BaseMultiplexerServer(MultiplexerPeer):
         if one came, and calls periodic_task(); a change of the routing or
         the key filters acknowledged by every multiplexer, a drain's
         included, ends the wait as the poll's time would, so that
-        periodic_task() and drained() see it at once. `drain_seconds` is how long
+        periodic_task() and drained() see it at once, and so does the last
+        message held for a connection going. `drain_seconds` is how long
         to keep serving after start_draining(), unless drained() is
-        overridden. With `stall_seconds`, a message's handling and the
+        overridden: while a drain with a cap runs, a wait lasts no longer
+        than what is left of it, so that the cap ends the drain on time
+        whatever the poll, a negative one, no deadline, included. With
+        `stall_seconds`, a message's handling and the
         periodic_task() after it that take longer, the wait before them
         apart, dump every thread's stack to `stall_file` or stderr, for
         finding a handler that hangs; the watchdog is faulthandler's, one
@@ -280,7 +303,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
                     # Only the wait running out is the poll's timeout: what the
                     # handler raises, an OperationTimedOut of its own included,
                     # goes by on_handler_exception().
-                    received = self.__receive_one(timeout=poll, end_on_acknowledgement=True)
+                    received = self.__receive_one(timeout=self.__wait(poll), end_on_acknowledgement=True)
                 finally:
                     # The watchdog covers the handling and periodic_task(), not
                     # the wait, an idle poll being no stall, and is cancelled
@@ -326,7 +349,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
     def __receive_one(self, *args, **kwargs) -> bool:
         """Wait for one message, as loop_iter() does, and keep it as the one
         to handle: False when the time passed, or, for serve_forever(), a
-        change was acknowledged. serve_forever() calls this and
+        change was acknowledged or the last message held for a connection
+        went. serve_forever() calls this and
         __handle_received() apart, so that only the wait running out is its
         poll's timeout."""
         # The plain read: a BACKEND_ERROR is a message like any other here,
@@ -359,7 +383,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
                 message=b"the echo of a %s of %d bytes would be over MAX_MESSAGE_SIZE"
                 % (what.encode(), len(mxmsg.message)),
                 type=types.BACKEND_ERROR,
-                workflow=b"",
+                workflow="",
             )
 
     def __handle_internal_message(self):

@@ -28,7 +28,7 @@ sequenceDiagram
 ## What is checked
 
 - Every query is answered.
-- The C heap in use of the client, the backend and the multiplexer plateaus; for Python roles so do the interpreter's allocations and its object count. A per-message leak in either language, including a reference leak in the binding, fails here with the three numbers in the message.
+- The C heap in use of the client, the backend and the multiplexer plateaus; for Python roles so do the interpreter's allocations and its object count. A per-message leak in any language, including a reference leak in the binding, fails here with the three numbers in the message.
 - `check.sh --leaks` runs the same scenario under LeakSanitizer, which reports what a C++ process still holds when it exits.
 
 ## Run

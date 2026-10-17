@@ -105,18 +105,20 @@ impl Lane {
         self.0.pinned()
     }
 
-    /// The connection it holds; None until a message went through.
+    /// The connection it holds; None until a message went through, and in
+    /// a forked child, where the lane is the parent's.
     pub fn connection(&self) -> Option<Connection> {
         self.0.connection().map(Connection)
     }
 
-    /// Whether the connection it holds is live.
+    /// Whether the connection it holds is live; false in a forked child.
     pub fn connected(&self) -> bool {
         self.0.connected()
     }
 
     /// A pinned lane whose connection is gone: nothing goes through it any
-    /// more.
+    /// more. True for any lane in a forked child, where a send or a query
+    /// through it fails with `UsedAfterFork`.
     pub fn closed(&self) -> bool {
         self.0.closed()
     }
@@ -140,7 +142,7 @@ pub(crate) mod tests {
     pub(crate) fn incoming(id: u64) -> Incoming {
         let connection = Connection(Wrapper {
             conn: None,
-            target: ("10.0.0.1".to_string(), 1980),
+            target: std::sync::Arc::new(("10.0.0.1".to_string(), 1980)),
             endpoint: None,
             living: None,
             owner: 1,

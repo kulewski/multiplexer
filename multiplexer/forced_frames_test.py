@@ -26,7 +26,7 @@ from multiplexer.testing.raw_peer import RawPeer, frame
 
 RULES = runfile("tests/testing.rules")
 TINY_QUEUE = 1  # TEST_TINY_QUEUE's queue_size in the rules
-WORKFLOW = b"w" * (16 * 1024)  # copied into every reply
+WORKFLOW = "w" * (16 * 1024)  # copied into every reply
 CHUNK = b"x" * (1024 * 1024)  # what fills a peer's queue past its socket buffers
 
 
@@ -35,7 +35,7 @@ def queue_full_line(peer: RawPeer) -> str:
     return "outgoing queue full, dropping message to peer %d" % peer.instance_id
 
 
-def status_request(peer: RawPeer, workflow: bytes = b"") -> MultiplexerMessage:
+def status_request(peer: RawPeer, workflow: str = "") -> MultiplexerMessage:
     """A PEER_CONTROL from `peer` that changes nothing, asking for the
     default routing, which the multiplexer answers with a PEER_STATUS
     carrying `workflow` back."""
@@ -79,7 +79,7 @@ class ForcedFramesTest(unittest.TestCase):
                 flood.send_raw(request)
                 flood.receive_type(types.PEER_STATUS)
                 # Twice what the kernel may buffer, in replies, then the queue and its forced room twice over.
-                filling = frame(status_request(flood, b"w" * fill_size()).SerializeToString())
+                filling = frame(status_request(flood, "w" * fill_size()).SerializeToString())
                 for _ in range(FILL_FRAMES):
                     flood.send_raw(filling)
                 flood.send_raw(request * 2 * (TINY_QUEUE + FORCED_FRAMES_PAST_FULL_QUEUE))

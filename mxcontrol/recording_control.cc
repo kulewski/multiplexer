@@ -52,8 +52,13 @@ std::string RecordingControlTask::_describe(const RecordingStatus& status, bool 
     line += "not recording";
   }
   if (with_tap) {
-    line += "; " + std::string(status.tapping() ? "tapping" : "not tapping") + " (" + repr(status.taps()) + " taps, " +
-            repr(status.dropped()) + " dropped)";
+    // A count only where the status has one: the requester's tap, or the
+    // one its UNTAP ended.
+    line += "; " + std::string(status.tapping() ? "tapping" : "not tapping") + " (" + repr(status.taps()) + " taps";
+    if (status.has_dropped()) {
+      line += ", " + repr(status.dropped()) + " dropped";
+    }
+    line += ")";
   }
   return line;
 }
@@ -78,7 +83,7 @@ void RecordingControlTask::_send(Client& client, const RecordingControl& control
 }
 
 bool RecordingControlTask::_control(Client& client, const RecordingControl& control, bool with_tap,
-                                    std::vector<Answer>* answers) {
+                                    std::vector<Answer>* answers, const Other& other, std::ostream& statuses) {
   const unsigned int expected = client.connections_count();
   if (!expected) {
     std::cerr << "not connected to any multiplexer\n";
@@ -105,6 +110,9 @@ bool RecordingControlTask::_control(Client& client, const RecordingControl& cont
     }
     const MultiplexerMessage& mxmsg = *incoming.first;
     if (mxmsg.type() != multiplexer::RECORDING_STATUS || mxmsg.references() != request) {
+      if (other) {
+        other(incoming);
+      }
       continue;
     }
     RecordingStatus status;
@@ -115,12 +123,12 @@ bool RecordingControlTask::_control(Client& client, const RecordingControl& cont
     if (answers) {
       answers->emplace_back(status, incoming.second);
     }
-    std::cout << _describe(status, with_tap) << "\n";
+    statuses << _describe(status, with_tap) << "\n";
     if (status.has_error()) {
       ok = false;
     }
   }
-  std::cout.flush();
+  statuses.flush();
   if (answered.size() < expected) {
     std::cerr << (expected - answered.size()) << " of " << expected << " multiplexer(s) did not answer\n";
     ok = false;

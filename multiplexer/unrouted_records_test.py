@@ -4,7 +4,9 @@ whether the sender was told: NO_RECIPIENT only when nobody of the type is
 connected, QUEUE_FULL when every peer that takes the message has its queue
 full, NOT_ACCEPTED when none takes it by its routing; a fan-out (whom:
 ALL) also records each peer it passed over. Every such rule was recorded
-NO_RECIPIENT, which Recording.proto says is nobody connected. Counted, not
+NO_RECIPIENT, which Recording.proto says is nobody connected. A rule for
+every peer type, ALL_TYPES, is recorded the same way, where one with whom:
+ANY left no record at all. Counted, not
 timed: the peer whose queue is filled never reads, and the sender's
 marker to itself comes back only after everything it sent before was
 routed, so the recording holds all of it.
@@ -14,12 +16,12 @@ import random
 import unittest
 
 from multiplexer import recording
-from multiplexer.Multiplexer_pb2 import Routing, WelcomeMessage
+from multiplexer.Multiplexer_pb2 import MultiplexerMessageDescription, Routing, WelcomeMessage
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.Recording_pb2 import RoutedMessage
 from multiplexer.testing import Cluster, runfile
 from multiplexer.testing.buffers import fill_frames
-from multiplexer.testing.raw_peer import RawPeer
+from multiplexer.testing.raw_peer import RawPeer, frame
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 FILLER = b"x" * (64 * 1024)
@@ -88,6 +90,58 @@ class UnroutedRecordsTest(unittest.TestCase):
             {nobody: True, queue_full: True, any_off: True, all_off: True},
             {message_id: told[message_id] for message_id in (nobody, queue_full, any_off, all_off)},
             "the rule's record says the sender was told",
+        )
+
+    def test_an_all_types_rule_that_queued_nothing_is_recorded(self) -> None:
+        """A rule for every peer type, ALL_TYPES, that no peer takes, every
+        one connected having turned its routing off, the sender's included:
+        one record for the rule, as any other rule has, its peer type
+        ALL_TYPES and nobody told, whom: ALL recording each peer it passed
+        over besides; where whom: ANY, the default, left no record of the
+        message at all, though the multiplexer logged it at ERROR."""
+        with Cluster(1, rules=RULES, record=True, record_payload_bytes=1) as cluster:
+            endpoint = cluster.endpoints[0]
+            off = Routing(any=False, all=False)
+            closed = welcomed(endpoint, peers.TEST_EVENT_BACKEND, off)
+            sender = welcomed(endpoint, peers.TEST_EVENT_CLIENT, off)
+            sent = {}
+            for whom in (MultiplexerMessageDescription.RoutingRule.ANY, MultiplexerMessageDescription.RoutingRule.ALL):
+                notice = sender.message(b"to every type", types.TEST_EVENT)
+                notice.override_rrules.add(peer_type=peers.ALL_TYPES, whom=whom)
+                sender.send_raw(frame(notice.SerializeToString()))
+                sent[whom] = notice.id
+            marker = random.randint(1, 2**62)
+            sender.send(str(marker).encode(), types.TEST_EVENT, to=sender.instance_id)
+            while True:  # after everything the sender sent before
+                mxmsg = sender.receive(timeout=60)
+                if mxmsg.type == types.TEST_EVENT and mxmsg.message == str(marker).encode():
+                    break
+            cluster.mx[0].stop()
+            routed = [
+                record.routed for record in recording.read(cluster.mx[0].record_file) if record.HasField("routed")
+            ]
+            for peer in (closed, sender):
+                peer.close()
+
+        def records_of(message_id: int) -> list[tuple[int, int, int, bool]]:
+            """(disposition, recipient, recipient's type, sender told) of each record of the message, sorted."""
+            return sorted(
+                (r.disposition, r.recipient, r.recipient_peer_type, r.error_reported)
+                for r in routed
+                if r.id == message_id
+            )
+
+        rule = (RoutedMessage.NOT_ACCEPTED, 0, peers.ALL_TYPES, False)
+        self.assertEqual([rule], records_of(sent[MultiplexerMessageDescription.RoutingRule.ANY]))
+        self.assertEqual(
+            sorted(
+                [
+                    (RoutedMessage.NOT_ACCEPTED, closed.instance_id, peers.TEST_EVENT_BACKEND, False),
+                    (RoutedMessage.NOT_ACCEPTED, sender.instance_id, peers.TEST_EVENT_CLIENT, False),
+                    rule,
+                ]
+            ),
+            records_of(sent[MultiplexerMessageDescription.RoutingRule.ALL]),
         )
 
 

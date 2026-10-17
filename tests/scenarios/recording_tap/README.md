@@ -6,7 +6,7 @@ A peer taps two multiplexers and receives every record live, tagged with the mul
 records it receives as one stream, each carrying the multiplexer's id;
 nothing is written on the multiplexers' side. A tap that stops reading fills
 its outgoing queue: the multiplexer drops its records, counts them in the
-status, and keeps routing.
+status, which the answer to its UNTAP gives whole, and keeps routing.
 
 ## What happens
 
@@ -27,13 +27,15 @@ sequenceDiagram
     T->>M2: UNTAP
     Note over M1: a second tap stops reading, 1600 records routed
     Note over M1: queue full, records dropped and counted, routing unaffected
+    Note over M1: its UNTAP answered with all it dropped
 ```
 
 ## What is checked
 
 - Both multiplexers report one tap; an event sent through both connections arrives in the tap's output twice, once per multiplexer id, along with the backend's arrival; the output has no file header and no file appears on the multiplexers' side.
 - SIGINT makes the tap untap and exit 0, reporting how many records it wrote.
-- A tap that does not read loses records once its queue is full: the status counts the drops, the queries all succeed, and a file session opened beside it has every one of them.
+- A tap whose output nobody reads falls behind, the multiplexer drops records for it, and on SIGINT it writes every record it was sent, loses none on the way out, says how many the multiplexer dropped and exits 1.
+- A tap that does not read loses records once its queue is full: the status counts the drops, the answer to its UNTAP carries the count, the queries all succeed, and a file session opened beside it has every one of them.
 
 ## Run
 

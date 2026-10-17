@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use super::FlushDone;
 use super::SendDone;
-use crate::core::client::Wrapper;
+use crate::core::client::{DropReason, Wrapper};
 use crate::core::lane::Lane;
 use crate::core::timers::TimerKey;
 use crate::core::{ConnId, OutFrame, Target, Tracker};
@@ -83,6 +83,11 @@ pub(super) struct Handover {
     pub(super) to_target: Target,
 }
 
+/// The key a tracker is found by: its address, unique while it lives.
+pub(super) fn tracker_key(tracker: &Arc<Tracker>) -> usize {
+    Arc::as_ptr(tracker) as usize
+}
+
 /// A flush's handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct FlushId(pub(super) u64);
@@ -107,14 +112,20 @@ pub(crate) struct Outbox {
     pub(super) flushes: Vec<FlushId>,
     pub(super) flush_states: HashMap<FlushId, Flush>,
     pub(super) next_flush: u64,
-    pub(super) moved: Vec<(Weak<Tracker>, Wrapper)>,
+    /// The connection each followed message went to last from a dead
+    /// one, by its tracker's key; held weakly, so an entry whose tracker
+    /// is gone, its address free for another, answers nothing.
+    pub(super) moved: HashMap<usize, (Weak<Tracker>, Wrapper)>,
     pub(super) moved_compact_at: usize,
     pub(super) handovers: Vec<Handover>,
     pub(super) follows: HashMap<usize, u64>,
     pub(super) follow_states: HashMap<u64, Follow>,
     pub(super) next_follow: u64,
     pub(super) follow_events: Vec<(Arc<Tracker>, bool)>,
-    pub(crate) follow_posted: bool,
+    /// The drops reported and not told to the observer yet: told in the
+    /// pass that runs the sends' callbacks, ahead of them.
+    pub(crate) drop_events: Vec<(u64, DropReason)>,
+    pub(crate) callbacks_posted: bool,
 }
 
 impl Outbox {

@@ -55,6 +55,7 @@ rm -f "$constants"
 
 mkdir -p "$staging/DEBIAN" "$staging/usr/share/doc/multiplexer"
 cp LICENSE "$staging/usr/share/doc/multiplexer/copyright"
+cp THIRD_PARTY_NOTICES "$staging/usr/share/doc/multiplexer/"  # what the binaries hold of Asio and protobuf
 size_kb="$(du -sk "$staging/usr" | cut -f1)"
 cat > "$staging/DEBIAN/control" <<CONTROL
 Package: multiplexer

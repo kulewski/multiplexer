@@ -1,5 +1,5 @@
-# The C++ base library, one small target per header so that dependencies
-# stay explicit and generate_constants can avoid the logging library.
+# The C++ base library, one small target per header so that every
+# dependency is explicit.
 cc_library(
     name = "assert",
     srcs = ["assertion.cc"],

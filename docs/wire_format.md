@@ -5,7 +5,7 @@ that speaks this format is a peer; the libraries are a convenience, not a
 requirement. [multiplexer/testing/raw_peer.py](../multiplexer/testing/raw_peer.py) is a
 complete peer in eighty lines of Python and
 [tests/scenarios/raw_protocol/raw_protocol.py](../tests/scenarios/raw_protocol/raw_protocol.py) uses it
-to perform everything on this page.
+for the handshake and the framing.
 
 ## A frame
 
@@ -33,10 +33,10 @@ the protocol:
 | `type` | 4 | the message type; decides routing and, below 100, protocol meaning |
 | `message` | 5 | the payload, opaque bytes |
 | `references` | 7 | the id of the message this one answers |
-| `workflow` | 8 | opaque bytes for tracing, copied from request to reply by the libraries |
+| `workflow` | 8 | a trace or request id, UTF-8 text, copied from request to reply by the libraries and carried on the multiplexer's log lines and records about the message; never routed by; a binary value goes as hex or base64 |
 | `report_delivery_error` | 21 | for a `to`-addressed message: report when the target is gone |
 | `override_rrules` | 20 | routing rules carried by the message, replacing the file's |
-| `key` | 9 | what the message is about, at most `MAX_KEY_SIZE` (256) bytes: routed by the rules, it reaches a peer with a key filter for its type only when the filter takes it ([keys](keys.md)); a `to` ignores it |
+| `key` | 9 | what the message is about, UTF-8 text of at most `MAX_KEY_SIZE` (256) bytes: routed by the rules, it reaches a peer with a key filter for its type only when the filter takes it ([keys](keys.md)); a `to` ignores it |
 | `timestamp`, `compression`, `logging_method` | 6, 24, 23 | carried but not acted on by the multiplexer, except that `logging_method` gates its own log |
 
 ## The handshake
@@ -81,9 +81,14 @@ is. The peer's kernel answers the probes; it needs to do nothing.
 
 ## Protocol messages
 
-Types 1 to 99 are the protocol's. The libraries handle them themselves,
-whichever class a peer is built on, with one gap: a peer on `SyncClient` does
-not answer a `PING`.
+Types 1 to 99 are the protocol's. The libraries answer the ones below
+that ask for an answer themselves, whichever class a peer is built on, with
+one gap: a peer on `SyncClient` does not answer a `PING`. The rest reach
+the program: `ThreadedClient` and `AsyncClient` hand them to `on_message`
+and the subscriptions, a `SyncClient`'s receive returns them, a
+`DELIVERY_ERROR` for an event among them, the Python one raising
+`BackendError` for a `BACKEND_ERROR`, and a threaded server's
+`handle_message()` gets them, while `BaseMultiplexerServer` logs them.
 
 | Type | Payload | Who sends it, and what the receiver does |
 |---|---|---|

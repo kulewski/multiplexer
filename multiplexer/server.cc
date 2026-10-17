@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -64,6 +65,7 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
 // The peers file is written first, empty: a file a process that died
 // left listed its peers until the first arrival or departure here.
 void Server::start() {
+  MX_DCHECK_RUN_ON(&owner_thread());
   if (!peers_file_.empty()) {
     _write_peers_file();
   }
@@ -129,6 +131,7 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
   if (error || !self) {
     return;
   }
+  MX_DCHECK_RUN_ON(&self->owner_thread());
   std::vector<Connection::pointer> late;
   for (const auto& entry : self->accepted_) {
     Connection::pointer connection = entry.second.lock();
@@ -153,6 +156,7 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
 // before anything can be routed, so that nothing reaches the peer against
 // them; given back when the base class refuses the connection after all.
 void Server::register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
+  MX_DCHECK_RUN_ON(&owner_thread());
   if (stopping_) {
     conn->shutdown();
     return;
@@ -181,6 +185,7 @@ void Server::register_connection(Connection::pointer conn, const WelcomeMessage&
 }
 
 void Server::connection_closed(Connection* conn) {
+  MX_DCHECK_RUN_ON(&owner_thread());
   accepted_.erase(conn);
   if (departed_.erase(conn)) {
     _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
@@ -235,8 +240,15 @@ bool routable(std::uint32_t peer_type) { return peer_type > peers::MAX_MULTIPLEX
 // or network is gone gives its descriptor back after the 90 s the heartbeats
 // give an active peer, also a passive one and one that has not sent its
 // welcome, which nothing else asks; a live peer's kernel answers for it,
-// however long its program stays away. Best effort: an option the system
-// lacks keeps its default.
+// however long its program stays away. Linux probes only a connection with
+// nothing written unacknowledged, so once the multiplexer wrote to a dead
+// peer, a reply or the heartbeat it owes, retransmission ends it instead,
+// about 15 min with net.ipv4.tcp_retries2 at its default of 15
+// (docs/semantics.md). TCP_USER_TIMEOUT would end it after 90 s, but since
+// Linux 5.11 it also ends a live peer's connection whose receive window
+// stayed closed that long, a passive peer that does not read for a while,
+// which the multiplexer must leave alone: decided against. Best effort: an
+// option the system lacks keeps its default.
 void keep_alive(asio::ip::tcp::socket& socket) {
   const int descriptor = socket.native_handle();
 #if defined(TCP_KEEPIDLE)
@@ -306,14 +318,18 @@ void Server::_accept_later() {
   accept_timer_.expires_after(mx::from_seconds(ACCEPT_RETRY_SECONDS));
   accept_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
     pointer self = weak.lock();
-    if (!error && self && self->acceptor_.is_open()) {
+    if (error || !self) {
+      return;
+    }
+    MX_DCHECK_RUN_ON(&self->owner_thread());
+    if (self->acceptor_.is_open()) {
       self->_start_accept();
     }
   });
 }
 
-void Server::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
-                            std::shared_ptr<MultiplexerMessage> msg) {
+void Server::handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
+                            const std::shared_ptr<MultiplexerMessage>& msg) {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (msg->sender() == instance_id_) {
     MX_LOG(ERROR, MEDIUMVERBOSITY,
@@ -361,8 +377,8 @@ void Server::MessageMetaHandler::__create_delivery_error_message(bool include_or
 // ---------------------------------------------------------------------------
 // The routing path
 
-void Server::_handle_message(Connection::pointer conn, const MultiplexerMessage& msg,
-                             std::shared_ptr<const RawMessage> raw) {
+void Server::_handle_message(const Connection::pointer& conn, const MultiplexerMessage& msg,
+                             const std::shared_ptr<const RawMessage>& raw) {
   // Per message: off unless MX_LOG_VERBOSITY or --verbosity says CHATTERBOX.
   // The entry's data is the envelope without the payload.
   if (mx::logging::impl::should_log(DEBUG, CHATTERBOX)) {
@@ -697,8 +713,14 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
   if (!scheduled) {
     const unsigned int level = rule.delivery_error_is_error() ? ERROR : WARNING;
     const Unrouted why = _unrouted(meta_handler, rule, rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY);
-    if (rule.peer_type() == peers::ALL_TYPES && why == NONE_PRESENT) {
-      return 0;  // nobody connected to tell: no failure for ALL_TYPES (see below)
+    if (rule.peer_type() == peers::ALL_TYPES) {
+      if (why == NONE_PRESENT) {
+        return 0;  // nobody connected to tell: no failure for ALL_TYPES (see below)
+      }
+      // The rule's one record, as every other rule's, saying why it queued
+      // the message nowhere, its passes over the types recording none; no
+      // sender is told, whatever the rule's flag.
+      _record(meta_handler, 0, peers::ALL_TYPES, _unrouted_disposition(why), false);
     }
     // A key nobody takes is a kind of line per message type, in the place
     // of the instance id, and the first line of the kind names the key.
@@ -719,6 +741,7 @@ Server::Unrouted Server::_unrouted(const MessageMetaHandler& meta_handler,
   bool key_taken = false;
   bool takes = false;
   const auto look_at = [&](const ConnectionsList& connections) {
+    MX_DCHECK_RUN_ON(&owner_thread());
     for (const auto& weak : connections) {
       if (Connection::pointer connection = weak.lock()) {
         if (connection->living()) {
@@ -810,7 +833,8 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
 
   // A rule for ALL_TYPES reaches whoever is connected, a notice such as a
   // shutdown's: a type with nobody to take it is no failure, so it is
-  // neither reported nor recorded, whatever the rule's flag says.
+  // neither reported nor recorded here, whatever the rule's flag says; the
+  // rule's own record, when no type took the message, is the caller's.
   if (!scheduled && rule.peer_type() != peers::ALL_TYPES) {
     if (rule.report_delivery_error()) {
       meta_handler.failed(rule, peer_type);
@@ -818,9 +842,12 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler, ConnectionsList
     // One record for the rule, no recipient, saying why it queued the
     // message nowhere, as its log line does (_unrouted), and whether the
     // sender was told; whom: ALL recorded each peer it passed over besides.
-    const bool by_any = meta_handler.search || rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY;
-    _record(meta_handler, 0, peer_type, _unrouted_disposition(_unrouted(meta_handler, rule, by_any)),
-            rule.report_delivery_error());
+    // The reason is a walk over the type's peers: only for a record.
+    if (_recording()) {
+      const bool by_any = meta_handler.search || rule.whom() == MultiplexerMessageDescription::RoutingRule::ANY;
+      _record(meta_handler, 0, peer_type, _unrouted_disposition(_unrouted(meta_handler, rule, by_any)),
+              rule.report_delivery_error());
+    }
   }
   return scheduled;
 }
@@ -890,20 +917,22 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
 
 // whom: ANY. The first live connection with room that takes the path
 // (Routing.any), starting from the front of the type's list, then moved
-// to the back: round robin that skips busy peers and the ones taking no
-// new requests. When there is none, the same over the last resorts. A
-// keyed message skips the peers whose filter does not take its key; the
-// one list serves every key, and the peers that take one, each taken from
-// the front and moved to the back, go round robin among themselves.
+// to the back: the list runs from the peer that has waited longest for a
+// message of the type, one that just registered first, so each message
+// goes to the one that waited longest among those that take it, round
+// robin that skips busy peers and the ones taking no new requests. When
+// there is none, the same over the last resorts. A keyed message passes
+// over the peers whose filter does not take its key, each locked once on
+// the way; the one list serves every key, so a key's takers go round
+// robin among themselves, a taker that another key's messages kept busy
+// letting the others take its turn.
 unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections) {
   for (int pass = 0; pass < 2; ++pass) {
     const bool last_resort = pass == 1;
     Connection::pointer connection;
     for (ConnectionsList::iterator current = connections.begin();
-         (current = choose_free_connections(connections, current, last_resort)) != connections.end(); ++current) {
-      if (!(connection = current->lock())) {
-        continue;
-      }
+         (current = choose_free_connections(connections, current, &connection, last_resort)) != connections.end();
+         ++current) {
       if (meta_handler.keyed && !_takes_key(*connection, meta_handler)) {
         continue;
       }
@@ -931,7 +960,11 @@ void Server::_peers_changed() {
                                                           : PEERS_FILE_INTERVAL - since);
   peers_timer_.async_wait([weak = weak_pointer(shared_from_this())](const asio::error_code& error) {
     pointer self = weak.lock();
-    if (!error && self && self->peers_write_pending_) {
+    if (error || !self) {
+      return;
+    }
+    MX_DCHECK_RUN_ON(&self->owner_thread());
+    if (self->peers_write_pending_) {
       self->_write_peers_file();
     }
   });
@@ -948,7 +981,7 @@ void Server::_write_peers_file() {
   {
     std::ofstream out(tmp.c_str(), std::ios::out | std::ios::trunc);
     if (!out.good()) {
-      MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT("cannot write peers file " + tmp));
+      _peers_file_failed("cannot write peers file " + tmp + ": " + std::strerror(errno));
       return;
     }
     for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
@@ -960,12 +993,38 @@ void Server::_write_peers_file() {
           << "\n";
       ++written;
     }
+    // A write that failed, a full disk say, left the temporary file empty
+    // or cut short: it goes, and the file stays as it was.
+    out.close();
+    if (out.fail()) {
+      const std::string why = std::strerror(errno);
+      std::remove(tmp.c_str());
+      _peers_file_failed("cannot write peers file " + tmp + ": " + why);
+      return;
+    }
   }
   if (std::rename(tmp.c_str(), peers_file_.c_str()) != 0) {
-    MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT("cannot rename peers file to " + peers_file_));
+    const std::string why = std::strerror(errno);
+    std::remove(tmp.c_str());
+    _peers_file_failed("cannot rename peers file to " + peers_file_ + ": " + why);
     return;
   }
+  if (peers_file_failures_) {
+    MX_LOG(INFO, LOWVERBOSITY,
+           CTX("multiplexer.server") TEXT("peers file " + peers_file_ + " written again, after " +
+                                          repr(peers_file_failures_) + " failed write(s)"));
+    peers_file_failures_ = 0;
+    peers_file_error_.clear();
+  }
   MX_LOG(DEBUG, HIGHVERBOSITY, CTX("multiplexer.server") TEXT("peers file written: " + repr(written) + " peer(s)"));
+}
+
+void Server::_peers_file_failed(const std::string& why) {
+  ++peers_file_failures_;
+  if (why != peers_file_error_) {
+    peers_file_error_ = why;
+    MX_LOG(ERROR, LOWVERBOSITY, CTX("multiplexer.server") TEXT(why + "; " + peers_file_ + " left as it was"));
+  }
 }
 
 std::string Server::_peer_name(std::uint32_t peer_type) const {
@@ -1084,7 +1143,7 @@ Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string
     line += "; " + repr(kept) + " connected peer(s) of types the file no longer names, kept";
   }
   MX_LOG(INFO, LOWVERBOSITY, CTX("multiplexer.server") TEXT(line));
-  if (recorder_ || !taps_.empty()) {
+  if (_recording()) {
     // A recording that spans the change says so, since its header names
     // the fingerprint the file had when the session began.
     Record record;
@@ -1109,6 +1168,7 @@ Server::RulesLoad Server::_rules_failed(const std::string& why, std::string* err
 }
 
 void Server::set_rules_check_interval(float seconds) {
+  MX_DCHECK_RUN_ON(&owner_thread());
   const std::string refused = rules_check_interval_refused(seconds);
   if (!refused.empty()) {
     throw std::invalid_argument(refused);
@@ -1142,7 +1202,11 @@ void Server::_on_rules_check(weak_pointer server, const asio::error_code& error)
     return;  // cancelled: stop()
   }
   pointer self = server.lock();
-  if (!self || self->stopped()) {
+  if (!self) {
+    return;
+  }
+  MX_DCHECK_RUN_ON(&self->owner_thread());
+  if (self->stopping_) {
     return;  // stop() came after the timer had expired: do not re-arm
   }
   self->_arm_rules_check();  // first: nothing the check does can leave the next one unarmed
@@ -1213,7 +1277,14 @@ void Server::_handle_peer_control(MessageMetaHandler& meta_handler) {
     // One read on after its connection failed, its peer gone from routing,
     // changes nothing and records nothing. New key filters replace the old
     // ones whole or not at all; refused, the routing stays as it was too.
-    if (!same_key_filters(conn->key_filters(), control.key_filter())) {
+    // The answer repeats the filters: one that would be over
+    // MAX_MESSAGE_SIZE refuses the request before anything changes, where
+    // the change took effect and its answer, which no frame could carry,
+    // never went.
+    if (!_answer_fits(meta_handler, control)) {
+      status.set_error("the answer, which repeats the key filters, would be over MAX_MESSAGE_SIZE (" +
+                       repr(MAX_MESSAGE_SIZE) + " bytes)");
+    } else if (!same_key_filters(conn->key_filters(), control.key_filter())) {
       std::string error;
       if (key_patterns_.set_filters(conn->key_owner(), control.key_filter(), &error)) {
         conn->set_key_filters(control.key_filter(), conn->key_owner());
@@ -1264,7 +1335,8 @@ bool Server::start_recording(const std::string& path, const std::string& label, 
   }
   std::unique_ptr<Recorder> recorder(new Recorder(path, payload_limit));
   if (!recorder->ok()) {
-    *error = "cannot open " + path;
+    *error = recorder->foreign() ? path + " is not a recording, or one damaged before its end; left as it is"
+                                 : "cannot open " + path;
     return false;
   }
   recorder->header(instance_id_, rules_fingerprint_, label);
@@ -1327,7 +1399,11 @@ void Server::_on_session_deadline(weak_pointer server, std::uint64_t session, co
   // The session may have ended, and another begun, between the expiry and
   // this call, the cancel then too late to recall it.
   pointer self = server.lock();
-  if (self && self->sessions_ == session) {
+  if (!self) {
+    return;
+  }
+  MX_DCHECK_RUN_ON(&self->owner_thread());
+  if (self->sessions_ == session) {
     self->stop_recording("max_seconds reached");
   }
 }
@@ -1347,10 +1423,13 @@ void Server::_on_recording_flush(weak_pointer server, const asio::error_code& er
     return;  // cancelled: the session ended
   }
   pointer self = server.lock();
-  if (!self || !self->recorder_) {
-    return;  // the session ended after the timer had expired: no next tick
+  if (!self) {
+    return;
   }
   MX_DCHECK_RUN_ON(&self->owner_thread());
+  if (!self->recorder_) {
+    return;  // the session ended after the timer had expired: no next tick
+  }
   self->recorder_->flush();
   if (!self->recorder_->ok()) {
     self->stop_recording("write failed");
@@ -1360,7 +1439,7 @@ void Server::_on_recording_flush(weak_pointer server, const asio::error_code& er
 }
 
 void Server::_emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type) {
-  if (!recorder_ && taps_.empty()) {
+  if (!_recording()) {
     return;
   }
   Record record;
@@ -1369,7 +1448,7 @@ void Server::_emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32
 }
 
 void Server::_emit_peer_routing(const Connection& conn) {
-  if (!recorder_ && taps_.empty()) {
+  if (!_recording()) {
     return;
   }
   Record record;
@@ -1570,9 +1649,16 @@ void Server::_handle_recording_control(MessageMetaHandler& meta_handler) {
                  CTX("multiplexer.server") TEXT("peer " + repr(msg.sender()) + " taps the recording"));
         }
         break;
-      case RecordingControl::UNTAP:
+      case RecordingControl::UNTAP: {
+        // What the tap lost goes in the answer that ends it, which has no
+        // tap of the requester's to count from once it is gone.
+        Taps::iterator tap = _find_tap(conn.get());
+        if (tap != taps_.end()) {
+          status.set_dropped(tap->dropped);
+        }
         _untap(conn.get());
         break;
+      }
     }
   }
   _fill_status(status, conn.get());
@@ -1602,16 +1688,40 @@ void Server::_fill_status(RecordingStatus& status, const Connection* requester) 
   }
 }
 
-void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
-                    const ::google::protobuf::Message& payload) {
+MultiplexerMessage Server::_answer(const MessageMetaHandler& meta_handler, std::uint32_t type,
+                                   const ::google::protobuf::Message& payload, std::uint64_t id) const {
   MultiplexerMessage mxmsg;
-  mxmsg.set_id(random_());
+  mxmsg.set_id(id);
   mxmsg.set_sender(instance_id_);
   mxmsg.set_to(meta_handler.msg.sender());
   mxmsg.set_type(type);
   mxmsg.set_references(meta_handler.msg.id());
   mxmsg.set_workflow(meta_handler.msg.workflow());
   payload.SerializeToString(mxmsg.mutable_message());
+  return mxmsg;
+}
+
+bool Server::_answer_fits(const MessageMetaHandler& meta_handler, PeerControl& control) const {
+  PeerStatus status;
+  status.set_multiplexer_id(instance_id_);
+  *status.mutable_routing() = control.routing();
+  // Moved in and back, not copied: the filters may be most of a frame.
+  status.mutable_key_filter()->Swap(control.mutable_key_filter());
+  const bool fits =
+      _answer(meta_handler, PEER_STATUS, status, std::numeric_limits<std::uint64_t>::max()).ByteSizeLong() <=
+      MAX_MESSAGE_SIZE;
+  status.mutable_key_filter()->Swap(control.mutable_key_filter());
+  return fits;
+}
+
+void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
+                    const ::google::protobuf::Message& payload) {
+  MultiplexerMessage mxmsg = _answer(meta_handler, type, payload, random_());
+  // A workflow that would take the answer over MAX_MESSAGE_SIZE is left
+  // out of it, as from a DELIVERY_ERROR.
+  if (mxmsg.ByteSizeLong() > MAX_MESSAGE_SIZE) {
+    mxmsg.clear_workflow();
+  }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
   // Forced past a full queue: the one answer to one frame received, which
   // a peer waits for; pushed at the back, behind everything routed to the

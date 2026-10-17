@@ -3,11 +3,15 @@
 // or to the instance id named in the message.
 //
 // Server is a ConnectionsManager whose connections are peers of any type.
-// It has one thread and one io_service; all the work per message is
-// _handle_message in server.cc. A frame is forwarded as the RawMessage it
-// arrived in, never re-serialized: routing costs a few map lookups and the
-// writes. Everything is in one translation unit, so the compiler inlines
-// the per-message path as it did when it lived in this header.
+// It has one thread and one io_service, declared: every member is guarded
+// by the owner thread's checker, which the calls from outside check and
+// the helpers require, so that --config=clang proves no other thread
+// touches the state. All the work per message is _handle_message in
+// server.cc. A frame is forwarded as the RawMessage it arrived in, never
+// re-serialized: routing costs the frame's CRC, its parse, which copies
+// the payload once, a few map lookups and the writes. Everything is in one
+// translation unit, so the compiler inlines the per-message path as it did
+// when it lived in this header.
 //
 // The routing order, first match wins: a `to` field; override_rrules
 // carried by the message; protocol (meta) types below 100; the rules file's
@@ -78,6 +82,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
   // ConnectionsManager interface
   std::shared_ptr<const RawMessage> get_welcome_message() {
+    MX_DCHECK_RUN_ON(&owner_thread());
     if (!welcome_message_) {
       welcome_message_ = create_welcome_message(multiplexer::peers::MULTIPLEXER);
     }
@@ -86,9 +91,11 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
   // Entry point for every routed message, called by a Connection once the
   // frame is parsed. Drops messages that claim to come from this multiplexer
-  // and hands the rest to _handle_message.
-  void handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
-                      std::shared_ptr<MultiplexerMessage> msg);
+  // and hands the rest to _handle_message. The pointers are the caller's,
+  // held for the whole call: routing takes them by reference down to the
+  // queue that keeps the frame, and changes no reference count before.
+  void handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
+                      const std::shared_ptr<MultiplexerMessage>& msg);
 
   // Starts accepting connections, and checking the rules file.
   void start();
@@ -103,7 +110,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // by a timer (an edit on disk, which is how a Kubernetes ConfigMap
   // arrives), on SIGHUP, and on a peer's RULES_CONTROL RELOAD.
   enum class RulesLoad { LOADED, UNCHANGED, FAILED };
-  void set_rules_file(const std::string& path) { rules_file_ = path; }
+  void set_rules_file(const std::string& path) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    rules_file_ = path;
+  }
   RulesLoad load_rules(std::string* error);
   // How often start() then checks the file, in seconds; 0, a negative
   // interval or NaN never. The check puts a changed file in use once two
@@ -120,14 +130,23 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // run_multiplexer's --rules-check-interval apply.
   static std::string rules_check_interval_refused(float seconds);
   // Whether stop() has run: the acceptor is closed and nothing re-arms.
-  bool stopped() const { return stopping_; }
+  bool stopped() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return stopping_;
+  }
   // The CRC-32 of the rules in use, as the generated constants carry it.
-  const std::string& rules_fingerprint() const { return rules_fingerprint_; }
+  std::string rules_fingerprint() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return rules_fingerprint_;
+  }
 
   // For the soak tests: after every `every` routed messages, log the C heap
   // in use (mx::heap_in_use_bytes) as "memory: heap_in_use=<bytes>
   // messages=<count>". Zero, the default, logs nothing and costs nothing.
-  void set_memory_log_every(unsigned int every) { memory_log_every_ = every; }
+  void set_memory_log_every(unsigned int every) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    memory_log_every_ = every;
+  }
 
   // Recording (Recording.proto): every peer event and delivery attempt, to
   // a file session and to the peers that tapped in. Off, the default, costs
@@ -136,9 +155,18 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // --recording-dir names where such sessions go; a peer taps in with TAP
   // once --allow-tap is set. The rules fingerprint goes into the header
   // record that opens every recording session.
-  void set_recording_dir(const std::string& dir) { recording_dir_ = dir; }
-  void set_allow_tap(bool allow) { allow_tap_ = allow; }
-  bool remote_recording_enabled() const { return !recording_dir_.empty() || allow_tap_; }
+  void set_recording_dir(const std::string& dir) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    recording_dir_ = dir;
+  }
+  void set_allow_tap(bool allow) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    allow_tap_ = allow;
+  }
+  bool remote_recording_enabled() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return !recording_dir_.empty() || allow_tap_;
+  }
 
   // Opens a file session on `path`, with the peers connected right now
   // written first, and returns true; false with `error` set when a session
@@ -150,23 +178,38 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
                        std::uint64_t max_bytes, unsigned int max_seconds, std::string* error);
   // Closes the file session, if one is open, noting `reason` for the status.
   void stop_recording(const std::string& reason);
-  bool recording() const { return recorder_ != nullptr; }
+  bool recording() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return recorder_ != nullptr;
+  }
 
   // --peers-file: written atomically at start(), and on every
   // registration and unregistration, one line per connected peer:
   // "<instance id> <peer type name> <peer type>". Empty, the default,
   // writes nothing.
-  void set_peers_file(const std::string& path) { peers_file_ = path; }
+  void set_peers_file(const std::string& path) {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    peers_file_ = path;
+  }
   // How many peer types the routing index holds: those some peer has
   // connected as, a type a rule only names never entering it. For tests;
   // on the io thread.
-  std::size_t peer_types_indexed() const { return connections_by_type_.size(); }
+  std::size_t peer_types_indexed() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return connections_by_type_.size();
+  }
   // How many connections are accepted and not ended yet, registered or
   // not. For tests; on the io thread.
-  std::size_t accepted_count() const { return accepted_.size(); }
+  std::size_t accepted_count() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return accepted_.size();
+  }
 
   // Port the acceptor is bound to; meaningful when constructed with port 0.
-  unsigned short local_port() const { return acceptor_.local_endpoint().port(); }
+  unsigned short local_port() const {
+    MX_DCHECK_RUN_ON(&owner_thread());
+    return acceptor_.local_endpoint().port();
+  }
 
   // Stops the multiplexer, so that the io loop drains and run() returns;
   // used on SIGTERM and SIGINT. The acceptor closes, and so does every
@@ -193,6 +236,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void register_connection(Connection::pointer conn, const WelcomeMessage& welcome);
   void connection_closed(Connection* conn);
   void handle_orphaned_outgoing_messages(Connection*, Connection::MessagesBuffer& queue) {
+    MX_DCHECK_RUN_ON(&owner_thread());
     if (stopping_) {
       stop_dropped_queued_ += queue.size();
     }
@@ -223,6 +267,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // routing its welcome carried when that turns anything off. A
   // controller is passive (controller()).
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
+    MX_DCHECK_RUN_ON(&owner_thread());
     if (controller(new_connection->peer_type())) {
       new_connection->set_is_passive(true);
     }
@@ -240,6 +285,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // (connection_closed): after a failed write it reads on to the peer's
   // end, delivering what it reads, whose records come before it.
   void connection_unregistered(Connection* conn) {
+    MX_DCHECK_RUN_ON(&owner_thread());
     departed_.insert(conn);
     _untap(conn);
     key_patterns_.remove_owner(conn->key_owner());
@@ -248,17 +294,17 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
 
  private:
-  void _start_accept();
+  void _start_accept() MX_RUN_ON(owner_thread_);
   void _handle_accept(Connection::pointer new_connection, const asio::error_code& error);
   // An accept that failed for want of a descriptor or memory is tried
   // again after ACCEPT_RETRY_SECONDS: no event says one was freed, and
   // trying again at once spins. Other failures, such as a peer that reset
   // before its accept, try again at once.
   static constexpr float ACCEPT_RETRY_SECONDS = 0.1;
-  void _accept_later();
+  void _accept_later() MX_RUN_ON(owner_thread_);
   // stop() is over once every connection it waits for has ended: the
   // timers go, the counts and the recording are closed, and `stopped` runs.
-  void _stop_if_done();
+  void _stop_if_done() MX_RUN_ON(owner_thread_);
   static void _on_drain_deadline(weak_pointer server, const asio::error_code& error);
 
   // Everything about the message being routed, passed down the _schedule
@@ -267,8 +313,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   struct MessageMetaHandler {
     MessageMetaHandler(const MessageMetaHandler&) = delete;
     MessageMetaHandler& operator=(const MessageMetaHandler&) = delete;
-    MessageMetaHandler(const MultiplexerMessage& message, Connection::pointer connection,
-                       std::shared_ptr<const RawMessage> raw_message)
+    MessageMetaHandler(const MultiplexerMessage& message, const Connection::pointer& connection,
+                       const std::shared_ptr<const RawMessage>& raw_message)
         : msg(message), conn(connection), raw(raw_message) {}
 
     // Nobody of `type` received it under `rule`.
@@ -285,9 +331,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
 
    public:
     std::unique_ptr<DeliveryError> delivery_error_message;
+    // The caller's, as handle_message says, outliving the handler.
     const MultiplexerMessage& msg;
-    const Connection::pointer conn;
-    const std::shared_ptr<const RawMessage> raw;
+    const Connection::pointer& conn;
+    const std::shared_ptr<const RawMessage>& raw;
     // A BACKEND_FOR_PACKET_SEARCH, forwarded to every peer of the type
     // that takes rule-routed requests (Routing.any), not every one.
     bool search = false;
@@ -307,38 +354,43 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // the message when its filter for the type takes the key, and when it has
   // none for the type, which is every key. Routing passes over a peer that
   // does not, and treats the rest as it treats every peer.
-  bool _takes_key(const Connection& connection, const MessageMetaHandler& meta_handler) const {
+  bool _takes_key(const Connection& connection, const MessageMetaHandler& meta_handler) const MX_RUN_ON(owner_thread_) {
     return key_patterns_.takes(connection.key_owner(), meta_handler.key_type, meta_handler.key_evaluation);
   }
   // A keyed message's MessageMetaHandler fields for the filters of `type`;
   // nothing for a type no peer filters.
-  void _match_key(MessageMetaHandler& meta_handler, std::uint32_t type);
+  void _match_key(MessageMetaHandler& meta_handler, std::uint32_t type) MX_RUN_ON(owner_thread_);
 
   // The per-message path; see the file comment for the order of the cases.
-  void _handle_message(Connection::pointer conn, const MultiplexerMessage& msg, std::shared_ptr<const RawMessage> raw);
-  void _handle_delivery_errors(MessageMetaHandler& meta_handler);
-  bool _handle_message_inlined_rules(MessageMetaHandler& meta_handler);
-  bool _handle_meta_message(MessageMetaHandler& meta_handler);
+  void _handle_message(const Connection::pointer& conn, const MultiplexerMessage& msg,
+                       const std::shared_ptr<const RawMessage>& raw) MX_RUN_ON(owner_thread_);
+  void _handle_delivery_errors(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
+  bool _handle_message_inlined_rules(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
+  bool _handle_meta_message(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
 
   // Applying rules. The overloads narrow from a message description to its
   // list of rules to one rule to the connections of one peer type; each
   // returns how many connections the frame was queued on. Zero, with
   // report_delivery_error set, records a failure in the meta handler.
-  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription& desc);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription& desc)
+      MX_RUN_ON(owner_thread_);
   unsigned int _schedule(MessageMetaHandler& meta_handler,
-                         const ::google::protobuf::RepeatedPtrField<MultiplexerMessageDescription::RoutingRule>& rules);
-  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription::RoutingRule& rule);
+                         const ::google::protobuf::RepeatedPtrField<MultiplexerMessageDescription::RoutingRule>& rules)
+      MX_RUN_ON(owner_thread_);
+  unsigned int _schedule(MessageMetaHandler& meta_handler, const MultiplexerMessageDescription::RoutingRule& rule)
+      MX_RUN_ON(owner_thread_);
   unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
-                         const MultiplexerMessageDescription::RoutingRule& rule);
+                         const MultiplexerMessageDescription::RoutingRule& rule) MX_RUN_ON(owner_thread_);
   unsigned int _schedule(MessageMetaHandler& meta_handler, ConnectionsList& connections,
-                         const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t peer_type);
+                         const MultiplexerMessageDescription::RoutingRule& rule, std::uint32_t peer_type)
+      MX_RUN_ON(owner_thread_);
 
   // whom: ALL and whom: ANY over one peer type's connections, to the peers
   // whose Routing takes the path; the last resorts among the others get
   // the message when no such peer could. A keyed message skips the peers
   // whose filter does not take its key (_takes_key).
-  unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections);
-  unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections);
+  unsigned int send_to_all(MessageMetaHandler& meta_handler, ConnectionsList& connections) MX_RUN_ON(owner_thread_);
+  unsigned int send_to_one(MessageMetaHandler& meta_handler, ConnectionsList& connections) MX_RUN_ON(owner_thread_);
 
   // Why a rule queued a message nowhere: no living peer of the type, no
   // filter of one that takes its key, routing off on every one that does,
@@ -347,7 +399,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // _unrouted_text() is the log line for it.
   enum Unrouted : unsigned int { NONE_PRESENT, ROUTING_OFF, ALL_FULL, KEY_NOT_TAKEN };
   Unrouted _unrouted(const MessageMetaHandler& meta_handler, const MultiplexerMessageDescription::RoutingRule& rule,
-                     bool by_any) const;
+                     bool by_any) const MX_RUN_ON(owner_thread_);
   std::string _unrouted_text(Unrouted why, std::uint32_t peer_type, const MessageMetaHandler& meta_handler) const;
   // How a recording says it: NO_RECIPIENT, NOT_ACCEPTED, QUEUE_FULL or KEY_NOT_TAKEN.
   static RoutedMessage::Disposition _unrouted_disposition(Unrouted why);
@@ -365,15 +417,17 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     KEY_TOO_LONG,   // a key over MAX_KEY_SIZE
   };
   // A peer's copy its full queue refused; the line names the peer.
-  void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection);
+  void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection)
+      MX_RUN_ON(owner_thread_);
 
   // Recording. A record is built once per delivery attempt, one for each
   // recipient of a message, and goes to the file session and to every
   // tap; nothing is built while neither exists. Of the payload it copies
   // what the sink that keeps the most keeps (_payload_kept), not more.
+  bool _recording() const MX_RUN_ON(owner_thread_) { return recorder_ || !taps_.empty(); }
   void _record(const MessageMetaHandler& meta_handler, std::uint64_t recipient, std::uint32_t recipient_type,
-               RoutedMessage::Disposition disposition, bool error_reported) {
-    if (!recorder_ && taps_.empty()) {
+               RoutedMessage::Disposition disposition, bool error_reported) MX_RUN_ON(owner_thread_) {
+    if (!_recording()) {
       return;
     }
     // A message of the multiplexer's own, a DELIVERY_ERROR, is routed
@@ -387,19 +441,19 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
   // The most of a payload a sink keeps: the file session's limit or a
   // tap's, the largest, 0 when one keeps all of it.
-  unsigned int _payload_kept() const;
-  void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type);
-  void _emit_peer_routing(const Connection& conn);
+  unsigned int _payload_kept() const MX_RUN_ON(owner_thread_);
+  void _emit_peer(PeerEvent::Kind kind, std::uint64_t peer_id, std::uint32_t peer_type) MX_RUN_ON(owner_thread_);
+  void _emit_peer_routing(const Connection& conn) MX_RUN_ON(owner_thread_);
   // Stamps `record`, writes it to the file session, closing the session at
   // its cap, and streams it to every tap. A routed message's payload is cut
   // in place for each sink's limit, the longest first, so that it is never
   // copied, and the record serialized once for each length the taps keep.
-  void _emit(Record& record);
+  void _emit(Record& record) MX_RUN_ON(owner_thread_);
   // `record` serialized as the taps get it, stamped with this multiplexer's
   // id, cut to fit a tap's frame within MAX_MESSAGE_SIZE when it would not:
   // see the definition.
-  std::string _tap_record(Record& record);
-  MultiplexerMessage _tap_frame(std::uint64_t peer_id);
+  std::string _tap_record(Record& record) MX_RUN_ON(owner_thread_);
+  MultiplexerMessage _tap_frame(std::uint64_t peer_id) MX_RUN_ON(owner_thread_);
 
   // A peer receiving every record as RECORDING_RECORD messages.
   struct Tap {
@@ -412,9 +466,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // One record, `serialized`, to `tap` as a RECORDING_RECORD message; one
   // too big for MAX_MESSAGE_SIZE even so, or that its full outgoing queue
   // refuses, is counted as dropped.
-  void _stream(Tap& tap, const std::string& serialized);
-  Taps::iterator _find_tap(const Connection* conn);
-  void _untap(const Connection* conn);
+  void _stream(Tap& tap, const std::string& serialized) MX_RUN_ON(owner_thread_);
+  Taps::iterator _find_tap(const Connection* conn) MX_RUN_ON(owner_thread_);
+  void _untap(const Connection* conn) MX_RUN_ON(owner_thread_);
 
   // What a file session was, kept after it closed for the status.
   struct Session {
@@ -428,11 +482,20 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   };
 
   // RECORDING_CONTROL from a peer: carry it out and answer RECORDING_STATUS.
-  void _handle_recording_control(MessageMetaHandler& meta_handler);
-  void _fill_status(RecordingStatus& status, const Connection* requester);
+  void _handle_recording_control(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
+  void _fill_status(RecordingStatus& status, const Connection* requester) MX_RUN_ON(owner_thread_);
   // Queues `payload` as a message of `type` on the sender's connection,
   // referencing the message being handled.
-  void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload);
+  void _reply(const MessageMetaHandler& meta_handler, std::uint32_t type, const ::google::protobuf::Message& payload)
+      MX_RUN_ON(owner_thread_);
+  // The frame _reply sends, its id `id`.
+  MultiplexerMessage _answer(const MessageMetaHandler& meta_handler, std::uint32_t type,
+                             const ::google::protobuf::Message& payload, std::uint64_t id) const
+      MX_RUN_ON(owner_thread_);
+  // Whether the PEER_STATUS that would answer `control` once applied fits
+  // a frame: measured on that frame, its id the largest, which no id the
+  // answer gets makes longer; `control` is as it was after.
+  bool _answer_fits(const MessageMetaHandler& meta_handler, PeerControl& control) const MX_RUN_ON(owner_thread_);
   // The deadline of file session number `session`: stops it unless it
   // ended already, its completion queued before a stop's cancel came.
   static void _on_session_deadline(weak_pointer server, std::uint64_t session, const asio::error_code& error);
@@ -443,32 +506,32 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // be a system call each. start_recording() arms the timer and
   // stop_recording() cancels it: nothing ticks without a session.
   static constexpr std::chrono::seconds RECORDING_FLUSH_INTERVAL{1};
-  void _arm_recording_flush();
+  void _arm_recording_flush() MX_RUN_ON(owner_thread_);
   static void _on_recording_flush(weak_pointer server, const asio::error_code& error);
 
   // RULES_CONTROL from a peer: reload if asked, answer RULES_STATUS.
-  void _handle_rules_control(MessageMetaHandler& meta_handler);
+  void _handle_rules_control(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
   // PEER_CONTROL from a peer: its routing and key filters from now on,
   // answered with PEER_STATUS once in effect, or with the error that left
   // both as they were.
-  void _handle_peer_control(MessageMetaHandler& meta_handler);
+  void _handle_peer_control(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
   // A message type's name for a log line: from the rules, or its number.
   std::string _type_name(std::uint32_t type) const;
-  void _fill_rules_status(RulesStatus& status);
+  void _fill_rules_status(RulesStatus& status) MX_RUN_ON(owner_thread_);
   // The file's bytes, or false with `error` set: no file named,
   // unreadable, or empty (nothing at all, or caught between a truncate
   // and the write that follows).
-  bool _read_rules_file(std::string* text, std::string* error);
+  bool _read_rules_file(std::string* text, std::string* error) MX_RUN_ON(owner_thread_);
   // The rest of load_rules(): `text` compared with the rules in use,
   // parsed apart and put in use when it differs and is good.
-  RulesLoad _apply_rules_text(const std::string& text, std::string* error);
+  RulesLoad _apply_rules_text(const std::string& text, std::string* error) MX_RUN_ON(owner_thread_);
   // The file could not be put in use: `why` goes to the caller's `error`
   // and is kept for the status, logged when it is news.
-  RulesLoad _rules_failed(const std::string& why, std::string* error);
+  RulesLoad _rules_failed(const std::string& why, std::string* error) MX_RUN_ON(owner_thread_);
   // The rules check timer: _check_rules_file() every rules_check_interval_.
-  void _arm_rules_check();
+  void _arm_rules_check() MX_RUN_ON(owner_thread_);
   static void _on_rules_check(weak_pointer server, const asio::error_code& error);
-  void _check_rules_file();
+  void _check_rules_file() MX_RUN_ON(owner_thread_);
 
   // The peers file follows the connections at most PEERS_FILE_INTERVAL
   // behind: a change arms one write, at once when the last was longer ago,
@@ -477,58 +540,68 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // file, O(N^2) on the io thread. A stop that ends writes what is pending
   // itself.
   static constexpr std::chrono::milliseconds PEERS_FILE_INTERVAL{10};
-  void _peers_changed();
+  void _peers_changed() MX_RUN_ON(owner_thread_);
   // The peers file, if configured: every living registered peer.
-  void _write_peers_file();
+  void _write_peers_file() MX_RUN_ON(owner_thread_);
+  // A write of the peers file that failed, `why` with its reason: logged
+  // at ERROR when it is news, the first failure or another reason than the
+  // last one's, and counted for the line that says the file is written
+  // again. A file that stays unwritable while peers come and go logged
+  // the same line, with no reason, at every arrival and departure.
+  void _peers_file_failed(const std::string& why) MX_RUN_ON(owner_thread_);
   // A peer type's name for the peers file: from the rules, or the reserved name.
   std::string _peer_name(std::uint32_t peer_type) const;
 
  private:
-  asio::ip::tcp::acceptor acceptor_;
-  std::shared_ptr<const RawMessage> welcome_message_;
+  asio::ip::tcp::acceptor acceptor_ MX_GUARDED_BY(owner_thread_);
+  std::shared_ptr<const RawMessage> welcome_message_ MX_GUARDED_BY(owner_thread_);
   asio::io_service& io_service_;
-  unsigned int memory_log_every_ = 0;
-  unsigned long routed_messages_ = 0;
-  std::string rules_file_;
-  std::string rules_fingerprint_;
-  std::uint64_t rules_loaded_us_ = 0;
-  std::string rules_last_error_;           // why the file on disk is not in use; empty while it is
-  std::string rules_failed_fingerprint_;   // the content that failed last, not parsed again while it stays
-  std::string rules_pending_fingerprint_;  // a change the timer saw once; applied when seen again
-  float rules_check_interval_ = 0;
-  asio::steady_timer rules_timer_;
-  std::string recording_dir_;
-  bool allow_tap_ = false;
-  std::unique_ptr<Recorder> recorder_;
-  Session session_;
-  std::uint64_t sessions_ = 0;  // file sessions started, the last one's number
-  asio::steady_timer session_timer_;
-  asio::steady_timer flush_timer_;  // the session's flush, armed while it is open
-  Taps taps_;
-  std::string peers_file_;
-  bool peers_write_pending_ = false;  // a write of the peers file is armed on peers_timer_
-  std::chrono::steady_clock::time_point peers_written_at_;
-  asio::steady_timer peers_timer_;
+  unsigned int memory_log_every_ MX_GUARDED_BY(owner_thread_) = 0;
+  unsigned long routed_messages_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::string rules_file_ MX_GUARDED_BY(owner_thread_);
+  std::string rules_fingerprint_ MX_GUARDED_BY(owner_thread_);
+  std::uint64_t rules_loaded_us_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::string rules_last_error_ MX_GUARDED_BY(owner_thread_);  // why the file on disk is not in use; empty while it is
+  std::string rules_failed_fingerprint_
+      MX_GUARDED_BY(owner_thread_);  // the content that failed last, not parsed again while it stays
+  std::string rules_pending_fingerprint_
+      MX_GUARDED_BY(owner_thread_);  // a change the timer saw once; applied when seen again
+  float rules_check_interval_ MX_GUARDED_BY(owner_thread_) = 0;
+  asio::steady_timer rules_timer_ MX_GUARDED_BY(owner_thread_);
+  std::string recording_dir_ MX_GUARDED_BY(owner_thread_);
+  bool allow_tap_ MX_GUARDED_BY(owner_thread_) = false;
+  std::unique_ptr<Recorder> recorder_ MX_GUARDED_BY(owner_thread_);
+  Session session_ MX_GUARDED_BY(owner_thread_);
+  std::uint64_t sessions_ MX_GUARDED_BY(owner_thread_) = 0;  // file sessions started, the last one's number
+  asio::steady_timer session_timer_ MX_GUARDED_BY(owner_thread_);
+  asio::steady_timer flush_timer_ MX_GUARDED_BY(owner_thread_);  // the session's flush, armed while it is open
+  Taps taps_ MX_GUARDED_BY(owner_thread_);
+  std::string peers_file_ MX_GUARDED_BY(owner_thread_);
+  bool peers_write_pending_ MX_GUARDED_BY(owner_thread_) = false;  // a write of the peers file is armed on peers_timer_
+  std::chrono::steady_clock::time_point peers_written_at_ MX_GUARDED_BY(owner_thread_);
+  std::string peers_file_error_ MX_GUARDED_BY(owner_thread_);  // the last failed write's line, empty after a good one
+  std::uint64_t peers_file_failures_ MX_GUARDED_BY(owner_thread_) = 0;  // failed writes since the last good one
+  asio::steady_timer peers_timer_ MX_GUARDED_BY(owner_thread_);
 
   // Every connection accepted and not yet ended, registered or not, for
   // stop(); keyed by address, which connection_closed() erases.
-  std::map<const Connection*, Connection::weak_pointer> accepted_;
+  std::map<const Connection*, Connection::weak_pointer> accepted_ MX_GUARDED_BY(owner_thread_);
   // Unregistered, their DISCONNECTED recorded when they close.
-  std::set<const Connection*> departed_;
-  asio::steady_timer accept_timer_;
+  std::set<const Connection*> departed_ MX_GUARDED_BY(owner_thread_);
+  asio::steady_timer accept_timer_ MX_GUARDED_BY(owner_thread_);
   // stop(): whether it ran, its deadline for the drain, its callback, and
   // what it dropped, said in its last line.
-  bool stopping_ = false;
-  bool stop_done_ = false;
-  std::chrono::steady_clock::time_point stop_started_;
-  asio::steady_timer drain_timer_;
-  std::function<void()> on_stopped_;
-  std::uint64_t stop_dropped_queued_ = 0;
-  std::uint64_t stop_dropped_read_ = 0;
+  bool stopping_ MX_GUARDED_BY(owner_thread_) = false;
+  bool stop_done_ MX_GUARDED_BY(owner_thread_) = false;
+  std::chrono::steady_clock::time_point stop_started_ MX_GUARDED_BY(owner_thread_);
+  asio::steady_timer drain_timer_ MX_GUARDED_BY(owner_thread_);
+  std::function<void()> on_stopped_ MX_GUARDED_BY(owner_thread_);
+  std::uint64_t stop_dropped_queued_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::uint64_t stop_dropped_read_ MX_GUARDED_BY(owner_thread_) = 0;
   // The lines about messages that went nowhere: see LogSummary.
-  LogSummary drops_;
+  LogSummary drops_ MX_GUARDED_BY(owner_thread_);
   // The patterns of every connected peer's key filters, by message type.
-  KeyPatterns key_patterns_;
+  KeyPatterns key_patterns_ MX_GUARDED_BY(owner_thread_);
 };  // class Server
 
 };  // namespace multiplexer

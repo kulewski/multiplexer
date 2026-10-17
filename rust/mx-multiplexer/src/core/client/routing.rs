@@ -249,8 +249,9 @@ impl Core {
         }
     }
 
-    /// Whether a change was acknowledged since the last call, which clears
-    /// it: what ends a serve loop's wait early.
+    /// Whether a change was acknowledged, or the last message held for a
+    /// connection went, since the last call, which clears it: what ends a
+    /// serve loop's wait early, each a reason for a drain to look again.
     pub(crate) fn take_acknowledged_wake(&mut self) -> bool {
         std::mem::take(&mut self.client.acknowledged_wake)
     }

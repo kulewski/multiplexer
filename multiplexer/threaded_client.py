@@ -95,6 +95,10 @@ class ThreadedClient:
         counts them. Like `on_message`, it is held until shutdown().
         `key_filters` is set_key_filters() made before the first
         connection, so that its welcome carries them.
+
+        `on_message` may run before the constructor returns, once the first
+        multiplexer welcomed the client: a handler that needs the client
+        passes no addresses and calls connect_all() once it is assigned.
         """
 
         def native_callback(raw: bytes, connection: Any) -> None:
@@ -222,6 +226,14 @@ class ThreadedClient:
         Not from the io thread."""
         return self._native.routing_acknowledged()
 
+    def held_for_a_connection(self) -> int:
+        """How many messages wait for a connection to come up: sent while
+        none was live, or left by one that died with none to take them,
+        each going out in order once one is registered, or given up on at
+        its own deadline. What the server classes' drains wait for, the
+        close dropping them. Not from the io thread."""
+        return self._native.held_for_a_connection()
+
     def flush_all(self, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """Wait until everything sent before the call has been written or
         given up on, or `timeout` seconds; True when every one was written,
@@ -230,8 +242,9 @@ class ThreadedClient:
         counts, as does what is queued on a connection; what is sent after
         the call does not, so a flush ends however busy the client is, a
         message a dying connection hands to another included. After
-        shutdown() it returns True at once, nothing being left to wait for.
-        What shutdown() does first. Not from the io thread."""
+        shutdown() it returns True at once: what is left to write is the
+        shutdown's, which every shutdown() call waits for. What shutdown()
+        does first. Not from the io thread."""
         return self._native.flush_all(timeout)
 
     def random(self) -> int:
@@ -332,6 +345,14 @@ class ThreadedClient:
         """flush_all() with `notify(flushed)` on the io thread instead of
         the wait; what multiplexer.aio awaits."""
         self._native.flush_all_and_notify(timeout, notify)
+
+    def _first_dropped_full(self) -> bool:
+        """A request the threaded server dropped for a full queue, counted
+        with the client's own lines about messages that went nowhere, as
+        the C++ server counts it: True for the first of a run, which the
+        server logs; the rest are said about once a second, a count of how
+        many more. On the io thread, from on_message."""
+        return self._native._first_dropped_full()
 
     def _prepare(
         self, message: Any, multiplexer: int | Lane | ConnectionWrapper, kwargs: dict[str, Any]

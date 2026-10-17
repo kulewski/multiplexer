@@ -27,14 +27,17 @@
 #include <algorithm>
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
 #include <asio/read.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/write.hpp>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <list>
 #include <memory>
 #include <string>
@@ -58,6 +61,15 @@ using mx::repr;
 template <typename ConnectionsManagerImplementation>
 struct ConnectionsManagerTraits;
 
+// The completion condition of a read or a write of a whole frame: every
+// step asks for all that is left, where asio's own, transfer_all, stops
+// each at 64 KiB, a frame of 1 MiB sixteen system calls each way.
+struct TransferRest {
+  std::size_t operator()(const asio::error_code& error, std::size_t) const {
+    return error ? 0 : std::numeric_limits<std::size_t>::max();
+  }
+};
+
 // The connection itself; see the file comment. `ConnectionsManagerImplementation`
 // is Server or BasicClient, and must provide: instance_id(),
 // get_welcome_message(), register_connection(), after_connection_registration(),
@@ -73,11 +85,12 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
 
   // Each direction of the socket is a channel with its own state. Outgoing:
   // FREE (nothing being written), BUSY (one async_write in flight). Incoming:
-  // FREE, READING_HEADER, READING_BODY. BROKEN, in either, means shutdown()
-  // ran and any handler that still fires must return without touching the
+  // FREE, READING (into the read buffer), READING_BODY (the rest of a frame
+  // too big for it, into its own). BROKEN, in either, means shutdown() ran
+  // and any handler that still fires must return without touching the
   // socket.
   struct ChannelState {
-    enum _ChannelState { FREE, BUSY, BROKEN, READING_HEADER, READING_BODY };
+    enum _ChannelState { FREE, BUSY, BROKEN, READING, READING_BODY };
   };
   typedef typename ChannelState::_ChannelState ChannelStateT;
 
@@ -101,7 +114,6 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         should_send_heartbit_(true),
         outgoing_channel_state_(ChannelState::FREE),
         outgoing_queue_max_size_(1),
-        incoming_message_(new RawMessage()),
         incoming_channel_state_(ChannelState::FREE),
         send_heartbit_timer_(io_service),
         require_heartbit_timer_(io_service)
@@ -288,7 +300,6 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
     send_heartbit_timer_.cancel(ignored);
     require_heartbit_timer_.cancel(ignored);
-    incoming_message_.reset();
 
     // cancel outgoing messages
     _orphan_outgoing_messages();
@@ -366,7 +377,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     _orphan_outgoing_messages();
     asio::error_code ignored;
     socket_.shutdown(asio::ip::tcp::socket::shutdown_send, ignored);
+    require_wait_ = 0;  // a frame read on arms it afresh
     require_heartbit_timer_.cancel(ignored);
+    send_wait_ = 0;  // the send timer bounds the reading now
     _do_later(send_heartbit_timer_, bound, [self = this->shared_from_this()](const asio::error_code& error) {
       if (error != asio::error::operation_aborted && !self->shuts_down_) {
         self->shutdown();  // the peer's end never came
@@ -508,12 +521,23 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     MX_DCHECK_RUN_ON(&io_thread_);
     return outgoing_queue_.empty();
   }
-  // The entry queued last, which everything queued before it is written
-  // ahead of; null when the queue is empty. For a manager that follows
-  // it, a client waiting until what it queued so far is out.
+  // The entry queued last but the connection's own frames, which
+  // everything queued before it is written ahead of; null when the queue
+  // holds none other. For a manager that follows it, a client waiting
+  // until what it queued so far is out: an own frame, a PEER_CONTROL or a
+  // heartbeat, goes with the connection when it dies, told to nobody, and
+  // one followed would be waited for for good, where the frames ahead of
+  // it go to another connection, and the one followed with them.
   typename MessagesBuffer::value_type* last_queued() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    return outgoing_queue_.empty() ? nullptr : &outgoing_queue_.back();
+    typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw;
+    for (typename MessagesBuffer::reverse_iterator entry = outgoing_queue_.rbegin(); entry != outgoing_queue_.rend();
+         ++entry) {
+      if (!to_raw(*entry)->own()) {
+        return &*entry;
+      }
+    }
+    return nullptr;
   }
   inline bool living() const { return is_living_; }
   // living(), readable from any thread without a reference to the
@@ -523,17 +547,28 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   inline bool shuts_down() const { return shuts_down_; }
 
  private:
-  /* Heartbeats. Two timers: send_heartbit_timer_ fires HEARTBIT_INTERVAL after
-   * the last write and queues a heartbeat, so an idle connection carries one
-   * frame every interval. require_heartbit_timer_ is re-armed on every frame
-   * read and drops the connection in two phases, NO_HEARTBIT_SO_PREPARE_DROP
-   * then NO_HEARTBIT_SO_REALLY_DROP, when nothing arrives. Both are off for
-   * passive peers, in the sense described at set_is_passive(): the send
-   * timer runs for one only while a heartbeat is owed, so an idle passive
-   * connection costs no wakeup at all. */
+  /* Heartbeats. Two timers: send_heartbit_timer_ comes due HEARTBIT_INTERVAL
+   * after the outgoing queue last emptied and queues a heartbeat, so an idle
+   * connection carries one frame every interval. require_heartbit_timer_
+   * comes due NO_HEARTBIT_SO_PREPARE_DROP after the last frame read, then
+   * waits NO_HEARTBIT_SO_REALLY_DROP more and drops the connection, when
+   * nothing arrives. Both are off for passive peers, in the sense described
+   * at set_is_passive(): the send timer runs for one only while a heartbeat
+   * is owed, so an idle passive connection costs no wakeup at all.
+   *
+   * Neither is moved by every frame. A write that empties the queue stamps
+   * quiet_since_ and a frame read stamps heard_at_, a clock read each; a
+   * wait already armed stays, and when it comes due before its stamp's
+   * moment it arms itself again for that moment. Re-arming at every frame,
+   * as these timers did, cancelled the wait before, whose handler the loop
+   * then ran, and moved the timer in asio's heap, a timerfd_settime(2)
+   * whenever it was the earliest: per message, in every peer and the
+   * multiplexer. Each arming has a number, which its handler is given: one
+   * replaced, or come due in the loop pass that also read a frame, which
+   * cannot take back a wait the pass already collected, finds a newer
+   * number, or none, and does nothing. */
   template <typename WaitHandler>
   void _do_later(asio::steady_timer& timer, const float seconds, WaitHandler handler) {
-    // timer.cancel();
     timer.expires_after(mx::from_seconds(seconds));
     timer.async_wait(handler);
   }
@@ -560,16 +595,36 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       heartbit_timer_off_ = true;
       return;
     }
-    _do_later(send_heartbit_timer_, HEARTBIT_INTERVAL,
-              [self = this->shared_from_this()](const asio::error_code& error) { self->_send_heartbit_now(error); });
+    quiet_since_ = std::chrono::steady_clock::now();
+    if (!send_wait_) {  // one armed moves on to this moment when it comes due
+      _arm_send(quiet_since_ + mx::from_seconds(HEARTBIT_INTERVAL));
+    }
   }
 
-  void _send_heartbit_now(const asio::error_code& error) {
+  void _arm_send(std::chrono::steady_clock::time_point due) {
     MX_DCHECK_RUN_ON(&io_thread_);
+    send_wait_ = ++waits_armed_;
+    send_heartbit_timer_.expires_at(due);
+    send_heartbit_timer_.async_wait([self = this->shared_from_this(), arming = send_wait_](
+                                        const asio::error_code& error) { self->_send_heartbit_now(error, arming); });
+  }
+
+  void _send_heartbit_now(const asio::error_code& error, std::uint64_t arming) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (error == asio::error::operation_aborted || arming != send_wait_) {
+      return;  // cancelled, or the timer serves the reading to the end now
+    }
+    send_wait_ = 0;
     // Not while closing either: a wait that had expired just before the
     // connection began closing gracefully runs all the same, and would
     // log that the heartbeat could not be queued.
-    if (error == asio::error::operation_aborted || shuts_down_ || !is_living_) {
+    if (shuts_down_ || !is_living_) {
+      return;
+    }
+    // The queue emptied since the wait was armed: it moves on.
+    const std::chrono::steady_clock::time_point due = quiet_since_ + mx::from_seconds(HEARTBIT_INTERVAL);
+    if (due > std::chrono::steady_clock::now()) {
+      _arm_send(due);
       return;
     }
     // A passive peer is sent the heartbeat it is owed (_send_heartbit_later);
@@ -589,84 +644,151 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
+  // A frame read, or the peer's type turned active: the drop's first wait
+  // runs from now. One armed moves on to this moment when it comes due;
+  // the second wait, the drop itself, gives way to a first.
   inline void _require_heartbit_later() {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (is_passive_) {
       // we can't require Heartbits from passive clients
-      require_heartbit_timer_.cancel();
+      if (require_wait_) {
+        require_wait_ = 0;
+        require_heartbit_timer_.cancel();
+      }
       return;
     }
-
-    _do_later(
-        require_heartbit_timer_, NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL,
-        [self = this->shared_from_this()](const asio::error_code& error) { self->_require_heartbit_soon(error); });
+    heard_at_ = std::chrono::steady_clock::now();
+    if (!require_wait_ || second_wait_) {
+      _arm_require(heard_at_ + mx::from_seconds(NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL), /*second=*/false);
+    }
   }
 
-  // Whether the drop's wait that just ran out is one to act on: the timer
-  // still due, not re-armed by a frame read since, and the peer active.
-  // A frame read in the same pass of the loop as the wait's expiry, ahead
-  // of this handler, re-arms the timer, and that cannot take back a wait
-  // the pass already collected, nor can the cancel that turning passive
-  // makes: the wait then runs as if it had come due. A synchronous client,
-  // which runs the loop only inside its calls, met that at every call
-  // after a stall of its multiplexer, whose frames since then waited in
-  // the socket and were read in the pass that ran the expired wait, and it
-  // shut down a connection that was fine.
-  bool _drop_wait_due() const {
-    return !is_passive_ && require_heartbit_timer_.expiry() <= std::chrono::steady_clock::now();
-  }
-
-  void _require_heartbit_soon(const asio::error_code& error) {
+  void _arm_require(std::chrono::steady_clock::time_point due, bool second) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    // First phase of the drop: nothing arrived for the prepare interval. Wait
-    // once more before really closing, so that a short stall on a busy peer
-    // does not cost it the connection.
-    if (error == asio::error::operation_aborted || shuts_down_ || !_drop_wait_due()) {
-      return;
-    }
-    _do_later(require_heartbit_timer_, NO_HEARTBIT_SO_REALLY_DROP_INTERVAL,
-              [self = this->shared_from_this()](const asio::error_code& error) { self->_require_heartbit_now(error); });
+    second_wait_ = second;
+    require_wait_ = ++waits_armed_;
+    require_heartbit_timer_.expires_at(due);
+    require_heartbit_timer_.async_wait(
+        [self = this->shared_from_this(), arming = require_wait_](const asio::error_code& error) {
+          self->_require_heartbit_due(error, arming);
+        });
   }
 
-  void _require_heartbit_now(const asio::error_code& error) {
+  // The drop's wait came due. A frame read in the same pass of the loop,
+  // ahead of this handler, stamped heard_at_, or armed a first wait in
+  // place of the second, whose number this handler then no longer has:
+  // a synchronous client, which runs the loop only inside its calls, has a
+  // stalled multiplexer's frames read in the pass that runs the expired
+  // wait, and must not shut down a connection that is fine.
+  void _require_heartbit_due(const asio::error_code& error, std::uint64_t arming) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (error == asio::error::operation_aborted || shuts_down_ || !_drop_wait_due()) {
+    if (error == asio::error::operation_aborted || arming != require_wait_) {
+      return;  // cancelled, replaced, or the peer turned passive
+    }
+    require_wait_ = 0;
+    if (shuts_down_) {
       return;
     }
-    // TODO logger.error << "no received messages for " <<
-    // NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL +
-    // NO_HEARTBIT_SO_REALLY_DROP_INTERVAL
-    //<< " seconds; shutting down... (peer_type = " << peer_type_ << ")";
-    shutdown();
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (!second_wait_) {
+      const std::chrono::steady_clock::time_point due =
+          heard_at_ + mx::from_seconds(NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL);
+      if (due > now) {
+        _arm_require(due, /*second=*/false);  // a frame read since: the wait moves on
+        return;
+      }
+      // First phase of the drop: nothing arrived for the prepare interval.
+      // Wait once more before really closing, so that a short stall on a
+      // busy peer does not cost it the connection. From now, when this
+      // runs: a synchronous client handles it at its next call, however
+      // long it idled, and idling alone must not cost it the connection.
+      _arm_require(now + mx::from_seconds(NO_HEARTBIT_SO_REALLY_DROP_INTERVAL), /*second=*/true);
+      return;
+    }
+    shutdown();  // the second phase over with nothing read
   }
 
-  /* Receiving. One frame at a time: header, then body, then parse, then hand
-   * over; a new async_read is issued only after the previous frame was
-   * handled, so a manager that does not keep up slows the peer down through
-   * TCP rather than by growing memory here. Any malformed frame ends the
-   * connection: input from the network is never trusted with an Assert. */
+  /* Receiving. The socket is read into the connection's buffer, as much as
+   * the buffer has room for, and the frames in it are handed over one per
+   * step of the loop, each step after the first posted to it, before the
+   * socket is read again: a burst of small frames costs one read, and a
+   * lone frame one read and the one that finds the socket empty, where
+   * every frame cost a read for its header, one for its body and that
+   * last one. A frame too big for the buffer gets one of its own, the rest
+   * of its body read straight into it, and no read or write stops at
+   * asio's 64 KiB a step (TransferRest). A manager that does not keep up
+   * still slows the peer down through TCP rather than by growing memory
+   * here: the buffer is the most that waits, a client's poll() counts the
+   * frames as they are handed over, and the socket is read again only once
+   * the buffer holds no whole frame. The buffer is made at the first read,
+   * and a read starts at its front when what was read before is all taken,
+   * so that a connection of small frames keeps a page of it in memory. Any
+   * malformed frame ends the connection: input from the network is never
+   * trusted with an Assert. */
+  static constexpr std::size_t READ_BUFFER_SIZE = 64 * 1024;
+
+  // The next step of reading: the buffer's next frame handed over, or a
+  // read of the socket for more.
   void _start_read() {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
     }
-
     Assert(incoming_channel_state_ == ChannelState::FREE);
-
-    incoming_channel_state_ = ChannelState::READING_HEADER;
-    // The handler holds the frame as well as the connection: a composed read
-    // goes on in steps after shutdown() dropped incoming_message_, and must
-    // still have its buffer.
-    asio::async_read(socket_, asio::buffer(incoming_message_->get_header_buffer()),
-                     [self = this->shared_from_this(), frame = incoming_message_](
-                         const asio::error_code& error, size_t bytes) { self->_handle_read_header(error, bytes); });
+    if (!read_buffer_) {
+      read_buffer_.reset(new char[READ_BUFFER_SIZE]);
+    }
+    const std::size_t held = read_end_ - read_begin_;
+    if (held >= RawMessage::HEADER_LENGTH) {
+      const char* const start = read_buffer_.get() + read_begin_;
+      const std::size_t length = RawMessage::body_length(start);
+      const std::size_t whole = RawMessage::HEADER_LENGTH + length;
+      if (!length) {
+        MX_LOG(WARNING, LOWVERBOSITY,
+               CTX("connection") TEXT("invalid frame header from peer; dropping connection " + repr((void*)this)));
+        shutdown();
+        return;
+      }
+      if (held >= whole || whole > READ_BUFFER_SIZE) {
+        // Whole, or too big for the buffer: what it holds of the body goes
+        // into the frame's own, the header good as body_length() found it.
+        std::shared_ptr<RawMessage> frame = std::make_shared<RawMessage>();
+        frame->unpack_header(start);
+        const std::size_t have = std::min(held, whole) - RawMessage::HEADER_LENGTH;
+        asio::buffer_copy(frame->get_body_buffer(), asio::buffer(start + RawMessage::HEADER_LENGTH, have));
+        read_begin_ += RawMessage::HEADER_LENGTH + have;
+        if (have == length) {
+          _frame_read(std::move(frame));
+          return;
+        }
+        // The header counts as heard; the rest of the body may take long.
+        incoming_channel_state_ = ChannelState::READING_BODY;
+        _require_heartbit_later();
+        asio::async_read(
+            socket_, frame->get_body_buffer() + have, TransferRest(),
+            [self = this->shared_from_this(), frame, rest = length - have](
+                const asio::error_code& error, size_t bytes) { self->_handle_read_body(frame, rest, error, bytes); });
+        return;
+      }
+    }
+    // More is needed, for a frame or the rest of one begun: what the buffer
+    // holds moves to its front, and the rest of it is read into.
+    if (read_begin_) {
+      std::memmove(read_buffer_.get(), read_buffer_.get() + read_begin_, held);
+      read_begin_ = 0;
+      read_end_ = held;
+    }
+    incoming_channel_state_ = ChannelState::READING;
+    socket_.async_read_some(asio::buffer(read_buffer_.get() + read_end_, READ_BUFFER_SIZE - read_end_),
+                            [self = this->shared_from_this()](const asio::error_code& error, size_t bytes) {
+                              self->_handle_read(error, bytes);
+                            });
   }
-  void _handle_read_header(const asio::error_code& error, size_t bytes_transferred) {
+  void _handle_read(const asio::error_code& error, size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
     if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
     }
-
     if (bytes_transferred == 0) {
       MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("peer shut its end down \"gracefully\""));
       incoming_channel_state_ = ChannelState::BROKEN;  // this shouldn't be needed
@@ -675,68 +797,79 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     if (error) {
       MX_LOG(ERROR, HIGHVERBOSITY,
-             TEXT("read header error on " + repr((void*)this) + "error=" + repr(error) +
+             TEXT("read error on " + repr((void*)this) + "error=" + repr(error) +
                   "bytes_transferred=" + repr(bytes_transferred)));
       shutdown();
       return;
     }
-
-    Assert(incoming_channel_state_ == ChannelState::READING_HEADER);
-    Assert(bytes_transferred == incoming_message_->get_header_length());
-    if (!incoming_message_->unpack_header()) {
-      MX_LOG(WARNING, LOWVERBOSITY,
-             CTX("connection") TEXT("invalid frame header from peer; dropping connection " + repr((void*)this)));
-      shutdown();
-      return;
-    }
-
-    incoming_channel_state_ = ChannelState::READING_BODY;
-    _require_heartbit_later();
-    asio::async_read(socket_, asio::buffer(incoming_message_->get_body_buffer()),
-                     [self = this->shared_from_this(), frame = incoming_message_](
-                         const asio::error_code& error, size_t bytes) { self->_handle_read_body(error, bytes); });
+    Assert(incoming_channel_state_ == ChannelState::READING);
+    incoming_channel_state_ = ChannelState::FREE;
+    read_end_ += bytes_transferred;
+    _start_read();
   }
-  void _handle_read_body(const asio::error_code& error, size_t bytes_transferred) {
+  // The rest of a frame too big for the buffer, `rest` bytes, read.
+  void _handle_read_body(std::shared_ptr<RawMessage> frame, size_t rest, const asio::error_code& error,
+                         size_t bytes_transferred) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    should_send_heartbit_ = true;
     if (incoming_channel_state_ == ChannelState::BROKEN) {
       return;
     }
-
-    if (error || bytes_transferred != incoming_message_->get_body_length()) {
+    if (error || bytes_transferred != rest) {
       MX_LOG(ERROR, HIGHVERBOSITY,
-             TEXT("read body error on " + repr((void*)this) + "error=" + repr(error) + "bytes_transferred=" +
-                  repr(bytes_transferred) + "expected_transferred=" + repr(incoming_message_->get_body_length())));
+             TEXT("read body error on " + repr((void*)this) + "error=" + repr(error) +
+                  "bytes_transferred=" + repr(bytes_transferred) + "expected_transferred=" + repr(rest)));
       shutdown();
       return;
     }
-
-    Assert(bytes_transferred == incoming_message_->get_body_length());
     Assert(incoming_channel_state_ == ChannelState::READING_BODY);
     incoming_channel_state_ = ChannelState::FREE;
+    _frame_read(std::move(frame));
+  }
 
-    if (!incoming_message_->verify()) {
+  // A whole frame read: its CRC checked, the frame handed over, and the
+  // next step of reading taken, as a step of the loop of its own when the
+  // buffer holds the next frame whole.
+  void _frame_read(std::shared_ptr<RawMessage> frame) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    should_send_heartbit_ = true;
+    if (!frame->verify()) {
       MX_LOG(ERROR, HIGHVERBOSITY, TEXT("incoming message verification failed"));
       shutdown();
-
+      return;
+    }
+    _require_heartbit_later();
+    if (heartbit_timer_off_) {
+      _send_heartbit_later();  // the heartbeat this frame is owed
+    }
+    // Whatever handling the frame throws, the connection reads on: the
+    // exception used to leave it registered, writing and never reading
+    // again. The clients catch their callbacks' own exceptions; this is
+    // the net for anything else, the frame logged and dropped.
+    try {
+      _receive_message(std::shared_ptr<const RawMessage>(std::move(frame)));
+    } catch (const std::exception& e) {
+      MX_LOG(ERROR, LOWVERBOSITY,
+             CTX("connection")
+                 TEXT("handling a frame from peer " + repr(peer_id_) + " failed, frame dropped: " + e.what()));
+    }
+    if (_next_frame_held()) {
+      asio::post(socket_.get_executor(), [self = this->shared_from_this()] { self->_start_read(); });
     } else {
-      _require_heartbit_later();
-      if (heartbit_timer_off_) {
-        _send_heartbit_later();  // the heartbeat this frame is owed
-      }
-      // Whatever handling the frame throws, the connection reads on: the
-      // exception used to leave it registered, writing and never reading
-      // again. The clients catch their callbacks' own exceptions; this is
-      // the net for anything else, the frame logged and dropped.
-      try {
-        _receive_message();
-      } catch (const std::exception& e) {
-        MX_LOG(ERROR, LOWVERBOSITY,
-               CTX("connection")
-                   TEXT("handling a frame from peer " + repr(peer_id_) + " failed, frame dropped: " + e.what()));
-      }
       _start_read();
     }
+  }
+  // Whether the buffer holds what the next step takes without a read: a
+  // whole frame, or the header of one it cannot take, too big for the
+  // buffer or malformed.
+  bool _next_frame_held() const {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    const std::size_t held = read_end_ - read_begin_;
+    if (held < RawMessage::HEADER_LENGTH) {
+      return false;
+    }
+    const std::size_t length = RawMessage::body_length(read_buffer_.get() + read_begin_);
+    return !length || held >= RawMessage::HEADER_LENGTH + length ||
+           RawMessage::HEADER_LENGTH + length > READ_BUFFER_SIZE;
   }
 
   // Whether `msg` is one of the protocol's own answers to what this peer
@@ -758,12 +891,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
   }
 
-  void _receive_message() {
+  // The frame is passed on as the RawMessage it arrived in, so that the
+  // multiplexer can forward it to other connections without re-serializing.
+  void _receive_message(const std::shared_ptr<const RawMessage>& message) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    // The frame is passed on as the RawMessage it arrived in, so that the
-    // multiplexer can forward it to other connections without re-serializing.
-    std::shared_ptr<const RawMessage> message = incoming_message_;
-    incoming_message_.reset(new RawMessage());
     if (!delivering_) {
       // leaving: read only so that nothing is left unread when the socket
       // closes; what was a message, rather than a heartbeat or, at a
@@ -839,8 +970,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
             if (shuts_down_) {
               return true;  // register_connection refused this connection
             }
-            manager->after_connection_registration(this->shared_from_this(), welcome);
+            // Registered before the hook runs, as the manager's maps
+            // already have it: a client's confirmation of its routing
+            // counts this connection, whose welcome carried that routing.
             is_registered_ = true;
+            manager->after_connection_registration(this->shared_from_this(), welcome);
           }
         } else {
           // TODO logger.error << "received repeated CONNECTION_WELCOME message;
@@ -883,7 +1017,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       Assert(raw->get_message_buffer().size());
       // The handler holds the connection and the frame: the write goes on in
       // steps after shutdown() handed the queue over or dropped it.
-      asio::async_write(socket_, raw->get_message_buffer(),
+      asio::async_write(socket_, raw->get_message_buffer(), TransferRest(),
                         [self = this->shared_from_this(), raw](const asio::error_code& error, size_t bytes) {
                           self->_handle_write(error, bytes);
                         });
@@ -1052,6 +1186,16 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // The send timer neither waits nor will be armed by a write in progress:
   // a passive peer owed nothing (see _send_heartbit_later).
   bool heartbit_timer_off_ = false;
+  // The heartbeat timers' stamps and armings (see "Heartbeats"): when the
+  // queue last emptied, when a frame last arrived, the number of each
+  // timer's wait armed, 0 for none, from a counter, and whether the
+  // require timer's is the drop's second phase.
+  std::chrono::steady_clock::time_point quiet_since_;
+  std::chrono::steady_clock::time_point heard_at_;
+  std::uint64_t send_wait_ = 0;
+  std::uint64_t require_wait_ = 0;
+  std::uint64_t waits_armed_ = 0;
+  bool second_wait_ = false;
 
  public:
   // Makes the calling thread the one this connection is driven from, for a
@@ -1076,7 +1220,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   std::weak_ptr<ConnectionsManagerImplementation> set_aside_manager_ MX_GUARDED_BY(io_thread_);
 
   /* incoming channel */
-  std::shared_ptr<RawMessage> incoming_message_ MX_GUARDED_BY(io_thread_);
+  // Bytes read and not yet taken as frames: read_buffer_[read_begin_,
+  // read_end_), made at the first read; see _start_read.
+  std::unique_ptr<char[]> read_buffer_ MX_GUARDED_BY(io_thread_);
+  std::size_t read_begin_ MX_GUARDED_BY(io_thread_) = 0;
+  std::size_t read_end_ MX_GUARDED_BY(io_thread_) = 0;
   ChannelStateT incoming_channel_state_ MX_GUARDED_BY(io_thread_);
 
   /* heartbiting */

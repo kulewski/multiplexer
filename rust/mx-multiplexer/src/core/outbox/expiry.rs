@@ -135,7 +135,7 @@ impl Core {
             }
         }
         if held {
-            self.outbox.held_live -= 1;
+            self.held_left();
         }
         self.outbox.waiting -= 1;
         self.wait_flushes(number, -1);

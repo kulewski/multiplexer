@@ -4,10 +4,11 @@
 records it receives as one stream, each carrying the multiplexer's id;
 nothing is written on the multiplexers' side. A tap that stops reading fills
 its outgoing queue: the multiplexer drops its records, counts them in the
-status, and keeps routing.
+status, which the answer to its UNTAP gives whole, and keeps routing.
 """
 
 import os
+import re
 import subprocess
 import unittest
 
@@ -88,6 +89,64 @@ class RecordingTap(unittest.TestCase):
                 self.assertEqual(2, text.count(": tapping"), text)
                 self.assertTrue(
                     all(status.taps == 0 for status in recording.status(controller)), "untapped on the way out"
+                )
+            finally:
+                if tap.poll() is None:
+                    tap.kill()
+                controller.shutdown()
+
+    def test_mxcontrol_tap_that_falls_behind_says_what_it_lost_and_exits_1(self):
+        """mxcontrol's tap whose output nobody reads: its pipe full, it stops
+        reading, and the multiplexer drops records for it; on SIGINT it
+        writes what it holds and what the multiplexer had queued for it,
+        losing none on the way out, says how many the multiplexer dropped,
+        as the answer to its untap counts them, and exits 1."""
+        cfg = harness.CONFIG
+        with Cluster(1, remote_recording=True) as cluster:
+            controller = Client(cluster.endpoints, type=recording.RECORDING_CONTROLLER)
+            log = open(os.path.join(output_dir(), "tap-behind.stderr.log"), "wb")
+            tap = subprocess.Popen(
+                [mx_runfile("mxcontrol/mxcontrol"), "recording", "tap", "-M", cluster.addresses[0]],
+                stdout=subprocess.PIPE,
+                stderr=log,
+                env=child_env(native=True),
+            )
+            try:
+                wait_until(lambda: recording.status(controller)[0].taps == 1, 10, "the tap")
+                backend = spawn(
+                    "backend",
+                    cfg.lang("backend"),
+                    mx=cluster.addresses,
+                    type=C.peers.TEST_BACKEND_A,
+                    serves={C.types.TEST_REQUEST_A: C.types.TEST_RESPONSE},
+                )
+                backend.wait_for("connected")
+                client = spawn(
+                    "client",
+                    cfg.lang("client"),
+                    mx=cluster.addresses,
+                    type=C.peers.TEST_CLIENT,
+                    query=[(C.types.TEST_REQUEST_A, "hi")],
+                    count=500,
+                    payload_size=20000,
+                    parallel=4,
+                )
+                self.assertEqual(0, client.wait(60))
+                tap.send_signal(2)  # SIGINT; its output is read from now on, to its end
+                tap.communicate(timeout=30)
+                self.assertEqual(1, tap.returncode)
+                log.close()
+                with open(log.name) as stderr:
+                    text = stderr.read()
+                lost = re.search(r"(\d+) records dropped by the multiplexers", text)
+                self.assertIsNotNone(lost, text)
+                self.assertGreater(int(lost.group(1)), 0)
+                self.assertNotIn("dropped here", text, "nothing lost on the way out")
+                written = re.search(r"(\d+) records written", text)
+                self.assertGreaterEqual(
+                    int(written.group(1)) + int(lost.group(1)),
+                    4000,
+                    "every record of the 2000 queries written or counted",
                 )
             finally:
                 if tap.poll() is None:
@@ -186,6 +245,9 @@ class RecordingTap(unittest.TestCase):
                 (untapped,) = recording.control(controller, RecordingControl.UNTAP)
                 self.assertFalse(untapped.tapping)
                 self.assertEqual(0, untapped.taps)
+                self.assertGreaterEqual(
+                    untapped.dropped, status.dropped, "the answer that ends the tap says all it lost"
+                )
             finally:
                 controller.shutdown()
                 file_controller.shutdown()

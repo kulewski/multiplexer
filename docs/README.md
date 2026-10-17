@@ -316,7 +316,7 @@ conventions contributors and coding agents follow.
 ## Editing the diagrams
 
 The step-by-step pages are generated. Edit
-[diagrams/generate.py](diagrams/generate.py), which holds each picture's
-boxes, arrows and steps once, then run it; `./format.sh` runs it too, and
+[diagrams/pages.py](diagrams/pages.py), which holds each picture's boxes,
+arrows and steps once, then run [diagrams/generate.py](diagrams/generate.py); `./format.sh` runs it too, and
 `./format.sh --check` fails when a page is stale. Preview in VS Code with
 `Ctrl+Shift+V`; from 1.121 on, Mermaid renders in the built-in preview.

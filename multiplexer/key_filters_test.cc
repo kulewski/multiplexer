@@ -4,8 +4,10 @@
 // last peer, a type with its last filter; an empty filter keeps its type
 // filtered and takes no key; a refusal leaves the filters as they were; a
 // replacement keeps what the old and the new filters share; tens of
-// thousands of keys and hundreds of patterns of one type need no limit; and
-// the stamps stay right as patterns, owners and their numbers come and go.
+// thousands of keys and hundreds of patterns of one type need no limit; a
+// thousand long patterns of one type are matched in one pass, their set
+// sized from what they compile to; and the stamps stay right as patterns,
+// owners and their numbers come and go.
 #include "multiplexer/key_filters.h"
 
 #include <gtest/gtest.h>
@@ -300,6 +302,30 @@ TEST(KeyPatternsTest, ThousandsOfKeysAndHundredsOfPatternsNeedNoLimit) {
     }
     EXPECT_FALSE(patterns.takes(everyone, TYPE, evaluation));
   }
+}
+
+// A thousand long patterns of one type, each with a repetition that RE2
+// unrolls, about 260 instructions apiece: their set is built, sized from
+// what the patterns compile to, and a key is matched in one pass, where a
+// budget of 4 KiB a pattern ran out, the set was not built, and every
+// keyed message was matched against each pattern alone. Each peer's own
+// key still finds that peer alone.
+TEST(KeyPatternsTest, ThousandsOfLongPatternsAreMatchedInOnePass) {
+  KeyPatterns patterns;
+  const unsigned int PEERS = 1000;
+  std::vector<Owner> owners;
+  for (unsigned int peer = 0; peer < PEERS; ++peer) {
+    owners.push_back(add(patterns, filters(TYPE, {"t" + std::to_string(peer) + "\\.[a-z0-9-]{1,63}"})));
+  }
+  for (unsigned int peer = 0; peer < PEERS; peer += 97) {
+    const std::string key = "t" + std::to_string(peer) + ".tenant-" + std::to_string(peer);
+    std::uint64_t evaluation = 0;
+    ASSERT_TRUE(patterns.match(TYPE, key, &evaluation));
+    for (unsigned int other = 0; other < PEERS; other += 1) {
+      ASSERT_EQ(patterns.takes(owners[other], TYPE, evaluation), other == peer) << key << " " << other;
+    }
+  }
+  EXPECT_TRUE(patterns.matched_in_one_pass(TYPE)) << "matched pattern by pattern";
 }
 
 TEST(KeyPatternsTest, TheStampsStayRightAsPatternsAndOwnersComeAndGo) {

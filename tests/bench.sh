@@ -4,21 +4,38 @@
 # as the peers, the C++ ones by default, one client in sequence and then
 # eight in parallel, 200-byte payloads. Prints throughput and the latency
 # distribution; the multiplexer's CPU share says how much of one core the
-# broker itself needed.
+# broker itself needed. The Python backend serves on
+# BaseThreadedMultiplexerServer, its io thread handing every request to
+# Python through a callback; its client is a SyncClient per worker.
 #
-#   ./tests/bench.sh [queries per client, default 20000] [backend: cc or rust, default cc] [client: default the backend's]
+#   ./tests/bench.sh [queries per client, default 20000] [backend: cc, rust or py, default cc] [client: default the backend's]
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 count="${1:-20000}"
 backend_lang="${2:-cc}"
 client_lang="${3:-$backend_lang}"
+targets=(//mxcontrol)
 for lang in "$backend_lang" "$client_lang"; do
-  [[ "$lang" == cc || "$lang" == rust ]] || { echo "bench.sh: a language is cc or rust, not $lang" >&2 && exit 2; }
+  case "$lang" in
+    cc | rust) targets+=("//tests/roles/$lang:mxtestroles") ;;
+    py) targets+=(//tests/roles/py:backend //tests/roles/py:client) ;;
+    *) echo "bench.sh: a language is cc, rust or py, not $lang" >&2 && exit 2 ;;
+  esac
 done
-bazel build -c opt //mxcontrol "//tests/roles/$backend_lang:mxtestroles" "//tests/roles/$client_lang:mxtestroles" > /dev/null 2>&1
+bazel build -c opt "${targets[@]}" > /dev/null 2>&1
 mxcontrol=bazel-bin/mxcontrol/mxcontrol
-backend_roles="bazel-bin/tests/roles/$backend_lang/mxtestroles"
-client_roles="bazel-bin/tests/roles/$client_lang/mxtestroles"
+# The command of `role` in `lang`: one binary of roles in C++ and Rust, one
+# binary each in Python.
+role() {
+  local lang=$1 role=$2
+  if [[ "$lang" == py ]]; then
+    echo "bazel-bin/tests/roles/py/$role"
+  else
+    echo "bazel-bin/tests/roles/$lang/mxtestroles $role"
+  fi
+}
+threaded=()
+[[ "$backend_lang" == py ]] && threaded=(--threaded)
 work="$(mktemp -d)"
 trap 'kill $backend $mx 2>/dev/null; rm -rf "$work"' EXIT
 
@@ -27,14 +44,16 @@ mx=$!
 until [[ -f "$work/port" ]]; do sleep 0.05; done
 address="$(cat "$work/port")"
 # TEST_BACKEND_A (201) answers TEST_REQUEST_A (201) with TEST_RESPONSE (203); TEST_CLIENT is 203.
-$backend_roles backend --mx "$address" --type 201 --serves 201=203 --behaviour echo > "$work/backend.log" 2>&1 &
+$(role "$backend_lang" backend) --mx "$address" --type 201 --serves 201=203 --behaviour echo "${threaded[@]}" \
+  > "$work/backend.log" 2>&1 &
 backend=$!
 until grep -q connected "$work/backend.log"; do sleep 0.05; done
 
 echo "backend: $backend_lang, client: $client_lang"
 for parallel in 1 8; do
   start=$(date +%s.%N)
-  $client_roles client --mx "$address" --type 203 --query "201:hello" --count "$count" --parallel "$parallel" --payload-size 200 \
+  $(role "$client_lang" client) --mx "$address" --type 203 --query "201:hello" --count "$count" --parallel "$parallel" \
+    --payload-size 200 \
     > "$work/client.log" 2> /dev/null
   end=$(date +%s.%N)
   python3 - "$work/client.log" "$start" "$end" "$parallel" <<'PY'

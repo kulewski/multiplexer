@@ -6,7 +6,8 @@
 // exception not derived from std::exception, or an exception out of
 // on_handler_exception(), ends serve_forever(), draining, a
 // request refused while leaving, nothing connected before serve_forever,
-// a poll and a drain with no deadline.
+// a poll and a drain with no deadline, and a close() on a thread made
+// after the workers ended.
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -20,7 +21,9 @@
 #include <limits>
 #include <mutex>
 #include <regex>
+#include <stdexcept>
 #include <thread>
+#include <vector>
 
 #include "multiplexer/backend/base_threaded_multiplexer_server.h"
 #include "multiplexer/client.h"
@@ -488,6 +491,26 @@ TEST(ThreadedServer, AFullQueueDropsAndTheRestIsHandledInOrder) {
   EXPECT_EQ((std::vector<std::string>{"block", "event-0", "event-1", "marker"}), served.server.snapshot());
 }
 
+// The largest queue_size is no limit: the workers and the queue were
+// summed, which wrapped round to nothing taken, every request dropped.
+TEST(ThreadedServer, TheLargestQueueSizeIsNoLimit) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.queue_size = std::numeric_limits<std::size_t>::max();
+  Served served(mx.port, options);
+  Requester requester(mx.port);
+  multiplexer::LanePtr lane(new multiplexer::Lane());
+  requester.send("block", lane);
+  ASSERT_TRUE(eventually([&] { return served.server.snapshot().size() == 1; })) << "the worker in the handler";
+  for (int index = 0; index < 5; ++index) {
+    requester.send("event-" + std::to_string(index), lane);
+  }
+  ASSERT_TRUE(eventually([&] { return served.server.pending() == 6; })) << "every one queued";
+  EXPECT_EQ(0u, served.server.dropped());
+  served.server.release();
+  EXPECT_EQ("MARKER", requester.query("marker", lane));
+}
+
 // A queue of none still lets every idle worker take a request: queue_size
 // counts what waits for a worker, and a request an idle worker is about
 // to take waits for none, where it was counted and queue_size 0 dropped
@@ -807,6 +830,46 @@ TEST(ThreadedServer, ASecondCloseWaitsForTheFirst) {
   server.release();
   closing.join();
   EXPECT_TRUE(eventually([&] { return served.returned.load(); }));
+}
+
+// close() on a thread made after the workers were joined is no worker's,
+// whatever id the system gave the thread: a joined thread's id is free
+// again, and glibc gives a new thread the stack, and with it the id, of
+// one it joined. close() compared ids, so threads made after the stop
+// that took a dead worker's stack threw logic_error, and the destructor
+// there terminated. Eight threads alive at once take the stacks of the
+// four workers, the io thread and serve_forever()'s thread.
+TEST(ThreadedServer, ACloseOnAThreadMadeAfterTheWorkersEndedIsAllowed) {
+  InProcessMultiplexer mx;
+  ThreadedServerOptions options;
+  options.workers = 4;
+  Scripted server(mx.port, options);
+  {
+    ServingThread serving(server, 0.05f);
+    ASSERT_TRUE(eventually([&server] { return server.client().connections_count() == 1; }));
+  }  // stopped: serve_forever()'s close() joined the workers and the io thread, then its thread was joined
+  std::atomic<int> refused{0};
+  std::promise<void> go;
+  std::shared_future<void> started = go.get_future().share();
+  std::atomic<int> alive{0};
+  std::vector<std::thread> threads;
+  for (int index = 0; index < 8; ++index) {
+    threads.emplace_back([&] {
+      ++alive;
+      started.wait();  // every one alive before any calls close(): a stack of its own each
+      try {
+        server.close();
+      } catch (const std::logic_error&) {
+        ++refused;
+      }
+    });
+  }
+  EXPECT_TRUE(eventually([&alive] { return alive.load() == 8; }));
+  go.set_value();
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+  EXPECT_EQ(0, refused.load()) << "close() took a thread made after the stop for a worker";
 }
 
 // A message that answers another, one with `references`, arriving while

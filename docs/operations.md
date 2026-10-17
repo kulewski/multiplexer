@@ -137,7 +137,10 @@ and a second; a second `SIGTERM` stops it at once. A supervisor's stop
 timeout must allow that much: Kubernetes waits 30 s by default
 (`terminationGracePeriodSeconds`), systemd 90 s (`TimeoutStopSec`) and
 `docker stop` 10 s. A restart has no side effects beyond the connections it
-drops. Any release
+drops. Every `mxcontrol` raises its core size limit at start, the soft
+limit to the hard one, and both to unlimited when it may, so a crash dumps
+a core unless the hard limit is 0 for an unprivileged process; a
+privileged one raises even that. Any release
 artifact carries it ([packaging](packaging.md)); the `mxcontrol` command
 that `pip install mx-multiplexer` installs replaces itself with the binary
 within milliseconds, keeping its pid, so a supervisor may run either it or
@@ -316,7 +319,8 @@ Release builds (`--config=release`) compile with symbols and strip the
 binaries: `//mxcontrol:mxcontrol` is the stripped copy of
 `//mxcontrol:mxcontrol_with_debug_symbols`, and `_native.so` of
 `_native_with_debug_symbols.so`, the way `bazel/maybe_strip.bzl` describes;
-both targets of each pair are public. In other build modes the stripped
+mxcontrol's pair is public, the extension's private to its package, though
+a command line builds either. In other build modes the stripped
 name is a symlink to the unstripped binary.
 
 What a release publishes is stripped, and the binaries with symbols are
@@ -405,6 +409,7 @@ stream of `LogEntry` protocol buffers, each preceded by its length as a
 varint. `mxcontrol streamlogs` can send such a stream on through a
 multiplexer, never waiting for one, so that a multiplexer that stops
 reading costs log entries rather than stopping the program that logs, and
+holding none back once the program has nothing more to say, and
 `mxcontrol receivelogs` prints what arrives; together they are a minimal
 log shipper and the smallest example of a backend. A stream
 whose reader goes away, a shipper that exits, is dropped at the first
@@ -422,23 +427,32 @@ ended.
 The Python library logs through the same mechanism, so a Python backend's
 stderr has the same shape.
 
-**How much is logged.** Levels above `DEBUG` are always emitted. `DEBUG`
-entries have a verbosity, and the default shows a process's connections
-coming and going, at `HIGHVERBOSITY`, and not its traffic: the
-per-message entries, a request and the connection it took, a message
-routed, a connection skipped because it is full, a message a full queue
-refused, a `DELIVERY_ERROR` sent back, are at `CHATTERBOX` and off unless
-asked for. The environment variable `MX_LOG_VERBOSITY`, read
-once when the library loads, sets this without a rebuild or a call:
+**How much is logged.** Every level has a verbosity cap, and an entry is
+emitted when its verbosity is within its level's: `HIGHVERBOSITY` for every
+level by default, and every entry above `DEBUG`, in the libraries and the
+multiplexer, is logged within it, so those are emitted unless a cap is
+lowered; `ZEROVERBOSITY` silences a level. `DEBUG` entries have a
+verbosity, and the default shows a process's connections coming and going,
+at `HIGHVERBOSITY`, and not its traffic: the per-message entries, a request
+and the connection it took, a message routed, a connection skipped because
+it is full, a message a full queue refused, a `DELIVERY_ERROR` sent back,
+are at `CHATTERBOX` and off unless asked for. An `mxcontrol` process, the
+multiplexer among them, caps `DEBUG` at `MEDIUMVERBOSITY` by default
+(`--verbosity`), and logs every connection registered and unregistered at
+`INFO` still. The environment variable `MX_LOG_VERBOSITY`, read once when
+the library loads, sets the caps without a rebuild or a call:
 `MX_LOG_VERBOSITY=DEBUG:CHATTERBOX` turns the traffic log on for one
 process, `MX_LOG_VERBOSITY=DEBUG:LOW` quiets a chatty one, and a bare
-verbosity, `MX_LOG_VERBOSITY=MEDIUM`, applies to every level; names are
-those of the constants, with or without the `VERBOSITY` suffix, in any
-case. A malformed value is reported at `WARNING` and ignored. In code,
-`set_maximal_logging_verbosity(level, verbosity)` does the same in both
-languages, from any thread at any time, as does setting the process
-context; `mxcontrol --verbosity` is the multiplexer's own setting and
-wins over the variable when given explicitly. A disabled entry costs one
+verbosity, `MX_LOG_VERBOSITY=MEDIUM`, applies to every level, `INFO` to
+`CRITICAL` included: it removes the `HIGHVERBOSITY` lines, registrations,
+undelivered messages and full queues among them, and `ZERO` removes
+everything, errors too. Names are those of the constants, with or without
+the `VERBOSITY` suffix, in any case. A malformed value is reported at
+`WARNING` and ignored. In code, `set_maximal_logging_verbosity(level,
+verbosity)` sets one level's cap in both languages, from any thread at any
+time, as does setting the process context; `mxcontrol --verbosity` is the
+multiplexer's own `DEBUG` cap and wins over the variable's `DEBUG` when
+given explicitly, the variable's caps on the other levels applying still. A disabled entry costs one
 comparison, so leaving the library's debug lines compiled in is free; an
 emitted one costs a write to stderr per line, which is why traffic is off
 by default.
@@ -450,7 +464,9 @@ There is no status port and no metrics endpoint. What you have:
 - the log, above: registrations tell you who is connected, undelivered
   messages tell you when a backend type has nobody behind it;
 - `mxcontrol receivelogs`, or any backend, connected as a peer type that
-  your rules also route a message type to, as a tap on that type;
+  your rules also route an event type to, as a tap on that type; never a
+  request type, since `receivelogs` answers every message with a `PING`
+  that a query takes for its reply, dropping the backend's;
 - the peers themselves: a client that gets `OperationFailed` has learned that
   no backend of that type is connected anywhere, and a backend's
   `connections_count()` says how many multiplexers it currently reaches;
@@ -469,12 +485,19 @@ at once, unless it was written less than 10 ms before, and then once
 when those 10 ms are up, for every change meanwhile, so that peers
 arriving or leaving by the thousand cost a few writes. A shell reads it; so does `Mx.connected_peers()` in the test infrastructure,
 and `Cluster.wait_for_peer()` waits on it. It is empty while nobody is
-connected, and is left behind as it was when the multiplexer exits.
+connected, and is left behind as it was when the multiplexer exits. A
+write that fails, on a full disk say, leaves the file as it was, the
+last good list, with an `ERROR` that says why: `cannot write peers file
+...: No space left on device; ... left as it was`. The next change
+writes it again; while the writes fail for the same reason, nothing more
+is logged, and the first that works says `peers file ... written again,
+after N failed write(s)` at `INFO`.
 
 ### Recording
 
 `run_multiplexer --record PATH` writes every routed message to a file as it
-passes through: who sent it, who received it or why nobody did, its type,
+passes through, or, when the file cannot be opened, logs that at `ERROR` and
+runs on without recording: who sent it, who received it or why nobody did, its type,
 its ids and its payload, plus every peer arriving and leaving. The file is a
 stream of length-prefixed `Record` protocol buffers
 ([multiplexer/Recording.proto](../multiplexer/Recording.proto)); its header
@@ -485,7 +508,9 @@ recorded. A file that exists is appended to, a restarted multiplexer's
 session after its own header: it is read once at start, and a record a
 multiplexer that died left half written at its end is cut, with a
 warning, so that every record after it reads; a status counts the bytes
-and records of this run.
+and records of this run. A file that is not a recording, the rules file
+named by mistake say, or a recording damaged before its end, is left as it
+is and not recorded into, said in an `ERROR`; the multiplexer serves on.
 
 Read it with `mxcontrol dump_recording FILE --rules FILE` (names from the
 rules file, `--type` and `--peer` to filter), with
@@ -493,7 +518,10 @@ rules file, `--type` and `--peer` to filter), with
 generated constants), or from Python with `multiplexer.recording.read()`,
 which yields the records, a record at a time, and refuses a file made with
 other rules than the constants were generated from, a session a restarted
-multiplexer appended to a `--record` file included; `read_many()` gives
+multiplexer appended to a `--record` file included; a pip install passes
+`constants=`, the module generated from the deployment's rules, since its
+own holds the system rules'. A tap's output has no header, so in it only a
+rules change during the tap is checked. `read_many()` gives
 each record the multiplexer id of the header before it. A file a session is still writing, or one
 a multiplexer that died left, can end partway through a record: both
 readers give every whole record and then say so, `dump_recording` with
@@ -509,7 +537,9 @@ was told, saying why for the type as a whole, as the log line does:
 no key filter of one takes the key, `QUEUE_FULL` when
 every peer that takes the message has its queue full, `NOT_ACCEPTED` when
 none takes it; a fan-out (`whom: ALL`) records each peer it passed over
-besides. The record of a keyed message carries its `key`. A `PeerEvent` marks a peer
+besides. A rule for `ALL_TYPES` that no type took has one such record,
+its peer type `ALL_TYPES`, and none when nobody is connected, which is no
+failure for it. The record of a keyed message carries its `key`. A `PeerEvent` marks a peer
 arriving, leaving, or changing its routing. A peer's `DISCONNECTED` comes
 when its connection has closed, after the records of what it sent last: a
 connection whose write failed reads on to the peer's end and routes what
@@ -596,8 +626,8 @@ without a label, which a STOP closes.
 a `RECORDING_RECORD` message (8) carrying the `Record`, with
 `multiplexer_id` set, until UNTAP or the connection ends. The tap's outgoing
 queue is the only buffer: a peer that reads too slowly loses records, which
-the multiplexer counts in the status as `dropped`, and routing is never
-held up. A tap costs one queued frame per record, the record serialized
+the multiplexer counts as `dropped` in the status it answers that peer, the
+answer to its UNTAP saying all it lost, and routing is never held up. A tap costs one queued frame per record, the record serialized
 once for every tap with the same payload limit. The record of a message
 near `MAX_MESSAGE_SIZE` would be over it, so its payload is cut to the
 longest that fits, as protobuf measures the tap's frame, and marked
@@ -633,8 +663,9 @@ good as their clocks.
 ## Sizing
 
 One multiplexer is one thread with one event loop. Every message is forwarded
-as the bytes it arrived in, without re-serialization, so the cost per message
-is a few map lookups and the socket writes. Memory is the sum of the outgoing
+as the bytes it arrived in, without re-serialization: the cost per message is
+the frame's CRC, its parse, which copies the payload once while the message
+is routed, a few map lookups and the socket writes. Memory is the sum of the outgoing
 queues: up to `queue_size` messages per connection, and 64 small protocol
 frames past that, each held as long as it is unsent, so a slow backend can
 pin up to 1024 messages of whatever size your peers send. Lower

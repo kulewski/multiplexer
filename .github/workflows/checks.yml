@@ -15,11 +15,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   format:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # make/generate_sources.py asks Bazel for the Makefile's source lists,
       # which configures the Python extension's headers: python3-dev. The
       # Rust protocol code is generated again with the system's protoc, and
@@ -31,7 +35,9 @@ jobs:
   tests:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
       # Bazel's linux-sandbox gives each test a network of its own through an
       # unprivileged user namespace, which Ubuntu 24.04's AppArmor withholds.
@@ -48,7 +54,9 @@ jobs:
     # Python runtime of protobuf comes from the system.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: sudo apt-get install -y -qq clang-18 libc++-18-dev python3-dev python3-protobuf
       - run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
@@ -69,7 +77,9 @@ jobs:
     # supports; and the package crates.io would get.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: sudo apt-get install -y -qq g++ protobuf-compiler libprotobuf-dev python3-dev python3-protobuf
       - run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

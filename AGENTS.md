@@ -37,7 +37,8 @@ both talk to multiplexers. Spell out "multiplexer" in prose, "mx" only in code.
 - `examples/`: complete programs, Bazel workspaces consuming this one as
   `@mx`, pip projects on the package, and Cargo workspaces on the crate;
   `examples/README.md` says how to add one.
-- `bazel/`: dependency macros and patches.
+- `bazel/`: dependency macros, external repositories' BUILD files and
+  build rules.
 - `docker/`: `check.sh` builds and tests the tree on a clean distribution;
   `docs/building.md` is the page it proves.
 - `Makefile` and `make/`: the build without Bazel; `make/sources.mk` is
@@ -64,7 +65,7 @@ bazel build --config=asan //...            # AddressSanitizer
 ./docker/runner_limits.sh                  # the fast tests as a GitHub runner runs them: 4 CPUs, 32 MB TCP buffers
 packaging/release_check.sh [COMMIT]        # what a release checks, before the tag; an hour or two, needs Docker
 make -j && make check                      # the build without Bazel (Makefile, docs/building.md)
-./tests/bench.sh                           # the throughput and latency numbers the README quotes; tests/bench.sh 20000 rust with Rust peers
+./tests/bench.sh                           # the throughput and latency numbers the README quotes; tests/bench.sh 20000 rust with Rust peers, py with a Python backend
 bazel run //compdb                         # compile_commands.json for clangd, after a debug build
 bazel test //rust/...                      # the Rust library; Bazel fetches the Rust toolchain and the crates
 bazel test --test_tag_filters=rust,-slow //...  # every Rust target: the library, the roles, the scenarios with Rust roles
@@ -145,15 +146,17 @@ rust/vendor.sh                             # after a change to a Cargo.toml's de
 
 ## Adding things
 
-- A scenario: one file under `tests/scenarios/`, one `mx_integration_test`
-  per configuration in its BUILD; see `tests/README.md` for the harness and
-  the roles.
+- A scenario: one folder under `tests/scenarios/`, holding the test and its
+  README, one `mx_integration_test` per configuration in its BUILD
+  (`docs/recipes/add_a_scenario.md`); see `tests/README.md` for the harness
+  and the roles.
 - An example: as `examples/README.md` says under "Adding an example": a
-  Bazel one copies `examples/echo/`, a pip one `examples/cache/`; each has
+  Bazel one copies `examples/echo/`, a pip one `examples/cache/`, a Cargo
+  one `examples/echo-rust/`; each has
   a README and a walkthrough, whose steps' output comes from a real run.
-- A diagram: add a `Page` or a `Section` in `docs/diagrams/generate.py` and
-  link the page from `docs/README.md`.
-- A recipe: a numbered page under `docs/recipes/`, linked from
+- A diagram: add a `Page` or a `Section` in `docs/diagrams/pages.py`, which
+  `generate.py` writes out, and link the page from `docs/README.md`.
+- A recipe: a page named for its task under `docs/recipes/`, linked from
   `docs/README.md` and `llms.txt`, for a task that comes up more than once.
 - A reference page: hand-written Markdown under `docs/`, linked from the
   "Reference" list in `docs/README.md` and from `llms.txt`. State behaviour

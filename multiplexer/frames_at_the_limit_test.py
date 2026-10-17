@@ -6,7 +6,10 @@ fits, marked truncated. Both used to go over the limit: the backend raised
 where it built the echo, and the multiplexer threw while routing, so the
 message reached no tap and its sender's connection was never read again;
 and a guess at what a tap's frame adds kept tens of bytes less than fit.
-And a search comes back carrying its payload, as a PING does.
+And a search comes back carrying its payload, as a PING does. And a
+PEER_CONTROL whose answer, which repeats its key filters, would be over the
+limit is refused with an error, the filters as they were, where the
+multiplexer applied it and threw building the answer, which never came.
 """
 
 import unittest
@@ -14,11 +17,12 @@ import unittest
 from multiplexer import recording
 from multiplexer._native import MAX_MESSAGE_SIZE
 from multiplexer.clients import BackendError, Client
-from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.Multiplexer_pb2 import KeyFilter, MultiplexerMessage, PeerControl, PeerStatus, Routing
 from multiplexer.Recording_pb2 import RECORDING_CONTROLLER, RECORDING_RECORD, Record
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, runfile
+from multiplexer.testing.raw_peer import RawPeer, frame
 
 RULES = runfile("tests/testing.rules")
 
@@ -46,6 +50,37 @@ def fill_to_the_limit(message) -> None:
     message.message = b"p" * (MAX_MESSAGE_SIZE - message.ByteSize() - 16)
     while message.ByteSize() < MAX_MESSAGE_SIZE:
         message.message += b"p"
+
+
+def peer_control(peer: RawPeer, patterns: list[str], short_of_the_limit: int = 0) -> MultiplexerMessage:
+    """A PEER_CONTROL from `peer` filtering PYTHON_TEST_REQUEST by
+    `patterns`; with `short_of_the_limit`, exact keys of about 1000 bytes
+    besides, as many as make the frame that many bytes short of
+    MAX_MESSAGE_SIZE, the rest spread over them a few bytes each, so that
+    every pattern is within MAX_KEY_PATTERN_SIZE, 1024. Every size is
+    protobuf's: a key of 1000 bytes give or take 24 takes as many bytes
+    more or less as it has."""
+    control = PeerControl(routing=Routing())
+    key_filter = control.key_filter.add(type=types.PYTHON_TEST_REQUEST, pattern=patterns)
+    mxmsg = peer.message(b"", types.PEER_CONTROL)
+    mxmsg.message = control.SerializeToString()
+    if short_of_the_limit:
+        target = MAX_MESSAGE_SIZE - short_of_the_limit
+        key = "k" * 1000
+        one = len(KeyFilter(type=1, pattern=[key, key]).SerializeToString()) - len(
+            KeyFilter(type=1, pattern=[key]).SerializeToString()
+        )
+        key_filter.pattern.extend([key] * ((target - mxmsg.ByteSize()) // one))
+        mxmsg.message = control.SerializeToString()
+        missing = target - mxmsg.ByteSize()  # less than a key, or the few bytes the lengths grew by over
+        for index in range(len(key_filter.pattern)):
+            step = max(-24, min(24, missing))
+            if not step:
+                break
+            key_filter.pattern[index] = "k" * (len(key_filter.pattern[index]) + step)
+            missing -= step
+        mxmsg.message = control.SerializeToString()
+    return mxmsg
 
 
 def reply_to(client: Client, message_id: int, timeout: float = 20.0):
@@ -146,6 +181,41 @@ class FramesAtTheLimitTest(unittest.TestCase):
             finally:
                 sender.shutdown()
                 tapper.shutdown()
+
+    def test_a_peer_control_whose_answer_would_not_fit_is_refused(self) -> None:
+        """Key filters that make a PEER_CONTROL 8 bytes short of the limit,
+        exact keys of 1000 bytes: its PEER_STATUS, which repeats them and
+        adds the multiplexer's id, `to` and `references`, would be over it.
+        The answer comes with the error, no filters in effect, as before;
+        then a small change is applied and answered."""
+        with Cluster(1, rules=RULES) as cluster:
+            peer = RawPeer(cluster.endpoints[0], peers.PYTHON_TEST_SERVER)
+            try:
+                peer.handshake()
+                big = peer_control(peer, [], short_of_the_limit=8)
+                self.assertEqual(MAX_MESSAGE_SIZE - 8, big.ByteSize())
+                self.assertLessEqual(
+                    max(len(p) for p in PeerControl.FromString(big.message).key_filter[0].pattern), 1024
+                )
+                peer.sock.settimeout(60)
+                peer.send_raw(frame(big.SerializeToString()))
+                status = self.answer(peer, big.id)
+                self.assertIn("over MAX_MESSAGE_SIZE", status.error)
+                self.assertEqual([], list(status.key_filter), "the filters as they were")
+                small = peer_control(peer, ["model-a"])
+                peer.send_raw(frame(small.SerializeToString()))
+                status = self.answer(peer, small.id)
+                self.assertFalse(status.HasField("error"), status.error)
+                self.assertEqual(["model-a"], [p for f in status.key_filter for p in f.pattern])
+            finally:
+                peer.close()
+
+    def answer(self, peer: RawPeer, control_id: int) -> PeerStatus:
+        """The PEER_STATUS answering the PEER_CONTROL `control_id`."""
+        while True:
+            mxmsg = peer.receive(timeout=60)
+            if mxmsg.type == types.PEER_STATUS and mxmsg.references == control_id:
+                return PeerStatus.FromString(mxmsg.message)
 
 
 if __name__ == "__main__":

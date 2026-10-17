@@ -118,10 +118,12 @@ std::string session_path(const std::string& dir, const std::string& label, std::
 
 namespace {
 // What follows the last whole record of the file at `path` cut, before
-// anything is appended: see mx::protobuf::cut_torn_tail.
+// anything is appended: see mx::protobuf::cut_torn_tail. Every record
+// says what happened, so one that parses with no event is no record.
 std::int64_t cut_torn_record(const std::string& path) {
   Record scratch;
-  return mx::protobuf::cut_torn_tail(path, scratch);
+  return mx::protobuf::cut_torn_tail(path, scratch,
+                                     [](const Record& record) { return record.event_case() != Record::EVENT_NOT_SET; });
 }
 }  // namespace
 
@@ -133,7 +135,11 @@ Recorder::Recorder(const std::string& path, unsigned int payload_limit)
       payload_limit_(payload_limit),
       failed_(cut_ < 0 || !out_.good()),
       records_(0) {
-  if (cut_ < 0) {
+  if (cut_ == mx::protobuf::NOT_THIS_FORMAT) {
+    MX_LOG(ERROR, LOWVERBOSITY,
+           CTX("multiplexer.recorder") TEXT(path + " is not a recording, or one damaged before its end; left as it "
+                                                   "is, not recording"));
+  } else if (cut_ < 0) {
     MX_LOG(ERROR, LOWVERBOSITY,
            CTX("multiplexer.recorder") TEXT("cannot read " + path + " to find its last whole record; not recording"));
   } else if (failed_) {
@@ -147,6 +153,9 @@ Recorder::Recorder(const std::string& path, unsigned int payload_limit)
 }
 
 void Recorder::header(std::uint64_t multiplexer_id, const std::string& rules_fingerprint, const std::string& label) {
+  if (failed_) {
+    return;
+  }
   Record record;
   RecordingHeader* header = record.mutable_header();
   header->set_multiplexer_id(multiplexer_id);

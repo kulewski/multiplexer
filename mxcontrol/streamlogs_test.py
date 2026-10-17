@@ -10,7 +10,9 @@ this machine buffers for the frozen multiplexer, the stream outgrows it in
 a few chunks. And with no log receiver connected, the
 DELIVERY_ERROR every chunk draws is said in streamlogs' own words, 'no log
 receiver took the log stream', where streamlogs logged the library's line
-about a message it had no callback for.
+about a message it had no callback for. And entries fewer than a chunk go
+out once nothing more is ready on stdin, where they waited for the chunk
+to fill or for stdin to end.
 """
 
 import os
@@ -103,6 +105,47 @@ class StreamLogsTest(unittest.TestCase):
                         receivers[1].wait_for(types.LOGS_STREAM, sent + chunks, timeout=60)
                     finally:
                         frozen.resume()
+                    streamer.stdin.close()
+                    self.assertEqual(0, streamer.wait(timeout=60))
+                finally:
+                    if streamer.poll() is None:
+                        streamer.kill()
+                        streamer.wait()
+
+    def test_a_quiet_stream_goes_out_without_waiting_for_more(self) -> None:
+        """A program that logs a few entries, fewer than a chunk, then
+        nothing for a while, its stdin open: they go out once stdin has
+        nothing more to read, where they waited for the chunk to fill or for
+        stdin to end, an ERROR before a hang never shipped while the program
+        lived. Then a few more go the same way. Counted: the receiver's
+        entries, in order, each wait bounded only to detect a failure."""
+        with Cluster(1, rules=RULES) as cluster:
+            receiver = FakePeer(cluster, peers.LOG_RECEIVER_EXAMPLE, name="receiver")
+            log = tempfile.TemporaryFile(dir=os.environ.get("TEST_TMPDIR"))
+            with receiver, log:
+                streamer = subprocess.Popen(
+                    [MXCONTROL, "streamlogs", "--multiplexer=%s:%d" % cluster.endpoints[0]],
+                    stdin=subprocess.PIPE,
+                    stderr=log,
+                )
+                assert streamer.stdin is not None
+
+                def received() -> list[int]:
+                    """The ids of the entries the receiver got, in order."""
+                    return [
+                        entry.id
+                        for mxmsg in receiver.messages(types.LOGS_STREAM)
+                        for entry in LogEntriesMessage.FromString(mxmsg.message).log
+                    ]
+
+                try:
+                    cluster.wait_for_peer(peers.LOG_STREAMER)
+                    streamer.stdin.write(entries(3, 0))
+                    streamer.stdin.flush()
+                    wait_until(lambda: received() == [1, 2, 3], 30, "the three entries, stdin open")
+                    streamer.stdin.write(entries(2, 3))
+                    streamer.stdin.flush()
+                    wait_until(lambda: received() == [1, 2, 3, 4, 5], 30, "two more, stdin open")
                     streamer.stdin.close()
                     self.assertEqual(0, streamer.wait(timeout=60))
                 finally:

@@ -95,10 +95,11 @@ struct BasicClient::Outbox {
   std::chrono::steady_clock::time_point armed = std::chrono::steady_clock::time_point::max();
   std::vector<FlushPtr> flushes;
   // Messages a dead connection handed to another while somebody held
-  // their tracker, with the connection each went to, for followed(). The
-  // entries of trackers nobody holds any more are cleared out when the list
-  // has doubled since the last time.
-  std::vector<std::pair<std::weak_ptr<SendState>, ConnectionWrapper>> moved;
+  // their tracker, by the tracker's address, with the connection each went
+  // to last, for followed(). Held weakly, so an entry whose tracker expired,
+  // its address free for another, answers nothing; such entries are
+  // cleared out when the map has doubled since the last time.
+  std::unordered_map<const SendState*, std::pair<std::weak_ptr<SendState>, ConnectionWrapper>> moved;
   std::size_t moved_compact_at = 64;
   // Where the last dead connection to each target handed what it had not
   // written (_successor), one entry per target: a lane that still holds a
@@ -114,12 +115,14 @@ struct BasicClient::Outbox {
   };
   std::vector<Handover> handovers;
   // The sends followed, by the state of each copy; the events about their
-  // copies, written or given up on, wait for the one pass per loop turn
-  // that handles them (_process_follows), outside the connection's
-  // handlers they came from.
+  // copies, written or given up on, and the drops the observer is to hear
+  // of, wait for the one pass per loop turn that handles them
+  // (_process_callbacks), outside the connection's handlers and the
+  // outbox's own bookkeeping they came from.
   std::unordered_map<const SendState*, FollowPtr> follows;
   std::vector<std::pair<std::shared_ptr<SendState>, bool>> follow_events;
-  bool follow_posted = false;
+  std::vector<std::pair<std::uint64_t, DropReason>> drop_events;
+  bool callbacks_posted = false;
 };
 
 }  // namespace multiplexer

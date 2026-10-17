@@ -150,7 +150,7 @@ class DrainRouting(unittest.TestCase):
                 send=[(C.types.TEST_EVENT, "e%d" % index) for index in range(200)],
                 interval=0.02,
             )
-            wait_for_total([strict], "received", 5)
+            self.assertGreaterEqual(wait_for_total([strict], "received", 5), 5, "events before the drain")
             strict.request_drain()
             keeping.request_drain()
             acked_strict = strict.wait_for("acked")

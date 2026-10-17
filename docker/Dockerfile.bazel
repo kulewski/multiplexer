@@ -1,6 +1,7 @@
 # The Bazel build on a clean distribution: exactly the packages the
 # documentation asks for, nothing else. docker/check.sh builds the image
-# and runs the build and the fast tests in it; BASE picks the distribution.
+# and runs the build, the fast tests and the Bazel example workspaces in it;
+# BASE picks the distribution.
 #
 #   docker build -f docker/Dockerfile.bazel --build-arg BASE=ubuntu:24.04 .
 ARG BASE=debian:12

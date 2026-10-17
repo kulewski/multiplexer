@@ -54,7 +54,17 @@ void refuse(BasicClient& client, const IncomingMessage& incoming) {
 void Client::refuse_arrivals() {
   basic_client_->check_not_orphaned();
   BasicClient* client = basic_client_.get();  // the sink lives in it, so it outlives every call
-  basic_client_->set_incoming_sink([client](const IncomingMessage& incoming) { refuse(*client, incoming); });
+  if (!awaited_) {
+    awaited_ = std::make_shared<std::vector<std::uint64_t>>();
+  }
+  basic_client_->set_incoming_sink([client, awaited = awaited_](const IncomingMessage& incoming) {
+    const std::uint64_t references = incoming.third->references();
+    if (references && contains(*awaited, references)) {
+      client->queue_incoming(incoming);  // an answer to the query under way, which reads the queue
+      return;
+    }
+    refuse(*client, incoming);
+  });
 }
 
 void Client::refuse_unread() {
@@ -77,6 +87,13 @@ Client::Client(std::shared_ptr<asio::io_service> io_service, std::uint32_t clien
 Client::Client(asio::io_service& io_service, std::uint32_t client_type)
     : io_service_(io_service), basic_client_(BasicClient::Create(io_service_, client_type)) {}
 
+Client::Client(Client&& other) noexcept
+    : io_service_ptr_(std::move(other.io_service_ptr_)),
+      received_(std::move(other.received_)),
+      awaited_(std::move(other.awaited_)),
+      io_service_(other.io_service_),
+      basic_client_(std::move(other.basic_client_)) {}
+
 // The thread that destroys the client owns it from here on, whichever
 // thread drove it: at interpreter exit Python destroys on the main thread a
 // client that served on a worker, and the shutdown inside must not fail the
@@ -87,6 +104,9 @@ Client::Client(asio::io_service& io_service, std::uint32_t client_type)
 // would take asio's locks, which may be held by a parent thread that does
 // not exist here, and close descriptor numbers the child may have reused.
 Client::~Client() {
+  if (!basic_client_) {
+    return;  // moved from
+  }
   if (basic_client_->orphaned()) {
     basic_client_->orphan_close_descriptors();
     new shared_ptr<BasicClient>(basic_client_);  // leaked: keeps the object alive forever

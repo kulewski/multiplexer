@@ -77,8 +77,9 @@ number, so that the wire and every recording are unchanged. For a release,
 
 **What is a good message size?**
 Anything up to 128 MiB is accepted, and a 1 MiB message is exercised by the
-tests. The multiplexer copies nothing, but it holds every message queued for
-a slow receiver in memory, so keep large messages off `whom: ALL` types and
+tests. The multiplexer forwards the bytes a message came in, copying its
+payload once while it parses the message to route it, and it holds every
+message queued for a slow receiver in memory, so keep large messages off `whom: ALL` types and
 give their receivers a small `queue_size`.
 
 **Can a backend built on `BaseMultiplexerServer` send requests of its own?**
@@ -87,7 +88,11 @@ It can, but not well. Its connection works like a `SyncClient`
 you supply your own), so `query()` works from inside `handle_message`. While that nested query waits
 for its reply, though, every other message that arrives on the backend's
 connections is logged and dropped rather than kept for later, so concurrent
-requests to that backend are lost. Sending an event from a backend is fine.
+requests to that backend are lost. Once its drain is over the backend
+refuses what arrives, and a handler's query then reads only its own
+answers, the requests read before waiting for their turn
+([leaving](leaving.md#a-drain-that-ends-while-work-keeps-coming)). Sending
+an event from a backend is fine.
 For a service that both serves and asks, build it on
 `BaseThreadedMultiplexerServer`, whose handlers may query from their worker
 threads, or run the asking side as a separate client process, or make the
@@ -103,8 +108,11 @@ signal per process: a C++ library in the same binary that installs its own
 replaces Python's without a trace. The loop therefore polls, and a backend
 built on one of the server classes notices a request to leave from
 `periodic_task()`, by a file a preStop hook wrote or a flag another thread
-set, within one poll. A pure C++ backend may still set a `sig_atomic_t` from
-a handler of its own and read it there.
+set, within one poll. A backend may still set a flag from a signal handler
+of its own and read it there, a C++ one a `sig_atomic_t`; a Python
+handler runs at the main thread's next return from C++, within one poll,
+and must only set the flag, never call the library
+([api_python.md](api_python.md#basemultiplexerserver)).
 
 **Is there a server class that runs handlers on worker threads?**
 Yes: `BaseThreadedMultiplexerServer`, in `multiplexer.threaded_server` and

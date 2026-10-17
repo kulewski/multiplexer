@@ -892,9 +892,6 @@ TEST(ServeThread, AnAddressedQueryLocatesABackendThatDeclinesSearches) {
   EXPECT_TRUE(reply.second.is_same_connection(right)) << "not through the second multiplexer";
 }
 
-// A reply may name the connections it goes through, `multiplexer` being
-// one of send_message()'s documented keys, which the debug-build check of
-// the keys refused.
 // A reply given as a whole MultiplexerMessage that sets only its type and
 // payload gets the rest from the request it answers, as a threaded
 // server's Request::reply fills it: to, references and workflow, so the
@@ -930,6 +927,9 @@ TEST(ServeThread, FieldsBesideAWholeMessageAreRefused) {
   EXPECT_EQ(1, backend.exceptions_once(1));
 }
 
+// A reply may name the connections it goes through, `multiplexer` being
+// one of send_message()'s documented keys, which the debug-build check of
+// the keys refused.
 TEST(ServeThread, AReplyMayNameItsMultiplexer) {
   InProcessMultiplexer mx;
   MultiplexerAddresses addresses;

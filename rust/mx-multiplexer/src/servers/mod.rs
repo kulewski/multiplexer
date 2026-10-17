@@ -18,7 +18,7 @@ pub(crate) mod plain;
 pub(crate) mod threaded;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -26,7 +26,6 @@ use crate::constants::types;
 use crate::error::{Error, Result};
 use crate::handles::{Connection, Incoming};
 use crate::message::{Message, Routing};
-use crate::sync_client::SyncClient;
 use crate::threaded_client::ThreadedClient;
 
 /// Why a handler failed: any error, or a panic's message.
@@ -68,7 +67,10 @@ pub trait Handler: Send + Sync + 'static {
     /// Whether the drain is over and `serve_forever()` may return;
     /// `by_default` is the library's answer: the drain's time has passed,
     /// or, with every path turned off and no last resort, every multiplexer
-    /// confirmed it and nothing is left to handle.
+    /// confirmed it, nothing is left to handle and nothing the server sent
+    /// waits for a connection to come up, a reply made while every
+    /// multiplexer was down going out once one is back, where the close
+    /// would drop it.
     fn drained(&self, by_default: bool) -> bool {
         by_default
     }
@@ -98,8 +100,9 @@ impl Handler for Box<dyn Handler> {
 /// How `serve_forever()` ended other than by `stop()` or a drain.
 #[derive(Debug)]
 pub enum ServeError {
-    /// The client failed: nothing could connect, or the client was used
-    /// after a fork.
+    /// The client failed: used after a fork, a worker thread that could
+    /// not start, or a receive's error. A multiplexer that cannot be
+    /// reached is none: the library keeps trying while the server serves.
     Client(Error),
     /// A handler failed and `on_handler_error()` returned false.
     Handler(HandlerError),
@@ -138,7 +141,7 @@ pub(crate) fn nothing_more_arrives(routing: &Routing) -> bool {
 /// its loop lends, or the threaded server's.
 #[derive(Clone)]
 pub(crate) enum Replier {
-    Sync(Arc<Mutex<SyncClient>>),
+    Sync(Arc<plain::Shared>),
     Threaded(ThreadedClient),
 }
 
@@ -147,19 +150,20 @@ impl Replier {
     /// it is gone, as every client sends.
     pub(crate) fn send(&self, message: Message, connection: &Connection) -> Result<()> {
         match self {
-            Replier::Sync(client) => {
-                let mut client = client.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                client.send_message(message).connection(connection).queue().map(|_| ())
-            }
+            Replier::Sync(shared) => shared.client()?.send_message(message).connection(connection).queue().map(|_| ()),
             Replier::Threaded(client) => client.send_message(message).connection(connection).queue().map(|_| ()),
         }
     }
 }
 
-/// What the server and a request share: whether it was answered, and
-/// whether a drop unanswered is the request's to log.
-#[derive(Debug, Default)]
+/// A request's message, what answers it, and what the server and the
+/// request share of its fate: whether it was answered, and whether a drop
+/// unanswered is the request's to log. One per request, held by the
+/// request and by the server that handles it, which so keeps what a
+/// failure's report needs without copying the message.
 pub(crate) struct RequestState {
+    incoming: Incoming,
+    replier: Replier,
     answered: AtomicBool,
     /// The handler returned and kept the request: it answers later.
     kept: AtomicBool,
@@ -168,27 +172,25 @@ pub(crate) struct RequestState {
 /// A message being handled, and what answers it; see the module comment.
 /// A handler may keep it and answer later, from any thread.
 pub struct Request {
-    incoming: Incoming,
-    replier: Replier,
     state: Arc<RequestState>,
 }
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Request").field("message", &self.incoming.message).finish_non_exhaustive()
+        formatter.debug_struct("Request").field("message", &self.state.incoming.message).finish_non_exhaustive()
     }
 }
 
 /// `reply` as the reply to `request`: its empty `to`, `references` and
 /// `workflow` filled in from the request.
-fn as_reply(request: &Message, mut reply: Message) -> Message {
+pub(crate) fn as_reply(request: &Message, mut reply: Message) -> Message {
     if reply.to.unwrap_or(0) == 0 {
         reply.to = Some(request.sender);
     }
     if reply.references == 0 {
         reply.references = request.id;
     }
-    if reply.workflow.as_ref().is_none_or(Bytes::is_empty) {
+    if reply.workflow.as_ref().is_none_or(String::is_empty) {
         reply.workflow.clone_from(&request.workflow);
     }
     reply
@@ -197,22 +199,23 @@ fn as_reply(request: &Message, mut reply: Message) -> Message {
 impl Request {
     /// A request for `incoming`, answered through `replier`.
     pub(crate) fn new(incoming: Incoming, replier: Replier) -> Request {
-        Request { incoming, replier, state: Arc::default() }
+        let state = RequestState { incoming, replier, answered: AtomicBool::new(false), kept: AtomicBool::new(false) };
+        Request { state: Arc::new(state) }
     }
 
     /// The message.
     pub fn message(&self) -> &Message {
-        &self.incoming.message
+        &self.state.incoming.message
     }
 
     /// The message's payload.
     pub fn payload(&self) -> &Bytes {
-        &self.incoming.message.payload
+        &self.state.incoming.message.payload
     }
 
     /// The connection it came on, which a reply goes back through.
     pub fn connection(&self) -> &Connection {
-        &self.incoming.connection
+        &self.state.incoming.connection
     }
 
     /// Whether a reply went out, or `no_response()` was called.
@@ -232,8 +235,8 @@ impl Request {
     /// is not the reply goes through the server's handle with `to` set. A
     /// reply that failed did not go out, and the request is not answered.
     pub fn reply_message(&self, message: Message) -> Result<()> {
-        let reply = as_reply(&self.incoming.message, message);
-        self.replier.send(reply, &self.incoming.connection)?;
+        let reply = as_reply(&self.state.incoming.message, message);
+        self.state.replier.send(reply, &self.state.incoming.connection)?;
         self.state.answered.store(true, Ordering::Release);
         Ok(())
     }
@@ -253,8 +256,9 @@ impl Request {
     /// long: the requester's `on_received` hears it. The request is no more
     /// answered than before.
     pub fn notify_start(&self) -> Result<()> {
-        let reply = as_reply(&self.incoming.message, Message { r#type: types::REQUEST_RECEIVED, ..Default::default() });
-        self.replier.send(reply, &self.incoming.connection)
+        let reply =
+            as_reply(&self.state.incoming.message, Message { r#type: types::REQUEST_RECEIVED, ..Default::default() });
+        self.state.replier.send(reply, &self.state.incoming.connection)
     }
 }
 
@@ -264,35 +268,39 @@ impl Drop for Request {
         if self.state.kept.load(Ordering::Acquire) && !self.answered() {
             log::warn!(
                 "request #{} of type {} dropped without a reply or no_response()",
-                self.incoming.message.id,
-                self.incoming.message.r#type
+                self.state.incoming.message.id,
+                self.state.incoming.message.r#type
             );
         }
     }
+}
+
+/// What a panic says, as a handler's failure.
+fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".to_string())
 }
 
 /// Runs the handler on `request` and does what follows: a failure, an
 /// `Err` or a panic, is logged and gets the requester BACKEND_ERROR unless
 /// a reply went out or the message answers another; a request dropped
 /// unanswered is logged, one kept is left to log its own drop. Returns the
-/// failure when `on_handler_error()` says the server ends.
+/// failure when `on_handler_error()` says the server ends, or what it
+/// panicked with: as an exception out of C++'s on_handler_exception(), it
+/// ends the server, where it killed a threaded server's worker with its
+/// request counted as being handled for good.
 pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Option<HandlerError> {
     let state = Arc::clone(&request.state);
-    let incoming = request.incoming.clone();
-    let replier = request.replier.clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.handle_message(request)));
     let failure = match outcome {
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(error),
-        Err(panic) => Some(HandlerError::from(
-            panic
-                .downcast_ref::<&str>()
-                .map(|text| text.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic".to_string()),
-        )),
+        Err(panic) => Some(HandlerError::from(panic_text(panic))),
     };
-    let message = &incoming.message;
+    let message = &state.incoming.message;
     let Some(error) = failure else {
         if Arc::strong_count(&state) > 1 {
             state.kept.store(true, Ordering::Release); // answered later, or logged at its drop
@@ -315,15 +323,20 @@ pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Opt
                 ..Default::default()
             },
         );
-        if let Err(reporting) = replier.send(report, &incoming.connection) {
+        if let Err(reporting) = state.replier.send(report, &state.incoming.connection) {
             log::error!("{kind}: could not report the failure to the requester: {reporting}");
         }
         state.answered.store(true, Ordering::Release);
     }
-    if handler.on_handler_error(&error) {
-        return None;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.on_handler_error(&error))) {
+        Ok(true) => None,
+        Ok(false) => Some(error),
+        Err(panic) => {
+            let text = panic_text(panic);
+            log::error!("{kind}: on_handler_error panicked: {text}");
+            Some(HandlerError::from(format!("on_handler_error panicked: {text}")))
+        }
     }
-    Some(error)
 }
 
 /// What a server's handle reaches: the plain server's client and flags, or
@@ -347,12 +360,12 @@ impl std::fmt::Debug for ServerHandle {
 }
 
 impl ServerHandle {
-    /// Asks `serve_forever()` to return, from any thread: it notices within
-    /// one poll, at once on the threaded server, finishes what it holds and
-    /// closes the connections.
+    /// Asks `serve_forever()` to return, from any thread: it notices at
+    /// once, its wait woken, finishes what it holds and closes the
+    /// connections.
     pub fn stop(&self) {
         match &self.0 {
-            Controlled::Plain(shared) => shared.working.store(false, Ordering::SeqCst),
+            Controlled::Plain(shared) => shared.stop(),
             Controlled::Threaded(control) => control.stop(),
         }
     }
@@ -392,11 +405,11 @@ impl ServerHandle {
     }
 
     /// How many connections are registered. From another thread than the
-    /// plain server's own it waits for the loop's current wait to end,
-    /// `poll` at most.
+    /// plain server's own, a call that finds its loop waiting wakes it and
+    /// has its turn with the client at once, as every call here does.
     pub fn connections_count(&self) -> Result<usize> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.lock().connections_count(),
+            Controlled::Plain(shared) => shared.client()?.connections_count(),
             Controlled::Threaded(control) => control.client().connections_count(),
         }
     }
@@ -407,8 +420,19 @@ impl ServerHandle {
     /// Waits as `connections_count()` does.
     pub fn routing_acknowledged(&self) -> Result<bool> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.lock().routing_acknowledged(),
+            Controlled::Plain(shared) => shared.client()?.routing_acknowledged(),
             Controlled::Threaded(control) => control.client().routing_acknowledged(),
+        }
+    }
+
+    /// How many messages the server's client holds for a connection to
+    /// come up, which a drain waits for; see
+    /// `SyncClient::held_for_a_connection()`. Waits as
+    /// `connections_count()` does.
+    pub fn held_for_a_connection(&self) -> Result<usize> {
+        match &self.0 {
+            Controlled::Plain(shared) => shared.client()?.held_for_a_connection(),
+            Controlled::Threaded(control) => control.client().held_for_a_connection(),
         }
     }
 
@@ -422,7 +446,7 @@ impl ServerHandle {
     /// filled in.
     pub fn send_message(&self, message: Message) -> Result<u64> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.lock().send_message(message).queue(),
+            Controlled::Plain(shared) => shared.client()?.send_message(message).queue(),
             Controlled::Threaded(control) => control.client().send_message(message).queue(),
         }
     }
@@ -431,7 +455,7 @@ impl ServerHandle {
     /// replacing those set before, a drain keeping them.
     pub fn set_key_filters(&self, filters: crate::message::KeyFilters) -> Result<()> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.lock().set_key_filters(filters),
+            Controlled::Plain(shared) => shared.client()?.set_key_filters(filters),
             Controlled::Threaded(control) => control.set_key_filters(filters, None),
         }
     }
@@ -446,7 +470,10 @@ impl ServerHandle {
         on_acknowledged: impl FnOnce() + Send + 'static,
     ) -> Result<()> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.lock().set_key_filters_then(filters, on_acknowledged),
+            Controlled::Plain(shared) => {
+                let on_acknowledged = shared.deferred(on_acknowledged);
+                shared.client()?.set_key_filters_then(filters, on_acknowledged)
+            }
             Controlled::Threaded(control) => control.set_key_filters(filters, Some(Box::new(on_acknowledged))),
         }
     }
@@ -460,11 +487,14 @@ impl ServerHandle {
         }
     }
 
-    /// Requests dropped for a full queue or refused while leaving: the
-    /// threaded server's; the plain server's client counts what it dropped.
+    /// Requests dropped: on the threaded server for a full queue or
+    /// refused while leaving, on the plain server for its client's full
+    /// receive queue, `BaseMultiplexerServer::incoming_dropped()`.
     pub fn dropped(&self) -> usize {
         match &self.0 {
-            Controlled::Plain(_) => 0,
+            Controlled::Plain(shared) => {
+                usize::try_from(shared.incoming_dropped.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+            }
             Controlled::Threaded(control) => control.dropped(),
         }
     }

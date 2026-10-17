@@ -20,7 +20,7 @@ C++ and a Python backend so.
 import unittest
 
 from multiplexer.multiplexer_constants import peers, types  # your rules file's
-from multiplexer.testing import Cluster, FakePeer, Process, TestClient, runfile
+from multiplexer.testing import Cluster, FakePeer, Process, TestClient, runfile, wait_until
 
 RULES = runfile("deployment.rules")  # the file the constants were generated from
 SERVICE = runfile("search_service")  # the binary under test
@@ -52,8 +52,12 @@ class SearchServiceTest(unittest.TestCase):
         ):
             index.reply_with(types.INDEX_REQUEST, b"3 hits", types.INDEX_RESPONSE)
             service = self.start(cluster)
+            mark = cluster.mx[0].log_mark()
             service.proc.terminate()  # what a deployment's stop sends
-            # The last of its type, it still answers through its drain.
+            # The last of its type, it still answers through its drain, asked once
+            # the multiplexer has the drain routing: before it, a request is
+            # routed as if no drain had begun.
+            wait_until(lambda: cluster.mx[0].log_contains("(SEARCH) takes", mark), 15, "the drain routing")
             self.assertEqual(b"3 hits", client.query(b"pears", types.SEARCH_REQUEST).message)
             self.assertEqual(0, service.wait(30))
 ```
@@ -68,6 +72,10 @@ class SearchServiceTest(unittest.TestCase):
 - **`cluster.wait_for_peer(type)`** waits until the service has
   registered on every multiplexer, so nothing is asked of it too early.
   `wait_for_peer_gone(type)` is its other side.
+- **`cluster.mx[0].log_mark()` and `log_contains(text, mark)`**, with
+  `wait_until`, wait for a line a multiplexer logs past the mark, as
+  `peer N (SEARCH) takes any=no all=no last_resort=yes` when it applies
+  a drain's routing.
 - **`cluster.mx[0].restart()`** restarts a multiplexer under the
   service, which must reconnect: wait for its peer again.
   `cluster.mx[0].pause()` freezes one instead, without closing a socket.

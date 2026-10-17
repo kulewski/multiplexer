@@ -15,8 +15,10 @@
 /// The reflected polynomial of the standard CRC-32.
 const POLYNOMIAL: u32 = 0xEDB8_8320;
 
-/// The eight tables; see the module comment.
-const TABLES: [[u32; 256]; 8] = make_tables();
+/// The eight tables; see the module comment. A static, built at compile
+/// time all the same, at one address: a const would be copied to the stack
+/// at every lookup in an unoptimized build, 8 KiB a time.
+static TABLES: [[u32; 256]; 8] = make_tables();
 
 /// Builds the tables, at compile time.
 const fn make_tables() -> [[u32; 256]; 8] {

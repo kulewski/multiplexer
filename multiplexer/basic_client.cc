@@ -51,8 +51,8 @@ void BasicClient::orphan_close_descriptors() {
   descriptors_.close_all();
 }
 
-void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
-                                 std::shared_ptr<MultiplexerMessage> mxmsg) {
+void BasicClient::handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
+                                 const std::shared_ptr<MultiplexerMessage>& mxmsg) {
   MX_DCHECK_RUN_ON(&owner_thread());
   ++frames_handled_;  // poll() reads a queue's worth at most
 
@@ -78,6 +78,11 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     incoming_sink_(incoming);
     return;
   }
+  queue_incoming(incoming);
+}
+
+void BasicClient::queue_incoming(const IncomingMessagesBuffer::value_type& incoming) {
+  MX_DCHECK_RUN_ON(&owner_thread());
   if (incoming_queue_full()) {
     // Not seen after all: its copy through another multiplexer, coming
     // once there is room, is taken, where it was dropped as a duplicate of
@@ -86,7 +91,7 @@ void BasicClient::handle_message(Connection::pointer conn, std::shared_ptr<const
     incoming_dropped_.fetch_add(1, std::memory_order_relaxed);
     if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
       MX_LOG(WARNING, LogSummary::VERBOSITY,
-             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping #" + repr(mxmsg->id())));
+             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping #" + repr(incoming.third->id())));
     }
     return;  // drop
   }
@@ -208,6 +213,19 @@ void BasicClient::bind_to_current_thread() {
       conn->bind_io_thread_to_current();
     }
   }
+}
+
+void BasicClient::set_incoming_aside() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  Assert(incoming_aside_.empty());
+  incoming_aside_.swap(incoming_messages_);
+}
+
+void BasicClient::put_incoming_back() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  dequeued_ += incoming_messages_.size();  // taken by nobody, as if received
+  incoming_messages_.clear();
+  incoming_messages_.swap(incoming_aside_);
 }
 
 BasicClient::IncomingMessagesBuffer::value_type BasicClient::next_incoming_message() {

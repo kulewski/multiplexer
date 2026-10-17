@@ -101,12 +101,11 @@ void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, Drop
       flush->lost = true;
     }
   }
+  // Told in the pass after the handler this is in, which may be in the
+  // middle of the outbox's bookkeeping (_process_callbacks).
   if (drop_observer_) {
-    try {
-      drop_observer_(raw->id(), reason);
-    } catch (const std::exception& error) {
-      MX_LOG(ERROR, LOWVERBOSITY, CTX("BasicClient") TEXT(std::string("the drop observer raised: ") + error.what()));
-    }
+    outbox_->drop_events.emplace_back(raw->id(), reason);
+    _post_callbacks();
   }
 }
 
@@ -388,12 +387,26 @@ void BasicClient::_place_held() {
       _moved(waiting->state, placed_on);  // somebody follows it: where it went
     }
     waiting->over = true;
-    --outbox.held_live;
+    _held_left();
     --outbox.waiting;
     _wait_flushes(waiting->number, -1);
     ++outbox.retries;
   }
   _check_flushes();
+}
+
+std::size_t BasicClient::held_for_a_connection() const {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  return outbox_->held_live;
+}
+
+// A message held for a connection went, placed on one that came up or given
+// up on: the last to go ends a serve loop's wait, so that a drain waiting
+// for what is held looks again at once, not at its next poll.
+void BasicClient::_held_left() {
+  if (--outbox_->held_live == 0) {
+    acknowledged_wake_ = true;
+  }
 }
 
 BasicClient::Backlog* BasicClient::_backlog(const Connection* conn) {
@@ -414,18 +427,15 @@ BasicClient::Connection::pointer BasicClient::_choose_connection() {
     return Connection::pointer();
   }
   ConnectionsList& connections = connections_by_type_[peers::MULTIPLEXER];
+  Connection::pointer chosen;
   for (ConnectionsList::iterator entry = connections.begin();
-       (entry = choose_free_connections(connections, entry)) != connections.end(); ++entry) {
-    Connection::pointer conn = entry->lock();
-    if (!conn) {
-      continue;
-    }
-    Backlog* backlog = _backlog(conn.get());
+       (entry = choose_free_connections(connections, entry, &chosen)) != connections.end(); ++entry) {
+    Backlog* backlog = _backlog(chosen.get());
     if (backlog && backlog->live) {
       continue;  // room, but what waits for it goes first
     }
     connections.splice(connections.end(), connections, entry);
-    return conn;
+    return chosen;
   }
   Connection::pointer least;
   std::size_t least_waiting = 0;

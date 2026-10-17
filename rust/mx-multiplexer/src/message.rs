@@ -49,8 +49,9 @@ pub struct Message {
     pub timestamp: Option<u32>,
     /// The id of the message this one answers, 0 for none.
     pub references: u64,
-    /// Opaque bytes for tracing, copied from a request to its reply.
-    pub workflow: Option<Bytes>,
+    /// The work flow, a trace or request id, text, copied from a request
+    /// to its reply; never routed by. A binary value goes as hex or base64.
+    pub workflow: Option<String>,
     /// Routing rules carried by the message, replacing the rules file's.
     pub override_rrules: Vec<RoutingRule>,
     /// Gates the multiplexer's own log of the message.
@@ -73,8 +74,10 @@ pub enum Whom {
 /// file's `to { ... }` entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutingRule {
-    /// The receiving peer type by its name in the rules file; `ALL_TYPES`
-    /// for every peer type that has a connection.
+    /// The receiving peer type by its name in a rules file; `ALL_TYPES`
+    /// for every peer type that has a connection. Names are resolved where
+    /// the multiplexer reads a rules file: a message's own rules are routed
+    /// by `peer_type` alone, a rule given by name only reaching nobody.
     pub peer: Option<String>,
     /// The receiving peer type by its number.
     pub peer_type: Option<u32>,
@@ -310,7 +313,7 @@ mod tests {
             compression: Some(1),
             timestamp: Some(5),
             references: Some(6),
-            workflow: Some(Bytes::from_static(b"workflow")),
+            workflow: Some("workflow".into()),
             override_rrules: vec![proto::multiplexer_message_description::RoutingRule {
                 peer: Some("backend".into()),
                 peer_type: Some(7),

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <set>
 
+#include "lib/logging/logging.h"
 #include "multiplexer/defaults.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 // Quoted, as RE2 includes its own: a workspace that builds @mx without
@@ -26,13 +27,18 @@ RE2::Options pattern_options() {
   return options;
 }
 
-// A set of a few thousand patterns fits RE2's default memory budget, 8
-// MiB; past that the budget grows with the patterns. It is a cap: RE2
-// takes only what the patterns need.
-RE2::Options set_options(std::size_t patterns) {
-  RE2::Options options = pattern_options();
-  options.set_max_mem(std::max<std::int64_t>(options.max_mem(), std::int64_t(4096) * std::int64_t(patterns)));
-  return options;
+// A set's memory budget for patterns whose programs hold `instructions`
+// in all. RE2 builds the set's program, and its DFA must have room for two
+// work queues and twenty states: measured, 45 to 60 bytes per instruction
+// of the patterns' programs. Twice that, RE2's default 8 MiB at least, and
+// 1 GiB at most. It is a cap, not an allocation: RE2 takes what it needs,
+// and the DFA's states as keys come. A budget per pattern, 4 KiB, ran out
+// for long patterns, a thousand {1,63} repetitions say.
+const std::int64_t SET_BYTES_PER_INSTRUCTION = 128;
+const std::int64_t SET_MAX_MEM = std::int64_t(1) << 30;
+std::int64_t set_budget(std::int64_t instructions) {
+  const std::int64_t wanted = SET_BYTES_PER_INSTRUCTION * instructions;
+  return std::min(SET_MAX_MEM, std::max<std::int64_t>(pattern_options().max_mem(), wanted));
 }
 
 bool ascii_word_character(unsigned char character) {
@@ -86,27 +92,52 @@ struct KeyPatterns::Type {
   // filter with no pattern takes no key, and keeps the type filtered.
   unsigned int owners = 0;
 
-  // Builds the set again from the used slots; on failure the slots are
-  // matched one by one until the next build.
-  void build() {
+  // Builds the set again from the used slots, its budget from what their
+  // patterns compiled to (set_budget), once more with twice that should it
+  // not do; failing that, the slots are matched one by one until the next
+  // build, which a WARNING says, naming `type`.
+  void build(std::uint32_t type) {
     stale = false;
     slot_by_index.clear();
     set.reset();
     if (slot_by_text.empty()) {
       return;
     }
-    set.reset(new RE2::Set(set_options(slot_by_text.size()), RE2::ANCHOR_BOTH));
-    for (unsigned int slot = 0; slot < slots.size(); ++slot) {
-      if (slots[slot].regex) {
-        if (set->Add(slots[slot].text, nullptr) < 0) {
-          set.reset();
-          return;
-        }
-        slot_by_index.push_back(slot);
+    std::int64_t instructions = 0;
+    for (const Pattern& slot : slots) {
+      if (slot.regex) {
+        instructions += slot.regex->ProgramSize() + 1;  // and the set's match of it
       }
     }
-    if (!set->Compile()) {
-      set.reset();
+    std::int64_t budget = set_budget(instructions);
+    std::int64_t tried = 0;
+    for (int attempt = 0; attempt < 2 && !set && budget > tried;
+         ++attempt, budget = std::min(SET_MAX_MEM, 2 * budget)) {
+      tried = budget;
+      RE2::Options options = pattern_options();
+      options.set_max_mem(budget);
+      std::unique_ptr<RE2::Set> built(new RE2::Set(options, RE2::ANCHOR_BOTH));
+      slot_by_index.clear();
+      for (unsigned int slot = 0; slot < slots.size(); ++slot) {
+        if (slots[slot].regex) {
+          if (built->Add(slots[slot].text, nullptr) < 0) {
+            built.reset();
+            break;
+          }
+          slot_by_index.push_back(slot);
+        }
+      }
+      if (built && built->Compile()) {
+        set = std::move(built);
+      }
+    }
+    if (!set) {
+      slot_by_index.clear();
+      MX_LOG(WARNING, LOWVERBOSITY,
+             CTX("multiplexer.key_filters") TEXT(
+                 "the " + std::to_string(slot_by_text.size()) + " key patterns of type " + std::to_string(type) + ", " +
+                 std::to_string(instructions) + " instructions, do not fit one RE2 set in " + std::to_string(tried) +
+                 " bytes: each keyed message of the type is matched against them one by one"));
     }
   }
 };
@@ -311,7 +342,7 @@ bool KeyPatterns::match(std::uint32_t type, const std::string& key, std::uint64_
     return true;
   }
   if (patterns.stale) {
-    patterns.build();
+    patterns.build(type);
   }
   if (patterns.set) {
     RE2::Set::ErrorInfo info;
@@ -341,6 +372,11 @@ std::size_t KeyPatterns::exact_keys(std::uint32_t type) const {
 std::size_t KeyPatterns::patterns(std::uint32_t type) const {
   std::unordered_map<std::uint32_t, std::unique_ptr<Type>>::const_iterator found = types_.find(type);
   return found == types_.end() ? 0 : found->second->slot_by_text.size();
+}
+
+bool KeyPatterns::matched_in_one_pass(std::uint32_t type) const {
+  std::unordered_map<std::uint32_t, std::unique_ptr<Type>>::const_iterator found = types_.find(type);
+  return found != types_.end() && found->second->set != nullptr;
 }
 
 };  // namespace multiplexer

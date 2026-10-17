@@ -2,11 +2,13 @@
 // CRC-32 of the body) followed by the body, a serialized MultiplexerMessage.
 // docs/wire_format.md is the reference.
 //
-// The same object is used for reading (buffers for Asio to fill, then
+// The same object is used for reading (buffers for Asio to fill, or a
+// header and a body copied from a connection's read buffer, then
 // unpack_header() and verify()) and for writing (a fixed header plus body,
 // exposed as a buffer list). A frame received by the multiplexer is
-// forwarded as the same RawMessage, so the body bytes are never copied or
-// re-serialized on the routing path.
+// forwarded as the same RawMessage, so the bytes forwarded are those that
+// came, never re-serialized; parsing the body to route it copies the
+// payload once.
 #ifndef MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 #define MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 
@@ -30,6 +32,16 @@ inline void check_message_size(std::size_t size) {
   if (size > MAX_MESSAGE_SIZE) {
     throw std::length_error("a message of " + std::to_string(size) + " bytes, over the limit of " +
                             std::to_string(MAX_MESSAGE_SIZE) + " (MAX_MESSAGE_SIZE)");
+  }
+}
+
+// A key over MAX_KEY_SIZE never leaves either: the multiplexer would drop
+// the message. Raised where a frame is built and, for a threaded query,
+// whose frames the io thread builds, at the call.
+inline void check_key_size(std::size_t size) {
+  if (size > MAX_KEY_SIZE) {
+    throw std::length_error("a key of " + std::to_string(size) + " bytes, over the limit of " +
+                            std::to_string(MAX_KEY_SIZE) + " (MAX_KEY_SIZE)");
   }
 }
 
@@ -89,10 +101,7 @@ class RawMessage {
   // closed the connection. A key over MAX_KEY_SIZE raises
   // std::length_error too: the multiplexer would drop the message.
   static RawMessage* FromMessage(const MultiplexerMessage& mxmsg) {
-    if (mxmsg.key().size() > MAX_KEY_SIZE) {
-      throw std::length_error("a key of " + std::to_string(mxmsg.key().size()) + " bytes, over the limit of " +
-                              std::to_string(MAX_KEY_SIZE) + " (MAX_KEY_SIZE)");
-    }
+    check_key_size(mxmsg.key().size());
     std::string serialized;
     if (!mxmsg.SerializeToString(&serialized)) {
       check_message_size(mxmsg.ByteSizeLong());
@@ -188,6 +197,12 @@ class RawMessage {
   // buffer. False for a length of 0 or above MAX_MESSAGE_SIZE: the caller
   // must drop the connection, since the stream cannot be resynchronized.
   bool unpack_header();
+  // The same for the header that is the HEADER_LENGTH bytes at `header`,
+  // in a connection's read buffer.
+  bool unpack_header(const char* header);
+  // The body length the header at `header` gives, before a frame is made
+  // for it: 0 for one unpack_header() refuses.
+  static std::uint32_t body_length(const char* header);
   // Checks the CRC of the body read into get_body_buffer() and, on success,
   // switches the object to WRITING so it can be forwarded as is.
   bool verify();

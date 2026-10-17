@@ -65,7 +65,8 @@ message RecordingStatus {
   optional string stopped = 9;          // why the last session ended, once it has
   optional uint32 taps = 10;            // peers receiving RECORDING_RECORD messages
   optional bool tapping = 11;           // the requester is one of them
-  optional uint64 dropped = 12;         // records the requester's tap lost to a full outgoing queue
+  optional uint64 dropped = 12;         // records the requester's tap lost to a full outgoing queue; in the
+                                        // answer to the UNTAP that ended it, all it lost
 }
 
 message RecordingHeader {
@@ -117,7 +118,8 @@ message RoutedMessage {
   // the intended instance id or peer type for a failure. A rule that
   // queued the message nowhere has a record of its own, recipient 0 and
   // the peer type, whose disposition says why for the type as a whole:
-  // NO_RECIPIENT, QUEUE_FULL or NOT_ACCEPTED.
+  // NO_RECIPIENT, QUEUE_FULL or NOT_ACCEPTED; a rule for ALL_TYPES, the
+  // peer type ALL_TYPES, for every type together.
   optional uint64 recipient = 8;
   optional uint32 recipient_peer_type = 9;
   optional Disposition disposition = 10;

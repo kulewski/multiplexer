@@ -83,8 +83,9 @@ int run_tasks(int argc, char** argv) {
     mx::logging::set_logging_file(logging_file);
   }
 
-  // The cap on DEBUG entries; the other levels are always emitted. An
-  // explicit --verbosity wins. Without it the option's default is set and
+  // The cap on DEBUG entries; the other levels keep theirs,
+  // HIGHVERBOSITY unless MX_LOG_VERBOSITY lowered them. An explicit
+  // --verbosity wins for DEBUG. Without it the option's default is set and
   // MX_LOG_VERBOSITY, applied when the library loaded, applied again on
   // top, so that only what the variable names replaces it: a spec that
   // names another level, INFO:LOW say, or one the library ignored as

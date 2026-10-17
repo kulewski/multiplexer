@@ -27,7 +27,13 @@ paths turned off; that, and an empty queue, is what ends a drain, with
 `drain_seconds` as the cap for a multiplexer that never answers. The
 routing travels in the welcome as well, so a backend that reconnects
 during its drain, to a multiplexer that restarted, registers as draining
-and gets nothing from that multiplexer's first message on.
+and gets nothing from that multiplexer's first message on. With no
+multiplexer connected there is nobody to confirm, and the confirmation
+holds at once, so a drain also waits for what the backend sent while none
+was: a reply its handler made as the last one went down is held for the
+next connection (`held_for_a_connection()`) and written once one is back,
+where the close would drop it. The last of them going, written or given up
+on at its own deadline, wakes the serve loop, as the confirmation does.
 
 ## What a draining backend still takes
 
@@ -39,7 +45,9 @@ The `Routing` has three flags, and the drain is strict by default:
   serve loop, which does not wait for its next poll.
 - `all` kept on, `Routing(any=False)`: events keep arriving through the
   drain, for a backend that must hear them to the end; the drain then
-  lasts its `drain_seconds`, since work keeps coming.
+  lasts its `drain_seconds`, since work keeps coming. The serve loop's
+  wait lasts no longer than what is left of the cap, so the drain ends on
+  time whatever the poll, one with no deadline included.
 - `last_resort`: a path that is off still carries what nobody else of the
   type could take: by `whom: ANY`, a live peer that takes the path and has
   room in its queue; by `whom: ALL`, and for a search, any live peer that
@@ -77,7 +85,10 @@ that `periodic_task()` watches, for instance, and waiting until the
 backend has left ([restarting backends](operations.md#restarting-backends)
 says why). The backend drains until the
 multiplexers confirmed and its work is done, then `serve_forever()`
-returns and `close()` runs. Backend B is another instance of the same
+returns and `close()` runs. That needs a `drain_seconds` that allows it:
+in C++ and Python it defaults to 0, which ends a drain as it begins, so a
+backend passes the most a drain may take, or -1 for no cap; Rust takes it
+explicitly, `None` for no cap. Backend B is another instance of the same
 type.
 
 ```mermaid
@@ -109,15 +120,19 @@ Request 1 was routed before the change and served. Request 2 went to B
 without a detour, no search, no retry, because the multiplexer had A's
 routing by then; the confirmation is what tells A that nothing more is
 coming, so its drain lasted as long as its work, a few milliseconds here,
-not a guessed number of seconds. No caller waited for anything. The one
-request that can still be refused is one routed in the moment between the
-multiplexer applying the routing and A's `close()`, none here; a backend
-of either server class answers it with the delivery
-error a multiplexer sends when nobody could take a message, and the
-client, which treats a delivery error on its first attempt as the signal
-to search, has B's answer a few milliseconds later. The inference
-walkthrough measures exactly this, three hundred requests through a
-rolling restart of two workers.
+not a guessed number of seconds. No caller waited for anything. Nothing
+routed by type is refused: what the multiplexer routed to A before it
+applied the routing comes ahead of its confirmation and is served, and
+nothing comes after, unless the drain's cap ended it before the
+confirmation. The one request that can still be refused is an addressed
+retry, the third stage of a query whose search A answered just before its
+drain, arriving once A's `close()` began, none here; a backend of either
+server class answers it with the delivery error a multiplexer sends when
+nobody could take a message, and that query ends with `OperationFailed`,
+or waits out its stage for a late reply when its first attempt may be
+with a backend ([`stop()` without a drain](#stop-without-a-drain)). The
+inference walkthrough shows it with three hundred requests through a
+rolling restart of two workers: none refused, none late.
 
 ## A drain that ends while work keeps coming
 
@@ -160,6 +175,9 @@ came after and is refused. Both server classes draw the line there: the
 threaded one stops taking requests into its queue and lets the workers
 finish it, the plain one serves the messages its client had read and
 refuses what the client reads after, a number fixed when the drain ends.
+A handler that queries another service meanwhile gets its answers, which
+the refusals pass by, and the plain class sets what it had read aside
+while the query waits, so that the loop serves it after.
 
 One window stays open. A multiplexer routes to a backend that is still a
 last resort until it sees the connection close, and a request it routes
@@ -209,13 +227,17 @@ sequenceDiagram
     M->>A: request
     A->>M: DELIVERY_ERROR
     M->>C: DELIVERY_ERROR
-    Note over C: an addressed request refused, OperationFailed at once
+    Note over C: an addressed request refused, OperationFailed at once when nobody took the first attempt
     A->>M: connection closed
 ```
 
 The client addressed its retry to the instance that answered, so a delivery
-error for it means that instance is gone, and the query fails with
-`OperationFailed` rather than being sent to B. That is still better than
+error for it means that instance is gone, and the query is not sent to B:
+it fails with `OperationFailed` at once when nobody took its first
+attempt, a delivery error having started the search, and otherwise, its
+first attempt perhaps with a backend after a stage that ran out of time,
+waits out the stage for a late reply, `OperationTimedOut` without one.
+That is still better than
 before, when the request was dropped and the query timed out, but it is a
 failure the application has to retry. A drain first leaves it a narrow
 window: by the time a drain ends, every multiplexer has stopped offering
@@ -305,7 +327,8 @@ Where the pieces live: `start_draining()`, `drained()` and the
 `drain_routing` in [threaded_server.py](../multiplexer/threaded_server.py)
 and
 [base_threaded_multiplexer_server.h](../multiplexer/backend/base_threaded_multiplexer_server.h),
-the same on the plain classes; `set_routing()`, its `on_acknowledged`, and
+the same on the plain classes, and in Rust in
+[rust/mx-multiplexer/src/servers/](../rust/mx-multiplexer/src/servers); `set_routing()`, its `on_acknowledged`, and
 `routing_acknowledged()` on `SyncClient`, `ThreadedClient` and
 `AsyncClient`, `BasicClient::set_routing` underneath, which puts the
 routing in the welcome, sends `PEER_CONTROL` and notes where the incoming

@@ -29,7 +29,7 @@ bazel test //tests/scenarios:threaded_idle_py
 ```
 
 The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one.
+one, `_rust` a Rust one; the backend is the Python one.
 
 The scenario is [threaded_idle.py](threaded_idle.py); the roles it spawns are described in
 [tests/README.md](../../README.md).

@@ -34,8 +34,8 @@ sequenceDiagram
 bazel test //tests/scenarios:mx_restarts_under_idle_client_py
 ```
 
-The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one.
+The suffix is the language of the client and the backend: `_py` Python,
+`_cc` C++, `_rust` Rust.
 
 The scenario is [mx_restarts_under_idle_client.py](mx_restarts_under_idle_client.py); the roles it spawns are described in
 [tests/README.md](../../README.md).

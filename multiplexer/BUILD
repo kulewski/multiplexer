@@ -360,6 +360,7 @@ cc_library(
         ":defaults",
         ":multiplexer_cc_constants",
         ":multiplexer_cc_proto",
+        "//lib/logging",
         "@com_googlesource_code_re2//:re2",
     ],
 )
@@ -505,6 +506,59 @@ cc_test(
         ":client",
         ":multiplexer_cc_constants",
         ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "client_moves_test",
+    size = "small",
+    srcs = ["client_moves_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "receive_allocations_test",
+    size = "small",
+    srcs = ["receive_allocations_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "timer_syscalls_test",
+    size = "small",
+    srcs = ["timer_syscalls_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "read_syscalls_test",
+    size = "small",
+    srcs = ["read_syscalls_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -764,6 +818,8 @@ cc_test(
     srcs = ["peers_file_start_test.cc"],
     data = ["//tests:testing.rules"],
     deps = [
+        ":client",
+        ":multiplexer_cc_constants",
         ":server",
         "@asio",
         "@com_google_googletest//:gtest_main",
@@ -1125,6 +1181,7 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":threaded_client_py",
+        "//multiplexer/testing",
     ],
 )
 
@@ -1271,6 +1328,21 @@ py_test(
         ":multiplexer_constants",
         ":servers",
         ":threaded_client_py",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "workflow_test",
+    size = "medium",
+    srcs = ["workflow_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":recording",
+        ":servers",
+        "//multiplexer/mxlog",
         "//multiplexer/testing",
     ],
 )
@@ -1504,6 +1576,7 @@ py_test(
         ":multiplexer_constants",
         ":mxclient",
         ":threaded_client_py",
+        ":threaded_server",
         "//multiplexer/testing",
     ],
 )
@@ -1724,6 +1797,19 @@ py_test(
         ":multiplexer_py_proto",
         ":recording_py_proto",
         ":threaded_client_py",
+    ],
+)
+
+py_test(
+    name = "drop_observer_test",
+    size = "medium",
+    srcs = ["drop_observer_test.py"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        "//multiplexer/testing",
     ],
 )
 

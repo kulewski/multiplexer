@@ -26,6 +26,7 @@ from unittest import mock
 
 from multiplexer import aio
 from multiplexer.aio import AsyncClient
+from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 from multiplexer.mxlog import WARNING
@@ -975,6 +976,61 @@ class HolderTest(unittest.TestCase):
                 self.assertEqual(b"here", asyncio.run(second_test()))
             finally:
                 holder.close()
+
+    def test_what_a_closed_loop_cannot_run_is_said_once(self):
+        """Once the client's loop has closed, the callbacks that run there,
+        a change's on_acknowledged, a send's callback and on_drop, are not
+        called any more, as what arrives is not delivered: each kind is
+        said once in a warning, where they went without a word, as in a
+        process whose every async_to_sync call runs on a loop of its own.
+        Two of each, from another loop, and only then counted: a flush
+        awaited there ends after the io thread called the callbacks of the
+        sends and the drops before it, and after the acknowledgements' pass
+        that came before it."""
+        said: list[str] = []
+        acknowledged = threading.Event()
+        logging = aio.log
+
+        def counted(level: int, verbosity: int, **fields: object) -> None:
+            """The client's log call, its warnings kept."""
+            logging(level, verbosity, **fields)
+            if level == WARNING:
+                said.append(str(fields.get("text", "")))
+                if "on_acknowledged" in said[-1]:
+                    acknowledged.set()
+
+        with Cluster(1, rules=RULES) as cluster:
+
+            async def make() -> AsyncClient:
+                return AsyncClient(cluster.endpoints, peers.PYTHON_TEST_CLIENT, on_drop=lambda *_: None)
+
+            client = asyncio.run(make())  # its loop closes here
+
+            async def use() -> None:
+                for _ in range(2):
+                    client.set_routing(Routing(), on_acknowledged=lambda: None)
+                self.assertTrue(
+                    await asyncio.get_running_loop().run_in_executor(None, acknowledged.wait, 10),
+                    "no acknowledgement",
+                )
+                for _ in range(2):
+                    await client.send_message(
+                        b"x", type=types.TEST_UNROUTED, report_delivery_error=False, callback=lambda _: None
+                    )
+                self.assertTrue(await client.flush_all())
+                client.disconnect(cluster.endpoints[0])
+                for _ in range(2):
+                    await client.send_message(b"y", type=types.TEST_UNROUTED, timeout=0)
+                await client.flush_all()  # once the drop observer heard of the two
+                self.assertEqual(2, client.dropped)
+
+            try:
+                with mock.patch.object(aio, "log", counted):
+                    asyncio.run(use())
+            finally:
+                client.close()
+        for kind in ("on_acknowledged", "a send's callback", "on_drop"):
+            self.assertEqual(1, len([line for line in said if kind in line]), "%s, once:\n%s" % (kind, said))
 
     def test_the_holder_makes_one_client_per_process(self):
         with Cluster(1, rules=RULES) as cluster, FakePeer(cluster, peers.PYTHON_TEST_SERVER) as peer:

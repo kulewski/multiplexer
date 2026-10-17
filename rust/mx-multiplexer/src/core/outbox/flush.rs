@@ -6,20 +6,17 @@
 //! for those numbered up to the last one at its start: the ones that still
 //! wait, and per connection the last of them queued there. The copies of a
 //! followed send, written or given up on, are heard in one pass per loop
-//! turn (`process_follows`), outside the connection's handlers.
+//! turn (`process_callbacks`), outside the connection's handlers and the
+//! outbox's bookkeeping, after the drop observer heard of the drops
+//! reported meanwhile; a flush that waits for those callbacks ends after
+//! them.
 
 use std::sync::Arc;
 
-use super::state::{Flush, Follow};
+use super::state::{tracker_key, Flush, Follow};
 use super::{FlushDone, FlushId, SendDone};
 use crate::core::client::guarded;
 use crate::core::{ConnId, Core, Posted, SendState, Tracker};
-
-/// The key a tracker is followed by: its address, held strongly by its
-/// follow so that it stays unique.
-fn tracker_key(tracker: &Arc<Tracker>) -> usize {
-    Arc::as_ptr(tracker) as usize
-}
 
 impl Core {
     /// `done` hears the end of the send whose copies are `copies`; a copy
@@ -52,11 +49,25 @@ impl Core {
             return; // a flush's mark, or a send nobody follows
         }
         self.outbox.follow_events.push((Arc::clone(tracker), written));
-        if self.outbox.follow_posted {
+        self.post_callbacks();
+    }
+
+    /// The pass that runs the program's callbacks, posted once for whatever
+    /// gathers until it runs.
+    pub(crate) fn post_callbacks(&mut self) {
+        if self.outbox.callbacks_posted {
             return;
         }
-        self.outbox.follow_posted = true;
-        self.posted.push_back(Posted::ProcessFollows);
+        self.outbox.callbacks_posted = true;
+        self.posted.push_back(Posted::ProcessCallbacks);
+    }
+
+    /// The program's callbacks of a loop turn: the drops reported, told to
+    /// the observer, then the followed sends' ends, and then the flushes
+    /// that waited for them.
+    pub(crate) fn process_callbacks(&mut self) {
+        self.tell_drops();
+        self.process_follows();
     }
 
     /// The followed sends whose copies were written or given up on: one
@@ -98,9 +109,11 @@ impl Core {
         }
     }
 
-    /// Ends every send still followed, each `done` hearing 0, at once: for a
-    /// client whose loop will not run again.
+    /// Ends every send still followed, each `done` hearing 0, at once, after
+    /// the drop observer heard of every drop reported before: for a client
+    /// whose loop will not run again.
     pub(crate) fn end_follows(&mut self) {
+        self.tell_drops();
         self.outbox.follow_events.clear();
         let left: Vec<u64> = self.outbox.follow_states.keys().copied().collect();
         for id in left {
@@ -114,8 +127,8 @@ impl Core {
     /// `done` is told once, when they are out, with whether every one was
     /// written.
     pub(crate) fn begin_flush(&mut self, done: Option<FlushDone>) -> FlushId {
-        if !self.outbox.follow_events.is_empty() {
-            self.process_follows(); // what ended before the flush began is heard before it ends
+        if !self.outbox.follow_events.is_empty() || !self.outbox.drop_events.is_empty() {
+            self.process_callbacks(); // what ended before the flush began is heard before it ends
         }
         self.outbox.next_flush += 1;
         let id = FlushId(self.outbox.next_flush);
@@ -142,9 +155,9 @@ impl Core {
         id
     }
 
-    /// A tracker for the frame queued last on `conn`, which everything
-    /// queued there before it is written ahead of; None when the queue is
-    /// empty.
+    /// A tracker for the frame queued last on `conn` but its own frames
+    /// (`Connection::last_queued`), which everything queued there before it
+    /// is written ahead of; None when the queue holds none other.
     fn track_last_queued(&mut self, conn: ConnId) -> Option<Arc<Tracker>> {
         let entry = self.conns.get_mut(&conn)?.last_queued()?;
         if let Some(tracker) = entry.0.upgrade() {
@@ -199,7 +212,10 @@ impl Core {
     /// frame it marked is out, and the callbacks of the sends that ended
     /// meanwhile have run; `done` is told after it left the list.
     pub(crate) fn check_flushes(&mut self) {
-        if self.outbox.flushes.is_empty() || !self.outbox.follow_events.is_empty() {
+        if self.outbox.flushes.is_empty()
+            || !self.outbox.follow_events.is_empty()
+            || !self.outbox.drop_events.is_empty()
+        {
             return;
         }
         let mut finished = Vec::new();

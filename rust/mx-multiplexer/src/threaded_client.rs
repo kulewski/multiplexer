@@ -256,8 +256,9 @@ impl Shared {
         if self.stopped.load(Ordering::SeqCst) {
             return false;
         }
-        self.inbox.push(Posted::Command(Box::new(command)));
-        let _ = self.waker.wake();
+        if self.inbox.push(Posted::Command(Box::new(command))) {
+            let _ = self.waker.wake();
+        }
         true
     }
 
@@ -358,8 +359,11 @@ impl Drop for Handle {
         if shared.orphaned() {
             // A forked child: the io thread does not exist, and a lock it
             // held is held for good; the child's copies of the sockets are
-            // closed, and everything else is left alone.
+            // closed, and everything else is left alone, leaked: the io
+            // thread's handle above all, whose drop would detach a pthread_t
+            // glibc may have handed to a thread of the child's by then.
             shared.descriptors.close_all();
+            std::mem::forget(Arc::clone(shared));
             return;
         }
         let ended = shared.shutdown(Some(CLOSE_FLUSH_SECONDS));
@@ -401,6 +405,13 @@ impl ThreadedClient {
     /// What every handle shares.
     fn shared(&self) -> &Shared {
         &self.handle.shared
+    }
+
+    /// Runs `command` on the io thread at its next turn, from any thread,
+    /// the io thread's own included: what a threaded server counts its
+    /// drops with in the client's drop lines. False after the shutdown.
+    pub(crate) fn run_on_io_thread(&self, command: impl FnOnce(&mut Core) + Send + 'static) -> bool {
+        self.shared().post(command)
     }
 
     /// This client's instance id: the `sender` of what it sends.
@@ -553,8 +564,8 @@ impl ThreadedClient {
 
     /// Waits until everything sent before the call has been written or
     /// given up on, the callbacks of those sends run, or `timeout`: true
-    /// when every one was written. True at once after `shutdown()`, nothing
-    /// being left to write.
+    /// when every one was written. True at once after `shutdown()`: what is
+    /// left to write is the shutdown's, whose result comes once it is over.
     pub fn flush_all(&self, timeout: Option<Duration>) -> Pending<bool> {
         let shared = self.shared();
         if let Err(error) = shared.check() {
@@ -631,19 +642,43 @@ impl ThreadedClient {
         self.shared().call(|core| core.routing_acknowledged())
     }
 
+    /// How many messages wait for a connection to come up: sent while none
+    /// was live, or left by one that died with none to take them, each
+    /// going out in order once one is registered, or given up on at its own
+    /// deadline. What the server classes' drains wait for, the close
+    /// dropping them.
+    pub fn held_for_a_connection(&self) -> Result<usize> {
+        self.shared().call(|core| core.held_for_a_connection())
+    }
+
+    /// `flush_all()` with `done(flushed)` on the io thread at its end
+    /// instead of a wait: what a draining threaded server wakes its loop
+    /// with. False after `shutdown()` or in a forked child, where `done`
+    /// never runs.
+    pub(crate) fn flush_all_then(&self, timeout: Option<Duration>, done: impl FnOnce(bool) + Send + 'static) -> bool {
+        let shared = self.shared();
+        shared.check().is_ok() && shared.post(move |core| core.begin_flush_all(timeout, Box::new(done)))
+    }
+
     /// The client's inbox: every message that arrives on its own, in one
     /// stream of DEFAULT_INCOMING_QUEUE_MAX_SIZE that drops its oldest, with
     /// a warning, when nobody reads it. Readers share it. After `shutdown()`
-    /// a stream that ends at once.
+    /// a stream that ends at once, and in a forked child, before any lock,
+    /// never the parent's inbox, which no io thread there fills or ends.
     pub fn messages(&self) -> Messages {
         let shared = self.shared();
+        if shared.orphaned() {
+            let queue = Queue::new(1, "the inbox of a client inherited across a fork".to_string());
+            queue.close();
+            return Messages::new(queue);
+        }
         let mut inbox = lock(&shared.messages);
         if let Some(queue) = inbox.as_ref() {
             return Messages::new(Arc::clone(queue));
         }
         let queue = Queue::new(DEFAULT_INCOMING_QUEUE_MAX_SIZE, "the client's inbox, messages(),".to_string());
         let registered = Arc::clone(&queue);
-        if shared.check().is_err() || !shared.post(move |core| core.threaded.inbox = Some(registered)) {
+        if shared.check().is_err() || !shared.post(move |core| core.register_inbox(registered)) {
             queue.close();
         }
         *inbox = Some(Arc::clone(&queue));
@@ -656,9 +691,7 @@ impl ThreadedClient {
         let queue = Queue::new(DEFAULT_INCOMING_QUEUE_MAX_SIZE, format!("the subscription to type {type}"));
         let registered = Arc::downgrade(&queue);
         let shared = self.shared();
-        if shared.check().is_err()
-            || !shared.post(move |core| core.threaded.subscriptions.push((Some(r#type), registered)))
-        {
+        if shared.check().is_err() || !shared.post(move |core| core.register_subscription(r#type, registered)) {
             queue.close();
         }
         Messages::new(queue)
@@ -794,7 +827,7 @@ impl ThreadedQuery<'_> {
         client.check_lane(lane.as_ref())?;
         let mut prototype = proto::MultiplexerMessage::from(request);
         prototype.id = None;
-        check_size_sent_again(&mut prototype)?;
+        check_size_sent_again(&mut prototype, shared.instance_id)?;
         let (done, kept) = {
             // The callback goes to the io thread, or, if the command never
             // runs, is called here: one of the two.
@@ -823,8 +856,10 @@ impl ThreadedQuery<'_> {
     }
 
     /// Sends the query; `done` hears its end on the io thread, where it must
-    /// be quick, or at once, here, after `shutdown()`. `TooLarge` and the
-    /// other refusals at the call come back here, and `done` is not called.
+    /// be quick, or at once, here, after `shutdown()`: one made from a
+    /// callback while the shutdown writes out hears `NotConnected` on the io
+    /// thread. `TooLarge` and the other refusals at the call come back here,
+    /// and `done` is not called.
     pub fn then(self, done: impl FnOnce(Result<Incoming>) + Send + 'static) -> Result<()> {
         self.start(Box::new(done))
     }
@@ -843,7 +878,9 @@ impl IntoFuture for ThreadedQuery<'_> {
     type Output = Result<Incoming>;
     type IntoFuture = Pending<Incoming>;
 
-    /// Sends the query; the result is awaited on any executor.
+    /// Sends the query; the result is awaited on any executor. Dropping
+    /// the future cancels nothing: the query runs its stages on, its reply
+    /// dropped; `.timeout(d)` bounds it.
     fn into_future(self) -> Pending<Incoming> {
         let (result, completer) = pending(self.client.shared().io_thread_id());
         match self.start(Box::new(move |outcome| completer.complete(outcome))) {
@@ -885,8 +922,9 @@ impl ThreadedSend<'_> {
         self
     }
 
-    /// The tracing bytes a reply copies from its request.
-    pub fn workflow(mut self, workflow: impl Into<Bytes>) -> Self {
+    /// The work flow, a trace or request id, text, which a reply copies
+    /// from its request.
+    pub fn workflow(mut self, workflow: impl Into<String>) -> Self {
         self.message.workflow = Some(workflow.into());
         self
     }
@@ -931,15 +969,17 @@ impl ThreadedSend<'_> {
         self
     }
 
-    /// The checks every form makes, and the frame.
-    fn frame(&self) -> Result<crate::core::outbox::Frame> {
-        let shared = self.client.shared();
+    /// The checks every form makes, and the frame, the message moved into
+    /// it rather than copied.
+    fn frame(&mut self) -> Result<crate::core::outbox::Frame> {
+        let client = self.client;
+        let shared = client.shared();
         shared.check()?;
-        self.client.check_lane(self.lane.as_ref())?;
+        client.check_lane(self.lane.as_ref())?;
         if self.lane.as_ref().is_some_and(Lane::closed) {
             return Err(Error::NotConnected); // a pinned lane whose connection is gone
         }
-        frame_of(self.message.clone(), || shared.ids.next(), shared.instance_id)
+        frame_of(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id)
     }
 
     /// Sends the message and returns its id at once: the io thread queues
@@ -947,7 +987,7 @@ impl ThreadedSend<'_> {
     /// comes up, the timeout at most, and drops and reports it after that.
     /// `NotConnected` after `shutdown()` and for a pinned lane whose
     /// connection is gone; `TooLarge` before anything is queued.
-    pub fn queue(self) -> Result<u64> {
+    pub fn queue(mut self) -> Result<u64> {
         let frame = self.frame()?;
         let id = frame.id;
         let ThreadedSend { client, all, lane, timeout, on_end, .. } = self;
@@ -967,7 +1007,7 @@ impl ThreadedSend<'_> {
     /// first copy for ALL, with its id, or at the timeout: `NotConnected`
     /// when nothing wrote it with no connection live, or it was given up
     /// on, `OperationTimedOut` otherwise. Awaited on any executor.
-    pub fn written(self) -> Pending<u64> {
+    pub fn written(mut self) -> Pending<u64> {
         let frame = match self.frame() {
             Ok(frame) => frame,
             Err(error) => return ready(Err(error)),

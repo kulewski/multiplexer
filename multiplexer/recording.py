@@ -16,7 +16,11 @@ A recording carries the fingerprint, a CRC-32, of the rules file it was
 made with, in its header, and of each other file put in use while it ran,
 in a `rules` record; read() refuses one whose rules differ from those the
 constants were generated from, at the header or partway through at such a
-record, since type numbers would then mean other things.
+record, since type numbers would then mean other things. The constants
+are multiplexer.multiplexer_constants unless `constants=` names the module
+generated from the rules file the multiplexer ran with, which a pip
+install, whose module holds the system rules', passes. A tap's output has
+no header: only a rules change during the tap is checked in it.
 
 start(), stop() and status() drive recording sessions on running
 multiplexers through a client connected to them, one RecordingStatus per
@@ -373,7 +377,7 @@ def tap(client, payload_limit: int = 0, timeout: float = 10.0) -> Iterator[Recor
     order. The subscriptions end with the client's connections, or with an
     UNTAP (`control(client, RecordingControl.UNTAP)`). Records the client
     does not read in time are dropped by the multiplexer, counted in its
-    status."""
+    status, and the UNTAP's statuses say how many each one dropped."""
     kept = _kept_records.setdefault(client, collections.deque())
     statuses, asked = _control(client, RecordingControl.TAP, timeout, payload_limit=payload_limit)
     refused = [status for status in statuses if status.error]

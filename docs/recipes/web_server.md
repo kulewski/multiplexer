@@ -14,7 +14,8 @@ it.
 import os
 import threading
 
-from multiplexer.multiplexer_constants import peers
+from django.conf import settings
+from multiplexer.multiplexer_constants import peers  # your rules' constants; after pip, the module generate_constants wrote
 from multiplexer.threaded_client import ThreadedClient
 
 _client: ThreadedClient | None = None

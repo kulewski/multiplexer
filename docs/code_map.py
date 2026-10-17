@@ -154,13 +154,13 @@ INDEX = [
     (
         "Dropping a multiplexer a client was given: no reconnect, the connection closed",
         "multiplexer/basic_client_connect.cc",
-        "`BasicClient::_disconnect`; `disconnect()` on every client class",
+        "`BasicClient::_disconnect`; `disconnect()` on `SyncClient`, `ThreadedClient` and `AsyncClient`",
     ),
     ("Dropping duplicate messages by id", "multiplexer/basic_client.cc", "`BasicClient::handle_message`"),
     (
         "What a backend does with a search or a PING",
         "multiplexer/backend/base_multiplexer_server.cc",
-        "`__handle_internal_message`; same in `multiplexer/clients.py`",
+        "`__handle_internal_message`; same in `multiplexer/servers.py`",
     ),
     (
         "What happens when a handler throws",
@@ -204,7 +204,7 @@ INDEX = [
     (
         "mxcontrol reaching every replica behind a name, one back under a new address, and letting an old one go",
         "mxcontrol/every_address.h",
-        "`EveryAddress::connect`, `refresh`, `drop_gone`; `tests/fake_dns` moves a name in a test",
+        "`EveryAddress::connect`, `refresh`, and `State::drop_gone` in `every_address.cc`; `tests/fake_dns` moves a name in a test",
     ),
     (
         "Log entries and the binary log stream",

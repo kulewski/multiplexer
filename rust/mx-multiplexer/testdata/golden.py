@@ -57,7 +57,7 @@ def messages() -> list[tuple[str, MultiplexerMessage]]:
         compression=Compression.GZIP,
         timestamp=4294967295,
         references=1,
-        workflow=b"\x00\xffworkflow",
+        workflow="\x00\xffworkflow",
         logging_method=LoggingMethod.CONSOLE,
         key="ключ-κλειδί",
     )

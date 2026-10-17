@@ -5,7 +5,7 @@ inside it is executable and runs as the `mxcontrol` command and as `python
 back the package's own constants; the multiplexer the command starts is the
 package's binary, under the command's pid and name, and ends with 0 on
 SIGTERM; the command leaves SIGPIPE and SIGXFSZ at their defaults, which
-only run_multiplexer changes, ignoring SIGPIPE itself; a host name
+only run_multiplexer changes, ignoring both itself; a host name
 resolves; Client, the synchronous client's name before 2.4.0, is the class
 SyncClient; and a
 rules file of the smoke's own, the system rules with a client's and a
@@ -85,9 +85,10 @@ assert read("system.py") == read(os.path.join(PACKAGE, "multiplexer_constants.py
 assert read("system.pyi") == read(os.path.join(PACKAGE, "multiplexer_constants.pyi"))
 
 # A multiplexer started by the command: the package's binary under the
-# command's pid and name, SIGXFSZ not ignored, and a host name resolved.
-# SIGPIPE it ignores itself, so that a log reader that goes away does not
-# end it; the command leaves both at their defaults, as streamlogs shows.
+# command's pid and name, and a host name resolved. SIGPIPE and SIGXFSZ it
+# ignores itself, so that neither a log reader that goes away nor a file
+# at the size limit ends it; the command leaves both at their defaults, as
+# streamlogs shows.
 process = subprocess.Popen(
     [COMMAND, "run_multiplexer", "--address", "127.0.0.1:0", "--rules", "multiplexer.rules", "--port-file", "port"],
     stderr=subprocess.PIPE,
@@ -104,7 +105,7 @@ assert exe(process.pid) == os.path.realpath(BINARY), exe(process.pid)
 with open("/proc/%d/comm" % process.pid) as comm:
     assert comm.read().strip() == "mxcontrol"
 ignored = ignored_signals(process.pid)
-assert ignored & 1 << 24 == 0, "SIGXFSZ ignored: %x" % ignored
+assert ignored & (1 << 12 | 1 << 24) == 1 << 12 | 1 << 24, "SIGPIPE or SIGXFSZ not ignored: %x" % ignored
 with open("port") as port_file:
     port = port_file.read().strip().rsplit(":", 1)[1]
 run(BINARY, "rules", "status", "-M", "localhost:" + port)

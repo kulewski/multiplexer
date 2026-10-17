@@ -62,8 +62,8 @@ everyone. This is what nearly every query looks like.
                     "The multiplexer picks a backend",
                     "The rules file maps the request's type to the backend peer type with "
                     "`whom: ANY`. Both backends are connected to multiplexer 1, so it hands "
-                    "the request to one of them round robin: backend 1 now, backend 2 for "
-                    "the next request of this type.",
+                    "the request to one of them round robin, a turn for every message the "
+                    "peer type gets, whatever its type: backend 1 now, backend 2 next.",
                     [2],
                     ["M1"],
                 ),
@@ -209,8 +209,9 @@ answers the search that follows the same way, so the client raises
                 Step(
                     "The multiplexer has nobody to give it to",
                     "No connected peer has the type the rule names, so multiplexer 1 "
-                    "answers at once with `DELIVERY_ERROR`. Requests ask for that report; "
-                    "without it the client would have had to wait out its timeout.",
+                    "answers at once with `DELIVERY_ERROR`. The rule reports it, as rules do "
+                    "by default (`report_delivery_error`); without the report the client "
+                    "would have had to wait out its timeout.",
                     [1],
                     ["M1"],
                 ),
@@ -422,10 +423,12 @@ lane's one connection.
     outro="""
 Where this lives: `Client::_query` and `Client::_query_addressed` in
 `multiplexer/client_query.cc`, `Client.query` in `multiplexer/mxclient.py`,
-and the state machine of `multiplexer/threaded_client_query.cc` for the
-threaded and asyncio clients, what comes back read by `Client::_await`,
-`Client.__await` and `ThreadedClient::Core::_advance`. The search is routed
-in `Server::_handle_meta_message` in `multiplexer/server.h`. Scenarios
+the state machine of `multiplexer/threaded_client_query.cc` for the
+threaded and asyncio clients, and the Rust core's in
+`rust/mx-multiplexer/src/core/query.rs` for both Rust clients, what comes
+back read by `Client::_await`, `Client.__await`,
+`ThreadedClient::Core::_advance` and the core's `advance`. The search is
+routed in `Server::_handle_meta_message` in `multiplexer/server.cc`. Scenarios
 `query_one.py`, `round_robin.py`, `backend_dies.py`,
 `two_mx_backends_on_each.py` and `unrouted_type.py` under
 `tests/scenarios/` exercise the typed pictures;
@@ -442,10 +445,11 @@ An event is a message nobody answers: `send_message()` in Python, in C++
 `queue()` or `queue_all()` on `SyncClient`, `send()` or `send_all()` on
 `ThreadedClient`, and in Rust `send()` on either client. The client chooses how many of its multiplexer
 connections carry the message; each multiplexer then delivers it to the
-backends its rules name. Nothing comes back unless no backend receives
-it: then the sender gets `DELIVERY_ERROR` when the rule says
-`report_delivery_error`, as it does by default, or, for a message
-addressed with `to`, when the message itself does.
+backends its rules name. Nothing comes back unless a rule delivers it to
+nobody: then the sender gets `DELIVERY_ERROR` for that rule when it says
+`report_delivery_error`, as rules do by default, whatever the type's other
+rules delivered ([rules](rules.md)), or, for a message addressed with
+`to`, when the message itself asks.
 
 The pictures use the healthy deployment: one client and two backends, all of
 them connected to both multiplexers. The rule for the event type says
@@ -593,7 +597,9 @@ backends; it costs one copy per multiplexer on every link.
 With a `whom: ANY` rule each multiplexer would pick one backend instead of all
 of them; see [routing](routing.md). Where this lives: `Client.send_message` and
 `Client.event` in `multiplexer/mxclient.py`, `BasicClient::send`, how every
-client sends, in `multiplexer/outbox.cc`, `queue` and `queue_all` in
+C++ and Python client sends, in `multiplexer/outbox.cc`, and `Core::send`
+in `rust/mx-multiplexer/src/core/outbox/`, how both Rust clients do,
+`queue` and `queue_all` in
 `multiplexer/client.h`, duplicate suppression in
 `BasicClient::handle_message` in `multiplexer/basic_client.cc`. Scenarios
 `event_all_backends.py` and `any_vs_all.py` under `tests/scenarios/` cover
@@ -749,8 +755,9 @@ the caller.
                     "runs, and the request goes out, once. The caller "
                     "sees a slow call, not an error, as long as the multiplexer is back "
                     "within the call's timeout and the backend reconnected before the "
-                    "client did: both reconnect 3 s after the drop, in no fixed order, "
-                    "and a request that reaches the fresh multiplexer before its backend "
+                    "client did: the backend reconnects 3 s after the drop, this client, "
+                    "idle until then, 3 s after the call that noticed it, so the backend is "
+                    "usually first, and a request that reaches the fresh multiplexer before its backend "
                     "fails with `OperationFailed`. With connections to several "
                     "multiplexers the request goes through another one at once instead.",
                     [5, 6],
@@ -777,8 +784,10 @@ ROUTING = Page(
 Every message carries a type. The rules file maps each message type to one
 peer type and says whether one peer of that type gets the message (`whom: ANY`,
 round robin) or all of them (`whom: ALL`). A message may instead name a peer
-directly by instance id, which wins over the rules. A message nobody can
-receive is answered with `DELIVERY_ERROR` if the client asked for one.
+directly by instance id, which wins over the rules. A message a rule finds
+nobody to receive is answered with `DELIVERY_ERROR` when the rule says so,
+as rules do by default, and one addressed to an instance that is gone when
+the message itself asks.
 
 Peer types are how you group backends; within a type, a message's key and
 the peers' key filters send some messages to some of its backends only
@@ -870,8 +879,8 @@ a read from any one.
         ),
     ],
     outro="""
-Where this lives: `Server::handle_message` in `multiplexer/server.h`; the rules
-file format is described in the root README. The `any_vs_all`,
+Where this lives: `Server::_handle_message` in `multiplexer/server.cc`;
+[rules.md](rules.md) describes the rules file's format. The `any_vs_all`,
 `direct_addressing` and `unrouted_type` scenarios under `tests/scenarios/`
 cover each case.
 """,

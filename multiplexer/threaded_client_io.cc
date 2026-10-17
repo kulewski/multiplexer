@@ -49,7 +49,10 @@ void ThreadedClient::Core::_end_connect(const std::shared_ptr<ConnectWaiter>& wa
 }
 
 // A flush_all() call ends, flushed or out of time: BasicClient forgets its
-// flush, and the caller is told.
+// flush at once, and the caller is told in a handler of its own. A flush
+// ends from wherever its last frame was written or given up on, a
+// connection's handler or the outbox's bookkeeping maybe, which what the
+// caller's callback does, a send say, must not run inside.
 void ThreadedClient::Core::_end_flush(const std::shared_ptr<FlushWait>& wait, bool flushed) {
   std::vector<std::shared_ptr<FlushWait>>::iterator found = std::find(flushes_.begin(), flushes_.end(), wait);
   if (found == flushes_.end()) {
@@ -63,7 +66,10 @@ void ThreadedClient::Core::_end_flush(const std::shared_ptr<FlushWait>& wait, bo
   wait->timer->cancel(ignored);
   FlushCallback done;
   done.swap(wait->done);
-  _guarded([&] { done(flushed); }, [] { return std::string("a flush_all() callback"); });
+  _post([this, done, flushed] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    _guarded([&] { done(flushed); }, [] { return std::string("a flush_all() callback"); });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +228,23 @@ void ThreadedClient::Core::_submit_send(std::shared_ptr<const RawMessage> raw, b
     MXTHROW(NotConnected());
   }
   MX_DCHECK_RUN_ON(&io_thread_);
+  if (!shut_down_) {
+    // shutdown() began on another thread, and its handler still waits,
+    // behind every send posted before it, this thread's earlier ones among
+    // them: this one goes behind them too, so that the order of one
+    // thread's sends holds on a connection. The write-out, begun there,
+    // sees the number this one takes and writes it out too.
+    _post([this, pending] {
+      MX_DCHECK_RUN_ON(&io_thread_);
+      if (torn_down_) {
+        basic_client_->report_drop(pending->raw, DropReason::SHUT_DOWN);  // a shutdown with no write-out
+        _settle(pending, 0, /*not_connected=*/true);
+        return;
+      }
+      _place(pending);
+    });
+    return;
+  }
   _place(pending);
 }
 

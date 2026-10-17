@@ -9,8 +9,10 @@
 //! `NotConnected`. A lane holds its connection's handle, which carries the
 //! connection's live flag, and nothing else: it keeps no connection alive,
 //! and the library keeps no registry of lanes. One made before a fork is
-//! the parent's: every call on it in the child fails with `UsedAfterFork`
-//! before it takes the lock.
+//! the parent's: in the child a send or a query through it fails with
+//! `UsedAfterFork`, and its getters answer as for a lane nothing goes
+//! through, holding no connection, not connected, closed, each before it
+//! would take the lock, which a parent thread may hold for good there.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,10 +65,15 @@ impl Lane {
     /// Fails with `UsedAfterFork` for a lane that is the parent's in this
     /// process; one load, before any lock.
     pub(crate) fn check_not_inherited(&self) -> Result<()> {
-        if self.0.generation != crate::fork::generation() {
+        if self.inherited() {
             return Err(Error::UsedAfterFork);
         }
         Ok(())
+    }
+
+    /// Whether the lane is the parent's in this process.
+    fn inherited(&self) -> bool {
+        self.0.generation != crate::fork::generation()
     }
 
     /// The lock, which nothing panics under.
@@ -87,26 +94,40 @@ impl Lane {
         }
     }
 
-    /// The connection held; None until the first message went through.
+    /// The connection held; None until the first message went through, and
+    /// in a forked child.
     pub(crate) fn connection(&self) -> Option<Wrapper> {
+        if self.inherited() {
+            return None;
+        }
         self.held().connection.clone()
     }
 
-    /// Whether a connection was ever written into the lane.
+    /// Whether a connection was ever written into the lane; not in a forked
+    /// child.
     pub(crate) fn holds_connection(&self) -> bool {
+        if self.inherited() {
+            return false;
+        }
         self.held().holds
     }
 
-    /// Whether the connection held is live.
+    /// Whether the connection held is live; not in a forked child.
     pub(crate) fn connected(&self) -> bool {
+        if self.inherited() {
+            return false;
+        }
         let held = self.held();
         held.holds && held.connection.as_ref().is_some_and(Wrapper::live)
     }
 
     /// A pinned lane whose connection is gone: nothing goes through it any
     /// more. From any thread, and from the moment the connection stops
-    /// being live.
+    /// being live; any lane, in a forked child.
     pub(crate) fn closed(&self) -> bool {
+        if self.inherited() {
+            return true;
+        }
         let held = self.held();
         self.0.pinned && held.holds && !held.connection.as_ref().is_some_and(Wrapper::live)
     }
@@ -114,6 +135,9 @@ impl Lane {
     /// The library, on the core's thread, writing the connection it used or
     /// a reply came through; a pinned lane takes the first connection only.
     pub(crate) fn adopt(&self, connection: &Wrapper) {
+        if self.inherited() {
+            return;
+        }
         let mut held = self.held();
         if self.0.pinned && held.holds {
             return;

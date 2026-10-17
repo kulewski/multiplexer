@@ -5,8 +5,10 @@
 #
 # Writes compile_commands.json and an `external` symlink to the workspace
 # root; both are ignored by git. The targets are the binaries with debug
-# symbols (the maybe_strip wrappers have no compile actions) plus the tools
-# and tests, so every C++ file in the tree gets a command. Generated headers
+# symbols (the maybe_strip wrappers have no compile actions), a tool, the
+# test roles and one unit test, so every file of the library, the
+# multiplexer and the tools gets a command, and most unit tests' sources
+# none: clangd guesses their flags from a neighbour. Generated headers
 # resolve to bazel-out/k8-dbg, so keep the build configuration at debug.
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 

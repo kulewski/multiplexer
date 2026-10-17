@@ -16,6 +16,7 @@ marker arrives, since frames from one connection are routed in their order
 and a connection's queue keeps it.
 """
 
+import re
 import unittest
 
 from multiplexer._native import MAX_KEY_SIZE
@@ -121,6 +122,38 @@ class KeyRoutingTest(unittest.TestCase):
             ["tenant.acme.orders"] * 2 + ["tenant.initech.orders"] * 4 + [""],
         )
         self.assertEqual(keys_of(received(globex, sender, REQUEST)), [""])
+
+    def test_any_takes_turns_among_the_peers_that_take_each_message(self) -> None:
+        """whom: ANY gives each message to the peer, of those that take it,
+        that has waited longest for one of its type, a peer that has just
+        registered first in line: turn by turn over every peer for messages
+        without a key, and over a key's takers for keyed ones, wherever the
+        peers that do not take it stand. Pinned message by message: what
+        each peer gets, in order, is what that rule gives."""
+        acme, globex = "tenant.acme.orders", "tenant.globex.orders"
+        filters = {"a": [ACME], "b": None, "c": [GLOBEX], "d": [ACME]}
+        backends = {name: self.peer(peers.TEST_BACKEND_A, {REQUEST: f} if f else None) for name, f in filters.items()}
+        sender = self.peer(peers.TEST_CLIENT)
+        keys = [""] * 4 + [acme] * 4 + [globex] * 2 + [acme] * 3 + [""] + [globex] + [""] * 3
+
+        def takes(name: str, key: str) -> bool:
+            patterns = filters[name]
+            return not key or patterns is None or any(re.fullmatch(pattern, key) for pattern in patterns)
+
+        waiting = list(reversed(filters))  # the longest waiting first: a peer that registers comes first in line
+        expected: dict[str, list[bytes]] = {name: [] for name in filters}
+        for index, key in enumerate(keys):
+            payload = b"m%d" % index
+            if key:
+                sender.send(payload, REQUEST, key=key)
+            else:
+                sender.send(payload, REQUEST)
+            chosen = next(name for name in waiting if takes(name, key))
+            waiting.remove(chosen)
+            waiting.append(chosen)
+            expected[chosen].append(payload)
+        got = {name: [mxmsg.message for mxmsg in received(peer, sender, REQUEST)] for name, peer in backends.items()}
+        self.assertEqual(expected, got)
 
     def test_a_key_nobody_takes_is_reported_and_a_peer_without_a_filter_takes_every_key(self) -> None:
         acme = self.peer(peers.TEST_BACKEND_A, {REQUEST: [ACME]})

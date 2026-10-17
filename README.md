@@ -252,8 +252,9 @@ Bazel build.
 - **Highly available, no single point of failure.** Run several multiplexers
   active-active; clients and backends connect to all of them, fail over
   automatically, and reconnect on their own. A rolling restart of three
-  multiplexers under traffic costs no request more than a millisecond
-  ([rolling_restart](tests/scenarios/rolling_restart/README.md)).
+  multiplexers under traffic fails no request and makes none wait for a
+  reconnect: [rolling_restart](tests/scenarios/rolling_restart/README.md)
+  checks that every query is answered, none taking 2.5 s.
 - **One `docker run`, or a StatefulSet on Kubernetes.** The image is 32 MB,
   `mxcontrol` and the system rules on distroless, running as `nonroot`;
   mount a rules file over its own and it is a multiplexer. On Kubernetes a
@@ -287,8 +288,8 @@ Bazel build.
   messages on one connection, in order, following a failover or pinned
   ([lanes, pinning and addressed queries](docs/api_python.md#lanes-pinning-and-addressed-queries)).
 - **High performance, low latency.** One thread and one event loop per multiplexer, frames forwarded
-  as they arrived, never re-serialized, one write per frame with Nagle's
-  algorithm off on every connection: over 120,000 request/reply round
+  as they arrived, never re-serialized, a burst of them read in one system
+  call, one write per frame with Nagle's algorithm off on every connection: over 120,000 request/reply round
   trips per second through one multiplexer on 70% of one core, 17 µs per
   round trip when idle, 7 MB resident, measured with
   [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX, and as
@@ -418,7 +419,8 @@ pip installs no C++ library: the Debian and Ubuntu packages on the
 release page hold it, its headers and a pkg-config file, besides
 `mxcontrol`, one package per release, because protobuf's C++ library promises no compatibility between
 versions and the library is built against each release's own. With the
-package installed, and `libprotobuf-dev` and `libasio-dev`:
+package installed, and `libprotobuf-dev`, `libasio-dev` and `libre2-dev`,
+which `pkg-config` looks for:
 
 ```
 sudo apt install ./multiplexer_<version>~<codename>_amd64.deb
@@ -504,15 +506,15 @@ connections and exits with 0.
 `multiplexer.rules` in this repository is the system rules, which every rules file starts from. Keep your deployment's rules file in your own repository and point the build at it:
 
 ```
-bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //...
+bazel build --//:multiplexer_rules=//your/pkg:multiplexer.rules //your/pkg/...
 ```
 
-When this repository is consumed as an external Bazel repository named `mx`, the flag is `--@mx//:multiplexer_rules=...`. At run time `mxcontrol run_multiplexer` reads `multiplexer.rules` from the current directory unless `--rules` points elsewhere.
+Your own targets, that is: this repository's unit tests use the tests' types, so `//...` builds only with a rules file that holds those of [tests/testing.rules](tests/testing.rules) too. When this repository is consumed as an external Bazel repository named `mx`, the flag is `--@mx//:multiplexer_rules=...`, best a line of your workspace's `.bazelrc` ([rules.md](docs/rules.md)). At run time `mxcontrol run_multiplexer` reads `multiplexer.rules` from the current directory unless `--rules` points elsewhere.
 
 ### Building without Bazel
 
 For a machine that will not have Bazel, a `Makefile` builds the same things
-from the distribution's own compiler, protobuf, Asio and pybind11:
+from the distribution's own compiler, protobuf, RE2, Asio and pybind11:
 
 ```
 make -j                      # build/bin/mxcontrol, build/libmultiplexer.a with headers, build/python/

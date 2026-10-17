@@ -13,6 +13,12 @@ file and in the peers; nothing in this repository changes.
    Python, `multiplexer::peers::NAME` and `multiplexer::types::NAME` in C++.
    A duplicate name or number fails the build here. Outside Bazel, run
    `mxcontrol generate_constants` again ([mxcontrol.md](../mxcontrol.md#generate_constants)).
+   Rust's are written by hand, `mxcontrol generate_constants your.rules
+   --rust src/multiplexer_constants.rs` again; in this repository a type
+   added to `tests/testing.rules` also needs
+   `rust/mx-multiplexer/tests/support/testing_constants.rs` written again
+   ([rust/README.md](../../rust/README.md#generated-files)), which
+   `//rust/mx-multiplexer:generated_test` checks.
 3. **Give the multiplexers the new file.** A running multiplexer reads
    its file again every 2 s and puts a change in use on its own, or at
    once on `SIGHUP` or `mxcontrol rules reload`

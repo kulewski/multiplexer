@@ -808,7 +808,7 @@ class QueryStagesTest(unittest.TestCase):
             direct = only.next()
             if direct is None or direct.type != types.PYTHON_TEST_REQUEST or direct.to != BACKEND:
                 return "no direct request came"
-            if direct.workflow != b"trace":
+            if direct.workflow != "trace":
                 return "the request sent again had the workflow %r" % direct.workflow
             only.write(only.answer(types.PYTHON_TEST_RESPONSE, BACKEND, direct.id))
             return ""
@@ -816,12 +816,82 @@ class QueryStagesTest(unittest.TestCase):
         outcomes: list[str] = []
         thread = in_thread(script, outcomes)
         with SyncClient([("127.0.0.1", only.port)], type=peers.WEBSITE) as client:
-            request = client.new_message(type=types.PYTHON_TEST_REQUEST, message=b"question", workflow=b"trace")
+            request = client.new_message(type=types.PYTHON_TEST_REQUEST, message=b"question", workflow="trace")
             reply = client.query(request, timeout=30)
         only.hang_up()
         thread.join(60)
         self.assertEqual([""], outcomes)
         self.assertEqual(b"late", reply.message)
+
+    def test_a_leaving_clients_query_takes_its_answers(self) -> None:
+        """A client that refuses what arrives, as a plain server does once
+        its drain is over, queries, as its handler may for what it read
+        before: the request draws a delivery error, the search a PING, the
+        direct request an acknowledgement and its reply, each answering the
+        query, which takes them, while a request that arrives meanwhile is
+        refused. The refusals dropped every answer as a reply that came
+        while leaving, and the query ran out of time at each stage. A
+        request read before the client began to refuse stays for it to
+        receive: the query reads only what answers it, where it took the
+        request off the queue and dropped it, neither served nor refused."""
+        only = StandIn()
+        self.addCleanup(only.close)
+        # A multiplexer that never welcomes: waiting for it runs the
+        # client's loop, which reads what the stand-in wrote, taking none.
+        silent = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(silent.close)
+        before = only.answer(types.PYTHON_TEST_REQUEST, BACKEND, 0)
+        before.message = b"before"
+
+        def script() -> str:
+            only.write(before)
+            request = only.next()
+            if request is None or request.type != types.PYTHON_TEST_REQUEST:
+                return "the request did not come"
+            arrival = only.answer(types.PYTHON_TEST_REQUEST, BACKEND, 0)
+            only.write(arrival)
+            refusal = only.next()
+            if refusal is None or refusal.type != types.DELIVERY_ERROR or refusal.references != arrival.id:
+                return "the request that arrived was not refused"
+            only.write(only.answer(types.DELIVERY_ERROR, LEAVING, request.id))
+            search = only.next()
+            if search is None or search.type != types.BACKEND_FOR_PACKET_SEARCH:
+                return "no search came"
+            only.write(only.answer(types.PING, BACKEND, search.id))
+            direct = only.next()
+            if direct is None or direct.type != types.PYTHON_TEST_REQUEST or direct.to != BACKEND:
+                return "no direct request came"
+            only.write(only.answer(types.REQUEST_RECEIVED, BACKEND, direct.id))
+            only.write(only.answer(types.PYTHON_TEST_RESPONSE, BACKEND, direct.id))
+            return ""
+
+        outcomes: list[str] = []
+        thread = in_thread(script, outcomes)
+        acknowledged: list[int] = []
+        answer = b"none"
+        kept = b"none"
+        with SyncClient([("127.0.0.1", only.port)], type=peers.WEBSITE) as client:
+            waiting = client.async_connect(("127.0.0.1", silent.getsockname()[1]))
+            for _ in range(600):  # a bound only a failure reaches
+                if client.has_incoming_messages():
+                    break
+                client.wait_for_connection(waiting, 0.05)
+            self.assertTrue(client.has_incoming_messages(), "the request before never came")
+            client.refuse_arrivals()
+            try:
+                answer = client.query(
+                    b"question", types.PYTHON_TEST_REQUEST, timeout=2, on_received=acknowledged.append
+                ).message
+            except (OperationTimedOut, OperationFailed) as error:
+                answer = repr(error).encode()
+            if client.has_incoming_messages():
+                kept = client.receive_message(0)[0].message
+        only.hang_up()
+        thread.join(60)
+        self.assertEqual([""], outcomes)
+        self.assertEqual(b"late", answer)
+        self.assertEqual([BACKEND], acknowledged, "the acknowledgement reached the query")
+        self.assertEqual(b"before", kept, "the request read before the refusals began was not kept")
 
     def test_an_addressed_query_waiting_for_room_at_its_deadline_times_out(self) -> None:
         """An addressed query whose request waits for room behind a full

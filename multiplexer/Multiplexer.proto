@@ -112,8 +112,10 @@ message MultiplexerMessage {
     // this may be change to repeated field in the future
     optional uint64 references = 7;
 
-    // work flow ID
-    optional bytes workflow = 8;
+    // The work flow: a trace or request id, UTF-8 text, which the
+    // libraries copy from a request to its reply; never routed by. A binary
+    // value goes as hex or base64.
+    optional string workflow = 8;
 
     // support for generally overriding the default routing rules
     repeated MultiplexerMessageDescription.RoutingRule override_rrules = 20;
@@ -276,7 +278,7 @@ message LogEntriesMessage {
 
 message SearchCollectedLogs {
     // select by workflow
-    optional bytes workflow = 1;
+    optional string workflow = 1;
 
     // select range of results; results returned will be from oldest-newset,
     // limited to `limit' newest, counting from `offset`'th newest

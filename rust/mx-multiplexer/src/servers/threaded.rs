@@ -26,11 +26,12 @@ use super::{
     handle, nothing_more_arrives, Controlled, Handler, HandlerError, Replier, Request, ServeError, ServerHandle,
 };
 use crate::constants::types;
-use crate::core::client::{check_key_filters, DropReason};
+use crate::core::client::{check_key_filters, DropLine, DropReason};
 use crate::defaults::{CLOSE_FLUSH_SECONDS, DEFAULT_TIMEOUT};
 use crate::endpoint::parse_endpoint;
 use crate::error::{Error, Result};
 use crate::handles::Incoming;
+use crate::log_summary::Kind;
 use crate::message::{DeliveryError, KeyFilters, Routing};
 use crate::threaded_client::ThreadedClient;
 
@@ -96,6 +97,9 @@ struct Waiting {
 struct State {
     queue: VecDeque<(u64, Request)>,
     busy: usize,
+    /// Workers waiting for a request: a request is notified only when one
+    /// waits, since a notify costs a syscall whether anyone waits or not.
+    idle: usize,
     accepted: u64,
     acknowledged: Vec<Waiting>,
     accepting: bool,
@@ -126,9 +130,10 @@ struct Shared<H: Handler> {
     closed: AtomicBool,
     close_lock: Mutex<()>,
     dropped: AtomicUsize,
-    /// The "queue full" lines: when the last was logged, and how many were
-    /// counted since.
-    full_lines: Mutex<(Option<Instant>, u64)>,
+    /// A flush `drained()` armed while something waited for a connection:
+    /// its end, what was held written once a connection is back or given up
+    /// on, wakes the serving loop. One at a time.
+    held_flush_armed: AtomicBool,
     /// The server itself, weakly, for the client's callbacks.
     weak: OnceLock<Weak<Shared<H>>>,
 }
@@ -163,12 +168,17 @@ impl<H: Handler> Shared<H> {
             let mut state = lock(&self.state);
             // What a worker will take, an idle one's included, and
             // queue_size more that wait for one.
-            if state.accepting && state.queue.len() + state.busy < self.options.workers + self.options.queue_size {
+            if state.accepting
+                && state.queue.len() + state.busy < self.options.workers.saturating_add(self.options.queue_size)
+            {
                 let number = state.accepted;
                 state.accepted += 1;
                 state.queue.push_back((number, request));
+                let waiting = state.idle > 0;
                 drop(state);
-                self.work.notify_one();
+                if waiting {
+                    self.work.notify_one();
+                }
                 return;
             }
             state.accepting
@@ -182,23 +192,18 @@ impl<H: Handler> Shared<H> {
         self.refuse(&request);
     }
 
-    /// A request dropped for a full queue, logged: the first of a second at
-    /// once, the rest counted and said with the next line after it.
+    /// A request dropped for a full queue, counted with the client's own
+    /// drop lines, as C++ counts it: the first of a run logged, the rest
+    /// said in a line a second by the client's timer, on the io thread,
+    /// where this runs too, at its next turn.
     fn say_full(&self, request: &Request) {
-        let mut lines = lock(&self.full_lines);
-        let now = Instant::now();
-        if lines.0.is_some_and(|last| now.duration_since(last) < crate::log_summary::INTERVAL) {
-            lines.1 += 1;
-            return;
-        }
-        let more = std::mem::take(&mut lines.1);
-        lines.0 = Some(now);
-        let message = request.message();
-        if more > 0 {
-            log::warn!("request #{} of type {} dropped: queue full [{more} more before]", message.id, message.r#type);
-        } else {
-            log::warn!("request #{} of type {} dropped: queue full", message.id, message.r#type);
-        }
+        let (id, r#type) = (request.message().id, request.message().r#type);
+        self.client.run_on_io_thread(move |core| {
+            let kind = Kind { reason: DropLine::RequestsQueueFull as u32, level: log::Level::Warn, r#type: 0, peer: 0 };
+            if core.drop_line_first(kind, || "requests dropped: queue full".to_string()) {
+                log::warn!("request #{id} of type {type} dropped: queue full");
+            }
+        });
     }
 
     /// A request this server will not serve, as it leaves: refused with the
@@ -236,7 +241,9 @@ impl<H: Handler> Shared<H> {
                     if !state.accepting {
                         return;
                     }
+                    state.idle += 1;
                     state = self.work.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.idle -= 1;
                 }
             };
             let failure = handle(&self.handler, request, "BaseThreadedMultiplexerServer");
@@ -293,8 +300,9 @@ impl<H: Handler> Shared<H> {
 
     /// Whether the drain is over: the handler's word on the library's
     /// answer, which is the drain's cap passed, a closed server, or, with
-    /// every path off and no last resort, nothing queued or being handled
-    /// and every multiplexer having confirmed the drain.
+    /// every path off and no last resort, nothing queued or being handled,
+    /// every multiplexer having confirmed the drain, and nothing waiting
+    /// for a connection (`nothing_held()`).
     fn drained(&self) -> bool {
         if !self.draining.load(Ordering::SeqCst) {
             return false;
@@ -308,8 +316,46 @@ impl<H: Handler> Shared<H> {
             || past_cap
             || (nothing_more_arrives(&self.options.drain_routing)
                 && self.pending() == 0
-                && self.client.routing_acknowledged().unwrap_or(true));
+                && self.client.routing_acknowledged().unwrap_or(true)
+                && self.nothing_held());
         self.handler.drained(by_default)
+    }
+
+    /// Whether nothing the server sent waits for a connection to come up.
+    /// With no connection live the confirmation holds at once, so what is
+    /// held for the next connection, a reply made while every multiplexer
+    /// was down, is waited for too, where the close would drop it: a flush
+    /// wakes the loop once it is written, a connection back, or given up on
+    /// at its own deadline.
+    fn nothing_held(&self) -> bool {
+        if self.client.held_for_a_connection().unwrap_or(0) == 0 {
+            return true;
+        }
+        if !self.held_flush_armed.swap(true, Ordering::SeqCst) {
+            let weak = self.this();
+            let armed = self.client.flush_all_then(None, move |_| {
+                if let Some(shared) = weak.upgrade() {
+                    shared.held_flush_armed.store(false, Ordering::SeqCst);
+                    shared.wake_loop();
+                }
+            });
+            if !armed {
+                self.held_flush_armed.store(false, Ordering::SeqCst); // shut down under us
+            }
+        }
+        false
+    }
+
+    /// What the serving loop's next wait may last: `poll`, and while a
+    /// drain with a cap runs, no longer than what is left of the cap.
+    fn next_wait(&self, poll: Duration) -> Duration {
+        if !self.draining.load(Ordering::SeqCst) {
+            return poll;
+        }
+        match (*lock(&self.draining_since), *lock(&self.drain)) {
+            (Some(since), Some(cap)) => poll.min(cap.saturating_sub(since.elapsed())),
+            _ => poll,
+        }
     }
 
     /// Takes nothing more, starts the drain, lets the workers finish what is
@@ -421,6 +467,9 @@ impl<H: Handler> Control for Shared<H> {
     }
 
     fn pending(&self) -> usize {
+        if self.client.orphaned() {
+            return 0; // a forked child: the parent's workers, and a lock they may hold for good
+        }
         let state = lock(&self.state);
         state.queue.len() + state.busy
     }
@@ -479,6 +528,7 @@ impl BaseThreadedMultiplexerServerBuilder {
     }
 
     /// Requests waiting for a worker; beyond it they are dropped.
+    /// `usize::MAX` is no limit.
     pub fn queue_size(mut self, queue_size: usize) -> Self {
         self.options.queue_size = queue_size;
         self
@@ -563,6 +613,7 @@ impl BaseThreadedMultiplexerServerBuilder {
             state: Mutex::new(State {
                 queue: VecDeque::new(),
                 busy: 0,
+                idle: 0,
                 accepted: 0,
                 acknowledged: Vec::new(),
                 accepting: true,
@@ -581,7 +632,7 @@ impl BaseThreadedMultiplexerServerBuilder {
             closed: AtomicBool::new(false),
             close_lock: Mutex::new(()),
             dropped: AtomicUsize::new(0),
-            full_lines: Mutex::new((None, 0)),
+            held_flush_armed: AtomicBool::new(false),
             weak: OnceLock::new(),
         });
         let _ = shared.weak.set(Arc::downgrade(&shared));
@@ -652,7 +703,9 @@ impl<H: Handler> BaseThreadedMultiplexerServer<H> {
     /// `connect()`; then, until `stop()`, a drain's end or a handler's
     /// failure that ends the server, `periodic_task()` every `poll`, or
     /// sooner when woken; then `close()`. `drain` caps a drain, None for no
-    /// cap. Returns the failure of a handler whose `on_handler_error()` said
+    /// cap: while a drain with a cap runs, a wait lasts no longer than what
+    /// is left of it, so that the cap ends the drain on time whatever the
+    /// poll. Returns the failure of a handler whose `on_handler_error()` said
     /// to end, or the client's. The calling thread only polls; the
     /// handlers run on the workers.
     pub fn serve_forever(&self, poll: Duration, drain: Option<Duration>) -> std::result::Result<(), ServeError> {
@@ -660,8 +713,11 @@ impl<H: Handler> BaseThreadedMultiplexerServer<H> {
             return Err(ServeError::Client(Error::UsedAfterFork));
         }
         *lock(&self.shared.drain) = drain;
-        let served = self.serve(poll);
+        // A panic out of periodic_task() or drained() closes the server
+        // first, as C++ and Python close it, and then goes on up.
+        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.serve(poll)));
         let closed = self.shared.close(Some(CLOSE_FLUSH_SECONDS));
+        let served = served.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         served?;
         closed?;
         if let Some(failure) = lock(&self.shared.state).failure.take() {
@@ -678,8 +734,9 @@ impl<H: Handler> BaseThreadedMultiplexerServer<H> {
             {
                 let mut woken = lock(&self.shared.woken);
                 if !*woken {
+                    let wait = self.shared.next_wait(poll);
                     woken =
-                        self.shared.wake.wait_timeout(woken, poll).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+                        self.shared.wake.wait_timeout(woken, wait).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
                 }
                 *woken = false;
             }
@@ -701,6 +758,7 @@ impl<H: Handler> BaseThreadedMultiplexerServer<H> {
     /// calls `stop()`.
     pub fn close(&self, timeout: Option<Duration>) -> Result<()> {
         if self.shared.client.orphaned() {
+            drop(self.shared.client.shutdown(None)); // the child's copies of the sockets, see Drop
             return Err(Error::UsedAfterFork);
         }
         self.shared.close(timeout)
@@ -708,12 +766,15 @@ impl<H: Handler> BaseThreadedMultiplexerServer<H> {
 }
 
 impl<H: Handler> Drop for BaseThreadedMultiplexerServer<H> {
-    /// `close()` with CLOSE_FLUSH_SECONDS; in a forked child, nothing: the
-    /// workers are the parent's, and the client tears itself down as an
-    /// orphan.
+    /// `close()` with CLOSE_FLUSH_SECONDS; in a forked child, the child's
+    /// copies of the sockets closed and nothing else: the workers are the
+    /// parent's, and their clones of the client, never let go of there,
+    /// would keep it from tearing itself down as an orphan.
     fn drop(&mut self) {
-        if !self.shared.client.orphaned() {
-            let _ = self.shared.close(Some(CLOSE_FLUSH_SECONDS));
+        if self.shared.client.orphaned() {
+            drop(self.shared.client.shutdown(None));
+            return;
         }
+        let _ = self.shared.close(Some(CLOSE_FLUSH_SECONDS));
     }
 }

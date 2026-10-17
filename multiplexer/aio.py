@@ -11,7 +11,9 @@ loop, as ThreadedClient may be called from any thread, which is what code
 run through asgiref's async_to_sync away from the server's loop needs.
 Once the client's loop has closed, subscribe() and messages() raise and
 what arrives is dropped, said once in a warning: a program that must
-receive again makes a new client on a running loop.
+receive again makes a new client on a running loop. The callbacks that run
+on that loop, on_drop, a send's callback and on_acknowledged, are not
+called any more either, each kind said once in a warning.
 docs/api_python.md has the user's view and
 docs/recipes/async_web_server.md an asyncio web server.
 
@@ -71,6 +73,10 @@ _LOOP_CLOSED = (
     "the loop the client was created on has closed; to receive, close the client,"
     " or its holder, and make one on a running loop"
 )
+_NOT_CALLED = (
+    "the loop the client was created on, where it runs, has closed; `dropped` counts what is given up on,"
+    " and a send with flush=True is awaited on the caller's loop"
+)
 
 
 class _Subscription:
@@ -123,9 +129,9 @@ class AsyncClient:
         for the loop has no bound. It is 1 at least, ValueError otherwise:
         asyncio.Queue's 0 for no bound is not offered. `on_drop(message_id,
         reason)` runs on the loop for every message the client gives up on,
-        each copy of one sent to ALL, with a DropReason; `dropped` counts
-        them. `key_filters` is set_key_filters() made before the first
-        connection, as ThreadedClient's."""
+        each copy of one sent to ALL, with a DropReason, as long as the loop
+        is open; `dropped` counts them. `key_filters` is set_key_filters()
+        made before the first connection, as ThreadedClient's."""
         if queue_size < 1:
             raise ValueError("queue_size is how many messages messages() holds, 1 at least: %r" % (queue_size,))
         self._loop = loop or asyncio.get_running_loop()
@@ -145,6 +151,9 @@ class AsyncClient:
         self._dropped_since_warning = 0
         # The io thread said that the loop had closed under what arrives: once.
         self._said_loop_closed = False
+        # The kinds of callbacks the io thread said it could not call there
+        # any more, each once (_not_called).
+        self._said_not_called: set[str] = set()
         # close() or aclose() was called: no handler is called again. Set on
         # any thread, read by _deliver on the loop.
         self._closing = False
@@ -203,8 +212,16 @@ class AsyncClient:
         assert on_drop is not None
         try:
             self._loop.call_soon_threadsafe(on_drop, message_id, reason)
-        except RuntimeError:
-            pass  # the loop is closed: nobody left to tell
+        except RuntimeError:  # the loop is closed
+            self._not_called("on_drop")
+
+    def _not_called(self, kind: str) -> None:
+        """On the io thread: a callback of `kind` could not be handed to
+        the client's loop, which has closed; said once a kind, in a
+        warning, unless the client is closing."""
+        if kind not in self._said_not_called and not self._closing:
+            self._said_not_called.add(kind)
+            log(WARNING, LOWVERBOSITY, text="AsyncClient: %s is not called any more: %s" % (kind, _NOT_CALLED))
 
     # Identity and connections.
 
@@ -238,7 +255,7 @@ class AsyncClient:
         """Which of a multiplexer's routing paths reach this peer; see
         ThreadedClient.set_routing. Does not block. `on_acknowledged()`
         runs on the loop, after what arrived before the acknowledgement was
-        delivered there."""
+        delivered there, as long as the loop is open."""
         self._threaded.set_routing(routing, self._on_loop(on_acknowledged))
 
     def set_key_filters(
@@ -259,8 +276,8 @@ class AsyncClient:
             """The io thread's call."""
             try:
                 self._loop.call_soon_threadsafe(callback)
-            except RuntimeError:
-                pass  # the loop is closed: nobody left to tell
+            except RuntimeError:  # the loop is closed
+                self._not_called("on_acknowledged")
 
         return call
 
@@ -269,6 +286,11 @@ class AsyncClient:
         key filters, in effect; see ThreadedClient.routing_acknowledged.
         Blocks briefly."""
         return self._threaded.routing_acknowledged()
+
+    def held_for_a_connection(self) -> int:
+        """How many messages wait for a connection to come up; see
+        ThreadedClient.held_for_a_connection. Blocks briefly."""
+        return self._threaded.held_for_a_connection()
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop:
@@ -414,10 +436,11 @@ class AsyncClient:
         when nothing wrote it with no connection live, or when every copy
         for ALL went with its connection, else OperationTimedOut. With a
         `callback`, flush or not, it returns at once and `callback(written)`
-        runs on the client's loop once the message's end is known: 1 once
-        it was written, the first copy for ALL, 0 once it was given up on
-        or close() came first. NotConnected at once for a pinned lane whose
-        connection is gone, and after close()."""
+        runs on the client's loop once the message's end is known, as long
+        as that loop is open: 1 once it was written, the first copy for
+        ALL, 0 once it was given up on or close() came first. NotConnected
+        at once for a pinned lane whose connection is gone, and after
+        close()."""
         if callback is not None:
             return self._threaded.send_message(
                 message,
@@ -457,8 +480,8 @@ class AsyncClient:
         """A send's callback, as the io thread calls it, run on the loop."""
         try:
             self._loop.call_soon_threadsafe(callback, written)
-        except RuntimeError:
-            pass  # the loop is closed: nobody left to tell
+        except RuntimeError:  # the loop is closed
+            self._not_called("a send's callback")
 
     async def send_pickle(self, data: Any, **kwargs: Any) -> int:
         """send_message() with `data` pickled as the payload."""

@@ -1,6 +1,7 @@
 // Length-delimited protocol buffer streams over std::ostream or a file
-// descriptor. Used by the logging library for its binary stream and by the
-// mxcontrol log commands.
+// descriptor. Used by the logging library for its binary stream, by the
+// mxcontrol log commands, and by the recordings, whose files
+// cut_torn_tail() mends before they are appended to.
 #ifndef MX_LIB_PROTOBUF_STREAM_H_
 #define MX_LIB_PROTOBUF_STREAM_H_
 
@@ -9,14 +10,17 @@
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/stubs/common.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <climits>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "lib/fd.h"
 #include "lib/logging/logging.h"
@@ -148,20 +152,24 @@ struct FileMessageOutputStream : MessageOutputStream {
 };
 
 struct FileMessageInputStream : MessageInputStream {
-  explicit FileMessageInputStream(int fd, bool own_fd = false)
-      : fd_(fd, own_fd), file_input_stream_(new google::protobuf::io ::FileInputStream(fd_.fd())) {}
+  // `idle`, when given, runs before a read of the descriptor that would
+  // wait, nothing being ready there: what a reader that gathers messages
+  // hands on then, rather than when more comes. It may run in the middle
+  // of a message, which is not its to touch.
+  explicit FileMessageInputStream(int fd, bool own_fd = false, std::function<void()> idle = std::function<void()>())
+      : fd_(fd, own_fd), input_(fd_.fd(), std::move(idle)), adaptor_(&input_) {}
 
   // Each message through a CodedInputStream of its own, whose limit on the
   // bytes it reads, 2 GiB, counts from that message, so that a stream of
   // any length reads whole, where one for the whole stream stopped there as
   // if the stream ended. Its destructor gives what it read past the message
-  // back to the file stream, for the next.
+  // back to the stream, for the next.
   virtual bool read(google::protobuf::Message& m) {
-    google::protobuf::io::CodedInputStream coded(file_input_stream_.get());
+    google::protobuf::io::CodedInputStream coded(&adaptor_);
     const void* data;
     int size;
     if (!coded.GetDirectBufferPointer(&data, &size)) {
-      failed_ = file_input_stream_->GetErrno() != 0;  // the end, or a read error
+      failed_ = input_.error() != 0;  // the end, or a read error
       return false;
     }
     failed_ = !Read(m, coded);
@@ -173,50 +181,136 @@ struct FileMessageInputStream : MessageInputStream {
   bool failed() const { return failed_; }
 
  private:
+  // The descriptor, read a buffer at a time for the parser, `idle` run
+  // before a read that would wait; a read a signal interrupted is made
+  // again, as protobuf's own file stream does.
+  class Input : public google::protobuf::io::CopyingInputStream {
+   public:
+    Input(int fd, std::function<void()> idle) : fd_(fd), idle_(std::move(idle)) {}
+    int Read(void* buffer, int size) override {
+      if (idle_) {
+        pollfd ready = {fd_, POLLIN, 0};
+        if (::poll(&ready, 1, 0) == 0) {
+          idle_();
+        }
+      }
+      for (;;) {
+        const ssize_t got = ::read(fd_, buffer, static_cast<std::size_t>(size));
+        if (got >= 0) {
+          return static_cast<int>(got);
+        }
+        if (errno != EINTR) {
+          error_ = errno;
+          return -1;
+        }
+      }
+    }
+    // The errno of the read that failed, 0 while none has.
+    int error() const { return error_; }
+
+   private:
+    const int fd_;
+    std::function<void()> idle_;
+    int error_ = 0;
+  };
+
   util::Fd fd_;
-  std::unique_ptr<google::protobuf::io::FileInputStream> file_input_stream_;
+  Input input_;
+  google::protobuf::io::CopyingInputStreamAdaptor adaptor_;
   bool failed_ = false;
 };
+
+// cut_torn_tail()'s answers besides the bytes it cut: the file could not
+// be read or cut; or it is not a stream of the message type, or one
+// damaged before its end, and is left as it is.
+const std::int64_t UNREADABLE = -1;
+const std::int64_t NOT_THIS_FORMAT = -2;
+
+// Whether the bytes from `at` to `size`, the end of the file `fd`, are the
+// start of a varint the end cut short: fewer than a varint's most, each one
+// saying that more follow.
+inline bool varint_cut_short(int fd, std::int64_t at, std::int64_t size) {
+  unsigned char bytes[10];
+  const std::int64_t left = size - at;
+  if (left <= 0 || left >= static_cast<std::int64_t>(sizeof bytes) ||
+      ::pread(fd, bytes, static_cast<std::size_t>(left), static_cast<off_t>(at)) != left) {
+    return false;
+  }
+  for (std::int64_t index = 0; index < left; ++index) {
+    if (!(bytes[index] & 0x80)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // Cuts the file at `path` after its last whole message, `scratch` a
 // message of the type it holds, parsing each in turn: what a writer that
 // died left of a message it was writing goes, so that what is appended to
-// the file reads on. The bytes cut, 0 for none or for a file that does not
-// exist, -1 when the file could not be read or cut. Reads the whole file.
-inline std::int64_t cut_torn_tail(const std::string& path, google::protobuf::Message& scratch) {
+// the file reads on. Only a torn tail is cut, a message whose length or
+// whose bytes the file ends inside, after one whole message at least. A
+// message whose length and bytes are all there but do not parse, or that
+// `ours(scratch)` says no stream of this kind holds, a length no message
+// has, or a file that ends inside its first message, is a file of another
+// kind, or one damaged before its end, which only a person can mend:
+// NOT_THIS_FORMAT, the file left as it is. The bytes cut, 0 for none, an
+// empty file or none at all; UNREADABLE when the file could not be read or
+// cut. Reads the whole file.
+template <typename Message, typename Ours>
+std::int64_t cut_torn_tail(const std::string& path, Message& scratch, Ours ours) {
   util::Fd fd(::open(path.c_str(), O_RDWR | O_CLOEXEC), true);
   if (fd.fd() < 0) {
-    return errno == ENOENT ? 0 : -1;
+    return errno == ENOENT ? 0 : UNREADABLE;
   }
   struct stat file;
   if (::fstat(fd.fd(), &file) != 0) {
-    return -1;
+    return UNREADABLE;
   }
+  const std::int64_t size = static_cast<std::int64_t>(file.st_size);
   google::protobuf::io::FileInputStream input(fd.fd());
   std::int64_t whole = 0;  // where the last whole message ends
-  for (;;) {
+  bool torn = false;
+  while (whole < size && !torn) {
     {
       // Destroyed before the count is taken, giving back what it read past the message.
       google::protobuf::io::CodedInputStream coded(&input);
-      const void* data;
-      int size;
-      if (!coded.GetDirectBufferPointer(&data, &size)) {
+      std::uint64_t length;
+      if (!coded.ReadVarint64(&length)) {
         if (input.GetErrno() != 0) {
-          return -1;
+          return UNREADABLE;
         }
-        break;  // the end, after a whole message
-      }
-      if (!MessageInputStream::Read(scratch, coded)) {
-        break;  // a message cut short or garbled: the file is cut where it starts
+        if (!varint_cut_short(fd.fd(), whole, size)) {
+          return NOT_THIS_FORMAT;  // no varint
+        }
+        torn = true;
+      } else if (length > static_cast<std::uint64_t>(INT_MAX)) {
+        return NOT_THIS_FORMAT;  // a length no message of this format has
+      } else if (whole + coded.CurrentPosition() + static_cast<std::int64_t>(length) > size) {
+        torn = true;  // the file ends inside the message
+      } else {
+        google::protobuf::io::CodedInputStream::Limit limit = coded.PushLimit(static_cast<int>(length));
+        const bool parsed =
+            scratch.ParseFromCodedStream(&coded) && coded.ConsumedEntireMessage() && coded.BytesUntilLimit() == 0;
+        coded.PopLimit(limit);
+        if (!parsed && input.GetErrno() != 0) {
+          return UNREADABLE;
+        }
+        if (!parsed || !ours(scratch)) {
+          return NOT_THIS_FORMAT;  // whole, and not a message of this stream
+        }
       }
     }
-    whole = input.ByteCount();
+    if (torn && whole == 0) {
+      return NOT_THIS_FORMAT;  // not one whole message: nothing says the file is a stream of this kind
+    }
+    if (!torn) {
+      whole = input.ByteCount();
+    }
   }
-  const std::int64_t torn = static_cast<std::int64_t>(file.st_size) - whole;
-  if (torn > 0 && ::ftruncate(fd.fd(), static_cast<off_t>(whole)) != 0) {
-    return -1;
+  if (torn && ::ftruncate(fd.fd(), static_cast<off_t>(whole)) != 0) {
+    return UNREADABLE;
   }
-  return torn > 0 ? torn : 0;
+  return torn ? size - whole : 0;
 }
 
 };  // namespace protobuf

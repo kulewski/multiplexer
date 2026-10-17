@@ -42,55 +42,6 @@ from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
 
 
-class _DropLines:
-    """The lines about requests a full queue dropped, at most about two a
-    second however many there are, as the C++ library's LogSummary says
-    its own: the first of a burst at once, then, while the drops go on,
-    one line a second with how many more there were, and the rest once
-    the queue takes a request again. The io thread's only."""
-
-    INTERVAL = 1.0  # seconds between two counts
-
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
-        self.clock = clock
-        self.burst = False  # a drop was said and the queue has taken nothing since
-        self.more = 0  # dropped since the last line
-        self.since = 0.0  # when the last line was said
-
-    def dropped(self, mxmsg: MultiplexerMessage) -> None:
-        """A request was dropped: said now when it is the first of a
-        burst or a second has passed, else counted."""
-        now = self.clock()
-        if not self.burst:
-            self.burst = True
-            self.since = now
-            log(
-                WARNING,
-                HIGHVERBOSITY,
-                text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type),
-            )
-            return
-        self.more += 1
-        if now - self.since >= self.INTERVAL:
-            self._say(now)
-
-    def accepted(self) -> None:
-        """The queue took a request: the burst is over, and its rest is said."""
-        if self.more:
-            self._say(self.clock())
-        self.burst = False
-
-    def _say(self, now: float) -> None:
-        """The count since the last line, in LogSummary's words."""
-        log(
-            WARNING,
-            HIGHVERBOSITY,
-            text="requests dropped: queue full [%d more in the last %.1f s]" % (self.more, now - self.since),
-        )
-        self.more = 0
-        self.since = now
-
-
 class Request:
     """One message being handled, and what answers it.
 
@@ -226,9 +177,10 @@ class BaseThreadedMultiplexerServer:
     ):
         """A backend of peer type `type` for the multiplexers in
         `addresses`. This only makes the instance id: the `workers` handler
-        threads start and the connections open in serve_forever(), so
-        nothing reaches handle_message() before the subclass's __init__ is
-        done, and no multiplexer knows the backend until it serves. `queue_size`
+        threads start and the connections open in connect(), which
+        serve_forever() calls first, so nothing reaches handle_message()
+        before the subclass's __init__ is done, and no multiplexer knows the
+        backend until it connects. `queue_size`
         bounds the requests waiting for a worker; beyond it a request is
         dropped with a warning and no answer, so the requester waits out
         its first stage's timeout and searches, and the backend keeps its
@@ -270,11 +222,14 @@ class BaseThreadedMultiplexerServer:
         # serve_forever() once `remaining` of them are done.
         self._acknowledged: list[list[Any]] = []
         self.dropped = 0  # requests dropped for a full queue, or while leaving
-        self._drop_lines = _DropLines()  # what is said about the requests a full queue dropped
         self._accepting = True
         self._closed = False  # set once, by the first close()
         self._close_lock = threading.Lock()  # a second close() returns once the first is done, not before
         self._wake = threading.Event()
+        # A flush drained() armed while something waited for a connection:
+        # its end, what was held written once a connection is back or given
+        # up on, wakes serve_forever(). One at a time.
+        self._held_flush_armed = False
         self._failure: BaseException | None = None
         self._threads: list[threading.Thread] = []  # started by serve_forever()
         self._addresses = addresses  # connected to by connect(), which serve_forever() calls first
@@ -438,10 +393,14 @@ class BaseThreadedMultiplexerServer:
         default once the `drain_seconds` given to serve_forever() have
         passed since start_draining(), or, when the drain routing turns
         every path off and asks for no last resort, once every connected
-        multiplexer has confirmed it and no request is queued or being
-        handled, since nothing more is on its way; a drain that keeps a
-        path open lasts the whole period, since work keeps arriving.
-        Override to wait for your own condition."""
+        multiplexer has confirmed it, no request is queued or being
+        handled, since nothing more is on its way, and nothing the server
+        sent waits for a connection to come up
+        (ThreadedClient.held_for_a_connection()): a reply made while every
+        multiplexer was down goes out once one is back, where the close
+        would drop it, a flush waking the loop when it has; a drain that
+        keeps a path open lasts the whole period, since work keeps
+        arriving. Override to wait for your own condition."""
         since = self._draining_since
         if since is None:
             return False
@@ -457,15 +416,45 @@ class BaseThreadedMultiplexerServer:
         if not (nothing_more_arrives(self.drain_routing) and self.pending == 0):
             return False
         try:
-            return client.routing_acknowledged()
+            if not client.routing_acknowledged():
+                return False
+            # With no connection live the confirmation holds at once, so
+            # what is held for the next connection, a reply made while every
+            # multiplexer was down, is waited for too, where the close would
+            # drop it: a flush wakes the loop once it is written, a
+            # connection back, or given up on at its own deadline.
+            if client.held_for_a_connection() == 0:
+                return True
+            if not self._held_flush_armed:
+                self._held_flush_armed = True
+                client._flush_all_and_notify(-1, self.__held_flushed)
+            return False
         except NotConnected:
             return True  # shut down under us: nothing more is coming
 
+    def __held_flushed(self, flushed: bool) -> None:
+        """On the io thread: the flush drained() armed is over; the loop
+        looks again."""
+        self._held_flush_armed = False
+        self._wake.set()
+
+    def __wait(self, poll: float) -> float:
+        """What serve_forever()'s next wait may last: `poll`, and while a
+        drain with a cap runs, no longer than what is left of the cap."""
+        wait = wait_seconds(poll)
+        since = self._draining_since
+        if since is None or self._drain_seconds < 0:
+            return wait  # no drain, or one with no cap: the poll alone
+        return max(0.0, min(wait, wait_seconds(self._drain_seconds) - (time.monotonic() - since)))
+
     def stop(self) -> None:
-        """Ask serve_forever() to return, from any thread: it finishes what
-        the workers hold, closes the connections and returns. In a forked
-        child, on a server the parent made, it only clears `working`: a
-        signal handler the parent installed may call it there."""
+        """Ask serve_forever() to return, from another thread: it finishes
+        what the workers hold, closes the connections and returns. Not from
+        a signal handler, which may run while serve_forever()'s thread holds
+        the lock this takes: a handler sets a flag that periodic_task()
+        reads (docs/api_python.md). In a forked child, on a server the
+        parent made, it only clears `working`, taking no lock a parent
+        thread may have held."""
         self.working = False
         client = self._client
         if client is not None and client.orphaned():
@@ -488,6 +477,9 @@ class BaseThreadedMultiplexerServer:
         when woken, by a drain, a stop or a change of the routing or the
         key filters acknowledged, call periodic_task(); then take no new message, let
         the workers finish the queue, close the connections and return.
+        While a drain with a cap runs, a wait lasts no longer than what is
+        left of it, so that the cap ends the drain on time whatever the
+        poll.
         The calling thread only polls: the handlers run on the workers,
         which is the point."""
         self._check_not_inherited()
@@ -495,7 +487,7 @@ class BaseThreadedMultiplexerServer:
         try:
             self.connect()
             while True:
-                self._wake.wait(wait_seconds(poll))
+                self._wake.wait(self.__wait(poll))
                 self._wake.clear()
                 self._run_acknowledged()
                 if not self.working or (self.draining and self.drained()) or self._failure is not None:
@@ -606,12 +598,13 @@ class BaseThreadedMultiplexerServer:
             else:
                 self.dropped += 1
         if accepted:
-            if self._drop_lines.burst:
-                self._drop_lines.accepted()
             return
         request.dropped = True  # said below, not by __del__
         if accepting:
-            self._drop_lines.dropped(mxmsg)
+            # Counted with the client's own drop lines: at most about two a second.
+            client = self._client
+            if client is not None and client._first_dropped_full():
+                log(WARNING, HIGHVERBOSITY, text="request #%d of type %d dropped: queue full" % (mxmsg.id, mxmsg.type))
             return
         self._refuse(request)
 

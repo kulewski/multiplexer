@@ -482,8 +482,7 @@ mx_integration_test(
     for client in LANGS
 ]
 
-# What a draining backend still takes, and the drain routing surviving a
-# multiplexer restart; the backends in both languages.
+# What a draining backend still takes; the backends in every language.
 [
     mx_integration_test(
         name = "drain_routing_%s" % lang,
@@ -515,6 +514,8 @@ mx_integration_test(
     for lang in LANGS
 ]
 
+# The drain routing surviving a multiplexer restart; the backends in every
+# language.
 [
     mx_integration_test(
         name = "drain_survives_mx_restart_%s" % lang,

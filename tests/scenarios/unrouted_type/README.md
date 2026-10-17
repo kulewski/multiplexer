@@ -30,7 +30,7 @@ bazel test //tests/scenarios:unrouted_type_py
 ```
 
 The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one.
+one, `_rust` a Rust one.
 
 The scenario is [unrouted_type.py](unrouted_type.py); the roles it spawns are described in
 [tests/README.md](../../README.md).

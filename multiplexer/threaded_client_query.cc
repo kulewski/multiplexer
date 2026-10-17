@@ -62,9 +62,11 @@ struct ThreadedClient::Core::InFlight {
   // left nothing can answer any more.
   std::vector<std::uint64_t> pending;
   // During SEARCH: the connections the search went through that have not
-  // answered it yet, with a delivery error or by going down. Only these
-  // count: another connection ending, a failed connect for instance, says
-  // nothing about the search.
+  // answered it yet. A delivery error answers; a connection going down
+  // answers only for a pinned lane, where it ends the query NOT_CONNECTED,
+  // and is otherwise no answer, the search waiting for its time. Only
+  // these count: another connection ending, a failed connect for
+  // instance, says nothing about the search.
   std::vector<ConnectionWrapper> searched;
   std::vector<std::uint64_t> search_ids;  // every search the query made, the current one last
   unsigned int generation = 0;            // bumped per stage so stale deadlines are ignored
@@ -149,7 +151,10 @@ void ThreadedClient::Core::query(const MultiplexerMessage& msg, Callback callbac
   // Here, on the caller's thread, the request as the io thread frames it:
   // each attempt only gets its id, and a typed query's request sent again
   // (_direct) the `to` of the backend its search found and a delivery
-  // error asked for, all measured at their largest.
+  // error asked for, all measured at their largest; and its key, which
+  // no attempt changes. What the io thread could not frame would end in
+  // no answer and no deadline.
+  check_key_size(msg.key().size());
   in_flight->prototype.set_id(std::numeric_limits<std::uint64_t>::max());
   const bool typed = !msg.to();
   const bool asked = in_flight->prototype.has_report_delivery_error();
@@ -418,7 +423,18 @@ void ThreadedClient::Core::_start_query(InFlightPtr in_flight, bool keep_deadlin
   }
   MultiplexerMessage request = in_flight->prototype;
   request.set_id(in_flight->request_id);
-  std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(request));
+  std::shared_ptr<const RawMessage> raw;
+  try {
+    raw.reset(RawMessage::FromMessage(request));
+  } catch (const std::exception& error) {
+    // What query() could not check on the caller's thread, a whole
+    // message without its type say: the query fails here, rather than
+    // wait for good with no deadline armed.
+    MX_LOG(ERROR, LOWVERBOSITY,
+           CTX("ThreadedClient") TEXT(std::string("a query's request could not be framed: ") + error.what()));
+    _finish(in_flight, FAILED, NULL);
+    return;
+  }
   ConnectionWrapper used;
   bool refused = false;
   Tracker tracker = _schedule(raw, in_flight->lane, &used, &refused, _stage_timeout(in_flight));
@@ -582,8 +598,8 @@ void ThreadedClient::Core::_search(InFlightPtr in_flight, bool keep_deadline) {
 }
 
 // The search went through `connection` and has its answer from it now, a
-// delivery error or the connection going down: it counts no more. False
-// when the search never went through it.
+// delivery error, or, for a pinned lane, the connection going down: it
+// counts no more. False when the search never went through it.
 bool ThreadedClient::Core::_answered(const InFlightPtr& in_flight, const ConnectionWrapper& connection) {
   std::vector<ConnectionWrapper>& searched = in_flight->searched;
   for (std::vector<ConnectionWrapper>::iterator it = searched.begin(); it != searched.end(); ++it) {

@@ -8,9 +8,11 @@
 // are. Every other distinct pattern of a type is compiled once and shared
 // by all the peers that declared it, and one RE2::Set over them, matched
 // once, gives the patterns that take the key. Either way the peers found
-// are stamped with the match's number, so whether a peer takes the key is
-// one comparison, and what a keyed message costs follows the patterns that
-// match it, never the number of peers or of patterns. The set is built
+// are stamped with the match's number, a write each, so whether a peer
+// takes the key is one comparison, and what the match costs follows the
+// patterns that match the key, never the number of patterns. Routed by
+// whom: ANY, a keyed message then passes over, in turn, the peers of its
+// type whose filters do not take it (Server::send_to_one). The set is built
 // again only after a pattern new to the type arrived or the last peer of
 // one left, at the next keyed message of the type, so a burst of welcomes
 // costs one build; exact keys never need one. A keyed message of a type no
@@ -18,14 +20,16 @@
 // There is no limit on patterns but the frame that carries them. Measured
 // at -c opt on one core: a match costs 20 to 40 ns for exact keys, 100,000
 // of them included, and 60 to 100 ns for a set of 64 to 10,000 patterns,
-// a peer's comparison about 1 ns more; a set build costs 0.25 ms for 64
+// each peer whom: ANY passes over about 6 ns more; a set build costs 0.25 ms for 64
 // patterns, 0.9 ms for 400 and 28 ms for 10,000, and compiling a pattern
 // new to its type alone about 5 us, all on the multiplexer's one thread.
 // RE2 stays inside key_filters.cc: only the multiplexer links it.
 //
-// Should the set fail to build, or run out of memory while matching, the
-// patterns are matched one by one instead, which costs more and gives the
-// same answer. Not thread-safe: the multiplexer's one thread.
+// The set's memory is sized from what its patterns compile to. Should it
+// fail to build all the same, which a WARNING says, or run out of memory
+// while matching, the patterns are matched one by one instead, which costs
+// more and gives the same answer. Not thread-safe: the multiplexer's one
+// thread.
 #ifndef MX_MULTIPLEXER_KEY_FILTERS_H_
 #define MX_MULTIPLEXER_KEY_FILTERS_H_
 
@@ -102,6 +106,9 @@ class KeyPatterns {
   // owners declared for `type`; for the tests.
   std::size_t exact_keys(std::uint32_t type) const;
   std::size_t patterns(std::uint32_t type) const;
+  // Whether the last match of `type` took its patterns in one pass, their
+  // set built, rather than pattern by pattern; for the tests.
+  bool matched_in_one_pass(std::uint32_t type) const;
 
  private:
   struct Type;      // its RE2 objects stay in key_filters.cc

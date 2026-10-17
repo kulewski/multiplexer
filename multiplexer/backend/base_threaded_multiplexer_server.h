@@ -48,7 +48,8 @@ class BaseThreadedMultiplexerServer;
 // What a BaseThreadedMultiplexerServer is built with.
 struct ThreadedServerOptions {
   unsigned int workers = 1;                 // handler threads
-  std::size_t queue_size = 1024;            // requests waiting for a worker; beyond it they are dropped
+  std::size_t queue_size = 1024;            // requests waiting for a worker; beyond it they are dropped; the
+                                            // largest size_t for no limit
   bool decline_searches_when_full = false;  // leave a client's search unanswered while saturated
   float connect_timeout = DEFAULT_TIMEOUT;
   // What start_draining() tells the multiplexers: any and all off keeps
@@ -201,15 +202,22 @@ class BaseThreadedMultiplexerServer {
   // it happens.
   virtual void handle_message(const RequestPtr& request) = 0;
   // Called from serve_forever() after every poll, on its thread, and at
-  // once when a change of the routing or the key filters is acknowledged,
-  // a drain's included.
+  // once when the server's own change is acknowledged, set_key_filters()'s
+  // or the drain's; one made through client().set_routing() is seen at the
+  // next poll.
   virtual void periodic_task() {}
   // Whether the drain is over: by default once `drain_seconds` have
   // passed since start_draining(), or, when the drain routing turns every
   // path off and asks for no last resort, once every connected
-  // multiplexer has confirmed it and no request is queued or being
-  // handled, since nothing more is on its way; a drain that keeps a path
-  // open lasts the whole period. Override for a condition of your own.
+  // multiplexer has confirmed it, no request is queued or being handled,
+  // since nothing more is on its way, and nothing the server sent waits
+  // for a connection to come up (ThreadedClient::held_for_a_connection()):
+  // a reply made while every multiplexer was down goes out once one is
+  // back, where the close would drop it, a flush waking the loop when it
+  // has; a drain that keeps a path open lasts the whole period. While a
+  // drain with a cap runs, serve_forever()'s wait lasts no longer than what
+  // is left of it, so that the cap ends the drain on time whatever the
+  // poll. Override for a condition of your own.
   virtual bool drained() const;
   // Called on the worker thread when handle_message() threw, after the
   // requester was sent BACKEND_ERROR, unless a reply had gone out or the
@@ -235,7 +243,10 @@ class BaseThreadedMultiplexerServer {
   void _handle(const RequestPtr& request);
   void _fail(std::exception_ptr failure);
   // Ends serve_forever()'s wait, now or, when it is elsewhere, at its next.
-  void _wake();
+  void _wake() const;
+  // What serve_forever()'s next wait may last: `poll`, and while a drain
+  // with a cap runs, no longer than what is left of the cap.
+  std::chrono::microseconds _wait(float poll) const;
   // On the io thread: a change acknowledged by every multiplexer; its
   // callback waits for the requests the queue took before it.
   void _acknowledged(BasicClient::AcknowledgedCallback callback);
@@ -244,6 +255,9 @@ class BaseThreadedMultiplexerServer {
   std::exception_ptr _failure() const;
 
   const Options options_;
+  // What the queue takes: a request for each worker and queue_size more,
+  // the sum held at the largest size_t, which is no limit.
+  const std::size_t capacity_;
   const MultiplexerAddresses addresses_;
   const PeerType type_;
   mutable mx::Mutex mutex_;
@@ -262,23 +276,29 @@ class BaseThreadedMultiplexerServer {
   std::vector<Acknowledged> acknowledged_ MX_GUARDED_BY(mutex_);
   bool accepting_ MX_GUARDED_BY(mutex_) = true;
   std::vector<std::thread> threads_ MX_GUARDED_BY(mutex_);
-  // Every worker's id, kept once close() has taken threads_ to join them:
-  // a worker calling close() then still throws, rather than wait for the
-  // close() that waits for it.
-  std::vector<std::thread::id> worker_ids_ MX_GUARDED_BY(mutex_);
+  // The server whose worker this thread is, set as the worker starts: a
+  // worker calling close() throws, rather than wait for the close() that
+  // waits for it, also once close() has taken threads_ to join them. A
+  // mark of the thread itself, where a thread id is given again to a
+  // thread made after its own was joined.
+  static thread_local const BaseThreadedMultiplexerServer* worker_of_;
   std::atomic<bool> draining_{false};
   // When the drain started, as steady_clock ticks, written before
   // draining_ is published: drained() may run on another thread than
   // start_draining().
   std::atomic<std::chrono::steady_clock::rep> draining_since_ticks_{0};
   float drain_seconds_ = 0.0f;
-  mx::Mutex wake_mutex_;
-  std::condition_variable_any wake_;
+  mutable mx::Mutex wake_mutex_;
+  mutable std::condition_variable_any wake_;
   // serve_forever() was woken, by a drain or a stop: set with every
   // notify and taken by the next wait, so that a wake while the loop was
   // elsewhere, in periodic_task() say, ends that wait at once rather than
   // being lost, which a poll with no deadline would never get over.
-  bool woken_ MX_GUARDED_BY(wake_mutex_) = false;
+  mutable bool woken_ MX_GUARDED_BY(wake_mutex_) = false;
+  // A flush drained() armed while something waited for a connection: its
+  // end, what was held written once a connection is back or given up on,
+  // wakes serve_forever(). One at a time.
+  mutable std::atomic<bool> held_flush_armed_{false};
   // What serve_forever() rethrows: the first a worker failed with.
   std::exception_ptr failure_ MX_GUARDED_BY(mutex_);
   std::atomic<bool> connected_{false};

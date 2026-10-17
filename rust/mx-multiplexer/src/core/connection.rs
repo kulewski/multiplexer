@@ -69,8 +69,9 @@ enum Channel {
 /// are what C++ keeps in the connection for its manager.
 #[derive(Debug)]
 pub(crate) struct Conn {
-    /// What it was asked to connect to, kept after it is gone.
-    pub(crate) target: Target,
+    /// What it was asked to connect to, kept after it is gone; shared
+    /// with every handle of the connection, which copies no string.
+    pub(crate) target: Arc<Target>,
     /// The address the target resolved to that is in use, or was tried last.
     pub(crate) expected_endpoint: Option<SocketAddr>,
     /// The addresses the target resolved to this time, tried in turn.
@@ -123,7 +124,7 @@ impl Conn {
     /// frame, the same every time, written once per connection.
     pub(crate) fn new(target: Target, heartbit: Arc<OutFrame>) -> Conn {
         Conn {
-            target,
+            target: Arc::new(target),
             expected_endpoint: None,
             candidates: Vec::new(),
             next_candidate: 0,
@@ -168,10 +169,14 @@ impl Conn {
         self.outgoing_max <= self.outgoing.len()
     }
 
-    /// The entry queued last, which everything queued before it is written
-    /// ahead of; None when the queue is empty.
+    /// The entry queued last but the connection's own frames, which
+    /// everything queued before it is written ahead of; None when the queue
+    /// holds none other. An own frame, a PEER_CONTROL or a heartbeat, goes
+    /// with the connection when it dies, told to nobody: one a flush
+    /// followed would be waited for for good, where the frames ahead of it
+    /// go to another connection, and the one followed with them.
     pub(crate) fn last_queued(&mut self) -> Option<&mut QueueEntry> {
-        self.outgoing.back_mut()
+        self.outgoing.iter_mut().rev().find(|entry| !entry.1.own)
     }
 
     /// Sets the queue's limit, at the registration.
@@ -480,7 +485,6 @@ impl Core {
             return;
         }
         let delivering = state.delivering;
-        let target = state.target.clone();
         self.require_heartbit_later(conn);
         if !delivering {
             // Leaving: read only so that nothing is left unread when the
@@ -498,6 +502,7 @@ impl Core {
         let message = match frame::decode(body) {
             Ok(message) => message,
             Err(error) => {
+                let target = self.conns.get(&conn).map(|state| &state.target);
                 log::debug!("received an invalid message from {target:?}: {error}");
                 self.shutdown_connection(conn);
                 return;

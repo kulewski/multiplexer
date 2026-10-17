@@ -1,5 +1,7 @@
-# A plain `bazel build //...` works. The configs only change optimisation and
-# debug info.
+# A plain `bazel build //...` works. The configs choose optimisation and
+# debug info (debug, release), a sanitizer (asan, tsan), clang with its
+# thread-safety analysis (clang), or libc++ with protoc and protobuf built
+# from source (libcxx).
 build --cxxopt=-std=c++17
 
 # The repository's own builds generate the package's constants from the

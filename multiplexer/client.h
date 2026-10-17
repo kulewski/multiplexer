@@ -90,6 +90,13 @@ class Client : public ExceptionDefinitions {
   Client(shared_ptr<asio::io_service> io_service, std::uint32_t client_type);
   Client(asio::io_service& io_service, std::uint32_t client_type);
   ~Client();  // shutdown(), on whichever thread destroys the client
+  // Moved, not copied: a copy would share the client, and either one's
+  // destructor would shut it down under the other. A moved-from client is
+  // only destroyed, which does nothing; one that borrows an io_service
+  // keeps borrowing it.
+  Client(const Client&) = delete;
+  Client& operator=(const Client&) = delete;
+  Client(Client&& other) noexcept;
 
   // Connectivity; see BasicClient for the semantics. shutdown() first
   // writes what was sent before it, running the loop as flush_all() does,
@@ -183,6 +190,13 @@ class Client : public ExceptionDefinitions {
     basic_client_->check_not_orphaned();  // the parent's state in a forked child: raise, as ThreadedClient's
     return basic_client_->routing_acknowledged();
   }
+  // How many messages wait for a connection to come up; see
+  // BasicClient::held_for_a_connection(). What the server classes' drains
+  // wait for, the close dropping them.
+  std::size_t held_for_a_connection() const {
+    basic_client_->check_not_orphaned();
+    return basic_client_->held_for_a_connection();
+  }
   // Messages read off the sockets and not yet handed out by a receive.
   bool has_incoming_messages() const {
     basic_client_->check_not_orphaned();
@@ -194,9 +208,10 @@ class Client : public ExceptionDefinitions {
   // that is gone, naming this client's type, so that its sender retries
   // elsewhere; a message that answers another, and the protocol's own,
   // are dropped: nobody retries a reply, and refusing one could start a
-  // loop. What was read before stays to be received, a number fixed now,
-  // however fast more comes. The refusal is queued as a reply is, on the
-  // request's connection while that lives.
+  // loop. What answers a query under way, a handler's own, reaches it, as
+  // it would otherwise. What was read before stays to be received, a
+  // number fixed now, however fast more comes. The refusal is queued as a
+  // reply is, on the request's connection while that lives.
   void refuse_arrivals();
   // The messages read and not received yet, refused or dropped by the same
   // rule: for a server that will not handle them, at its close.
@@ -217,6 +232,9 @@ class Client : public ExceptionDefinitions {
   // `timeout` (negative: forever). Throws OperationTimedOut, NotConnected.
   BasicClient::IncomingMessagesBuffer::value_type read_raw_message(float timeout = DEFAULT_READ_TIMEOUT) {
     basic_client_->check_not_orphaned();
+    if (basic_client_->has_incoming_messages()) {
+      return basic_client_->next_incoming_message();  // no timer for a wait that does not happen
+    }
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
     return read_raw_message(*timer);
   }
@@ -230,12 +248,20 @@ class Client : public ExceptionDefinitions {
   // The next message, as read_raw_message(), running the callbacks of
   // the changes acknowledged meanwhile (set_routing()). With
   // `end_on_acknowledgement` the wait also ends, throwing OperationTimedOut
-  // as if the time had run out, as soon as a change is acknowledged: what
-  // a loop of receives, the server classes' among them, acts on at once
-  // rather than at its next poll.
+  // as if the time had run out, as soon as a change is acknowledged or the
+  // last message held for a connection goes (held_for_a_connection()):
+  // what a loop of receives, the server classes' among them, acts on at
+  // once rather than at its next poll.
   BasicClient::IncomingMessagesBuffer::value_type receive_raw_message(float timeout = DEFAULT_READ_TIMEOUT,
                                                                       bool end_on_acknowledgement = false) {
     basic_client_->check_not_orphaned();
+    // A message waiting is taken with no timer made, armed and cancelled,
+    // a syscall per message in a busy serve loop: as wait_to_receive()'s
+    // first look, its callbacks run first.
+    basic_client_->run_acknowledged_callbacks();
+    if (basic_client_->has_incoming_messages()) {
+      return basic_client_->next_incoming_message();
+    }
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
     if (!basic_client_->wait_to_receive(*timer, end_on_acknowledgement)) {
       MXTHROW(OperationTimedOut());
@@ -426,8 +452,9 @@ class Client : public ExceptionDefinitions {
 
   // Every message the program sent that the client gives up on, each copy
   // of one sent to ALL, is told to `observer` with its id and why
-  // (DropReason), inside whichever call runs the loop when it happens;
-  // dropped() counts them. See BasicClient::report_drop.
+  // (DropReason), once the handler it happened in is done, inside
+  // whichever call runs the loop then, so that it may send or shut the
+  // client down; dropped() counts them at once. See BasicClient::report_drop.
   void set_drop_observer(BasicClient::DropObserver observer) { basic_client_->set_drop_observer(observer); }
   std::uint64_t dropped() const { return basic_client_->dropped(); }
   // See BasicClient::incoming_dropped().
@@ -488,6 +515,29 @@ class Client : public ExceptionDefinitions {
   Outcome _await(Ledger& ledger, mx::SimpleTimer& timer, Stage stage, const ConnectionWrapper* watch,
                  const LanePtr& lane);
   IncomingMessage _late(Ledger& ledger, mx::SimpleTimer& timer, const LanePtr& lane);
+  // A query names each id it sends, its attempts' and its search's,
+  // before it goes out, and forgets them as it ends: while the client
+  // refuses what arrives (refuse_arrivals), a message that references one
+  // answers the query, and the refusals pass it by to the queue the query
+  // reads, from which what was read before is set aside for the query's
+  // duration (BasicClient::set_incoming_aside). Nothing is kept for a
+  // client that does not refuse.
+  void _awaiting(std::uint64_t id) {
+    if (!awaited_) {
+      return;
+    }
+    if (awaited_->empty()) {
+      basic_client_->set_incoming_aside();
+    }
+    awaited_->push_back(id);
+  }
+  void _awaiting_none() {
+    if (!awaited_ || awaited_->empty()) {
+      return;
+    }
+    awaited_->clear();
+    basic_client_->put_incoming_back();
+  }
   // `placed`, when given, gets the message's tracker once it is placed,
   // whatever the send then comes to.
   ConnectionWrapper _send_one(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, ConnectionWrapper preferred,
@@ -539,6 +589,9 @@ class Client : public ExceptionDefinitions {
  private:
   shared_ptr<asio::io_service> io_service_ptr_;
   ReceivedCallback received_;  // the on_received of the query under way, see _query
+  // The ids _awaiting() named, shared with the refusals, which a move of
+  // the client leaves where they are; none before refuse_arrivals().
+  shared_ptr<std::vector<std::uint64_t>> awaited_;
 
  protected:
   asio::io_service& io_service_;

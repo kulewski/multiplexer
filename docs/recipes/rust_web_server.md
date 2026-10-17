@@ -145,8 +145,9 @@ sessions with `set_key_filters()`.
 
 The io thread hands messages to the streams and never waits for them. A
 subscription holds `DEFAULT_INCOMING_QUEUE_MAX_SIZE`, 1024 messages, and
-drops its oldest, with a warning, when nobody reads it, a browser that
-reads slowly losing its oldest events rather than holding the process's.
+drops its oldest when nobody reads it, with a warning at the first drop
+of each run, a browser that reads slowly losing its oldest events rather
+than holding the process's.
 A query waits on nothing but its reply: tasks that query faster than the
 backends answer pile up as tasks, which the server's own limits bound.
 

@@ -103,7 +103,9 @@ A routing rule has these fields:
   request type one rule that reports, the one naming its backends, and
   set `report_delivery_error: false` on any other, such as a copy to a
   monitor, or a request a backend is already handling is searched for and
-  sent again.
+  sent again. A destination that may be absent, a journal or a monitor,
+  takes `delivery_error_is_error: false` as well, so that the multiplexer
+  logs its absence as a warning rather than as an error.
 - `include_original_packet_in_report`: put the whole undelivered message
   inside the `DELIVERY_ERROR`. Default false.
 - `delivery_error_is_error`: only changes the level at which the multiplexer
@@ -117,8 +119,11 @@ names the backends first.
 
 Peer types 1 to 99 and message types 1 to 99 belong to the protocol. A peer
 that announces a type in that range is refused, the two controllers below
-apart; the server classes treat a message type in that range as internal
-and never pass it to `handle_message`.
+apart. `BaseMultiplexerServer` keeps a message of a type in that range to
+itself, answering a search or a `PING` and logging the rest;
+`BaseThreadedMultiplexerServer` answers those and passes `handle_message`
+every other one addressed to it, a `DELIVERY_ERROR` for a message it sent
+that was not a query among them.
 
 | Peer type | Value | Meaning |
 |---|---|---|

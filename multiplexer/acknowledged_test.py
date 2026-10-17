@@ -6,8 +6,13 @@ AsyncClient's loop, handled by the server classes, on their loop's
 thread), and the server classes' loops wake at the acknowledgement rather
 than at their next poll, an hour away here, for a drain as for a change of
 filters, and a receive's wait as well when the receive before it, taking
-the last message routed before the change, is what acknowledged it.
-Counted, not timed: the sender's own marker coming back says the
+the last message routed before the change, is what acknowledged it. A
+connection's welcome confirms the routing it carries, so a client is
+acknowledged once connected, a change made before connecting is heard
+after it, and a drain survives its multiplexer's restart. A drain also
+waits for what its server holds for a connection, every multiplexer down,
+and ends on its cap whatever the poll. Counted, not
+timed: the sender's own marker coming back says the
 multiplexer routed everything it sent before; a held handler says what a
 threaded server still has; a bound on a wait only detects a failure.
 """
@@ -20,7 +25,7 @@ from multiplexer.aio import AsyncClient
 from multiplexer.clients import SyncClient
 from multiplexer.Multiplexer_pb2 import Routing
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.mxclient import OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationTimedOut
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import BackendThread, Cluster, runfile, wait_until
 from multiplexer.testing.raw_peer import RawPeer
@@ -65,6 +70,22 @@ class Counter:
         with self._changed:
             assert self._changed.wait_for(lambda: self.value > value, timeout=BOUND), "nothing came"
             return self.value
+
+
+class Held(BaseThreadedMultiplexerServer):
+    """Holds every request until the test releases it, then answers it."""
+
+    multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+    def __init__(self, addresses) -> None:
+        super().__init__(addresses, workers=1)
+        self.holding = threading.Event()
+        self.release = threading.Event()
+
+    def handle_message(self, request) -> None:
+        self.holding.set()
+        self.release.wait(BOUND)
+        request.reply(b"ok", type=RESPONSE)
 
 
 class AcknowledgedTest(unittest.TestCase):
@@ -281,6 +302,188 @@ class AcknowledgedTest(unittest.TestCase):
         heard.wait_past(0)
         self.assertEqual(served._thread.ident, heard.threads[0], "on serve_forever()'s thread")
         wait_until(lambda: answers, BOUND, "the held request answered")
+
+    def test_a_connections_welcome_confirms_the_routing(self) -> None:
+        """A connection's welcome carries the client's routing, which the
+        multiplexer takes with it: once connected, with no change made and
+        nothing received, the routing reads acknowledged."""
+        sync = SyncClient([self.endpoint], peers.TEST_EVENT_BACKEND)  # connected when made
+        self.addCleanup(sync.shutdown)
+        self.assertTrue(sync.routing_acknowledged())
+        threaded = ThreadedClient([self.endpoint], peers.TEST_EVENT_BACKEND)  # likewise
+        self.addCleanup(threaded.shutdown)
+        self.assertTrue(threaded.routing_acknowledged())
+
+    def test_a_change_made_before_connecting_is_heard_after(self) -> None:
+        """A change made with no connection is in effect at once, and its
+        callback runs at the next receive; a connection made before that
+        receive carries the change in its welcome and takes nothing back."""
+        receiver = SyncClient([], peers.TEST_EVENT_BACKEND)
+        self.addCleanup(receiver.shutdown)
+        heard: list[int] = []
+        receiver.set_key_filters({EVENT: []}, on_acknowledged=lambda: heard.append(1))
+        receiver.connect(self.endpoint)
+
+        def came_back() -> bool:
+            """The caller back for more, as a loop of receives is."""
+            try:
+                receiver.receive_message(timeout=0.05)
+            except OperationTimedOut:
+                pass
+            return bool(heard)
+
+        wait_until(came_back, BOUND, "the callback, at a receive after the connection")
+        self.assertEqual([1], heard)
+        self.assertTrue(receiver.routing_acknowledged())
+
+    def test_a_drain_across_a_restart_ends_once_its_work_is_done(self) -> None:
+        """A threaded server drains with a request in its worker, the drain
+        confirmed; its multiplexer restarts, and the connection that comes
+        back carries the drain routing in its welcome, which confirms it
+        again: the drain ends once the worker is done, not at its cap, an
+        hour away. The worker is let go only once the connection is back,
+        so that the drain cannot end while no multiplexer is connected."""
+        served = BackendThread(lambda: Held([self.endpoint]), poll=HOUR, drain_seconds=HOUR).start()
+        server = served.backend
+        assert server is not None
+        self.addCleanup(served.stop)
+        self.addCleanup(server.release.set)
+        asking = SyncClient([self.endpoint], peers.WEBSITE)
+        self.addCleanup(asking.shutdown)
+        asking.send_message(b"hold", type=REQUEST, flush=True)
+        self.assertTrue(server.holding.wait(BOUND), "the request reached the worker, which holds it")
+        server.start_draining()
+        wait_until(server.client.routing_acknowledged, BOUND, "the drain confirmed")
+        self.cluster.mx[0].restart()
+        self.cluster.wait_for_peer(peers.PYTHON_TEST_SERVER, timeout=BOUND)  # back on the restarted one
+        wait_until(lambda: server.client.connections_count() == 1, BOUND, "registered on the server's side")
+        server.release.set()
+        wait_until(lambda: not served.running, BOUND, "the drain over once the worker is done")
+
+    def test_a_drain_waits_for_what_it_holds_for_a_connection(self) -> None:
+        """A threaded server drains while its only multiplexer is down, a
+        request in its worker: the worker's reply is held for the next
+        connection, and the drain waits for it, the multiplexer back, where
+        the confirmation, with no connection, held at once and the close
+        dropped the reply. Counted: what the server's client gave up on."""
+        served = BackendThread(lambda: Held([self.endpoint]), poll=HOUR, drain_seconds=HOUR).start()
+        server = served.backend
+        assert server is not None
+        self.addCleanup(served.stop)
+        self.addCleanup(server.release.set)
+        client = server.client  # gone from the server at its close: what it dropped is read after
+        asking = SyncClient([self.endpoint], peers.WEBSITE)
+        self.addCleanup(asking.shutdown)
+        asking.send_message(b"hold", type=REQUEST, flush=True)
+        self.assertTrue(server.holding.wait(BOUND), "the request reached the worker, which holds it")
+        multiplexer = self.cluster.mx[0]
+        multiplexer.stop()  # every connection to it ends
+        wait_until(lambda: client.connections_count() == 0, BOUND, "the connection gone")
+        server.start_draining()
+        server.release.set()
+
+        def held() -> bool:
+            """The reply held; a server that did not wait for it is closed
+            by now, and what it dropped is checked below."""
+            try:
+                return client.held_for_a_connection() == 1
+            except NotConnected:
+                return True
+
+        wait_until(held, BOUND, "the reply held")
+        multiplexer.start()  # back on the same address
+        wait_until(lambda: not served.running, BOUND, "the drain over once the reply went")
+        self.assertEqual(0, client.dropped, "the reply written once a connection was back, not dropped")
+
+    def test_a_plain_drain_waits_for_what_it_holds_for_a_connection(self) -> None:
+        """The same for the plain server: its reply, made as its only
+        multiplexer went down, held for the next connection, which the
+        drain waits for."""
+        held = threading.Event()
+
+        class HeldPlain(BaseMultiplexerServer):
+            """Starts draining at the request it is told to hold, holds it
+            until the test releases it, then answers it; says, on its
+            loop's thread, when its client holds a message for a
+            connection."""
+
+            multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+            def __init__(self, addresses) -> None:
+                super().__init__(addresses)
+                self.holding = threading.Event()
+                self.release = threading.Event()
+
+            def handle_message(self, mxmsg) -> None:
+                if mxmsg.message == b"hold":
+                    self.start_draining()
+                    self.holding.set()
+                    self.release.wait(BOUND)
+                self.send_message(message=b"ok", type=RESPONSE)
+
+            def periodic_task(self) -> None:
+                if self.conn.held_for_a_connection():
+                    held.set()
+
+        served = BackendThread(lambda: HeldPlain([self.endpoint]), poll=HOUR, drain_seconds=HOUR).start()
+        server = served.backend
+        assert server is not None
+        self.addCleanup(served.stop)
+        self.addCleanup(server.release.set)
+        asking = SyncClient([self.endpoint], peers.WEBSITE)
+        self.addCleanup(asking.shutdown)
+        asking.send_message(b"hold", type=REQUEST, flush=True)
+        self.assertTrue(server.holding.wait(BOUND), "the request reached the server, which holds it, draining")
+        multiplexer = self.cluster.mx[0]
+        multiplexer.stop()  # every connection to it ends
+        server.release.set()
+        self.assertTrue(held.wait(BOUND), "the reply held")
+        multiplexer.start()  # back on the same address
+        wait_until(lambda: not served.running, BOUND, "the drain over once the reply went")
+        self.assertEqual(0, server.conn.dropped, "the reply written once a connection was back, not dropped")
+
+    def test_a_plain_drain_ends_on_its_cap_whatever_the_poll(self) -> None:
+        """A drain that keeps a path open ends on its cap alone: with a poll
+        of an hour the loop's wait ends at the cap, where nothing woke the
+        loop after the confirmation and the drain went on for good."""
+
+        class Leaving(BaseMultiplexerServer):
+            """Answers, and is asked to leave by its first request."""
+
+            multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+            def handle_message(self, mxmsg) -> None:
+                self.send_message(message=b"ok", type=RESPONSE)
+                self.start_draining()
+
+        served = BackendThread(
+            lambda: Leaving([self.endpoint], drain_routing=Routing(any=False)), poll=HOUR, drain_seconds=1.0
+        ).start()
+        self.addCleanup(served.stop)
+        asking = ThreadedClient([self.endpoint], peers.WEBSITE)
+        self.addCleanup(asking.shutdown)
+        self.assertEqual(b"ok", asking.query(b"leave", type=REQUEST, timeout=BOUND).message)
+        wait_until(lambda: not served.running, BOUND, "the drain over at its cap")
+
+    def test_a_threaded_drain_ends_on_its_cap_whatever_the_poll(self) -> None:
+        """The same for the threaded server."""
+
+        class Open(BaseThreadedMultiplexerServer):
+            """Takes events through its drain, so only the cap can end it."""
+
+            multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+            def handle_message(self, request) -> None:
+                request.no_response()
+
+        served = BackendThread(
+            lambda: Open([self.endpoint], drain_routing=Routing(any=False)), poll=HOUR, drain_seconds=1.0
+        ).start()
+        server = served.backend
+        assert server is not None
+        self.addCleanup(served.stop)
+        server.start_draining()
+        wait_until(lambda: not served.running, BOUND, "the drain over at its cap")
 
 
 if __name__ == "__main__":

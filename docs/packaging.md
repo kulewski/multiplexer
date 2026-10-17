@@ -13,14 +13,16 @@ published; [operations](operations.md#debug-symbols) says how to debug.
 |---|---|---|
 | `mxcontrol-<version>-linux-amd64` with its `.sha256` | running a multiplexer, or its tools, on any Linux | x86_64 with glibc 2.28 or newer |
 | `ghcr.io/kulewski/multiplexer:<version>` | running a multiplexer in a container | a container runtime |
-| `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev` and `libasio-dev` to build against the library |
+| `multiplexer_<version>~<codename>_amd64.deb`, one per Debian and Ubuntu release | mxcontrol as a system package, and building C++ peers | that release; `libprotobuf-dev`, `libasio-dev` and `libre2-dev`, which `pkg-config` looks for, to build against the library |
 | `mx_multiplexer-<version>-cp3XY-cp3XY-manylinux_2_28_x86_64.whl`, one per CPython from 3.10 | Python peers, and `mxcontrol`: a multiplexer, `generate_rules`, `generate_constants`, the test harness's binary | `pip` on x86_64 Linux with glibc 2.28 or newer; the `protobuf` package comes with it |
 | `mx-multiplexer-<version>.crate`, on crates.io as `mx-multiplexer` | Rust peers | cargo, Rust 1.85 or newer, on Linux |
 | the source archive GitHub makes for the tag | everything else, through Bazel or `make` | [building.md](building.md) |
 
-Bazel consumers do not use any of these: `git_repository(tag = "v<version>")`
-with `mx_dependencies()` and `mx_setup()` builds the library from source
-in their workspace, as [examples/README.md](../examples/README.md) shows.
+Bazel consumers do not use any of these: `git_repository(commit = "<the
+tag's commit>")`, or an `http_archive` of the tag's source archive with
+its `sha256`, with `mx_dependencies()` and `mx_setup()` builds the library
+from source in their workspace, as [examples/README.md](../examples/README.md)
+and [examples/echo/WORKSPACE](../examples/echo/WORKSPACE) show.
 
 ## Licenses
 
@@ -29,10 +31,11 @@ compiled in: protobuf in `mxcontrol` and in the wheels' extension, RE2 in
 `mxcontrol`, pybind11 in the extension, and Asio's headers in both.
 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) has their licenses, and every
 artifact carries it with LICENSE: the wheels in their `.dist-info`, the
-release beside the binary, the image under `/usr/share/doc/mxcontrol`.
-The build scripts check that each does. glibc is the system's, or in the
-image Debian's, from the distroless base; the Debian packages link
-protobuf and RE2 from their distribution.
+release beside the binary, the image under `/usr/share/doc/mxcontrol`,
+the Debian packages under `/usr/share/doc/multiplexer`. The build scripts
+check that each does. glibc is the system's, or in the image Debian's,
+from the distroless base; the Debian packages link protobuf and RE2 from
+their distribution, and hold the code of Asio's and protobuf's headers.
 
 ## The mxcontrol binary
 
@@ -195,8 +198,10 @@ from the wheel or the Debian package ([the Rust API](api_rust.md)).
    `~/.cache/mx-release-check/logs`, with a line in its `summary.txt`, ok
    or FAIL. It takes an hour or two.
 3. Tag it: `git tag -a v<version> -m "..."` and `git push origin main v<version>`.
-4. The workflow runs the tests, builds every artifact, pushes the image and
-   creates the release with the files attached.
+4. The workflow checks that the tag is the version the source carries,
+   runs the tests, builds every artifact and checks each; only then does
+   it push the image and create the release with the files attached, so a
+   run that fails a check publishes nothing.
 5. Approve the upload to PyPI: the `pypi` job waits for the reviewer of
    the `pypi` environment in the Actions tab, then publishes the wheels
    through trusted publishing, which PyPI grants to this workflow file and
@@ -212,6 +217,15 @@ from the wheel or the Debian package ([the Rust API](api_rust.md)).
    Reject that release's own `crates-io` job: it would find the version
    taken.
 
+A job's token reads the repository and nothing more, unless the job needs
+more: the image job's pushes to ghcr.io, the release job's writes the
+release, and the registry jobs ask for the OIDC token that trusted
+publishing exchanges; no checkout keeps its token on disk, in this
+workflow or the others. Every action the workflows use is pinned to a
+commit, its version in a comment beside it, and moves only through a
+reviewed pull request, which Dependabot opens once a week for new releases
+(`.github/dependabot.yml`).
+
 To try the workflow before tagging, start it by hand from the Actions tab,
 or with `gh workflow run release.yml -f tag=v<version>rc1`: the same build
 from the chosen branch, the files named after the tag given, without the
@@ -225,8 +239,10 @@ CPython the same way on a distribution of their own before anything is
 published.
 TestPyPI never accepts a version it has seen, so the tag given is a
 release candidate that will not be tagged, never the version itself. A
-failed run is re-run from its page once the fix is on the branch; the tag
-never moves.
+re-run builds the commit its run started from, with that commit's
+workflow, so a failed run is re-run from its page only for a failure from
+outside the repository, a flake, an outage, a setting; one the repository
+causes takes a fixed commit and a new run, and a tag never moves.
 
 To rebuild any artifact by hand: `packaging/build_binary.sh`, then
 `packaging/build_image.sh` with the binary it wrote,

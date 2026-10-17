@@ -102,6 +102,12 @@ class ThreadedClient : public ExceptionDefinitions {
   // comment); without it such messages are logged and dropped.
   explicit ThreadedClient(std::uint32_t peer_type, MessageSink on_message = MessageSink());
   ~ThreadedClient();  // shutdown() if not done
+  // Moved, not copied: a copy would share the client, and either one's
+  // destructor would shut it down under the other. A moved-from client is
+  // only destroyed, which does nothing.
+  ThreadedClient(const ThreadedClient&) = delete;
+  ThreadedClient& operator=(const ThreadedClient&) = delete;
+  ThreadedClient(ThreadedClient&& other) noexcept;
 
   // A backend built on this client answers the search clients use to find
   // a backend: with a policy set, every BACKEND_FOR_PACKET_SEARCH, routed
@@ -143,6 +149,10 @@ class ThreadedClient : public ExceptionDefinitions {
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();
+  // How many messages wait for a connection to come up; see
+  // BasicClient::held_for_a_connection(). What the server classes' drains
+  // wait for. Not from the io thread.
+  std::size_t held_for_a_connection();
   // Waits until everything sent before the call has been written or given
   // up on, or `timeout` seconds; true when every one was written, false
   // when one was given up on, which the drop observer names, or the time
@@ -150,12 +160,13 @@ class ThreadedClient : public ExceptionDefinitions {
   // does what is queued on a connection; what is sent after the call does
   // not, so a flush ends however busy the client is, a message a dying
   // connection hands to another included. After shutdown() it returns
-  // true at once, nothing being left to wait for. What shutdown() does
-  // first. Not from the io thread.
+  // true at once: what is left to write is the shutdown's, which every
+  // shutdown() call waits for. What shutdown() does first. Not from the
+  // io thread.
   bool flush_all(float timeout);
   // flush_all() with `done(flushed)` on the io thread instead of the wait,
   // safe from any thread including the io thread: what an asyncio layer
-  // awaits.
+  // awaits. `done` runs in a handler of its own, where it may send.
   typedef std::function<void(bool)> FlushCallback;
   void flush_all_with_callback(float timeout, FlushCallback done);
 
@@ -320,9 +331,11 @@ class ThreadedClient : public ExceptionDefinitions {
   // what still arrives say, `timeout` seconds in all, any other send
   // meanwhile throwing NotConnected, then closes the connections and
   // stops the io thread; what is still unwritten is dropped and reported,
-  // at once with 0. Idempotent; the destructor calls it. On the io thread
-  // itself it does not wait for the thread, which ends once its handlers
-  // are done. The callbacks the client was given, on_message and the
+  // at once with 0. Idempotent; the destructor calls it. A call that
+  // finds the shutdown begun, on another thread or on the io thread, waits
+  // as the one that began it does, until the io thread has ended. On the
+  // io thread itself it does not wait for the thread, which ends once its
+  // handlers are done. The callbacks the client was given, on_message and the
   // search policy, are destroyed when the io thread ends, on that thread,
   // and in a forked child by shutdown() itself.
   void shutdown(float timeout = CLOSE_FLUSH_SECONDS);

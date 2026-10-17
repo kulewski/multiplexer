@@ -1,0 +1,13 @@
+# The workflows' actions, each pinned to a commit with its version beside
+# it (.github/workflows/): Dependabot proposes a new release of any of them
+# once a week, in one pull request that moves the commits and the versions
+# together, reviewed like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

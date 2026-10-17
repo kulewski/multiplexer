@@ -25,6 +25,7 @@ mod handover;
 mod state;
 
 use std::collections::VecDeque;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -261,8 +262,15 @@ impl Core {
             let mut placed = false;
             let mut first_tracker = tracker;
             let mut used = used;
-            let registered: Vec<ConnId> = self.by_peer_id.values().copied().collect();
-            for conn in registered {
+            // Every registered connection, walked by peer id rather than
+            // collected first, which would allocate on every send.
+            let mut cursor = self.by_peer_id.first_key_value().map(|(&peer_id, &conn)| (peer_id, conn));
+            while let Some((peer_id, conn)) = cursor {
+                cursor = self
+                    .by_peer_id
+                    .range((Bound::Excluded(peer_id), Bound::Unbounded))
+                    .next()
+                    .map(|(&peer_id, &conn)| (peer_id, conn));
                 if !self.conn_living(conn) {
                     continue;
                 }
@@ -326,15 +334,18 @@ impl Core {
             return false;
         };
         let placed = self.place_on(conn, Arc::clone(frame), tracker, number, deadline, false, lane.cloned());
-        let wrapper = self.wrap(conn);
-        if let Some(lane) = lane {
-            lane.adopt(&wrapper);
-        }
         if let (Some(trackers), Some(placed)) = (trackers, placed) {
             trackers.push(placed);
         }
-        if let Some(used) = used {
-            *used = Some(wrapper);
+        if lane.is_some() || used.is_some() {
+            // Built only for whoever takes it: a plain send wants none.
+            let wrapper = self.wrap(conn);
+            if let Some(lane) = lane {
+                lane.adopt(&wrapper);
+            }
+            if let Some(used) = used {
+                *used = Some(wrapper);
+            }
         }
         true
     }
@@ -368,6 +379,27 @@ impl Core {
         self.wait_flushes(number, 1);
         self.expire_at(key);
         tracker
+    }
+
+    /// How many messages wait for a connection to come up: sent while none
+    /// was live, or left by one that died with none to take them, each
+    /// going out in order once one is registered, or given up on at its own
+    /// deadline. What the server classes' drains wait for, a close dropping
+    /// them; the last one to go ends a serve loop's wait as an
+    /// acknowledgement does (`take_acknowledged_wake()`).
+    pub(crate) fn held_for_a_connection(&self) -> usize {
+        self.outbox.held_live
+    }
+
+    /// A message held for a connection went, placed on one that came up or
+    /// given up on: the last to go ends a serve loop's wait, so that a
+    /// drain waiting for what is held looks again at once, not at its next
+    /// poll.
+    pub(super) fn held_left(&mut self) {
+        self.outbox.held_live -= 1;
+        if self.outbox.held_live == 0 {
+            self.client.acknowledged_wake = true;
+        }
     }
 
     /// A connection came up: what was held for one is placed, in order,
@@ -418,7 +450,7 @@ impl Core {
                 waiting.over = true;
             }
             self.outbox.release(key);
-            self.outbox.held_live -= 1;
+            self.held_left();
             self.outbox.waiting -= 1;
             self.wait_flushes(number, -1);
             self.outbox.retries += 1;

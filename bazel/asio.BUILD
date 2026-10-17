@@ -1,5 +1,5 @@
 # Standalone Asio, header-only, as @asio//:asio; ASIO_STANDALONE keeps it
-# Fetched by mx_dependencies() in deps.bzl.
+# off Boost. Fetched by mx_dependencies() in deps.bzl.
 cc_library(
     name = "asio",
     hdrs = glob([

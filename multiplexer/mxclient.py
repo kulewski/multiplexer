@@ -367,6 +367,7 @@ class Client(_mxclient.Client):
         self._client_type = client_type
         self.__instance_id: int | None = None
         self.__on_received: Callable[[int], None] | None = None  # the query under way's, see query()
+        self.__refusing = False  # refuse_arrivals() was called: a query names what it sends
         super(Client, self).__init__(client_type)
 
     def __get_instance_id(self) -> int:
@@ -408,6 +409,16 @@ class Client(_mxclient.Client):
         at once, whether the client had it; raises NotConnected after
         shutdown(), as connect() does."""
         return super(Client, self).disconnect_from(endpoint[0], endpoint[1])
+
+    def refuse_arrivals(self) -> None:
+        """Leaving, for the server classes: from now on a request that
+        arrives is refused at once with DELIVERY_ERROR, so that its sender
+        retries elsewhere; a reply, and the protocol's own messages, are
+        dropped, but what answers a query under way, a handler's own, which
+        takes it as it would otherwise. What was read before stays to be
+        received."""
+        super(Client, self).refuse_arrivals()
+        self.__refusing = True
 
     def set_routing(self, routing: Routing, on_acknowledged: Callable[[], None] | None = None) -> None:
         """Which of a multiplexer's routing paths reach this peer, a
@@ -453,6 +464,14 @@ class Client(_mxclient.Client):
         resort."""
         return super(Client, self).routing_acknowledged()
 
+    def held_for_a_connection(self) -> int:
+        """How many messages wait for a connection to come up: sent while
+        none was live, or left by one that died with none to take them,
+        each going out in order once one is registered, or given up on at
+        its own deadline. What the server classes' drains wait for, the
+        close dropping them."""
+        return super(Client, self).held_for_a_connection()
+
     # Narrower than the native method, whose timeout pybind11 annotates as
     # anything float() takes: the seconds this method documents.
     def wait_for_connection(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -486,8 +505,10 @@ class Client(_mxclient.Client):
         of set_routing() and set_key_filters() whose time came. With
         `end_on_acknowledgement` the wait also ends, raising
         OperationTimedOut as if the time had run out, as soon as a change
-        is acknowledged: what a loop of receives, the server classes'
-        among them, acts on at once rather than at its next poll."""
+        is acknowledged or the last message held for a connection goes
+        (held_for_a_connection()): what a loop of receives, the server
+        classes' among them, acts on at once rather than at its next
+        poll."""
         return self.__receive_message(timeout, end_on_acknowledgement)
 
     def handle_drop(self, mxmsg, connwrap=None):
@@ -639,6 +660,8 @@ class Client(_mxclient.Client):
                 response, connwrap = self.__query_typed(request, timeout, multiplexer)
         finally:
             self.__on_received = previous
+            if self.__refusing:
+                self._awaiting_none()  # what the query named as it sent, forgotten
         return (response, connwrap) if with_connection else response
 
     def __request(self, message: Any, type: "int | None", to: int, key: "str | None") -> MultiplexerMessage:
@@ -793,8 +816,11 @@ class Client(_mxclient.Client):
         for a connection if none is; the same as Client::_send_attempt in
         client_query.cc. The ledger records it before the send, its tracker
         once it is placed: a send that runs out of time leaves the message
-        queued, to be written later, and a reply to it still answers.
+        queued, to be written later, and a reply to it still answers. A
+        client that refuses what arrives names it first (refuse_arrivals()).
         Returns the connection that wrote it."""
+        if self.__refusing:
+            self._awaiting(mxmsg.id)
         attempt = ledger.attempts[mxmsg.id] = _mxclient.Attempt()
         return self.send_one(mxmsg.SerializeToString(), mxmsg.id, mxmsg.type, preferred, lane, ticker(), attempt)
 
@@ -804,8 +830,10 @@ class Client(_mxclient.Client):
         its one connection; the same as Client::_send_search in
         client_query.cc. The copies wait for room, or for a connection, as
         long as the stage has left and a moment more. The ledger records its
-        id and the connections it went through. Returns the pinned lane's
-        connection, None without one."""
+        id, named as an attempt's is, and the connections it went through.
+        Returns the pinned lane's connection, None without one."""
+        if self.__refusing:
+            self._awaiting(mxmsg.id)
         ledger.search_id = mxmsg.id
         raw = mxmsg.SerializeToString()
         if lane is not None and lane.pinned:
@@ -1106,8 +1134,11 @@ class Client(_mxclient.Client):
         OperationTimedOut. With a `callback`, flush or not, it returns at
         once and `callback(written)` runs inside a later call that runs the
         loop, 1 once the message is written, the first copy for ALL, 0 once
-        it was given up on or shutdown() came first. NotConnected at once
-        for a pinned lane whose connection is gone, and after shutdown().
+        it was given up on or shutdown() came first; since that call may be
+        a query or a receive, the callback must not receive or query
+        through this client, which would take that call's reply.
+        NotConnected at once for a pinned lane whose connection is gone,
+        and after shutdown().
         """
         mxmsg_id, taken = self.__send_message(message, **kwargs)
         if not taken:

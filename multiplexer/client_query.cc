@@ -110,6 +110,11 @@ IncomingMessage Client::_query(const MultiplexerMessage& query, float timeout, L
     ReceivedCallback previous;
     ~Holding() { slot = std::move(previous); }
   } holding{received_, std::exchange(received_, std::move(received))};
+  // The ids it names as it sends (_awaiting) are forgotten as it ends.
+  struct Forgetting {
+    Client& client;
+    ~Forgetting() { client._awaiting_none(); }
+  } forgetting{*this};
   if (query.to()) {
     return _query_addressed(query, timeout, lane);
   }
@@ -274,25 +279,29 @@ MultiplexerMessage Client::_locator_for(const MultiplexerMessage& query) {
 // Sends one attempt of a query, the request or the request sent again,
 // through one connection, `preferred` while it is live, waiting for a
 // connection if none is: see _send_one. The ledger records it before the
-// send, its tracker once it is placed: a send that runs out of time leaves
-// the message queued, to be written later, and a reply to it still
-// answers. Returns the connection that wrote it.
+// send, named as the query's (_awaiting), its tracker once it is placed: a
+// send that runs out of time leaves the message queued, to be written
+// later, and a reply to it still answers. Returns the connection that
+// wrote it.
 ConnectionWrapper Client::_send_attempt(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer,
                                         ConnectionWrapper preferred, const LanePtr& lane, Ledger* ledger) {
+  _awaiting(mxmsg.id());
   ledger->attempts.push_back(Attempt{mxmsg.id(), BasicClient::BasicScheduledMessageTracker()});
   return _send_one(mxmsg, timer, preferred, lane, &ledger->attempts.back().state);
 }
 
 // Sends the search, or the locating PING: a copy on every live
 // connection, waiting for one when none is (_place_search), or through a
-// pinned lane its one connection. The copies wait for room, or for a connection, as long
-// as the stage has left and a moment more, as an attempt's send lets it
-// wait (_send_and_wait), none for a stage with no deadline: a copy left
-// after the stage is an answer nobody waits for. The ledger records its id
-// and the connections it went through. Returns the pinned lane's
-// connection, empty without one.
+// pinned lane its one connection. The copies wait for room, or for a
+// connection, as long as the stage has left and a moment more, as an
+// attempt's send lets it wait (_send_and_wait), none for a stage with no
+// deadline: a copy left after the stage is an answer nobody waits for.
+// The ledger records its id, named as an attempt's is, and the
+// connections it went through. Returns the pinned lane's connection,
+// empty without one.
 ConnectionWrapper Client::_send_search(const MultiplexerMessage& mxmsg, mx::SimpleTimer& timer, const LanePtr& lane,
                                        Ledger* ledger) {
+  _awaiting(mxmsg.id());
   ledger->search_id = mxmsg.id();
   ledger->searched.clear();
   if (lane && lane->pinned()) {

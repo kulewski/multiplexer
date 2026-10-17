@@ -15,8 +15,10 @@ extension, are under the GPL with the GCC Runtime Library Exception, which
 asks nothing of the programs they are compiled into. glibc is in none of
 these binaries: they take it from the system, and the image from its base,
 distroless, whose packages' copyright files are under /usr/share/doc. The
-Debian packages link protobuf and RE2 from their distribution and hold
-none of this code.
+Debian packages link protobuf and RE2 from their distribution; their
+mxcontrol and libmultiplexer.a hold the code of Asio's headers and of
+protobuf's, compiled from the distribution's, and carry this file under
+/usr/share/doc/multiplexer.
 
 ========================================================================
 Protocol Buffers (protobuf)

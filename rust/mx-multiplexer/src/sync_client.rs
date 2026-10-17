@@ -28,7 +28,7 @@ use crate::constants::types;
 use crate::core::client::{target_of, DropReason, IncomingMode};
 use crate::core::outbox::{Frame, SendDone};
 use crate::core::query::{check_size_sent_again, Outcome, QueryId};
-use crate::core::{deadline_after, SendState};
+use crate::core::{deadline_after, SendState, Tracker};
 use crate::defaults::{CLOSE_FLUSH_SECONDS, CLOSE_READ_SECONDS, DEFAULT_TIMEOUT, ROOM_GRACE_SECONDS};
 use crate::endpoint::{format_endpoint, parse_endpoint};
 use crate::engine::Engine;
@@ -53,7 +53,8 @@ pub struct SyncClientBuilder {
 impl SyncClientBuilder {
     /// Every message the program sent that the client gives up on, each
     /// copy of one sent to ALL, is told to `observer` with its id and why,
-    /// inside whichever call runs the loop then.
+    /// once the handler it happened in is done, inside whichever call runs
+    /// the loop then; `dropped()` counts them at once.
     pub fn on_drop(mut self, observer: impl FnMut(u64, DropReason) + Send + 'static) -> Self {
         self.on_drop = Some(Box::new(observer));
         self
@@ -111,6 +112,18 @@ impl SyncClientBuilder {
     }
 }
 
+/// How a wait for a message ended. Taken apart as soon as it is returned,
+/// as `Result<Incoming>` is: a box would cost an allocation a message.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Waited {
+    /// A message, handed out.
+    Message(Incoming),
+    /// Its deadline, or an acknowledgement for a wait that ends at one.
+    Nothing,
+    /// A call from another thread asked for the client.
+    Asked,
+}
+
 /// A client with no thread of its own; see the module comment.
 pub struct SyncClient {
     /// Present until a forked child drops the client, which leaks it.
@@ -135,6 +148,26 @@ fn passed(deadline: Option<Instant>) -> bool {
     deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
+/// How a flushing send's wait has ended, looked at between its steps: Ok
+/// once a copy was written; at the deadline `OperationTimedOut`, or
+/// `NotConnected` when `none_live` says no connection could write it;
+/// before the deadline, `NotConnected` once every copy was given up on;
+/// None while it goes on. The deadline comes before the copies, so that a
+/// step that woke late, the message's expiry run in it, ends as the
+/// timeout it is rather than as a drop.
+fn flush_ended(copies: &[Arc<Tracker>], deadline_passed: bool, none_live: impl FnOnce() -> bool) -> Option<Result<()>> {
+    if copies.iter().any(|copy| copy.get() == SendState::Sent) {
+        return Some(Ok(()));
+    }
+    if deadline_passed {
+        return Some(Err(if none_live() { Error::NotConnected } else { Error::OperationTimedOut }));
+    }
+    if !copies.iter().any(|copy| copy.get() == SendState::Queued) {
+        return Some(Err(Error::NotConnected)); // every copy given up on
+    }
+    None
+}
+
 impl SyncClient {
     /// A builder of a client of `peer_type`, a type whose rules entry has
     /// `is_passive`.
@@ -150,6 +183,20 @@ impl SyncClient {
     /// The engine, to read.
     fn engine_ref(&self) -> &Engine {
         self.engine.as_ref().expect("present until the client is dropped")
+    }
+
+    /// The fork generation the client was made in, and its sockets: what a
+    /// plain server keeps beside its lock, which a forked child may find
+    /// held for good.
+    pub(crate) fn fork_state(&self) -> (u32, std::sync::Arc<crate::fork::DescriptorTable>) {
+        (self.generation, std::sync::Arc::clone(&self.engine_ref().core.client.descriptors))
+    }
+
+    /// The counters behind `dropped()` and `incoming_dropped()`: what a
+    /// plain server reads without its lock.
+    pub(crate) fn drop_counters(&self) -> (Arc<std::sync::atomic::AtomicU64>, Arc<std::sync::atomic::AtomicU64>) {
+        let client = &self.engine_ref().core.client;
+        (Arc::clone(&client.dropped), Arc::clone(&client.incoming_dropped))
     }
 
     /// Whether this process inherited the client across a fork.
@@ -316,20 +363,52 @@ impl SyncClient {
     }
 
     /// `receive()` that also ends, with `OperationTimedOut`, as soon as a
-    /// change of the routing or the key filters is acknowledged: what a loop
-    /// of receives acts on at once.
+    /// change of the routing or the key filters is acknowledged, or the last
+    /// message held for a connection goes (`held_for_a_connection()`): what
+    /// a loop of receives acts on at once.
     pub fn receive_until_acknowledged(&mut self, timeout: Option<Duration>) -> Result<Incoming> {
         self.wait_to_receive(timeout, true)
     }
 
     /// The receive's wait (BasicClient::wait_to_receive).
     fn wait_to_receive(&mut self, timeout: Option<Duration>, end_on_acknowledgement: bool) -> Result<Incoming> {
+        match self.wait_for_message(deadline(timeout), end_on_acknowledgement, &|| false)? {
+            Waited::Message(incoming) => Ok(incoming),
+            Waited::Nothing | Waited::Asked => Err(Error::OperationTimedOut),
+        }
+    }
+
+    /// A plain server loop's wait: `wait_to_receive()` until `until`, None
+    /// for no deadline, ending also, with `Waited::Asked`, as soon as
+    /// `asked()` is true, which the loop's handle makes so by waking the
+    /// wait (`waker()`) when a call from another thread wants the client.
+    /// A deadline or an acknowledgement that ended it is `Waited::Nothing`.
+    pub(crate) fn wait_for_server(
+        &mut self,
+        until: Option<Instant>,
+        end_on_acknowledgement: bool,
+        asked: &dyn Fn() -> bool,
+    ) -> Result<Waited> {
+        self.wait_for_message(until, end_on_acknowledgement, asked)
+    }
+
+    /// What wakes this client's wait from another thread.
+    pub(crate) fn waker(&self) -> Arc<mio::Waker> {
+        self.engine_ref().driver.waker()
+    }
+
+    /// The wait under both: see `wait_to_receive()` and `wait_for_server()`.
+    fn wait_for_message(
+        &mut self,
+        until: Option<Instant>,
+        end_on_acknowledgement: bool,
+        asked: &dyn Fn() -> bool,
+    ) -> Result<Waited> {
         self.check()?;
-        let until = deadline(timeout);
         loop {
             self.engine().call(|core| core.run_acknowledged_callbacks());
             if let Some(incoming) = self.engine().core.next_incoming_message() {
-                return Ok(incoming.into());
+                return Ok(Waited::Message(incoming.into()));
             }
             // A confirmation that came while messages routed before it were
             // still queued left the change to the receive that took the last
@@ -337,10 +416,13 @@ impl SyncClient {
             // loop's wait ends at it as at any other.
             self.engine().core.acknowledged_by_receive();
             if end_on_acknowledgement && self.engine().core.take_acknowledged_wake() {
-                return Err(Error::OperationTimedOut);
+                return Ok(Waited::Nothing);
             }
             if passed(until) {
                 break;
+            }
+            if asked() {
+                return Ok(Waited::Asked);
             }
             if self.engine().run_one(until) == 0 {
                 return Err(Error::NotConnected);
@@ -349,8 +431,8 @@ impl SyncClient {
         self.engine().poll(); // a last look, without waiting
         self.engine().call(|core| core.run_acknowledged_callbacks());
         match self.engine().core.next_incoming_message() {
-            Some(incoming) => Ok(incoming.into()),
-            None => Err(Error::OperationTimedOut),
+            Some(incoming) => Ok(Waited::Message(incoming.into())),
+            None => Ok(Waited::Nothing),
         }
     }
 
@@ -427,6 +509,16 @@ impl SyncClient {
     pub fn routing_acknowledged(&self) -> Result<bool> {
         self.check()?;
         Ok(self.engine_ref().core.routing_acknowledged())
+    }
+
+    /// How many messages wait for a connection to come up: sent while none
+    /// was live, or left by one that died with none to take them, each
+    /// going out in order once one is registered, or given up on at its own
+    /// deadline. What the server classes' drains wait for, the close
+    /// dropping them.
+    pub fn held_for_a_connection(&self) -> Result<usize> {
+        self.check()?;
+        Ok(self.engine_ref().core.held_for_a_connection())
     }
 
     /// Writes what was sent before, running the loop as `flush_all()` does,
@@ -604,7 +696,7 @@ impl SyncQuery<'_> {
         client.check_lane(lane.as_ref())?;
         let mut prototype = proto::MultiplexerMessage::from(request);
         prototype.id = None;
-        check_size_sent_again(&mut prototype)?;
+        check_size_sent_again(&mut prototype, client.instance_id())?;
         client.engine().poll(); // retire what the multiplexers closed while the client was idle
         let outcome: Arc<Mutex<Option<Outcome>>> = Arc::default();
         let ended = Arc::clone(&outcome);
@@ -664,8 +756,9 @@ impl SyncSend<'_> {
         self
     }
 
-    /// The tracing bytes a reply copies from its request.
-    pub fn workflow(mut self, workflow: impl Into<Bytes>) -> Self {
+    /// The work flow, a trace or request id, text, which a reply copies
+    /// from its request.
+    pub fn workflow(mut self, workflow: impl Into<String>) -> Self {
         self.message.workflow = Some(workflow.into());
         self
     }
@@ -753,8 +846,9 @@ impl SyncSend<'_> {
         let until = deadline(timeout);
         client.engine().poll();
         // The message waits a moment past the call's deadline, so that the
-        // call times out first rather than see its message dropped.
-        let room = timeout.map(|timeout| timeout + ROOM_GRACE_SECONDS);
+        // call times out first rather than see its message dropped; past
+        // MAX_TIMEOUT that is no deadline, Duration::MAX included.
+        let room = timeout.map(|timeout| timeout.saturating_add(ROOM_GRACE_SECONDS));
         let done = on_end.map(|on_end| SendDone::Callback(Box::new(move |written| on_end(written > 0))));
         let core_lane = lane.as_ref().map(|lane| lane.0.clone());
         let mut copies = Vec::new();
@@ -765,18 +859,10 @@ impl SyncSend<'_> {
             return Err(Error::NotConnected);
         }
         loop {
-            if copies.iter().any(|copy| copy.get() == SendState::Sent) {
-                return Ok(id);
-            }
-            if !copies.iter().any(|copy| copy.get() == SendState::Queued) {
-                return Err(Error::NotConnected); // every copy given up on
-            }
-            if passed(until) {
-                let none_live = client.engine_ref().core.connections_count() == 0;
-                if none_live || lane.as_ref().is_some_and(Lane::closed) {
-                    return Err(Error::NotConnected);
-                }
-                return Err(Error::OperationTimedOut);
+            let none_live =
+                || client.engine_ref().core.connections_count() == 0 || lane.as_ref().is_some_and(Lane::closed);
+            if let Some(ended) = flush_ended(&copies, passed(until), none_live) {
+                return ended.map(|()| id);
             }
             if !client.engine_ref().core.connection_live_or_coming() {
                 // Nothing could write it, however long the call waited: given
@@ -790,5 +876,27 @@ impl SyncSend<'_> {
             }
             client.engine().run_one(until);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! How a flushing send's wait ends, by what its copies read.
+
+    use super::flush_ended;
+    use crate::core::{SendState, Tracker};
+    use crate::error::Error;
+
+    #[test]
+    fn a_copy_given_up_on_past_the_deadline_with_a_connection_live_is_a_timeout() {
+        // A step that woke late ran the message's expiry, which gave the
+        // copy up for want of room before the wait looked: the call timed
+        // out, a connection being live.
+        let lost = [Tracker::new(SendState::Lost)];
+        assert_eq!(Some(Err(Error::OperationTimedOut)), flush_ended(&lost, true, || false));
+        assert_eq!(Some(Err(Error::NotConnected)), flush_ended(&lost, true, || true), "none live");
+        assert_eq!(Some(Err(Error::NotConnected)), flush_ended(&lost, false, || false), "given up on before it");
+        assert_eq!(None, flush_ended(&[Tracker::new(SendState::Queued)], false, || false));
+        assert_eq!(Some(Ok(())), flush_ended(&[Tracker::new(SendState::Sent)], true, || true));
     }
 }

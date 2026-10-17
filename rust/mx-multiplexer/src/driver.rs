@@ -7,14 +7,24 @@
 //! threaded class's io thread steps it for good.
 //!
 //! Work reaches the core in passes, as asio runs its queue of handlers:
-//! when the queue is empty, a pass adds each reading socket's next frame,
-//! then a turn for the timers that came due, and every step runs the
+//! when the queue is empty, or every TURN entries run however full it is,
+//! a pass adds the commands of other threads, each reading socket's next
+//! frame, then a turn for the timers that came due, and every step runs the
 //! queue's first entry; what the core posts, and a write's or a connect's
-//! end, joins the back as it happens. So a frame already waiting in a socket
-//! is handed over before a timer that came due in the same pass, which a
-//! synchronous client that wakes after a long idle relies on: the frame
-//! re-arms the silence timer before that timer can act. A timer cancelled
-//! meanwhile never runs: the turn takes the timers due when it comes.
+//! end, joins the back as it happens. A pass first gives the reactor a
+//! turn, readiness polled with no wait, when a timer is due or TURN entries
+//! ran since the last poll, as asio polls once per cycle of its queue: a
+//! connect that ended or a frame that arrived while a synchronous client
+//! did nothing is seen before a timer that came due meanwhile, and one
+//! socket that always has a frame, or a flow of other threads' commands,
+//! keeps no other socket unread, its writes unresumed, or the timers
+//! waiting. So a frame already waiting in a socket is handed over before a
+//! timer that came due in the same pass, which a synchronous client that
+//! wakes after a long idle relies on: the frame re-arms the silence timer
+//! before that timer can act, and the end of its connect comes before the
+//! connect's deadline. A timer cancelled meanwhile never runs: the turn
+//! takes the timers due when it comes. A poll every TURN entries costs a
+//! syscall per TURN messages, none per message.
 //!
 //! Readiness is edge-triggered, so a socket's flags are kept here and a
 //! socket is read and written until it would block. A frame is pulled from
@@ -45,6 +55,10 @@ use crate::frame::{FrameReader, Next};
 
 /// The waker's token; sockets get the ones after it.
 const WAKER: Token = Token(0);
+
+/// The most entries a step runs between two passes, and between two polls
+/// of the sockets' readiness; see the module comment.
+const TURN: usize = 64;
 
 /// Work ready for the core, in the order it became ready; see the module
 /// comment.
@@ -91,11 +105,14 @@ pub(crate) struct Inbox {
 }
 
 impl Inbox {
-    /// Queues `posted` for the io thread; the caller wakes it.
-    pub(crate) fn push(&self, posted: Posted) {
+    /// Queues `posted` for the io thread: true when the inbox was empty,
+    /// for the caller to wake the io thread then only, since a wake is a
+    /// syscall; a command queued behind others rides the wake the first
+    /// made, the io thread taking them all at once.
+    pub(crate) fn push(&self, posted: Posted) -> bool {
         let mut commands = self.commands.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         commands.push_back(posted);
-        self.pending.store(true, Ordering::Release);
+        !self.pending.swap(true, Ordering::AcqRel)
     }
 
     /// Moves what was queued to the driver's queue, in order; one load when
@@ -131,6 +148,9 @@ pub(crate) enum Step {
     Deadline,
     /// Nothing is ready, for a step that may not wait.
     Idle,
+    /// Another thread woke the wait, and nothing came to run: a caller
+    /// with a condition of its own looks at it again.
+    Woken,
     /// Nothing can happen any more: no socket, no name being resolved, no
     /// timer and no posted work, and the call has no deadline.
     NoWork,
@@ -140,6 +160,7 @@ pub(crate) enum Step {
 pub(crate) struct Driver {
     poll: Poll,
     events: Events,
+    fired: Vec<(Token, bool, bool)>, // what a wait's events say of each socket, kept from one wait to the next
     waker: Arc<Waker>,
     sockets: HashMap<ConnId, Socket>,
     by_token: HashMap<Token, ConnId>,
@@ -150,6 +171,11 @@ pub(crate) struct Driver {
     resolving: HashSet<ConnId>,
     resolver: Option<ResolverThread>,
     inbox: Option<Arc<Inbox>>,
+    /// Entries run since the last pass, and since the last poll.
+    since_pass: usize,
+    since_poll: usize,
+    /// The waker fired since a blocking step last looked.
+    woken: bool,
 }
 
 impl std::fmt::Debug for Driver {
@@ -167,6 +193,7 @@ impl Driver {
         Ok(Driver {
             poll,
             events: Events::with_capacity(256),
+            fired: Vec::new(),
             waker,
             sockets: HashMap::new(),
             by_token: HashMap::new(),
@@ -176,6 +203,9 @@ impl Driver {
             resolving: HashSet::new(),
             resolver: None,
             inbox,
+            since_pass: 0,
+            since_poll: 0,
+            woken: false,
         })
     }
 
@@ -199,18 +229,15 @@ impl Driver {
         loop {
             core.now = Instant::now();
             self.ready.extend(core.posted.drain(..).map(Ready::Posted));
-            if let Some(ready) = self.ready.pop_front() {
-                self.run(core, ready);
-                return Step::Ran;
+            if self.since_pass < TURN {
+                if let Some(ready) = self.ready.pop_front() {
+                    self.since_pass += 1;
+                    self.since_poll += 1;
+                    self.run(core, ready);
+                    return Step::Ran;
+                }
             }
-            if let Some(inbox) = &self.inbox {
-                inbox.drain_into(&mut self.ready);
-            }
-            self.take_resolved();
-            self.pull_pass();
-            if core.timers.next_deadline().is_some_and(|due| due <= core.now) {
-                self.ready.push_back(Ready::Timers);
-            }
+            self.pass(core);
             if !self.ready.is_empty() {
                 continue;
             }
@@ -224,6 +251,9 @@ impl Driver {
                 looked = true;
                 self.wait(Some(Duration::ZERO));
                 continue;
+            }
+            if std::mem::take(&mut self.woken) {
+                return Step::Woken;
             }
             if !self.has_work() && !core.has_work() && self.inbox.is_none() {
                 let Some(deadline) = deadline else {
@@ -240,10 +270,35 @@ impl Driver {
         }
     }
 
+    /// A pass; see the module comment. Its work joins the back of the
+    /// queue, behind what is there.
+    fn pass(&mut self, core: &mut Core) {
+        self.since_pass = 0;
+        let timers_due = core.timers.next_deadline().is_some_and(|due| due <= core.now);
+        if timers_due || self.since_poll >= TURN {
+            self.wait(Some(Duration::ZERO));
+        }
+        if let Some(inbox) = &self.inbox {
+            inbox.drain_into(&mut self.ready);
+        }
+        self.take_resolved();
+        self.pull_pass();
+        if timers_due {
+            self.ready.push_back(Ready::Timers);
+        }
+    }
+
     /// Hands one entry of the queue to the core, then carries out what the
     /// core asked for.
     fn run(&mut self, core: &mut Core, ready: Ready) {
         match ready {
+            Ready::Posted(Posted::WriteOutStep) if self.commands_queued() => {
+                // A command queued behind the shutdown's write-out step,
+                // a callback's send among them, runs first: the step
+                // looks at what was sent once they did, as the C++ client
+                // numbers a callback's send at once.
+                self.ready.push_back(Ready::Posted(Posted::WriteOutStep));
+            }
             Ready::Posted(posted) => core.run_posted(posted),
             Ready::Connected(conn, result) => core.connected(conn, result),
             Ready::WriteDone(conn, written, failed) => core.on_write_done(conn, written, failed),
@@ -269,29 +324,37 @@ impl Driver {
         self.ready.extend(core.posted.drain(..).map(Ready::Posted));
     }
 
+    /// Whether a command waits in the queue: once the shutdown began, only
+    /// the io thread's own callbacks post any.
+    fn commands_queued(&self) -> bool {
+        self.ready.iter().any(|ready| matches!(ready, Ready::Posted(Posted::Command(_))))
+    }
+
     /// Waits for readiness, `timeout` at most, and notes what is ready:
     /// connects ended, writes that may go on, sockets to read.
     fn wait(&mut self, timeout: Option<Duration>) {
+        self.since_poll = 0;
         if let Err(error) = self.poll.poll(&mut self.events, timeout) {
             if error.kind() != ErrorKind::Interrupted {
                 log::error!("waiting for the sockets failed: {error}");
             }
             return;
         }
-        let ready: Vec<(Token, bool, bool)> = self
-            .events
-            .iter()
-            .map(|event| {
-                let failed = event.is_error();
-                (
-                    event.token(),
-                    event.is_readable() || event.is_read_closed() || failed,
-                    event.is_writable() || event.is_write_closed() || failed,
-                )
-            })
-            .collect();
-        for (token, readable, writable) in ready {
+        // Copied out, since handling them changes the driver, into a
+        // buffer kept from one wait to the next.
+        let mut fired = std::mem::take(&mut self.fired);
+        fired.clear();
+        fired.extend(self.events.iter().map(|event| {
+            let failed = event.is_error();
+            (
+                event.token(),
+                event.is_readable() || event.is_read_closed() || failed,
+                event.is_writable() || event.is_write_closed() || failed,
+            )
+        }));
+        for &(token, readable, writable) in &fired {
             if token == WAKER {
+                self.woken = true;
                 continue;
             }
             let Some(conn) = self.by_token.get(&token).copied() else { continue };
@@ -305,6 +368,7 @@ impl Driver {
                 self.write_some(conn);
             }
         }
+        self.fired = fired;
     }
 
     /// Whether the connect under way on `conn` has ended, and how.
@@ -358,8 +422,8 @@ impl Driver {
     /// the start of a large one, or the end of its reading, into the queue;
     /// the next pass starts at the next socket.
     fn pull_pass(&mut self) {
-        let sockets: Vec<ConnId> = self.turns.iter().copied().collect();
-        for conn in sockets {
+        for turn in 0..self.turns.len() {
+            let conn = self.turns[turn];
             if let Some(pulled) = self.pull_from(conn) {
                 self.ready.push_back(Ready::Pulled(conn, pulled));
             }

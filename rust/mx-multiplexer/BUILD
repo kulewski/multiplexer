@@ -34,7 +34,7 @@ rust_test(
 # The crate's tests against real multiplexers, one test crate per file of
 # tests/, as cargo builds them, with mxcontrol and the tests' rules file
 # from runfiles (tests/support/mod.rs); the soak reads the heap through
-# libc.
+# libc, and the servers' test keeps what the library logs through log.
 [
     rust_test(
         name = test + "_test",
@@ -53,9 +53,11 @@ rust_test(
         deps = [
             ":mx_multiplexer",
             "//rust/3rdparty/crates:libc",
+            "//rust/3rdparty/crates:log",
         ],
     )
     for test in [
+        "fork",
         "servers",
         "soak",
         "sync_client",

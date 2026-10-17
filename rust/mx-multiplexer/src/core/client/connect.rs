@@ -6,6 +6,7 @@
 //! connections_manager.h. Part of the client; see `super`.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use super::Wrapper;
 use crate::constants::peers;
@@ -41,7 +42,7 @@ impl Core {
     /// targets that reach one multiplexer. Refusal is a shutdown.
     pub(crate) fn register_connection(&mut self, conn: ConnId, welcome: &WelcomeMessage) {
         let Some(state) = self.conns.get(&conn) else { return };
-        let target = state.target.clone();
+        let target = (*state.target).clone();
         for (reached, id) in &self.client.reached_by_target {
             if *id != welcome.id || *reached == target {
                 continue;
@@ -115,7 +116,7 @@ impl Core {
         let Some(state) = self.conns.get_mut(&conn) else { return };
         state.routing_acknowledged = state.routing_in_welcome;
         let outdated = state.routing_in_welcome != version;
-        let target = state.target.clone();
+        let target = (*state.target).clone();
         if outdated {
             self.send_routing(conn);
         }
@@ -149,7 +150,7 @@ impl Core {
         if !state.shuts_down {
             self.client.closing.push(conn);
         }
-        let target = state.target.clone();
+        let target = (*state.target).clone();
         self.displace(conn);
         let still_wanted = self.client.by_target.get(&target) == Some(&conn);
         if still_wanted {
@@ -169,7 +170,7 @@ impl Core {
         }
         let wrapper = Wrapper {
             conn: None,
-            target,
+            target: Arc::new(target),
             endpoint: self.conns.get(&conn).and_then(|state| state.expected_endpoint),
             living: None,
             owner: self.instance_id,
@@ -263,7 +264,7 @@ impl Core {
     /// Resolves the connection's target, on the driver's resolver thread,
     /// then connects.
     fn resolve_and_start(&mut self, conn: ConnId) {
-        let target = self.conns[&conn].target.clone();
+        let target = (*self.conns[&conn].target).clone();
         self.actions.push(Action::Resolve(conn, target.0, target.1));
     }
 

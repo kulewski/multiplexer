@@ -185,6 +185,7 @@ CC_TEST_SRCS := \
   multiplexer/backend/connect_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
+  multiplexer/client_moves_test.cc \
   multiplexer/client_names_test.cc \
   multiplexer/close_on_exec_test.cc \
   multiplexer/connect_again_test.cc \
@@ -207,6 +208,8 @@ CC_TEST_SRCS := \
   multiplexer/oversized_message_test.cc \
   multiplexer/peers_file_start_test.cc \
   multiplexer/query_stages_test.cc \
+  multiplexer/read_syscalls_test.cc \
+  multiplexer/receive_allocations_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/recording_copies_test.cc \
   multiplexer/recording_session_test.cc \
@@ -216,6 +219,7 @@ CC_TEST_SRCS := \
   multiplexer/server_release_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/threaded_client_test.cc \
+  multiplexer/timer_syscalls_test.cc \
   multiplexer/zero_nan_timeout_test.cc \
 
 
@@ -231,6 +235,7 @@ PY_TEST_FILES := \
   multiplexer/direct_request_test.py \
   multiplexer/disconnect_test.py \
   multiplexer/drop_lines_test.py \
+  multiplexer/drop_observer_test.py \
   multiplexer/drop_reports_test.py \
   multiplexer/end_calls_test.py \
   multiplexer/endpoints_test.py \
@@ -287,6 +292,7 @@ PY_TEST_FILES := \
   multiplexer/unrouted_records_test.py \
   multiplexer/unrouted_test.py \
   multiplexer/whole_message_test.py \
+  multiplexer/workflow_test.py \
   multiplexer/zero_nan_timeout_test.py \
   multiplexer/zero_timeout_test.py \
 

@@ -44,6 +44,19 @@ bool RawMessage::unpack_header() {
   return true;
 }
 
+bool RawMessage::unpack_header(const char* header) {
+  Assert(usability_ == READING);
+  header_.assign(header, HEADER_LENGTH);
+  return unpack_header();
+}
+
+std::uint32_t RawMessage::body_length(const char* header) {
+  mx::encoders::DecodeFromRange<const char*, mx::encodings::LittleEndian> decoder(header, header + HEADER_LENGTH);
+  std::uint32_t length = 0;
+  decoder(length);
+  return length > MAX_MESSAGE_SIZE ? 0 : length;
+}
+
 bool RawMessage::verify() {
   Assert(usability_ == READING);
   AssertMsg(!contents_.empty(), "You can't verify partial message.");

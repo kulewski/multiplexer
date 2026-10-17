@@ -35,7 +35,7 @@
 
 namespace multiplexer {
 
-class ThreadedClient::Core {
+class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient::Core> {
  public:
   Core(std::uint32_t peer_type, MessageSink on_message);
   // Starts the io thread, which holds `self` until it ends, so that the
@@ -48,6 +48,7 @@ class ThreadedClient::Core {
   void set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged);
   void set_key_filters(const BasicClient::KeyFilters& filters, BasicClient::AcknowledgedCallback acknowledged);
   bool routing_acknowledged();
+  std::size_t held_for_a_connection();
   bool flush_all(float timeout);
   void flush_all_with_callback(float timeout, FlushCallback done);
   std::uint64_t instance_id() const { return instance_id_; }
@@ -137,6 +138,7 @@ class ThreadedClient::Core {
   void _end_connect(const std::shared_ptr<ConnectWaiter>& waiter, bool up) MX_RUN_ON(io_thread_);
 
   void _io_thread_main();
+  void _wait_ended();
   template <typename F, typename D>
   void _guarded(F function, D description);
   template <typename F>
@@ -248,6 +250,16 @@ class ThreadedClient::Core {
   mx::Mutex lifecycle_mutex_;
   std::condition_variable_any posted_;  // posting_ fell to 0 once stopped_ was set
   std::thread thread_;
+  // The io thread's end, told once it let go of the Core, which may go
+  // with it, hence an object of its own: what a shutdown() that found the
+  // shutdown begun, on another thread or on the io thread, waits for
+  // (_wait_ended), as the one that began it waits for the thread.
+  struct End {
+    mx::Mutex mutex;
+    std::condition_variable_any changed;
+    bool ended MX_GUARDED_BY(mutex) = false;
+  };
+  const std::shared_ptr<End> end_ = std::make_shared<End>();
 };
 
 // The structs and member templates the parts of ThreadedClient share.

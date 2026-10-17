@@ -138,7 +138,7 @@ void BasicClient::_drop_expired(const WaitingPtr& waiting) {
   }
   const bool held = !waiting->on;
   if (held) {
-    --outbox.held_live;
+    _held_left();
   }
   waiting->over = true;
   --outbox.waiting;

@@ -1,13 +1,20 @@
 """Unit tests for multiplexer.mxlog: entries with data must not fail, the
 log streamer's child never returns into its caller's code, a worker forked
 from a streaming process that turns streaming on again streams to a
-streamer of its own, and a process with stdin closed streams too."""
+streamer of its own, a process with stdin closed streams too, and a log
+write blocked on a stalled reader leaves the process's other threads
+running."""
 
+import fcntl
 import io
 import os
+import select
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 import unittest
 from contextlib import redirect_stderr
 
@@ -75,6 +82,56 @@ class VerbosityEnvironmentTest(unittest.TestCase):
         self.assertEqual("YYYY", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "DEBUG:CHATTERBOX"}))
         self.assertEqual("YYNN", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "medium"}))
         self.assertEqual("YYYN", self.should_log_in_a_fresh_interpreter({"MX_LOG_VERBOSITY": "DEBUG:LOUD"}), "ignored")
+
+
+class StalledReaderTest(unittest.TestCase):
+    """A log entry's write that waits for a reader of stderr."""
+
+    BOUND = 30.0  # what only a failure reaches
+
+    def test_a_write_waiting_for_the_reader_leaves_the_other_threads_running(self):
+        # A thread logs into a stderr nobody reads, a pipe of one page that
+        # its first entry fills, so that its write waits for room; the main
+        # thread, waiting for a line on stdin, is then asked to answer. The
+        # write held the GIL while it waited: no other thread of the process
+        # ran, the main one included, the io threads' callbacks neither.
+        script = (
+            "import sys, threading\n"
+            "from multiplexer import mxlog\n"
+            "def flood():\n"
+            "    while True:\n"
+            "        mxlog.log(mxlog.WARNING, mxlog.LOWVERBOSITY, text='x' * 10000)\n"
+            "threading.Thread(target=flood, daemon=True).start()\n"
+            "sys.stdin.readline()\n"
+            "print('alive', flush=True)\n"
+        )
+        reading, writing = os.pipe()
+        fcntl.fcntl(writing, fcntl.F_SETPIPE_SZ, 4096)
+        capacity = fcntl.fcntl(reading, fcntl.F_GETPIPE_SZ)
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+        child = subprocess.Popen(
+            [sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=writing, env=env
+        )
+        os.close(writing)
+        try:
+            # The pipe full: the flooding thread's write waits for room.
+            deadline = time.monotonic() + self.BOUND
+            while struct.unpack("i", fcntl.ioctl(reading, termios.FIONREAD, b"\0" * 4))[0] < capacity:
+                self.assertLess(time.monotonic(), deadline, "the log never filled stderr")
+                time.sleep(0.01)
+            assert child.stdin is not None and child.stdout is not None
+            child.stdin.write(b"go\n")
+            child.stdin.flush()
+            ready, _, _ = select.select([child.stdout], [], [], self.BOUND)
+            self.assertTrue(ready, "the main thread never ran: the waiting write held the GIL")
+            self.assertEqual(b"alive\n", child.stdout.readline())
+        finally:
+            child.kill()
+            child.wait()
+            os.close(reading)
+            for stream in (child.stdin, child.stdout):
+                if stream is not None:
+                    stream.close()
 
 
 class StreamingTest(unittest.TestCase):

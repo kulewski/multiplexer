@@ -167,9 +167,11 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
     std::size_t next_candidate = 0;
     // The TCP connect to expected_endpoint is under way, and its deadline,
     // CONNECT_ATTEMPT_SECONDS, which cancels it: past it the connect is a
-    // failure, `connect_timed_out` says why (see _try_next_candidate).
+    // failure, `connect_timed_out` says why (see _try_next_candidate). The
+    // deadline's handler acts for its own attempt, `connect_attempt`, alone.
     bool connecting = false;
     bool connect_timed_out = false;
+    std::uint64_t connect_attempt = 0;
     std::shared_ptr<asio::steady_timer> connect_deadline;
     // The client's routing (see BasicClient::set_routing) as versions: the
     // one this connection's welcome carried, and the last one the
@@ -492,8 +494,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // routing_acknowledged() holds; nothing otherwise. What wait_to_receive()
   // calls for the synchronous client.
   void run_acknowledged_callbacks();
-  // Whether a change was acknowledged since the last call, which clears it:
-  // what ends a serve loop's wait early (wait_to_receive()).
+  // Whether a change was acknowledged, or the last message held for a
+  // connection went, since the last call, which clears it: what ends a
+  // serve loop's wait early (wait_to_receive()), each a reason for a drain
+  // to look again.
   bool take_acknowledged_wake() {
     MX_DCHECK_RUN_ON(&owner_thread());
     const bool woken = acknowledged_wake_;
@@ -503,8 +507,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
   // Called by a Connection with every parsed message: drops ones without an
   // id or seen before, then queues or hands to the sink.
-  void handle_message(Connection::pointer conn, std::shared_ptr<const RawMessage> raw,
-                      std::shared_ptr<MultiplexerMessage> mxmsg);
+  void handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
+                      const std::shared_ptr<MultiplexerMessage>& mxmsg);
 
   // Connectivity. async_connect returns at once; connect runs the loop until
   // the handshake completed or `timeout` passed, and returns the wrapper
@@ -531,15 +535,23 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // held could ever be written: a wait for that would wait for nothing,
   // spinning when nothing else gives the loop work.
   bool connection_live_or_coming() const;
+  // How many messages wait for a connection to come up: sent while none
+  // was live, or left by one that died with none to take them, each going
+  // out in order once one is registered, or given up on at its own
+  // deadline. What the server classes' drains wait for, a close dropping
+  // them; the last one to go, placed or given up on, ends a serve loop's
+  // wait as an acknowledgement does (take_acknowledged_wake()).
+  std::size_t held_for_a_connection() const;
   // How many reconnects are armed, a timer each: none once shutdown()
   // returned, which cancels them and takes them out. For tests.
   std::size_t reconnects_pending() const {
     MX_DCHECK_RUN_ON(&owner_thread());
     return reconnect_timers_.size();
   }
-  // The messages the client's connections read after they began closing,
-  // in shutdown() or after a failed write, and dropped: a request among
-  // them gets no answer, its sender waits out its timeout. Every one is
+  // The messages the client's connections read after they began closing
+  // the polite way, in shutdown() or disconnect(), and dropped: a request
+  // among them gets no answer, its sender waits out its timeout. A
+  // connection whose write failed delivers what it reads on. Every one is
   // logged, as a WARNING when its connection ends. The protocol's own
   // answers to what the client sent, a DELIVERY_ERROR, REQUEST_RECEIVED,
   // BACKEND_ERROR, a control frame's status or a PING that answers, are
@@ -681,9 +693,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // again, from inside its write handler: what waits for it goes in, in
   // order, as far as the room goes. See "The outbox" in outbox.cc.
   void outgoing_queue_has_room(Connection* conn);
-  // A tracker for the frame queued last on `conn`, which everything queued
-  // there before it is written ahead of; null when the queue is empty.
-  // What a caller waiting until everything queued so far is out follows.
+  // A tracker for the frame queued last on `conn` but its own frames
+  // (Connection::last_queued), which everything queued there before it is
+  // written ahead of; null when the queue holds none other. What a caller
+  // waiting until everything queued so far is out follows.
   BasicScheduledMessageTracker track_last_queued(const Connection::pointer& conn) {
     MX_DCHECK_RUN_ON(&owner_thread());
     Connection::MessagesBuffer::value_type* entry = conn->last_queued();
@@ -729,6 +742,20 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   inline bool has_incoming_messages() const { return !incoming_messages_.empty(); }
   IncomingMessagesBuffer::value_type next_incoming_message();  // pop the oldest; only when has_incoming_messages()
   inline bool incoming_queue_full() const { return incoming_queue_max_size_ <= incoming_messages_.size(); }
+  // Queues `incoming`, the message handle_message() was given last, for a
+  // receive to take, as it does when no sink is set: a full queue drops
+  // it, and takes its copy through another multiplexer once there is room.
+  // For a sink that passes a message by to the queue's reader, a query of
+  // a leaving server's (Client::refuse_arrivals).
+  void queue_incoming(const IncomingMessagesBuffer::value_type& incoming);
+  // A query of a leaving server's sets what was read before aside, so that
+  // it reads only what the refusals pass by to it, and puts it back as it
+  // ends, in its order (Client::_awaiting): what was read stays to be
+  // received, as refuse_arrivals() promised, where the query took it off
+  // the queue and dropped it. The answers nobody took then go, as the
+  // refusals drop a reply.
+  void set_incoming_aside();
+  void put_incoming_back();
 
   // The lines about messages this client dropped, at most about two per
   // kind and second (see LogSummary); for the io thread only, the classes
@@ -746,11 +773,14 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   LogSummary& drop_lines() { return drop_lines_; }
 
   // Every message the program sent that this client gives up on, a copy
-  // for ALL each, is counted, logged in drop_lines(), and told to the drop
-  // observer with its id and why, on the owner thread, from inside the
-  // loop's handlers, so an observer only takes note. dropped() is the
-  // count so far, from any thread. report_drop() is the one place every
-  // drop goes through, the ThreadedClient's own included.
+  // for ALL each, is counted and logged in drop_lines() at once, and told
+  // to the drop observer with its id and why, on the owner thread, in the
+  // one pass per loop turn that runs the sends' callbacks too, ahead of
+  // them, outside the handlers and the outbox's bookkeeping the drop came
+  // from: an observer may send, or shut the client down. A flush ends
+  // after the drops it saw were told. dropped() is the count so far, from
+  // any thread. report_drop() is the one place every drop goes through,
+  // the ThreadedClient's own included.
   typedef std::function<void(std::uint64_t message_id, DropReason reason)> DropObserver;
   void set_drop_observer(DropObserver observer) {
     MX_DCHECK_RUN_ON(&owner_thread());
@@ -770,12 +800,15 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // `timer` expires, false, running the callbacks of the changes
   // acknowledged meanwhile (run_acknowledged_callbacks()), and, with
   // `end_on_acknowledgement`, false too as soon as a change is acknowledged
-  // (take_acknowledged_wake()), what a serve loop does at once rather than
-  // at its next poll. Throws NotConnected when nothing could arrive.
+  // or the last message held for a connection goes
+  // (take_acknowledged_wake()), what a serve loop acts on at once rather
+  // than at its next poll. Throws NotConnected when nothing could arrive, for a
+  // timer with no deadline; a finite one's wait runs its course then.
   bool wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledgement);
 
   // Runs the loop until a message is queued or `timeout` seconds pass;
-  // throws OperationTimedOut, or NotConnected when nothing could arrive.
+  // throws OperationTimedOut, or, with no deadline, NotConnected when
+  // nothing could arrive.
   void inline wait_for_incoming_message(float timeout = -1) const {
     if (has_incoming_messages()) {
       return;
@@ -925,9 +958,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   bool send(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
             std::uint64_t number = 0, std::vector<BasicScheduledMessageTracker>* trackers = NULL,
             ConnectionWrapper* used = NULL, SendCallback done = SendCallback());
-  // Ends every send still followed, each `done` hearing 0, at once: for a
-  // client whose loop will not run again, once its shutdown has let what
-  // was being written settle.
+  // Ends every send still followed, each `done` hearing 0, at once, after
+  // the drop observer heard of every drop reported before: for a client
+  // whose loop will not run again, once its shutdown has let what was
+  // being written settle.
   void end_follows();
   // Lets go of every send still followed, calling no `done`: for a client
   // freed where nothing may call back, as release_drop_observer() is.
@@ -1028,8 +1062,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // which has its own: left in the buffer, it is reported dropped here
   // (report_drop), its tracker reading LOST, which is what the pin means.
   // With no connection live the rest is held for the next one, an ALL
-  // send once, whole, DEFAULT_TIMEOUT from then; at shutdown everything is
-  // left.
+  // send once, whole, each within the deadline its send gave it
+  // (RawMessage::deadline), one whose time is up dropped and reported at
+  // once; at shutdown everything is left.
   void handle_orphaned_outgoing_messages(Connection* conn, Connection::MessagesBuffer& outgoing_messages);
 
   mx::Random64::result_type random64() { return random_(); }         // a message id
@@ -1094,6 +1129,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   unsigned int acknowledged_version_ = 0;  // the last version told of (_acknowledged)
   bool acknowledged_wake_ = false;         // see take_acknowledged_wake()
   IncomingMessagesBuffer incoming_messages_;
+  IncomingMessagesBuffer incoming_aside_;  // see set_incoming_aside()
   unsigned int incoming_queue_max_size_;
   std::uint64_t frames_handled_ = 0;  // every frame handle_message() was given, owner thread; see poll()
   LogSummary drop_lines_;
@@ -1162,11 +1198,15 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   bool _held_whole(const std::shared_ptr<const RawMessage>& raw) const;
   void _supersede(const BasicScheduledMessageTracker& state);
   void _place_held();
+  void _held_left();
   void _rehold(const WaitingPtr& waiting, bool all);
   struct Follow;
   typedef std::shared_ptr<Follow> FollowPtr;
   void _follow(const std::vector<BasicScheduledMessageTracker>& copies, SendCallback done);
   void _follow_event(const std::shared_ptr<SendState>& state, bool written);
+  void _post_callbacks();
+  void _process_callbacks();
+  void _tell_drops();
   void _process_follows();
   void _end_follow(const FollowPtr& follow, unsigned int written);
   void _lose(const WaitingPtr& waiting);

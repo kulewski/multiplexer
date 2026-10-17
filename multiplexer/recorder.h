@@ -70,11 +70,13 @@ class Recorder {
   // Opens `path` for appending, first cutting what follows the last whole
   // record of a file that exists, a record a multiplexer that died left
   // half written, which would make every record after it unreadable; a
-  // file that exists is so read once. `payload_limit` bytes of each
-  // payload are kept, all of it when 0. ok() says whether the file could be
-  // read and opened.
+  // file that exists is so read once. A file that is not a recording, or
+  // one damaged before its end, is left as it is and not recorded into:
+  // foreign(). `payload_limit` bytes of each payload are kept, all of it
+  // when 0. ok() says whether the file could be read and opened, and taken.
   Recorder(const std::string& path, unsigned int payload_limit);
   bool ok() const { return !failed_; }
+  bool foreign() const { return cut_ == mx::protobuf::NOT_THIS_FORMAT; }
 
   const std::string& path() const { return path_; }
   unsigned int payload_limit() const { return payload_limit_; }
@@ -100,7 +102,10 @@ class Recorder {
   void _fail();
 
   const std::string path_;
-  const std::int64_t cut_;  // bytes of a torn last record cut before the open; -1 when that failed
+  // Bytes of a torn last record cut before the open; UNREADABLE when the
+  // file could not be read, NOT_THIS_FORMAT when it is not a recording
+  // (mx::protobuf::cut_torn_tail).
+  const std::int64_t cut_;
   std::ofstream out_;
   mx::protobuf::OstreamMessageOutputStream stream_;
   const unsigned int payload_limit_;

@@ -1249,6 +1249,85 @@ TEST(QueryStagesSync, ASearchCopyWaitsForRoomNoLongerThanItsStage) {
   EXPECT_EQ("", nobody.get());
 }
 
+// A client that refuses what arrives, as a plain server does once its
+// drain is over, queries, as its handler may for what it read before:
+// the request draws a delivery error, the search a PING, the direct
+// request an acknowledgement and its reply, each answering the query,
+// which takes them, while a request that arrives meanwhile is refused.
+// The refusals dropped every answer as a reply that came while leaving,
+// and the query ran out of time at each stage.
+// A request read before the client began to refuse stays for it to
+// receive: the query reads only what answers it, where it took the
+// request off the queue and dropped it, neither served nor refused.
+TEST(QueryStagesSync, ALeavingClientsQueryTakesItsAnswers) {
+  // A client whose loop the test runs until a message is read and queued,
+  // taking none.
+  struct Reading : Client {
+    using Client::Client;
+    bool wait_queued(float timeout) {
+      std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
+      basic_client_->wait_for_incoming_message(*timer);
+      return has_incoming_messages();
+    }
+  };
+  StandIn only;
+  MultiplexerMessage before = only.answer(types::PYTHON_TEST_REQUEST, BACKEND, 0);
+  before.clear_references();
+  before.clear_to();
+  before.set_message("before");
+  std::future<std::string> script = std::async(std::launch::async, [&only, &before] {
+    only.write(before);
+    MultiplexerMessage msg;
+    if (!only.next(&msg) || msg.type() != types::PYTHON_TEST_REQUEST) {
+      return std::string("no request came");
+    }
+    const std::uint64_t request = msg.id();
+    MultiplexerMessage arrival = only.answer(types::PYTHON_TEST_REQUEST, BACKEND, 0);
+    arrival.clear_references();
+    only.write(arrival);
+    if (!only.next(&msg) || msg.type() != types::DELIVERY_ERROR || msg.references() != arrival.id()) {
+      return std::string("the request that arrived was not refused");
+    }
+    only.write(only.answer(types::DELIVERY_ERROR, LEAVING, request));
+    if (!only.next(&msg) || msg.type() != types::BACKEND_FOR_PACKET_SEARCH) {
+      return std::string("no search came");
+    }
+    only.write(only.answer(types::PING, BACKEND, msg.id()));
+    if (!only.next(&msg) || msg.type() != types::PYTHON_TEST_REQUEST || msg.to() != BACKEND) {
+      return std::string("no direct request came");
+    }
+    only.write(only.answer(types::REQUEST_RECEIVED, BACKEND, msg.id()));
+    only.write(only.answer(types::PYTHON_TEST_RESPONSE, BACKEND, msg.id()));
+    return std::string();
+  });
+  std::string payload;
+  std::vector<std::uint64_t> acknowledged;
+  std::string kept;
+  try {
+    Reading client(peers::WEBSITE);
+    ASSERT_TRUE(client.wait_for_connection(client.connect("127.0.0.1", only.port, 5), 5));
+    ASSERT_TRUE(client.wait_queued(30)) << "the request before never came";
+    client.refuse_arrivals();
+    MultiplexerMessage request;
+    request.set_type(types::PYTHON_TEST_REQUEST);
+    request.set_message("question");
+    payload = client
+                  .query(request, 2, multiplexer::LanePtr(),
+                         [&acknowledged](std::uint64_t backend) { acknowledged.push_back(backend); })
+                  .third->message();
+    if (client.has_incoming_messages()) {
+      kept = client.read_raw_message(0).third->message();
+    }
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "the query raised " << error.what();
+  }
+  only.hang_up();
+  EXPECT_EQ("", script.get());
+  EXPECT_EQ("late", payload);
+  EXPECT_EQ(std::vector<std::uint64_t>{BACKEND}, acknowledged) << "the acknowledgement reached the query";
+  EXPECT_EQ("before", kept) << "the request read before the refusals began was not kept";
+}
+
 INSTANTIATE_TEST_SUITE_P(BothClients, QueryStages, ::testing::Values(Kind::SYNC, Kind::THREADED),
                          [](const ::testing::TestParamInfo<Kind>& info) {
                            return std::string(info.param == Kind::SYNC ? "SyncClient" : "ThreadedClient");

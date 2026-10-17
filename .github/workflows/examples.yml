@@ -14,13 +14,17 @@ on:
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   pip-examples:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: sudo apt-get install -y -qq g++ make protobuf-compiler libprotobuf-dev libasio-dev libre2-dev python3-dev python3-venv python3-setuptools python3-wheel python3-protobuf pybind11-dev python3-pybind11
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pip
           key: pip-examples-${{ runner.os }}-${{ hashFiles('examples/*/requirements*.txt') }}

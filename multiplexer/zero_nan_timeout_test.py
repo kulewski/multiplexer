@@ -100,27 +100,27 @@ class ZeroOrNanTimeoutTest(unittest.TestCase):
 
     def test_a_sync_send_with_no_time_is_dropped_at_once(self) -> None:
         """With no connection live, a message sent with 0 or NaN is dropped
-        and told inside the call, NO_CONNECTION, a send to ALL once, and its
-        callback hears 0 in the next call that runs the loop: it was held
-        for DEFAULT_TIMEOUT."""
+        and counted inside the call, NO_CONNECTION, a send to ALL once, and
+        told to on_drop, as its callback hears 0, in the next call that runs
+        the loop: it was held for DEFAULT_TIMEOUT."""
         told: list[DropReason] = []
         heard: list[int] = []
         client = Client([], type=peers.WEBSITE, on_drop=lambda message_id, reason: told.append(reason))
         try:
             client.send_message(b"zero", type=types.TEST_UNROUTED, timeout=0, callback=heard.append)
-            self.assertEqual([DropReason.NO_CONNECTION], told, "held for a connection")
+            self.assertEqual(1, client.dropped, "held for a connection")
             client.send_message(b"nan", type=types.TEST_UNROUTED, timeout=math.nan, multiplexer=Client.ALL)
-            self.assertEqual([DropReason.NO_CONNECTION] * 2, told)
             self.assertEqual(2, client.dropped)
             with self.assertRaises(OperationTimedOut):
                 client.receive_message(timeout=0)  # runs the loop once
+            self.assertEqual([DropReason.NO_CONNECTION] * 2, told)
             self.assertEqual([0], heard)
         finally:
             client.shutdown()
 
     def test_a_threaded_send_with_no_time_is_dropped_at_once(self) -> None:
         """ThreadedClient and AsyncClient, with no connection live: a send
-        with 0 or NaN is dropped and told by the time the io thread has
+        with 0 or NaN is dropped and counted by the time the io thread has
         handled it, as a round trip through that thread shows, where it was
         held a millisecond."""
         for timeout in NO_TIME:

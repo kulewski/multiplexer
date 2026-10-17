@@ -161,9 +161,11 @@ class SyncClient(BasicClient):
         """`addresses`: (host, port) pairs of every multiplexer; `type`: a
         peers.* constant. `on_drop(message_id, reason)` hears of every
         message the client gives up on, each copy of one sent to ALL, with
-        a DropReason, inside whichever call runs the loop when it happens;
-        `dropped` counts them. Held until shutdown(), so that a callback
-        referring to the client keeps it alive until then."""
+        a DropReason, once the handler it happened in is done, inside
+        whichever call runs the loop then, so that it may send or shut the
+        client down; `dropped` counts them at once. Held until shutdown(),
+        so that a callback referring to the client keeps it alive until
+        then."""
         if type is None:
             raise ValueError
         super(SyncClient, self).__init__(type)

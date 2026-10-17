@@ -12,11 +12,12 @@ use prost::Message as _;
 
 use crate::constants::types;
 use crate::core::client::IncomingMode;
-use crate::core::connection::ReadEnd;
+use crate::core::connection::{ReadEnd, DEFAULT_OUT_QUEUE_SIZE};
 use crate::core::harness::{multiplexer_id, Harness};
 use crate::core::lane::Lane;
 use crate::core::query::Outcome;
 use crate::core::ConnId;
+use crate::defaults::DEFAULT_TIMEOUT;
 use crate::proto::multiplexer::{BackendForPacketSearch, DeliveryError, MultiplexerMessage};
 
 /// The type of the test's requests, and of their replies.
@@ -50,7 +51,7 @@ fn ask(h: &mut Harness, to: Option<u64>, key: Option<&str>, lane: Option<Lane>) 
         message: Some(Bytes::from_static(b"ask")),
         to,
         key: key.map(str::to_string),
-        workflow: Some(Bytes::from_static(b"flow")),
+        workflow: Some("flow".into()),
         ..Default::default()
     };
     let outcome = Arc::new(Mutex::new(None));
@@ -135,7 +136,7 @@ fn stage_one_a_reply_answers_the_query() {
     let (one, two) = two_up(&mut h);
     let asked = ask(&mut h, None, None, None);
     let (request, via, _) = sent_through(&mut h, one, two);
-    assert_eq!((None, Some(Bytes::from_static(b"flow"))), (request.to, request.workflow.clone()));
+    assert_eq!((None, Some("flow".to_string())), (request.to, request.workflow.clone()));
     let reply = answer(&h, 500, REPLY, BACKEND, request.id.unwrap());
     h.deliver(via, &reply);
     assert_eq!(Some("replied 500".to_string()), asked.outcome());
@@ -258,7 +259,144 @@ fn with_no_connection_a_stage_waits_for_one_and_sends_once() {
     let late = ask(&mut h, None, None, None);
     h.advance(STAGE);
     assert_eq!(Some("not connected".to_string()), late.outcome(), "no connection came within the stage");
-    assert!(unanswered.outcome().is_some());
+    assert_eq!(Some("not connected".to_string()), unanswered.outcome(), "nor for its search");
+}
+
+#[test]
+fn stage_one_a_lost_connection_then_nobody_waits_for_the_request_a_backend_may_have() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let (one, two) = two_up(&mut h);
+    let asked = ask(&mut h, None, None, None);
+    let (request, via, other) = sent_through(&mut h, one, two);
+    h.end(via, ReadEnd::Eof);
+    let search = one_of(&wrote(&mut h, other), types::BACKEND_FOR_PACKET_SEARCH);
+    h.deliver(other, &nobody(&h, 500, 2, search.id.unwrap()));
+    assert_eq!(None, asked.outcome(), "the request may be with a backend");
+    h.deliver(other, &answer(&h, 501, REPLY, BACKEND, request.id.unwrap()));
+    assert_eq!(Some("replied 501".to_string()), asked.outcome());
+    assert!(wrote(&mut h, other).iter().all(|message| message.r#type != REQUEST), "nothing sent again");
+}
+
+#[test]
+fn a_query_that_lost_its_only_connection_sends_its_search_when_one_comes_up() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let conn = h.up(1);
+    h.written(conn);
+    let asked = ask(&mut h, None, None, None);
+    let request = one_of(&wrote(&mut h, conn), REQUEST);
+    h.end(conn, ReadEnd::Eof);
+    let next = h.up(2);
+    let written = wrote(&mut h, next);
+    let search = one_of(&written, types::BACKEND_FOR_PACKET_SEARCH);
+    assert!(written.iter().all(|message| message.r#type != REQUEST), "the request went out again");
+    h.deliver(next, &nobody(&h, 500, 2, search.id.unwrap()));
+    h.deliver(next, &answer(&h, 501, REPLY, BACKEND, request.id.unwrap()));
+    assert_eq!(Some("replied 501".to_string()), asked.outcome());
+}
+
+#[test]
+fn a_query_whose_ping_came_with_no_connection_live_sends_its_direct_request_when_one_comes_up() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let conn = h.up(1);
+    h.written(conn);
+    let asked = ask(&mut h, None, None, None);
+    let request = one_of(&wrote(&mut h, conn), REQUEST);
+    h.deliver(conn, &nobody(&h, 500, 1, request.id.unwrap()));
+    let search = one_of(&wrote(&mut h, conn), types::BACKEND_FOR_PACKET_SEARCH);
+    // The connection breaks for writing; what its multiplexer wrote before,
+    // the PING, is still read.
+    h.hold_writes = true;
+    assert!(h.send(9));
+    h.fail_write(conn);
+    h.hold_writes = false;
+    h.deliver(conn, &answer(&h, 501, types::PING, BACKEND, search.id.unwrap()));
+    let next = h.up(2);
+    let again = one_of(&wrote(&mut h, next), REQUEST);
+    assert_eq!(Some(BACKEND), again.to, "the request sent again, to the backend found");
+    assert!(wrote(&mut h, next).iter().all(|message| message.r#type != types::BACKEND_FOR_PACKET_SEARCH));
+    h.deliver(next, &answer(&h, 502, REPLY, BACKEND, again.id.unwrap()));
+    assert_eq!(Some("replied 502".to_string()), asked.outcome());
+}
+
+#[test]
+fn a_request_refused_during_the_search_leaves_nothing_to_wait_for() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let conn = h.up(1);
+    h.written(conn);
+    let asked = ask(&mut h, None, None, None);
+    let request = one_of(&wrote(&mut h, conn), REQUEST);
+    h.advance(STAGE);
+    let search = one_of(&wrote(&mut h, conn), types::BACKEND_FOR_PACKET_SEARCH);
+    h.deliver(conn, &nobody(&h, 500, 1, request.id.unwrap()));
+    assert_eq!(None, asked.outcome(), "the search goes on");
+    h.deliver(conn, &nobody(&h, 501, 1, search.id.unwrap()));
+    assert_eq!(Some("failed".to_string()), asked.outcome(), "nobody has the request: no late reply can come");
+}
+
+#[test]
+fn a_delivery_error_in_the_late_wait_ends_it_once_no_attempt_is_left() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let conn = h.up(1);
+    h.written(conn);
+    let asked = ask(&mut h, None, None, None);
+    let request = one_of(&wrote(&mut h, conn), REQUEST);
+    h.advance(STAGE);
+    let search = one_of(&wrote(&mut h, conn), types::BACKEND_FOR_PACKET_SEARCH);
+    h.deliver(conn, &nobody(&h, 500, 1, search.id.unwrap()));
+    assert_eq!(None, asked.outcome(), "waiting for a late reply");
+    h.deliver(conn, &nobody(&h, 501, 1, request.id.unwrap()));
+    assert_eq!(Some("failed".to_string()), asked.outcome());
+}
+
+#[test]
+fn a_request_its_send_gave_up_on_is_struck_off_the_late_wait() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let conn = h.up(1);
+    h.written(conn);
+    h.hold_writes = true;
+    for id in 1..=DEFAULT_OUT_QUEUE_SIZE as u64 {
+        assert!(h.send(id)); // the queue full: the request waits for room
+    }
+    let asked = ask(&mut h, None, None, None);
+    h.advance(STAGE);
+    h.complete_writes();
+    let written = wrote(&mut h, conn);
+    assert!(written.iter().all(|message| message.r#type != REQUEST), "given up, never written");
+    let search = one_of(&written, types::BACKEND_FOR_PACKET_SEARCH);
+    h.deliver(conn, &nobody(&h, 500, 1, search.id.unwrap()));
+    assert_eq!(Some("failed".to_string()), asked.outcome(), "no attempt a backend may have");
+}
+
+#[test]
+fn a_pinned_query_searches_only_through_its_lanes_connection_and_ends_with_it() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let (one, two) = two_up(&mut h);
+    let lane = Lane::new(true);
+    let asked = ask(&mut h, None, None, Some(lane.clone()));
+    let pinned = lane.connection().unwrap().conn.unwrap();
+    let other = if pinned == one { two } else { one };
+    let request = one_of(&wrote(&mut h, pinned), REQUEST);
+    h.deliver(pinned, &nobody(&h, 500, 1, request.id.unwrap()));
+    one_of(&wrote(&mut h, pinned), types::BACKEND_FOR_PACKET_SEARCH);
+    assert!(wrote(&mut h, other).is_empty(), "the search went through the other connection");
+    h.end(pinned, ReadEnd::Eof);
+    assert_eq!(Some("not connected".to_string()), asked.outcome());
+}
+
+#[test]
+fn a_pinned_query_waiting_late_ends_when_its_connection_goes() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let (one, two) = two_up(&mut h);
+    let lane = Lane::new(true);
+    let asked = ask(&mut h, None, None, Some(lane.clone()));
+    let pinned = lane.connection().unwrap().conn.unwrap();
+    let _ = (one, two);
+    h.advance(STAGE);
+    let search = one_of(&wrote(&mut h, pinned), types::BACKEND_FOR_PACKET_SEARCH);
+    h.deliver(pinned, &nobody(&h, 500, 1, search.id.unwrap()));
+    assert_eq!(None, asked.outcome(), "waiting for a late reply");
+    h.end(pinned, ReadEnd::Eof);
+    assert_eq!(Some("not connected".to_string()), asked.outcome());
 }
 
 #[test]
@@ -337,6 +475,23 @@ fn stage_three_a_lost_connection_waits_for_a_reply_to_either_attempt() {
 }
 
 #[test]
+fn stage_three_a_lost_connection_takes_a_reply_to_the_first_attempt_too() {
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let (one, two) = two_up(&mut h);
+    let asked = ask(&mut h, None, None, None);
+    let (request, via, other) = sent_through(&mut h, one, two);
+    h.advance(STAGE);
+    let search = one_of(&wrote(&mut h, via), types::BACKEND_FOR_PACKET_SEARCH);
+    wrote(&mut h, other);
+    h.deliver(via, &answer(&h, 500, types::PING, BACKEND, search.id.unwrap()));
+    one_of(&wrote(&mut h, via), REQUEST);
+    h.end(via, ReadEnd::Eof);
+    assert_eq!(None, asked.outcome(), "waiting for a reply to either attempt");
+    h.deliver(other, &answer(&h, 501, REPLY, BACKEND, request.id.unwrap()));
+    assert_eq!(Some("replied 501".to_string()), asked.outcome());
+}
+
+#[test]
 fn an_addressed_query_locates_its_instance_with_a_ping_and_shares_one_deadline() {
     let mut h = Harness::new(200, IncomingMode::Dispatch);
     let conn = h.up(1);
@@ -390,21 +545,59 @@ fn on_received_hears_each_backend_that_acknowledges_an_attempt() {
     assert_eq!(None, asked.outcome(), "nothing else changes");
 }
 
+/// What reaches the program on its own: `on_message`'s ids for a threaded
+/// client, and the queue's for a synchronous one, which `handed` collects.
+fn on_its_own(h: &mut Harness) -> Arc<Mutex<Vec<u64>>> {
+    let handed = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&handed);
+    h.core.threaded.on_message = Some(Box::new(move |incoming| kept.lock().unwrap().push(incoming.message.id)));
+    handed
+}
+
 #[test]
 fn a_late_reply_to_a_finished_query_is_dropped_by_a_threaded_client_and_kept_by_a_synchronous_one() {
-    for (mode, kept) in [(IncomingMode::Dispatch, 0), (IncomingMode::Queue, 1)] {
+    // The threaded half read the synchronous client's queue, which a
+    // threaded client never fills: it could not fail.
+    for mode in [IncomingMode::Dispatch, IncomingMode::Queue] {
         let mut h = Harness::new(200, mode);
+        let handed = on_its_own(&mut h);
         let conn = h.up(1);
         h.written(conn);
         let asked = ask(&mut h, None, None, None);
         let request = one_of(&wrote(&mut h, conn), REQUEST);
-        let reply = answer(&h, 500, REPLY, BACKEND, request.id.unwrap());
-        h.deliver(conn, &reply);
+        h.deliver(conn, &answer(&h, 500, REPLY, BACKEND, request.id.unwrap()));
         assert_eq!(Some("replied 500".to_string()), asked.outcome());
-        let late = answer(&h, 501, REPLY, BACKEND + 1, request.id.unwrap());
-        h.deliver(conn, &late);
-        assert_eq!(kept, h.queued_ids().len(), "{mode:?}");
+        h.deliver(conn, &answer(&h, 501, REPLY, BACKEND + 1, request.id.unwrap()));
+        h.deliver(conn, &answer(&h, 502, REPLY, BACKEND + 1, 0)); // a message on its own
+        let reached = if mode == IncomingMode::Dispatch { handed.lock().unwrap().clone() } else { h.queued_ids() };
+        let expected = if mode == IncomingMode::Dispatch { vec![502] } else { vec![501, 502] };
+        assert_eq!(expected, reached, "{mode:?}");
     }
+}
+
+#[test]
+fn a_threaded_client_drops_late_replies_for_twice_the_default_timeout() {
+    // The ids are let go when a later query ends past that time.
+    let mut h = Harness::new(200, IncomingMode::Dispatch);
+    let handed = on_its_own(&mut h);
+    let conn = h.up(1);
+    h.written(conn);
+    let ended = |h: &mut Harness, reply: u64| {
+        let asked = ask(h, None, None, None);
+        let request = one_of(&wrote(h, conn), REQUEST);
+        h.deliver(conn, &answer(h, reply, REPLY, BACKEND, request.id.unwrap()));
+        assert_eq!(Some(format!("replied {reply}")), asked.outcome());
+        request.id.unwrap()
+    };
+    let first = ended(&mut h, 500);
+    h.jump(2 * DEFAULT_TIMEOUT - MS);
+    ended(&mut h, 501);
+    h.deliver(conn, &answer(&h, 502, REPLY, BACKEND, first));
+    assert!(handed.lock().unwrap().is_empty(), "within the window: dropped");
+    h.jump(2 * MS);
+    ended(&mut h, 503);
+    h.deliver(conn, &answer(&h, 504, REPLY, BACKEND, first));
+    assert_eq!(vec![504], *handed.lock().unwrap(), "past it: the program's");
 }
 
 #[test]

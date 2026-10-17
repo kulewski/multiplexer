@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use super::state::{Handover, WaitKey};
+use super::state::{tracker_key, Handover, WaitKey};
 use crate::core::client::{DropReason, Wrapper};
 use crate::core::{followed, ConnId, Core, OutFrame, QueueEntry, SendState, Tracker};
 
@@ -44,14 +44,14 @@ impl Core {
     /// first handover and kept while it lives, remembered for `dead`'s
     /// target, for the lanes that held `dead`. None when none is live.
     fn successor(&mut self, dead: ConnId) -> Option<ConnId> {
-        let target = self.conns.get(&dead).map(|state| state.target.clone())?;
+        let target = self.conns.get(&dead).map(|state| (*state.target).clone())?;
         if let Some(entry) = self.outbox.handovers.iter().find(|each| each.target == target) {
             if entry.from == Some(dead) && self.conn_living(entry.to) {
                 return Some(entry.to);
             }
         }
         let conn = self.choose_connection()?;
-        let to_target = self.conns[&conn].target.clone();
+        let to_target = (*self.conns[&conn].target).clone();
         match self.outbox.handovers.iter_mut().find(|each| each.target == target) {
             Some(entry) => {
                 entry.from = Some(dead);
@@ -71,7 +71,7 @@ impl Core {
         if gone.conn.is_some_and(|own| self.conn_living(own)) {
             return None;
         }
-        let mut target = &gone.target;
+        let mut target = &*gone.target;
         for _ in 0..self.outbox.handovers.len() {
             let entry = self.outbox.handovers.iter().find(|each| each.target == *target)?;
             if self.conn_living(entry.to) {
@@ -93,7 +93,7 @@ impl Core {
         let frame = waiting.frame.clone();
         let tracker = Arc::clone(&waiting.tracker);
         if held {
-            self.outbox.held_live -= 1;
+            self.held_left();
         }
         self.outbox.waiting -= 1;
         self.wait_flushes(number, -1);
@@ -189,31 +189,27 @@ impl Core {
     }
 
     /// A message somebody follows went to another connection from a dead
-    /// one, or from the held when a connection came up.
+    /// one, or from the held when a connection came up: the last move
+    /// wins. The entries of trackers gone are cleared out when the map has
+    /// doubled since the last time.
     pub(super) fn record_moved(&mut self, tracker: &Arc<Tracker>, conn: Wrapper) {
         let outbox = &mut self.outbox;
         if outbox.moved.len() >= outbox.moved_compact_at.max(64) {
-            outbox.moved.retain(|(weak, _)| weak.strong_count() > 0);
+            outbox.moved.retain(|_, (weak, _)| weak.strong_count() > 0);
             outbox.moved_compact_at = (2 * outbox.moved.len()).max(64);
         }
-        outbox.moved.push((Arc::downgrade(tracker), conn));
+        outbox.moved.insert(tracker_key(tracker), (Arc::downgrade(tracker), conn));
     }
 
     /// The connection the message tracked by `tracker` went to last: the
-    /// one a dead connection handed it to, or `first`.
+    /// one a dead connection handed it to, or `first`. Its entry goes.
     pub(crate) fn followed_connection(&mut self, tracker: &Arc<Tracker>, first: Option<Wrapper>) -> Option<Wrapper> {
-        let mut last = first;
-        if self.outbox.moved.is_empty() {
-            return last;
+        match self.outbox.moved.remove(&tracker_key(tracker)) {
+            // The caller holds the tracker: an entry at its address whose
+            // tracker lives is its own.
+            Some((weak, wrapper)) if weak.strong_count() > 0 => Some(wrapper),
+            _ => first,
         }
-        self.outbox.moved.retain(|(weak, wrapper)| {
-            if weak.upgrade().is_some_and(|moved| Arc::ptr_eq(&moved, tracker)) {
-                last = Some(wrapper.clone());
-                return false;
-            }
-            true
-        });
-        last
     }
 
     /// Whether `wrapper`'s connection is live.
@@ -274,12 +270,14 @@ impl Core {
             self.outbox.retries += 1;
             let followed_before = followed(&tracker);
             self.place_on(conn, frame, Some(Arc::clone(&tracker)), number, deadline, false, lane.clone());
-            let wrapper = self.wrap(conn);
-            if followed_before {
-                self.record_moved(&tracker, wrapper.clone());
-            }
-            if let Some(lane) = lane {
-                lane.adopt(&wrapper);
+            if followed_before || lane.is_some() {
+                let wrapper = self.wrap(conn);
+                if followed_before {
+                    self.record_moved(&tracker, wrapper.clone());
+                }
+                if let Some(lane) = lane {
+                    lane.adopt(&wrapper);
+                }
             }
         }
         self.check_flushes();

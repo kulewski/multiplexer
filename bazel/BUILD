@@ -1,5 +1,6 @@
-# Build machinery: maybe_strip.bzl, patches/ for external repositories, and
-# the default protobuf toolchain behind //:protoc and //:protobuf_runtime.
+# Build machinery: the dependency macros (deps.bzl, setup.bzl), the BUILD
+# files of external repositories, maybe_strip.bzl, and the default protobuf
+# toolchain behind //:protoc and //:protobuf_runtime.
 
 # protoc from PATH; see //:protoc for pointing the build at another one.
 sh_binary(

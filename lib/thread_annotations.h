@@ -44,6 +44,8 @@
 #define MX_TRY_ACQUIRE(...) MX_THREAD_ANNOTATION_ATTRIBUTE(try_acquire_capability(__VA_ARGS__))
 // On a function: it asserts, at run time, that these are held.
 #define MX_ASSERT_CAPABILITY(x) MX_THREAD_ANNOTATION_ATTRIBUTE(assert_capability(x))
+// On a getter: it returns `x`, so that holding what it returns is holding `x`.
+#define MX_RETURN_CAPABILITY(x) MX_THREAD_ANNOTATION_ATTRIBUTE(lock_returned(x))
 // On a function: skip the analysis (say why in a comment).
 #define MX_NO_THREAD_SAFETY_ANALYSIS MX_THREAD_ANNOTATION_ATTRIBUTE(no_thread_safety_analysis)
 

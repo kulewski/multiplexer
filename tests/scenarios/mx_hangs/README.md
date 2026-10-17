@@ -46,5 +46,5 @@ bazel test //tests/scenarios:mx_hangs_py
 ```
 
 The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one. It is tagged slow: it waits out the
+one, `_rust` a Rust one; the backend is the Python one. It is tagged slow: it waits out the
 drop interval.

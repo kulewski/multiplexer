@@ -100,9 +100,11 @@ class BaseMultiplexerServer {
   // the handshakes: the backend serves what one multiplexer routes to it
   // while another has not welcomed it yet. `drain_seconds` is how
   // long to keep serving after start_draining(), unless drained() is
-  // overridden. The calling thread becomes the backend's thread: a backend
-  // may be built on one thread and served from another, but from here on
-  // only this thread may touch it.
+  // overridden: while a drain with a cap runs, a wait lasts no longer than
+  // what is left of it, so that the cap ends the drain on time whatever
+  // the poll, a negative one, no deadline, included. The calling thread
+  // becomes the backend's thread: a backend may be built on one thread and
+  // served from another, but from here on only this thread may touch it.
   void serve_forever(float poll = 1.0f, float drain_seconds = 0.0f);
 
   // Draining: a backend about to exit tells every multiplexer to route it
@@ -161,9 +163,13 @@ class BaseMultiplexerServer {
   // every iteration while draining, so between two messages. Default:
   // `drain_seconds` have passed since start_draining(), or, when the
   // drain routing turns every path off and asks for no last resort, every
-  // connected multiplexer has confirmed it, so nothing more is on its way;
-  // a drain that keeps a path open lasts the whole period, since work
-  // keeps arriving. Override to wait for your own condition, for example
+  // connected multiplexer has confirmed it, so nothing more is on its way,
+  // and nothing the server sent waits for a connection to come up
+  // (Client::held_for_a_connection()): a reply made while every
+  // multiplexer was down goes out once one is back, where the close
+  // would drop it, its going ending the loop's wait; a drain that keeps a
+  // path open lasts the whole period, since work keeps arriving. Override
+  // to wait for your own condition, for example
   // `BaseMultiplexerServer::drained() && in_flight_ == 0`.
   virtual bool drained() const;
 
@@ -243,6 +249,9 @@ class BaseMultiplexerServer {
   // apart, so that only the wait running out is its poll's timeout.
   bool _receive_one(float timeout, bool end_on_acknowledgement = false);
   void _handle_received();
+  // What serve_forever()'s next wait may last: `poll`, and while a drain
+  // with a cap runs, no longer than what is left of the cap.
+  float _wait(float poll) const;
 
  public:
   std::atomic<bool> working;  // cleared by stop(), from any thread, or by the loop thread directly

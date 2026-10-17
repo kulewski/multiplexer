@@ -15,7 +15,7 @@ Docker. The commands themselves are in the [README](../README.md#building-with-b
 | protoc and libprotobuf, the same version | the wire format and the recording are protocol buffers; the generated code must match the runtime it links | `protobuf-compiler libprotobuf-dev` |
 | the Python protobuf runtime | the generated Python modules | `python3-protobuf` |
 | Python 3.10 or newer with headers | the extension (`pybind11`) and the Python library | `python3-dev` |
-| network access on the first build | Bazel fetches Asio, RE2, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`, and for the Rust library a Rust toolchain and the crates `rust/3rdparty` pins; nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
+| network access on the first build | Bazel fetches Asio, RE2, pybind11, googletest and the rulesets pinned in `bazel/deps.bzl`; the development repositories the WORKSPACE names, hedron_compile_commands, rules_rust with its tinyjson crate, and platforms; for the Rust library a Rust toolchain and the crates `rust/3rdparty` pins; and the pybind11-stubgen wheel `//tools:native_stub` runs. Nothing else is downloaded, and every later build is offline | `ca-certificates`, `curl` for Bazelisk itself |
 
 On Debian or Ubuntu, that is:
 
@@ -34,7 +34,7 @@ in the soak tests.
 
 Each row is [docker/check.sh](../docker/check.sh) on that distribution with
 the packages above and nothing else: `bazel build //...`, the fast tests,
-and the echo example workspace.
+and the Bazel example workspaces (aio, audio, echo).
 
 | System | Compiler | protobuf | Python | glibc | Result |
 |---|---|---|---|---|---|
@@ -84,9 +84,11 @@ thread-safety analysis), and `--config=libcxx`, the clang build against
 libc++, LLVM's standard library, instead of libstdc++, with protoc and
 libprotobuf built from source for it, since the system's are built
 against libstdc++. `./check.sh` runs what a change is checked with; on
-every push and pull request, CI runs three of those checks,
-`./format.sh --check`, the fast tests, and the fast tests under
-`--config=libcxx`
+every push and pull request, CI runs four of those checks,
+`./format.sh --check`, the fast tests, the fast tests under
+`--config=libcxx`, and the Rust job: the Rust targets' fast tests, clippy,
+the crate's docs, the Cargo examples' tests and the package crates.io
+would get
 ([.github/workflows/checks.yml](../.github/workflows/checks.yml)).
 
 ## Without Bazel
@@ -116,7 +118,7 @@ What comes out, and how a program uses it:
 | `build/bin/mxcontrol` | the multiplexer and its subcommands; `make install` puts it in `PREFIX/bin` |
 | `build/libmultiplexer.a` and the headers, under `PREFIX/include/mx` after `make install` | a C++ program compiles and links with `$(pkg-config --cflags --libs multiplexer)`, which `make install` also puts under `PREFIX/lib/pkgconfig`, together with `generate_constants` for your own rules file; the generated `multiplexer/multiplexer.constants.h` for the rules file the build used is among the headers |
 | `build/python/` | the `multiplexer` package importable with `PYTHONPATH=build/python`, extension and `mxcontrol` included |
-| `build/dist/*.whl` | `pip install` it: the package and the `mxcontrol` command; the package needs only `protobuf`, 3.20 or newer. The wheel also carries `lib.logging`, one generated module the package imports |
+| `build/dist/*.whl` | `pip install` it: the package and the `mxcontrol` command; the package needs only `protobuf`, in the range the wheel asks for, below |
 
 `make check` runs the C++ unit tests with googletest and the Python ones
 with `unittest`, in a build of its own under `build/check` whose constants
@@ -250,8 +252,8 @@ checkout keeps its own:
 ```
 
 builds an image from the files git knows about, with exactly the packages
-in the table, and runs the build, the fast tests and the example workspace
-in it. It is how the table above was made; run it before changing what the
+in the table, and runs the build, the fast tests and the Bazel example
+workspaces in it. It is how the table above was made; run it before changing what the
 build needs.
 
 ```

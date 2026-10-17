@@ -9,6 +9,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <iostream>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -51,6 +54,10 @@ class RecordingControlTask : public Task {
 
   // A status and the connection it came through.
   typedef std::pair<multiplexer::RecordingStatus, multiplexer::ConnectionWrapper> Answer;
+  // A message as a receive gives it, and what _control does with one that
+  // is no answer it waits for.
+  typedef std::pair<std::shared_ptr<multiplexer::MultiplexerMessage>, multiplexer::ConnectionWrapper> Incoming;
+  typedef std::function<void(const Incoming& incoming)> Other;
 
  protected:
   virtual void _initialize_options(mx::options::Options& options) {
@@ -99,10 +106,13 @@ class RecordingControlTask : public Task {
   void _send(multiplexer::Client& client, const multiplexer::RecordingControl& control,
              multiplexer::ConnectionWrapper connection);
   // Sends `control` everywhere and collects one status per connection,
-  // printing each, and keeping each with its connection in `answers` when
-  // given; returns false if any was an error or missing.
+  // printing each to `statuses`, keeping each with its connection in
+  // `answers` when given, and handing every other message that comes
+  // meanwhile to `other` when given; returns false if any was an error or
+  // missing.
   bool _control(multiplexer::Client& client, const multiplexer::RecordingControl& control, bool with_tap = false,
-                std::vector<Answer>* answers = nullptr);
+                std::vector<Answer>* answers = nullptr, const Other& other = Other(),
+                std::ostream& statuses = std::cout);
   // The commands that keep running, in recording_loops.cc: start --stay,
   // `start` first on whatever is reachable, and tap.
   int _stay(multiplexer::Client& client, EveryAddress& addresses, const multiplexer::RecordingControl& start);

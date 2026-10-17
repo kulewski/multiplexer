@@ -299,9 +299,9 @@ void _emit_log(const LogEntry& log_msg) {
 
 using namespace impl;
 
-void set_maximal_logging_verbosity(const unsigned int for_level, const unsigned int minimal_verbosity) {
+void set_maximal_logging_verbosity(const unsigned int for_level, const unsigned int maximal_verbosity) {
   Assert(for_level <= MAX_LEVEL);
-  maximal_logging_verbosity[for_level].store(minimal_verbosity, std::memory_order_relaxed);
+  maximal_logging_verbosity[for_level].store(maximal_verbosity, std::memory_order_relaxed);
 }
 
 namespace {

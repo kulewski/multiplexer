@@ -4,15 +4,20 @@ the first line of a kind at once, the rest counted into one line a second,
 known number of messages go nowhere, known by construction or counted on
 the wire as the DELIVERY_ERRORs a sender gets back, and checks that the
 lines stand for exactly that many messages while being a handful, where
-the code before logged one to three lines per message."""
+the code before logged one to three lines per message. The Python threaded
+server's requests dropped for a full queue are counted the same way, where
+a request taken between two drops started its lines over, a line per drop
+under steady load."""
 
 import contextlib
+import math
 import os
 import random
 import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Iterator
 
@@ -23,9 +28,11 @@ from multiplexer.testing import Cluster, runfile, wait_until
 from multiplexer.testing.buffers import fill_frames
 from multiplexer.testing.raw_peer import RawPeer
 from multiplexer.threaded_client import ThreadedClient
+from multiplexer.threaded_server import BaseThreadedMultiplexerServer
 
 RULES = runfile("tests/testing.rules")  # the file the constants were generated from
 COUNT = 3000  # messages that go nowhere in each test
+TURNS = 40  # turns of a threaded server's queue full by turns, each a request taken and one dropped
 FEW = 50  # lines at most for COUNT messages: about two a second per kind, for far less than 25 s
 BATCH = 100  # messages a RawPeer sends before reading what came back for them
 NOBODY = "of type 207 (TEST_TINY_QUEUE)"
@@ -216,6 +223,66 @@ class ClientLinesTest(unittest.TestCase):
             )
             self.assertEqual(COUNT - 1, total)
             self.assertLessEqual(lines, FEW)
+
+
+class Turnstile(BaseThreadedMultiplexerServer):
+    """One worker and a queue of one: each request is held until the test
+    lets one go (`passes`); `taken` counts the requests the worker took."""
+
+    multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+    def __init__(self, addresses) -> None:
+        super().__init__(addresses, workers=1, queue_size=1)
+        self.passes = threading.Semaphore(0)
+        self.taken = 0
+
+    def handle_message(self, request) -> None:
+        self.taken += 1
+        self.passes.acquire(timeout=30)
+        request.no_response()
+
+
+class ServerLinesTest(unittest.TestCase):
+    """The threaded server's lines, from this process's own descriptor 2."""
+
+    def test_a_queue_full_by_turns(self) -> None:
+        """A threaded server whose one worker frees the queue's one place
+        request by request, one taken after each drop, as a backend that
+        stays saturated: its drops are said as every kind is, the first at
+        once and the rest counted about once a second, where every drop
+        after a request was taken began a burst of its own and had a line
+        of its own. Counted: TURNS turns, each a drop followed on the
+        server's count, a request let go, the next one taken, and one more
+        sent, which the queue takes; the lines stand for every drop."""
+        with Cluster(1, rules=RULES) as cluster, tempfile.TemporaryDirectory() as scratch:
+            log_path = os.path.join(scratch, "server.log")
+            with stderr_to(log_path):
+                server = Turnstile(cluster.endpoints)
+                serving = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+                serving.start()
+                client = Client(cluster.endpoints, type=peers.WEBSITE)
+                try:
+                    cluster.wait_for_peer(peers.PYTHON_TEST_SERVER)
+                    started = time.monotonic()
+                    client.send_message(b"first", type=types.PYTHON_TEST_REQUEST, flush=True)
+                    wait_until(lambda: server.taken == 1, 20, "the worker took the first")
+                    client.send_message(b"queued", type=types.PYTHON_TEST_REQUEST, flush=True)
+                    for turn in range(1, TURNS + 1):
+                        client.send_message(b"dropped", type=types.PYTHON_TEST_REQUEST, flush=True)
+                        wait_until(lambda turn=turn: server.dropped == turn, 20, "drop %d" % turn)
+                        server.passes.release()
+                        wait_until(lambda turn=turn: server.taken == turn + 1, 20, "request %d taken" % (turn + 1))
+                        client.send_message(b"taken", type=types.PYTHON_TEST_REQUEST, flush=True)
+                    took = time.monotonic() - started
+                finally:
+                    for _ in range(TURNS + 2):
+                        server.passes.release()
+                    client.shutdown()
+                    server.stop()
+                    serving.join(30)
+            total, lines = said(read(log_path), "dropped: queue full")
+            self.assertEqual(TURNS, total, read(log_path)[-3000:])
+            self.assertLessEqual(lines, 2 + 2 * math.ceil(took), "about two lines a second: %.1f s" % took)
 
 
 if __name__ == "__main__":

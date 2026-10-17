@@ -5,12 +5,20 @@
 //! file. The binary is `$MXCONTROL`, or the repository's bazel-bin after a
 //! `bazel build //mxcontrol`; the rules file is `$MX_TEST_RULES`, or the
 //! repository's tests/testing.rules. Bazel sets both from runfiles.
+//!
+//! As the Python harness has it: each multiplexer watches a pipe only this
+//! process writes to (`MX_TEST_PARENT_FD`, lib/program.h) and ends itself
+//! once the test process is gone, however it died; a stop that does not
+//! end it with 0, and a multiplexer that ended on its own before the test
+//! killed it or ended, fail the test, its log printed.
 
 #![allow(dead_code)]
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// The tests' rules file's types: the system rules and the test types.
@@ -34,6 +42,27 @@ pub fn mxcontrol() -> PathBuf {
 /// The tests' rules file.
 pub fn rules() -> PathBuf {
     std::env::var_os("MX_TEST_RULES").map(PathBuf::from).unwrap_or_else(|| repository().join("tests/testing.rules"))
+}
+
+/// The read end of a pipe whose write end this process holds, close on
+/// exec, for its whole life: handed to a multiplexer as MX_TEST_PARENT_FD,
+/// it reaches its end when this process is gone, however it died.
+fn parent_pipe() -> libc::c_int {
+    static READ_END: OnceLock<libc::c_int> = OnceLock::new();
+    *READ_END.get_or_init(|| {
+        let mut ends: [libc::c_int; 2] = [0; 2];
+        // SAFETY: pipe2(2) writes two descriptors into `ends`, which
+        // outlives the call.
+        let made = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+        assert_eq!(0, made, "pipe2: {}", std::io::Error::last_os_error());
+        ends[0] // the write end, ends[1], is never closed: the process's to hold
+    })
+}
+
+/// The last `count` lines of `text`.
+fn tail(text: &str, count: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(count)..].join("\n")
 }
 
 /// A directory of this test process's own, for port files and logs.
@@ -72,15 +101,28 @@ impl Multiplexer {
         let port_file = self.directory.join("port");
         let _ = std::fs::remove_file(&port_file);
         let log = std::fs::File::create(self.directory.join("log")).expect("a log file");
-        let child = Command::new(mxcontrol())
+        let watched = parent_pipe();
+        let mut command = Command::new(mxcontrol());
+        command
             .args(["run_multiplexer", "--address", &self.address, "--rules"])
             .arg(rules())
             .arg("--port-file")
             .arg(&port_file)
+            .env("MX_TEST_PARENT_FD", watched.to_string())
             .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .expect("mxcontrol runs");
+            .stderr(log);
+        // SAFETY: between fork and exec the child calls fcntl(2) alone,
+        // which is async-signal-safe: the pipe's read end, close on exec
+        // here, stays open in the multiplexer.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(watched, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("mxcontrol runs");
         self.child = Some(child);
         let until = Instant::now() + Duration::from_secs(15);
         loop {
@@ -115,18 +157,24 @@ impl Multiplexer {
         send_signal(self.pid(), signal);
     }
 
-    /// Stops it with SIGTERM, as an operator would, and waits for it.
+    /// Stops it with SIGTERM, as an operator would, and waits for it: a
+    /// multiplexer that does not end with 0 fails the test.
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             send_signal(child.id(), libc::SIGCONT);
             send_signal(child.id(), libc::SIGTERM);
-            let _ = child.wait();
+            let status = child.wait().expect("the multiplexer waited for");
+            assert!(status.success(), "the multiplexer's stop ended it with {status}:\n{}", tail(&self.log(), 40));
         }
     }
 
-    /// Kills it with SIGKILL: its connections reset.
+    /// Kills it with SIGKILL: its connections reset. One that had ended on
+    /// its own fails the test.
     pub fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("the multiplexer ended on its own, {status}:\n{}", tail(&self.log(), 40));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -135,6 +183,13 @@ impl Multiplexer {
     /// Starts it again on the address it had.
     pub fn restart(&mut self) {
         self.stop();
+        self.run();
+    }
+
+    /// Starts it again on the address it had, after `stop()`: what was
+    /// connected to it reconnects on its own.
+    pub fn start_again(&mut self) {
+        assert!(self.child.is_none(), "stopped first");
         self.run();
     }
 
@@ -162,9 +217,28 @@ fn send_signal(pid: u32, signal: libc::c_int) {
 }
 
 impl Drop for Multiplexer {
+    /// Killed at the test's end; one that ended on its own meanwhile fails
+    /// the test. A test that failed keeps the log, and prints its end.
     fn drop(&mut self) {
-        self.kill();
+        let ended = self.child.as_mut().and_then(|child| child.try_wait().ok().flatten());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if std::thread::panicking() {
+            eprintln!(
+                "the multiplexer at {} logged, in {}:\n{}",
+                self.address,
+                self.directory.display(),
+                tail(&self.log(), 40)
+            );
+            return;
+        }
+        let log = self.log();
         let _ = std::fs::remove_dir_all(&self.directory);
+        if let Some(status) = ended {
+            panic!("the multiplexer ended on its own during the test, {status}:\n{}", tail(&log, 40));
+        }
     }
 }
 
@@ -194,4 +268,32 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
         }
         std::thread::park();
     }
+}
+
+/// The calling thread's id, as /proc/self/task names it.
+pub fn thread_id() -> i32 {
+    // SAFETY: gettid(2) takes no argument and only returns the id.
+    let id = unsafe { libc::syscall(libc::SYS_gettid) };
+    i32::try_from(id).expect("a thread id fits i32")
+}
+
+/// Waits until thread `id` of this process is blocked in epoll_wait,
+/// which /proc/self/task/ID/syscall shows as its first number.
+pub fn wait_in_epoll_wait(id: i32) {
+    let waits = [
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_epoll_wait,
+        libc::SYS_epoll_pwait,
+        libc::SYS_epoll_pwait2,
+    ];
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < until {
+        let line = std::fs::read_to_string(format!("/proc/self/task/{id}/syscall")).unwrap_or_default();
+        let number = line.split_whitespace().next().and_then(|first| first.parse::<libc::c_long>().ok());
+        if number.is_some_and(|number| waits.contains(&number)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("thread {id} never waited in epoll_wait");
 }

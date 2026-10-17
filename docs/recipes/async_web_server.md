@@ -16,7 +16,7 @@ does exactly that and forgets the client in a forked child:
 # mx.py
 from django.conf import settings
 from multiplexer.aio import AsyncClient
-from multiplexer.multiplexer_constants import peers
+from multiplexer.multiplexer_constants import peers  # your rules' constants; after pip, the module generate_constants wrote
 
 MX = AsyncClient.holder(peers.WEB, lambda: settings.MULTIPLEXER_ADDRESSES)
 ```
@@ -103,7 +103,10 @@ is never freed, so what it had not written yet is lost, unreported
 ## Testing the consumer
 
 `multiplexer.testing` gives a real multiplexer and a scripted backend in
-one process; the consumer's own test is an `IsolatedAsyncioTestCase`:
+one process, `Cluster`, `FakePeer` and `runfile` among its names, the rules
+those of the file the constants came from, as
+[test_a_service](test_a_service.md) has it; the consumer's own test is an
+`IsolatedAsyncioTestCase`:
 
 ```python
 class LessonConsumerTest(unittest.IsolatedAsyncioTestCase):
@@ -111,7 +114,7 @@ class LessonConsumerTest(unittest.IsolatedAsyncioTestCase):
         await MX.aclose()  # the client is this test's loop's, which ends with the test
 
     async def test_a_message_is_answered(self):
-        with Cluster(1) as cluster, FakePeer(cluster, peers.LESSON_SERVER) as backend:
+        with Cluster(1, rules=runfile("deployment.rules")) as cluster, FakePeer(cluster, peers.LESSON_SERVER) as backend:
             backend.reply_with(types.LESSON_REQUEST, b"done", types.LESSON_RESPONSE)
             settings.MULTIPLEXER_ADDRESSES = cluster.endpoints
             ...  # drive the consumer with Channels' communicator, assert on backend.received

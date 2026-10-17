@@ -36,10 +36,14 @@ that changes.
   connection. It breaks only where a message went out through fewer
   connections than the one after it, one being down at that moment, or
   where a late copy came after the library forgot the first.
-- **A key narrows, never widens.** A keyed message reaches, of the peers
-  its rule names, those with no key filter for its type and those whose
-  filter takes the key; it reaches no peer the rule would not have reached
-  without a key ([keys](keys.md)).
+- **A key narrows.** A keyed message reaches, of the peers its rule names,
+  those with no key filter for its type and those whose filter takes the
+  key, and among them a last resort is a last resort for that key: a
+  draining backend kept as one gets the message when no open peer takes
+  the key, though open peers that do not take it are connected, where the
+  same message without a key goes to the open peers while they have room
+  ([keys](keys.md), [how a backend
+  leaves](leaving.md#what-a-draining-backend-still-takes)).
 - **Full queues drop.** Each connection on the multiplexer holds at most
   `queue_size` unsent messages, 1024 by default per peer type, and 64
   protocol frames past that, heartbeats and the answers to the peer's
@@ -179,7 +183,8 @@ that changes.
   as for a port that refuses, and the library keeps trying every 3 s. A
   program that keeps its own list of multiplexers, addresses it learns
   elsewhere, connects to a new one with `connect()` and lets one that left
-  the list go with `disconnect()`, on every client class, which stops its
+  the list go with `disconnect()`, on `SyncClient`, `ThreadedClient` and
+  `AsyncClient`, which stops its
   reconnect and closes a live connection, what it had not written going
   to another as a lost connection's does: tried for good, an address
   nobody serves any more can one day be another deployment's
@@ -197,13 +202,17 @@ that changes.
   fails at once with `OperationFailed`, and one that was in flight waits
   out its search's timeout for a late reply, which comes only if the
   backend had the request before the drop, and raises `OperationTimedOut`
-  without it. Which reconnect lands first is chance, since both are
-  scheduled 3 s after the drop. Run two multiplexers if a restart must be
+  without it. Each peer reconnects 3 s after its library notices the
+  drop: a backend, whose loop runs, 3 s after it, a `SyncClient` idle at
+  the drop 3 s after its next call, which is when it notices, so that
+  backend is usually back first; between two busy peers which lands
+  first is chance. Run two multiplexers if a restart must be
   invisible; the `threaded_mx_restarts` scenario records both cases.
 - **A backend leaves.** A draining backend tells every multiplexer to
   route it nothing new by the rules, so a request goes to another
   backend of the type at once, without a search, and the drain ends when
-  the multiplexers confirmed and the work is done, `drain_seconds` at
+  the multiplexers confirmed and the work is done, a reply it made while
+  every multiplexer was down written once one is back, `drain_seconds` at
   the latest; a backend alone of its type drains as the last resort or
   its callers fail at once, its choice. A backend of either server class
   that is closing, or whose drain is over, answers a request routed to it
@@ -224,8 +233,12 @@ that changes.
   libraries apply to it the heartbeat intervals it applies to its peers,
   and close the connection after 30 s and 60 s more without a frame, as
   for a dead one. Until then the round robin still gives it its share,
-  until its queue of 1024 messages is full; from then on new messages and
-  requests go to the other connections. A
+  until the socket buffers between them are full, the client's send
+  buffer, up to `net.ipv4.tcp_wmem`'s maximum, 4 MB by default on Linux,
+  and the multiplexer's receive buffer, and then the client's queue of
+  1024 messages; from then on new messages and requests go to the other
+  connections. With small messages at ordinary rates that outlasts the
+  90 s before the connection closes. A
   typed query sent through it waits out its `timeout`, then its search
   finds a backend through another multiplexer; an addressed query through
   it ends with `OperationTimedOut`. An event sent through it waits in the
@@ -238,14 +251,28 @@ that changes.
 - **A client is idle for a long time.** Nothing happens: passive peers are
   never dropped for silence, and a `ThreadedClient` keeps heartbeating.
 - **A peer's host or network goes away without closing its connection.**
-  The multiplexer closes the connection after 90 s: an active peer's
-  silence ends it, and for a passive peer, or one that has not sent its
-  welcome yet, which owe no heartbeats, TCP keepalive does, the kernel
-  probing a connection silent for 30 s every 10 s and closing it after
-  60 s without an answer. A live peer's kernel answers the probes for it,
-  however long its program stays away; a connection that stays up and
-  never sends its welcome is kept as long, whoever the peer: a
-  synchronous client's reconnect sends its welcome only inside the
+  The multiplexer closes an active peer's connection after 90 s of
+  silence. A passive peer, or one that has not sent its welcome yet, owes
+  no heartbeats, and TCP keepalive ends its connection instead: the
+  kernel probes a connection silent for 30 s every 10 s and closes it
+  after 60 s without an answer, 90 s in all. Linux probes only while
+  nothing the multiplexer wrote waits for an acknowledgement, though, and
+  a busy passive peer is usually owed something when it goes: a reply, an
+  event, or the heartbeat the multiplexer owes a peer that sent a frame
+  since the last one, written 3 s after its last write. Then
+  retransmission ends the connection, after about 15 minutes with Linux's
+  default `net.ipv4.tcp_retries2` of 15, sooner if the host comes back
+  and answers with a reset. Until then the peer stays registered:
+  messages addressed to it are queued, with no `DELIVERY_ERROR`, until
+  its queue is full. The multiplexer does not set `TCP_USER_TIMEOUT`,
+  which would make that 90 s too: since Linux 5.11 it also ends the
+  connection of a live peer whose receive window stayed closed that long,
+  a passive client that does not read for a while, which the multiplexer
+  leaves alone. A lower `tcp_retries2` on the multiplexer's host shortens
+  the wait, for every connection there. A live peer's kernel answers the
+  probes for it, however long its program stays away; a connection that
+  stays up and never sends its welcome is kept as long, whoever the peer:
+  a synchronous client's reconnect sends its welcome only inside the
   client's next call, which may come much later.
 - **A multiplexer restarts while a synchronous client is idle.** The
   client's next call runs the loop before it picks a connection, so the
@@ -262,8 +289,10 @@ that changes.
   nothing more to it: a multiplexer drops what it had queued for that
   peer, and a client sends what it had queued through another connection,
   or holds it for the next when none is live, unless it was pinned to that
-  one or was a copy for every connection. No peer of theirs half-closes; a server
-  of yours that takes plain TCP clients decides for itself what it still
+  one or was a copy for every connection. Their own peers half-close only
+  when leaving, a client's `shutdown()`, a failed write, a multiplexer that
+  stops with `--drain-seconds`, so a half-close is the end; a server of
+  yours that takes plain TCP clients decides for itself what it still
   owes one that does.
 - **A peer closes while a message to it is on its way.** Writing to a
   closed connection fails, but what the peer sent before it closed is
@@ -327,12 +356,15 @@ that changes.
   for.
 - **A message is near 128 MiB.** A few frames are built around a peer's
   message and are a little bigger than it: the echo of a `PING` or of a
-  search, a delivery error that carries the original, a tap's record. For
-  a message near the limit they would be over it, so a `PING` or a search
-  whose echo would not fit is answered with `BACKEND_ERROR` saying so, a
-  delivery error leaves the original out and sets
-  `original_message_omitted`, and a tap's record has its payload cut to
-  fit, marked `truncated`. `ThreadedClient`'s `query()` measures a request
+  search, a delivery error that carries the original, a tap's record, the
+  `PEER_STATUS` that repeats a peer's key filters. For a message near the
+  limit they would be over it, so a `PING` or a search whose echo would
+  not fit is answered with `BACKEND_ERROR` saying so, a delivery error
+  leaves the original out and sets `original_message_omitted`, a tap's
+  record has its payload cut to fit, marked `truncated`, and a
+  `PEER_CONTROL` whose answer would not fit is refused with the error,
+  the filters and routing as they were. An answer to a control request
+  leaves out a workflow that would take it over the limit. `ThreadedClient`'s `query()` measures a request
   with the id it adds, so one within a few bytes of the limit is refused
   at the call.
 - **The rules file changes.** Each multiplexer reads it again every 2 s,
@@ -347,10 +379,13 @@ that changes.
 
 ## Defaults
 
-All in [multiplexer/defaults.h](../multiplexer/defaults.h), compiled into the
-multiplexer and the C++ library, exported to Python as attributes of
-`multiplexer.mxclient`, and to Rust as constants at the crate's root,
-generated from the header.
+In [multiplexer/defaults.h](../multiplexer/defaults.h), but for the three
+rows that say where they are set, compiled into the multiplexer and the C++
+library, exported to Python as attributes of `multiplexer._native`,
+`DEFAULT_READ_TIMEOUT` and `DEFAULT_REMOTE_RECORDING_MAX_BYTES` apart, with
+`DEFAULT_TIMEOUT`, `CLOSE_FLUSH_SECONDS`, `MAX_KEY_SIZE` and `MAX_SECONDS`
+also on `multiplexer.mxclient`, and to Rust as constants at the crate's
+root, generated from the header.
 
 | Constant | Value | Where it applies |
 |---|---|---|
@@ -362,7 +397,7 @@ generated from the header.
 | `HEARTBIT_INTERVAL` | 3 s | between heartbeats on an idle connection |
 | `CLOSE_FLUSH_SECONDS` | 1 s | every `shutdown()` and `close()`: how long what was sent before it is written before the connections close; the `timeout=` default |
 | `CLOSE_READ_SECONDS` | 1 s | a client's `shutdown()`: how long a connection reads on, waiting for its multiplexer to close its side |
-| `MX_LOG_VERBOSITY` | `DEBUG:HIGH` | connections logged, traffic not; the environment variable changes it per process ([operations](operations.md#logs)) |
+| `MX_LOG_VERBOSITY`, an environment variable | `DEBUG:HIGH`, `DEBUG:MEDIUM` in an `mxcontrol` process | connections logged, traffic not, the multiplexer's connections at `INFO`; the variable changes it per process ([operations](operations.md#logs)) |
 | `NO_HEARTBIT_SO_PREPARE_DROP_INTERVAL` | 30 s | silence on a connection, from a non-passive peer or from a multiplexer, before the other side starts to worry |
 | `NO_HEARTBIT_SO_REALLY_DROP_INTERVAL` | 60 s | further silence before that side closes the connection |
 | `KEEPALIVE_PROBE_INTERVAL` | 10 s | between the TCP keepalive probes on the multiplexer's accepted connections, which start after the first interval above and close the connection after the second without an answer |
@@ -370,10 +405,10 @@ generated from the header.
 | `MAX_KEY_SIZE` | 256 bytes | the longest key a message may carry; a library refuses a longer one where the message is built, a multiplexer drops and reports it ([keys](keys.md)) |
 | `MAX_KEY_PATTERN_SIZE` | 1024 bytes | the longest pattern of a key filter |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client holds; a `ThreadedClient` with no `on_message` drops what arrives on its own, with a warning |
-| `queue_size` in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
+| `queue_size`, in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |
 | `DEFAULT_REMOTE_RECORDING_MAX_BYTES` | 1 GiB | a recording session started over the protocol closes itself at this size unless the request says otherwise |
-| dedup window | 2048 ids | repeats the library recognizes |
+| dedup window, in the libraries' code | 2048 ids | repeats the library recognizes |
 
 Every timeout and interval, in the libraries and the multiplexer, is
 seconds as a float, and is read as at most 10⁹ s, about 31.7 years: a

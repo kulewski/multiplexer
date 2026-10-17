@@ -1199,6 +1199,131 @@ TEST(ThreadedClient, ASendFromTheIoThreadDuringTheShutdownsWriteOutGoesOut) {
   closing.join();
 }
 
+// A send made on the io thread as shutdown() begins on another thread goes
+// behind what that thread sent before: of two sends in one callback, with
+// the shutdown begun between them, the second was placed at once, ahead
+// of the first, which waited for the io thread, and the receiver got them
+// the wrong way round. The test's sends of a frame routed nowhere, from
+// its own thread, say when the shutdown began: from then on they throw.
+TEST(ThreadedClient, ASendOnTheIoThreadAsTheShutdownBeginsKeepsItsPlace) {
+  InProcessMultiplexer mx;
+  Peer receiver(mx.port, multiplexer::peers::TEST_EVENT_BACKEND);
+  ThreadedClient sender(multiplexer::peers::TEST_EVENT_CLIENT);
+  ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
+  std::promise<void> first_sent;
+  std::promise<void> shutdown_begun;
+  std::shared_future<void> begun = shutdown_begun.get_future().share();
+  sender.send(sender.new_message(multiplexer::types::TEST_EVENT, "start"), multiplexer::LanePtr(),
+              [&sender, &first_sent, begun](unsigned int) {  // on the io thread, "start" written
+                sender.send(sender.new_message(multiplexer::types::TEST_EVENT, "first"));
+                first_sent.set_value();
+                begun.wait_for(std::chrono::seconds(30));
+                sender.send(sender.new_message(multiplexer::types::TEST_EVENT, "second"));
+              });
+  ASSERT_EQ(std::future_status::ready, first_sent.get_future().wait_for(std::chrono::seconds(30)));
+  std::thread closing([&sender] { sender.shutdown(10); });
+  multiplexer::MultiplexerMessage probe = sender.new_message(multiplexer::types::TEST_UNROUTED, "probe");
+  probe.set_report_delivery_error(false);
+  for (bool stopped = false; !stopped;) {
+    try {
+      probe.set_id(sender.random64());
+      sender.send(probe);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } catch (const ThreadedClient::NotConnected&) {
+      stopped = true;
+    }
+  }
+  shutdown_begun.set_value();
+  closing.join();
+  std::vector<std::string> got;
+  for (int index = 0; index < 3; ++index) {
+    got.push_back(receiver.client.receive_message(30).first->message());
+  }
+  EXPECT_EQ((std::vector<std::string>{"start", "first", "second"}), got);
+}
+
+// Fills `mx`'s connection from `client` past what its sockets and its
+// queue hold, with messages nobody takes and nobody hears of: with `mx`
+// frozen, a shutdown's write-out waits for its deadline.
+void fill_frozen(ThreadedClient& client) {
+  const Fill fill(1024);
+  for (int index = 0; index < Fill::COUNT; ++index) {
+    multiplexer::MultiplexerMessage msg = client.new_message(multiplexer::types::TEST_UNROUTED, fill[index]);
+    msg.set_report_delivery_error(false);
+    client.send(msg);
+  }
+}
+
+// A shutdown begun in a callback, on the io thread, returns at once; the
+// destructor after it waits for the write-out and the close that shutdown
+// began, and returns once the io thread has ended, its callbacks let go of:
+// it returned at once, and a program that then exited cut the write-out.
+// The first multiplexer, frozen with what the client sent queued for it,
+// holds the write-out open until the shutdown's deadline; the word to quit
+// comes through the second.
+TEST(ThreadedClient, TheDestructorWaitsForAShutdownBegunInACallback) {
+  InProcessMultiplexer first, second;
+  std::shared_ptr<int> marker = std::make_shared<int>(0);
+  const std::weak_ptr<int> held = marker;
+  std::promise<void> begun;
+  std::unique_ptr<Freeze> frozen;
+  {
+    ThreadedClient* self = nullptr;
+    ThreadedClient client(multiplexer::peers::PYTHON_TEST_SERVER,
+                          [&self, &begun, marker](const multiplexer::IncomingMessage& incoming) {
+                            if (incoming.third->message() == "quit") {
+                              self->shutdown(1);  // on the io thread: it does not wait
+                              begun.set_value();
+                            }
+                          });
+    self = &client;
+    marker.reset();
+    ASSERT_TRUE(client.connect("127.0.0.1", first.port, 5));
+    ASSERT_TRUE(client.connect("127.0.0.1", second.port, 5));
+    Peer requester(second.port, multiplexer::peers::WEBSITE);
+    frozen.reset(new Freeze(first));
+    fill_frozen(client);
+    requester.send(requester.message(multiplexer::types::PYTHON_TEST_REQUEST, "quit", client.instance_id()));
+    ASSERT_EQ(std::future_status::ready, begun.get_future().wait_for(std::chrono::seconds(30)));
+  }
+  const bool ended = held.expired();
+  frozen.reset();
+  EXPECT_TRUE(ended) << "the destructor returned before the io thread ended";
+}
+
+// A client deleted while another thread shuts it down: the destructor
+// waits until the io thread has ended, its callbacks let go of, and the
+// state outlives the other thread's wait for the thread, where the
+// destructor returned at once and the io thread, ending with the last
+// reference to that state, destroyed it under the other thread's join,
+// std::terminate. The frozen multiplexer holds the write-out open until
+// the shutdown's deadline.
+TEST(ThreadedClient, ADeleteWhileAnotherThreadShutsDownWaitsForTheEnd) {
+  InProcessMultiplexer mx;
+  std::shared_ptr<int> marker = std::make_shared<int>(0);
+  const std::weak_ptr<int> held = marker;
+  ThreadedClient* client =
+      new ThreadedClient(multiplexer::peers::WEBSITE, [marker](const multiplexer::IncomingMessage&) {});
+  marker.reset();
+  ASSERT_TRUE(client->connect("127.0.0.1", mx.port, 5));
+  std::unique_ptr<Freeze> frozen(new Freeze(mx));
+  fill_frozen(*client);
+  std::thread stopping([client] { client->shutdown(1); });
+  for (bool stopped = false; !stopped;) {  // until the shutdown has begun
+    try {
+      client->connections_count();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } catch (const ThreadedClient::NotConnected&) {
+      stopped = true;
+    }
+  }
+  delete client;
+  const bool ended = held.expired();
+  frozen.reset();
+  stopping.join();
+  EXPECT_TRUE(ended) << "the destructor returned before the io thread ended";
+}
+
 // A burst the connection cannot take while its multiplexer is frozen: the
 // rest waits, and everything arrives once it reads again, where most of it
 // used to be dropped at its timeout while every send looked at every one
@@ -2647,14 +2772,6 @@ TEST(Client, APeerTypeAboveSixteenBitsIsAnnouncedWhole) {
   }
 }
 
-// Through a pinned lane, the request a search ends in, sent again to the
-// backend that answered the search, is pinned too: when the lane's
-// connection dies before writing it, it goes nowhere, as the NOT_CONNECTED
-// the query ends with says. It went out unpinned, and the client handed it
-// to another connection: the backend ran a request whose caller heard it
-// did not go, and a caller who sent it again on a new lane, as the pin
-// asks, had it run twice. Counted at the backend before a last request
-// that the same connection carries after the hand-over.
 // A connection that dies with frames of its own unwritten, here the
 // PEER_CONTROL a routing change sent behind messages its multiplexer never
 // read: those go with it, unreported. Each was reported dropped, under an
@@ -2701,6 +2818,14 @@ TEST(ThreadedClient, AConnectionsOwnFramesGoWithItUnreported) {
   }
 }
 
+// Through a pinned lane, the request a search ends in, sent again to the
+// backend that answered the search, is pinned too: when the lane's
+// connection dies before writing it, it goes nowhere, as the NOT_CONNECTED
+// the query ends with says. It went out unpinned, and the client handed it
+// to another connection: the backend ran a request whose caller heard it
+// did not go, and a caller who sent it again on a new lane, as the pin
+// asks, had it run twice. Counted at the backend before a last request
+// that the same connection carries after the hand-over.
 TEST(ThreadedClient, TheRequestASearchThroughAPinnedLaneEndsInIsPinnedToo) {
   std::promise<ThreadedClient::Result> done;  // before the clients, whose callbacks set them
   std::promise<void> noted;
@@ -2924,6 +3049,33 @@ TEST(ThreadedClient, AQueryCallbackThatThrowsLeavesTheConnectionReading) {
 // The net under both: whatever the manager's handling of a frame throws,
 // here a BasicClient's own sink, the connection logs it, drops that frame
 // and reads on.
+TEST(Connection, AFrameWhoseHandlingThrowsIsDroppedAndTheConnectionReadsOn) {
+  InProcessMultiplexer mx;
+  asio::io_service io_service;
+  std::shared_ptr<multiplexer::BasicClient> client =
+      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
+  int seen = 0;
+  client->set_incoming_sink([&seen](const multiplexer::BasicClient::IncomingMessagesBuffer::value_type&) {
+    if (++seen == 1) {
+      throw std::runtime_error("the first frame upsets the sink");
+    }
+  });
+  ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
+  Peer peer(mx.port, multiplexer::peers::WEBSITE);
+  peer.send(peer.message(multiplexer::types::PYTHON_TEST_REQUEST, "one", client->instance_id()));
+  peer.send(peer.message(multiplexer::types::PYTHON_TEST_REQUEST, "two", client->instance_id()));
+  std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(10);
+  while (seen < 2 && !timer->expired()) {
+    try {
+      client->run_one();
+    } catch (const std::exception&) {
+      // what the connection let through, before it caught it itself
+    }
+  }
+  EXPECT_EQ(2, seen);
+  client->shutdown();
+}
+
 // A connection that stays full, its multiplexer frozen: what ended waiting
 // for its room is cleared out beside a message that still waits, 64 more
 // than what waits kept at most, where every one stayed, its whole frame
@@ -3161,33 +3313,6 @@ TEST(BasicClient, AConnectionShutDownGoesToTheNewOwnerThreadWithItsHandlers) {
   EXPECT_EQ("", thrown) << "a handler of the connection ran on the new owner thread";
 }
 
-TEST(Connection, AFrameWhoseHandlingThrowsIsDroppedAndTheConnectionReadsOn) {
-  InProcessMultiplexer mx;
-  asio::io_service io_service;
-  std::shared_ptr<multiplexer::BasicClient> client =
-      multiplexer::BasicClient::Create(io_service, multiplexer::peers::WEBSITE);
-  int seen = 0;
-  client->set_incoming_sink([&seen](const multiplexer::BasicClient::IncomingMessagesBuffer::value_type&) {
-    if (++seen == 1) {
-      throw std::runtime_error("the first frame upsets the sink");
-    }
-  });
-  ASSERT_TRUE(client->wait_for_connection(client->connect("127.0.0.1", mx.port, 5), 5));
-  Peer peer(mx.port, multiplexer::peers::WEBSITE);
-  peer.send(peer.message(multiplexer::types::PYTHON_TEST_REQUEST, "one", client->instance_id()));
-  peer.send(peer.message(multiplexer::types::PYTHON_TEST_REQUEST, "two", client->instance_id()));
-  std::unique_ptr<mx::SimpleTimer> timer = client->create_timer(10);
-  while (seen < 2 && !timer->expired()) {
-    try {
-      client->run_one();
-    } catch (const std::exception&) {
-      // what the connection let through, before it caught it itself
-    }
-  }
-  EXPECT_EQ(2, seen);
-  client->shutdown();
-}
-
 // --- Answers that would be over MAX_MESSAGE_SIZE -----------------------------
 //
 // Frames the libraries and the multiplexer build around a peer's message,
@@ -3363,6 +3488,42 @@ TEST(ThreadedClient, ATypedQueryTooBigOnceAddressedIsRefusedAtTheCall) {
   request.clear_id();
   request.clear_sender();
   EXPECT_THROW(client.query(request, [](const ThreadedClient::Result&) {}, 1), std::length_error);
+}
+
+// A key over MAX_KEY_SIZE was refused only where the io thread framed the
+// request: the exception escaped its handler, and the query, no deadline
+// armed, never ended, a blocking query() with it. The key is checked at
+// the call, in both forms.
+TEST(ThreadedClient, AQueryWithAKeyTooLongIsRefusedAtTheCall) {
+  ThreadedClient client(multiplexer::peers::WEBSITE);
+  multiplexer::MultiplexerMessage request;
+  request.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  request.set_key(std::string(multiplexer::MAX_KEY_SIZE + 1, 'k'));
+  EXPECT_THROW(client.query(request, [](const ThreadedClient::Result&) {}, 1), std::length_error);
+  EXPECT_THROW(client.query(request, 1), std::length_error);
+}
+
+// flush_all_with_callback()'s `done` ran where the flush ended, often the
+// write handler of the frame it waited for, which had not taken that frame
+// off its queue yet: a send made there was lost, and the frame went out
+// again. It runs in a handler of its own, so its send, made after it
+// called shutdown(), goes out with the shutdown's write-out.
+TEST(ThreadedClient, AFlushCallbacksSendGoesOut) {
+  InProcessMultiplexer mx;
+  multiplexer::Client receiver(multiplexer::peers::TEST_EVENT_BACKEND);
+  ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
+  ThreadedClient sender(multiplexer::peers::TEST_EVENT_CLIENT);
+  ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
+  std::promise<void> called;
+  sender.send(sender.new_message(multiplexer::types::TEST_EVENT, "first"));
+  sender.flush_all_with_callback(30, [&](bool) {
+    sender.shutdown();  // from the io thread: does not wait there
+    sender.send(sender.new_message(multiplexer::types::TEST_EVENT, "after"));
+    called.set_value();
+  });
+  ASSERT_EQ(std::future_status::ready, called.get_future().wait_for(std::chrono::seconds(30)));
+  EXPECT_EQ("first", receiver.receive_message(30).first->message());
+  EXPECT_EQ("after", receiver.receive_message(30).first->message());
 }
 
 namespace {
@@ -3626,6 +3787,40 @@ TEST(Client, AHandedOverRequestIsAnsweredWithoutAResend) {
   killer.join();
   EXPECT_EQ("question", answer);
   EXPECT_EQ(1, backend.requests.load()) << "sent once, not again under a new id";
+}
+
+// A flush whose last frame on a connection is the client's own, a
+// PEER_CONTROL queued behind messages for a frozen multiplexer, is over
+// once those messages are written through the other connection, the frozen
+// multiplexer gone: the flush followed the last frame queued, the
+// PEER_CONTROL, which goes with its connection told to nobody, and it
+// waited out its whole timeout and said not everything was written. The
+// synchronous client hears of the end inside flush_all(), after the flush
+// began.
+TEST(Client, AFlushIsOverWhenItsConnectionGoesWithTheClientsOwnFrameLast) {
+  InProcessMultiplexer kept;
+  std::unique_ptr<InProcessMultiplexer> going(new InProcessMultiplexer());
+  multiplexer::Client client(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(client.connect("127.0.0.1", kept.port, 5));
+  const multiplexer::ConnectionWrapper to_going = client.connect("127.0.0.1", going->port, 5);
+  ASSERT_TRUE(to_going);
+  {
+    Freeze freeze(*going);
+    multiplexer::MultiplexerMessage fill;  // routed nowhere: fills the connection, answered by nobody
+    fill.set_type(multiplexer::types::TEST_UNROUTED);
+    fill.set_sender(client.instance_id());
+    fill.set_report_delivery_error(false);
+    fill.set_message(std::string(fill_size(), 'f'));
+    for (int index = 0; index <= FILL_FRAMES; ++index) {  // the sockets full, and one more queued
+      fill.set_id(client.random64());
+      client.schedule_one(fill, to_going, 30);  // preferred, not pinned: handed over when its connection goes
+    }
+    multiplexer::Routing routing;
+    routing.set_all(false);
+    client.set_routing(routing);  // a PEER_CONTROL to each multiplexer, behind the fill on the frozen one
+  }  // thawed, then stopped: the client's loop does not run meanwhile
+  going.reset();
+  EXPECT_TRUE(client.flush_all(30)) << "the flush waited for the PEER_CONTROL its connection took along";
 }
 
 namespace {

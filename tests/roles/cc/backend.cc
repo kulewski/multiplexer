@@ -127,7 +127,7 @@ struct Behaviour {
 // The backend that answers requests. --serves maps each request type to the
 // reply type; --behaviour says what to do with the payload: upper (the
 // default), echo, drop (no reply), raise (throw from the handler), sleep:MS
-// (wait, then upper-case). --crash-after N exits with status 3 after N
+// (wait, then echo). --crash-after N exits with status 3 after N
 // requests, mid-run, for the failover scenarios. Events: request,
 // unexpected, crash, draining, acked, stopped.
 class BackendServer : public multiplexer::backend::BaseMultiplexerServer {

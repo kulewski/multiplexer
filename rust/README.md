@@ -75,7 +75,9 @@ joins that list.
 ## Generated files
 
 Nothing here is generated at build time; every generated file is
-committed, and `./format.sh --check` says when one is stale:
+committed. `./format.sh` writes the first two again, and `--check` says
+when one is stale; the fast Bazel tests check the other three, and each
+says below how it is written again:
 
 - `mx-multiplexer/src/proto/`: the protocol's messages, written by
   `cargo run --manifest-path codegen/Cargo.toml` (prost-build on the
@@ -92,8 +94,9 @@ committed, and `./format.sh --check` says when one is stale:
   tests' rules, written the same way from `tests/testing.rules`, and
   checked by the same test.
 - `mx-multiplexer/testdata/golden_frames.txt`: frames the Python package's
-  protobuf writes, which the crate's frames must equal byte for byte;
-  `//rust/mx-multiplexer:golden_frames_test` checks it.
+  protobuf writes, which the crate's frames must equal byte for byte,
+  written by `testdata/golden.py`; `//rust/mx-multiplexer:golden_frames_test`
+  checks it.
 
 ## Dependencies
 

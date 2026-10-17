@@ -214,8 +214,9 @@ pub(crate) enum Posted {
     /// A connect that could not even open its socket, reported as a failed
     /// connect is.
     ConnectFailed(ConnId, String),
-    /// The pass over the followed sends' ends (outbox's _process_follows).
-    ProcessFollows,
+    /// The pass over the program's callbacks: the drops told, then the
+    /// followed sends' ends (outbox's _process_callbacks).
+    ProcessCallbacks,
     /// The queries that waited for a connection start again.
     Fill,
     /// A query follows its unwritten attempt to the connection the outbox
@@ -232,7 +233,7 @@ impl std::fmt::Debug for Posted {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Posted::ConnectFailed(conn, why) => write!(formatter, "ConnectFailed({conn:?}, {why:?})"),
-            Posted::ProcessFollows => write!(formatter, "ProcessFollows"),
+            Posted::ProcessCallbacks => write!(formatter, "ProcessCallbacks"),
             Posted::Fill => write!(formatter, "Fill"),
             Posted::FollowHandover(query, generation, request) => {
                 write!(formatter, "FollowHandover({query:?}, {generation}, {request})")
@@ -358,9 +359,9 @@ impl Core {
     pub(crate) fn run_posted(&mut self, posted: Posted) {
         match posted {
             Posted::ConnectFailed(conn, why) => self.connected(conn, Err(why)),
-            Posted::ProcessFollows => {
-                self.outbox.follow_posted = false;
-                self.process_follows();
+            Posted::ProcessCallbacks => {
+                self.outbox.callbacks_posted = false;
+                self.process_callbacks();
             }
             Posted::Fill => self.fill(),
             Posted::FollowHandover(query, generation, request) => self.followed_handover(query, generation, request),

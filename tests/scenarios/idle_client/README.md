@@ -10,7 +10,7 @@ sequenceDiagram
     participant M as multiplexer
     participant B as backend
     C->>M: welcome
-    Note over C,M: 100 s of silence: longer than 30 s + 60 s
+    Note over C,M: 95 s of silence: longer than 30 s + 60 s
     Note over M: passive type: no heartbeat required, connection kept
     C->>M: request after idling
     B->>C: reply
@@ -27,8 +27,8 @@ sequenceDiagram
 bazel test //tests/scenarios:idle_client_py
 ```
 
-The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one.
+The suffix is the language of the client and the backend: `_py` Python,
+`_cc` C++, `_rust` Rust.
 
 The scenario is [idle_client.py](idle_client.py); the roles it spawns are described in
 [tests/README.md](../../README.md).

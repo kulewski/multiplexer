@@ -3,7 +3,8 @@ refuses makes the command exit 1 at its end, and a refused TAP is not
 sent again, where both exited 0 whatever was refused and tap asked again
 every 2 s; and tap --out appends after the last whole record of its file,
 cutting one left half written, so that the file reads to its end, where
-the records after the torn one were unreadable. Counted, not timed: each
+the records after the torn one were unreadable, and leaves a file that is
+not a recording as it is, where it emptied it. Counted, not timed: each
 command is ended once its output says what is checked, a refusal or a
 tap in place, and the records are counted in the file.
 """
@@ -132,6 +133,31 @@ class RecordingLoopsTest(unittest.TestCase):
         self.assertFalse(whole, "the last record is torn")
         tap_until_recorded(torn)
         self.assertTrue(whole_records(out)[1], "the file reads to its end")
+
+    def test_tap_out_leaves_a_file_that_is_not_a_recording_as_it_is(self) -> None:
+        """A tap's --out naming a file that is not a recording, a rules file
+        by mistake: the tap says so and exits 1 before tapping, the file as
+        it was, where its first byte that did not read as a record was taken
+        for a torn record and the file was cut there, emptied."""
+        mx = self.multiplexer(allow_tap=True)
+        out = os.path.join(self.scratch.name, "multiplexer.rules")
+        with open(RULES, "rb") as rules:
+            text = rules.read()
+        with open(out, "wb") as copy:
+            copy.write(text)
+        tap = Command("recording", "tap", "-M", mx.address, "--out", out)
+        try:
+            code = tap.proc.wait(BOUND)
+        finally:
+            if tap.proc.poll() is None:  # tapping, into the file
+                tap.proc.kill()
+                tap.proc.wait(BOUND)
+        self.assertEqual(1, code, tap.output())
+        for reader in tap.readers:
+            reader.join(BOUND)
+        self.assertIn("is not a recording", tap.output())
+        with open(out, "rb") as kept:
+            self.assertEqual(text, kept.read())
 
 
 if __name__ == "__main__":

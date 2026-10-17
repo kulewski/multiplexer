@@ -138,27 +138,27 @@ class WholeMessageTest(unittest.TestCase):
             assert served.backend is not None
             backend_id = served.backend.conn.instance_id
             with Client(cluster.endpoints, type=peers.WEBSITE) as client:
-                request = client.new_message(type=REQUEST, message=b"question", workflow=b"trace")
+                request = client.new_message(type=REQUEST, message=b"question", workflow="trace")
                 reply = client.query(request, timeout=10)
-                self.assertEqual((b"QUESTION", b"trace"), (reply.message, reply.workflow))
-                addressed = client.new_message(type=REQUEST, message=b"addressed", workflow=b"trace", to=backend_id)
+                self.assertEqual((b"QUESTION", "trace"), (reply.message, reply.workflow))
+                addressed = client.new_message(type=REQUEST, message=b"addressed", workflow="trace", to=backend_id)
                 reply = client.query(addressed, timeout=10)
-                self.assertEqual((b"ADDRESSED", b"trace"), (reply.message, reply.workflow))
+                self.assertEqual((b"ADDRESSED", "trace"), (reply.message, reply.workflow))
             with ThreadedClient(cluster.endpoints, type=peers.TEST_ACTIVE_CLIENT) as threaded:
-                request = threaded.new_message(type=REQUEST, message=b"question", workflow=b"trace")
+                request = threaded.new_message(type=REQUEST, message=b"question", workflow="trace")
                 reply = threaded.query(request, timeout=10)
-                self.assertEqual((b"QUESTION", b"trace"), (reply.message, reply.workflow))
-                addressed = threaded.new_message(type=REQUEST, message=b"addressed", workflow=b"trace", to=backend_id)
+                self.assertEqual((b"QUESTION", "trace"), (reply.message, reply.workflow))
+                addressed = threaded.new_message(type=REQUEST, message=b"addressed", workflow="trace", to=backend_id)
                 reply = threaded.query(addressed, timeout=10)
-                self.assertEqual((b"ADDRESSED", b"trace"), (reply.message, reply.workflow))
+                self.assertEqual((b"ADDRESSED", "trace"), (reply.message, reply.workflow))
 
             async def ask() -> MultiplexerMessage:
                 async with AsyncClient(cluster.endpoints, peers.TEST_ACTIVE_CLIENT) as asynchronous:
-                    request = asynchronous.new_message(type=REQUEST, message=b"question", workflow=b"trace")
+                    request = asynchronous.new_message(type=REQUEST, message=b"question", workflow="trace")
                     return await asynchronous.query(request, timeout=10)
 
             reply = asyncio.run(ask())
-            self.assertEqual((b"QUESTION", b"trace"), (reply.message, reply.workflow))
+            self.assertEqual((b"QUESTION", "trace"), (reply.message, reply.workflow))
 
     def test_a_plain_servers_whole_message_reply_answers_the_request(self) -> None:
         """The backend's reply sets only its type and payload; the server

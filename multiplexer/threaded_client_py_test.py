@@ -2,8 +2,9 @@
 
 Against a real multiplexer started for the test: a message addressed to the
 client's instance id reaches on_message, a PING is answered by the client
-itself, a search policy's answer is read by its truth, and the blocking
-query() raises RuntimeError from a callback.
+itself, a search policy's answer is read by its truth, the blocking
+query() raises RuntimeError from a callback, and the io thread keeps one
+Python thread state from its first callback to its end.
 """
 
 import os
@@ -13,10 +14,13 @@ import sys
 import threading
 import time
 import unittest
+import weakref
 
 from multiplexer.clients import Client
 from multiplexer.Multiplexer_pb2 import BackendForPacketSearch
 from multiplexer.multiplexer_constants import peers, types
+from multiplexer.testing import Cluster
+from multiplexer.testing.buffers import past_the_queue
 from multiplexer.threaded_client import ThreadedClient
 
 
@@ -93,6 +97,80 @@ class ThreadedClientTest(unittest.TestCase):
         self.assertEqual(peer.instance_id, mxmsg.sender)
         client.shutdown()
         peer.shutdown()
+
+    def test_the_io_threads_python_state_lasts_from_its_first_callback_to_its_end(self) -> None:
+        """A thread-local a callback sets is there in the next callback, and
+        goes when the client shuts down, the io thread's Python thread state
+        with it: each callback had a state made and destroyed for it, an
+        mmap, a munmap and a gettid per message on CPython 3.11 and later."""
+        local = threading.local()
+        seen: list[bool] = []
+        markers: list[weakref.ref] = []
+        arrived = threading.Semaphore(0)
+
+        class Marker:
+            """What the callback keeps in its thread-local."""
+
+        def on_message(mxmsg) -> None:
+            seen.append(hasattr(local, "marker"))
+            if not hasattr(local, "marker"):
+                local.marker = Marker()
+                markers.append(weakref.ref(local.marker))
+            arrived.release()
+
+        client = ThreadedClient([self.endpoint], type=peers.WEBSITE, on_message=on_message)
+        peer = Client([self.endpoint], type=peers.WEBSITE)
+        for _ in range(3):
+            peer.send_message(message=b"for you", type=types.PYTHON_TEST_REQUEST, to=client.instance_id, flush=True)
+        for _ in range(3):
+            self.assertTrue(arrived.acquire(timeout=5), "a message did not arrive")
+        self.assertEqual([False, True, True], seen, "the callback before's thread-local was gone")
+        client.shutdown()  # the io thread ends, joined
+        self.assertEqual(1, len(markers))
+        self.assertIsNone(markers[0](), "the io thread's thread state outlived the thread")
+        peer.shutdown()
+
+    def test_a_shutdown_after_one_begun_in_a_callback_waits_for_the_end(self) -> None:
+        """A shutdown begun in a callback, on the io thread, returns at once;
+        one from another thread after it waits for the write-out and the
+        close the first began, and returns once the io thread has ended, the
+        callbacks let go of: it returned at once, and a program that then
+        exited cut the write-out. The first multiplexer, frozen with what the
+        client sent queued for it, holds the write-out open until the
+        shutdown's deadline; the word to quit comes through the second."""
+
+        class Marker:
+            """What only the callback holds."""
+
+        marker = Marker()
+        held = weakref.ref(marker)
+        begun = threading.Event()
+        clients: list[ThreadedClient] = []
+
+        def on_message(mxmsg, kept=marker) -> None:
+            if mxmsg.message == b"quit":
+                clients[0].shutdown(1)  # on the io thread: it does not wait
+                begun.set()
+
+        del marker
+        with Cluster(2, rules=runfile("tests/testing.rules")) as cluster:
+            first, second = cluster.endpoints
+            client = ThreadedClient([first, second], type=peers.PYTHON_TEST_SERVER, on_message=on_message)
+            clients.append(client)
+            del on_message  # the client's alone
+            peer = Client([second], type=peers.WEBSITE)
+            cluster.mx[0].pause()
+            try:
+                for payload in past_the_queue(b"x" * 16):
+                    client.send_message(payload, multiplexer=ThreadedClient.ALL, type=types.TEST_UNROUTED)
+                peer.send_message(message=b"quit", type=types.PYTHON_TEST_REQUEST, to=client.instance_id, flush=True)
+                self.assertTrue(begun.wait(30), "the callback never ran")
+                client.shutdown()
+                ended = held() is None
+            finally:
+                cluster.mx[0].resume()
+            peer.shutdown()
+        self.assertTrue(ended, "shutdown() returned before the io thread ended")
 
     def test_ping_is_answered_by_the_client_itself(self) -> None:
         """A PING addressed to the client comes back as a PING referencing it, and on_message never sees it."""

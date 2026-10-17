@@ -1,7 +1,8 @@
 // streamlogs: reads a binary log stream (length-prefixed LogEntry records,
 // as written by --logging-file) from stdin and sends it in chunks as
 // LOGS_STREAM messages through every --multiplexer given, as the peer type
-// LOG_STREAMER. The Python library's logging.streaming spawns this. It
+// LOG_STREAMER: a chunk goes once it is full, and whenever stdin has
+// nothing more ready. The Python library's logging.streaming spawns this. It
 // never waits for the network: the program whose log this is blocks
 // writing into the pipe as soon as nobody reads it, so a multiplexer that
 // stops reading must not stop the reading here. Each chunk goes to every
@@ -96,7 +97,6 @@ static inline void send_logs(ThreadedClient& client, const LogEntriesMessage& lo
 int StreamLogs::run() {
   using namespace mx::protobuf;
 
-  FileMessageInputStream fmis(0);
   multiplexer::LogEntriesMessage logs;
 
   ThreadedClient client(peers::LOG_STREAMER,
@@ -105,14 +105,25 @@ int StreamLogs::run() {
     client.connect(address.first, address.second, 0);  // no wait: the io thread connects, and reconnects, on its own
   }
 
-  while (fmis.read(*logs.add_log())) {
+  // A chunk goes once it holds chunksize_ entries, and whenever stdin has
+  // nothing more ready, however few it holds: a busy program's log goes in
+  // full chunks, a quiet one's last lines at once, where they waited for
+  // the chunk to fill or for stdin to end.
+  FileMessageInputStream fmis(0, false, [this, &client, &logs] {
+    if (logs.log_size()) {
+      send_logs(client, logs, timeout_);
+      logs.clear_log();
+    }
+  });
+  mx::logging::LogEntry entry;  // read here, since a chunk may go in the middle of one
+  while (fmis.read(entry)) {
+    logs.add_log()->Swap(&entry);
     // if chunksize_ == 0 (unlimited) this will be always false
     if (logs.log_size() == chunksize_) {
       send_logs(client, logs, timeout_);
       logs.clear_log();
     }
   }
-  logs.mutable_log()->RemoveLast();
 
   if (logs.log_size()) {
     send_logs(client, logs, timeout_);

@@ -55,7 +55,7 @@ change of prost is never a change of this API:
 | `sender` | `u64` | 0 for this client's instance id, filled in where it is sent |
 | `to` | `Option<u64>` | the instance it is addressed to |
 | `references` | `u64` | the id of the message it answers, 0 for none |
-| `workflow` | `Option<Bytes>` | tracing bytes a reply copies from its request |
+| `workflow` | `Option<String>` | a trace or request id, text, which a reply copies from its request |
 | `key` | `Option<String>` | what peers' key filters are matched against ([keys](keys.md)) |
 
 and the rest of the protocol's fields, `report_delivery_error`,
@@ -188,7 +188,7 @@ one thread at a time.
   be received.
 - `send(type, payload)` and `send_message(message)` build a send of an
   event, the way every client sends. The builder takes `to(instance)`,
-  `key(key)`, `references(id)`, `workflow(bytes)`, `all()`, through every
+  `key(key)`, `references(id)`, `workflow(text)`, `all()`, through every
   connection, a multiplexer whose first connection is still in its
   handshake getting its copy at the welcome, `lane(&lane)`,
   `connection(&connection)`, `timeout(duration)`, `no_deadline()` and
@@ -221,7 +221,8 @@ one thread at a time.
   ([below](#routing-key-filters-and-acknowledgements)).
   `receive_until_acknowledged(timeout)` also ends, with
   `OperationTimedOut`, as soon as a change of the routing or the key
-  filters is acknowledged: what a loop of receives acts on at once, the
+  filters is acknowledged, or the last message held for a connection goes
+  (`held_for_a_connection()`): what a loop of receives acts on at once, the
   server classes' loops among them. A change whose last confirmation came
   while messages routed before it were still to be received is
   acknowledged by the receive that takes the last of them, and the next
@@ -239,7 +240,13 @@ one thread at a time.
   what is still unwritten then; and runs the loop until every multiplexer
   has closed its side of the connection too, a round trip,
   `CLOSE_READ_SECONDS` at most, so that what was written arrives. After
-  it every call fails with `NotConnected`.
+  it a send, a query, a connect and a receive with no deadline fail with
+  `NotConnected`; a receive with a deadline still hands out a message
+  received before, and otherwise waits the deadline out,
+  `OperationTimedOut`; `flush_all()` returns `true`, nothing being left;
+  the routing and key-filter setters return `Ok` and change nothing, a
+  `_then` callback never running; `routing_acknowledged()` and
+  `connections_count()`, 0, answer.
 
 ### Lanes, pinning and addressed queries
 
@@ -300,8 +307,10 @@ on.
 
 ### Routing, key filters and acknowledgements
 
-The same calls on both clients; the server classes reach them through
-their handle.
+The same calls on both clients. The server classes reach the key-filter
+calls and `routing_acknowledged()` through their handle; their routing
+changes by `start_draining()`, and the threaded server's `client()` has
+`set_routing()` too.
 
 - `set_routing(routing)`: which of a multiplexer's routing paths reach this
   peer, `any`, `all` and `last_resort` ([how a backend
@@ -320,6 +329,11 @@ their handle.
 - `routing_acknowledged()`: whether every multiplexer has the current
   routing and key filters in effect, with everything they routed before
   received.
+- `held_for_a_connection()`: how many messages wait for a connection to
+  come up, sent while none was live or left by one that died with none to
+  take them; each goes out in order once one is registered, or is given up
+  on at its own deadline. The server classes' drains wait for them, since
+  the close would drop them.
 - `set_routing_then(routing, on_acknowledged)` and
   `set_key_filters_then(filters, on_acknowledged)`: the same, and
   `on_acknowledged` called once this change, or a later one, is
@@ -359,7 +373,11 @@ type serves on the threaded class unchanged.
   `drain_routing(routing)`, what `start_draining()` tells the
   multiplexers, `key_filters(filters)`, in effect from the first request,
   and `on_drop(observer)`; `build(handler)` makes the server, connected to
-  nothing, `InvalidArgument` for an address that does not parse.
+  nothing, `InvalidArgument` for an address that does not parse. The drop
+  observer and `set_key_filters_then()`'s callback run on the loop's
+  thread between its waits, `serve_forever()`'s, `loop_iter()`'s or
+  `close()`'s, not while the loop holds the client: they may call the
+  handle and answer kept requests.
 - `connect()` connects to every address, once, each handshake waited for
   against one `DEFAULT_TIMEOUT`, and returns how many came up; an address
   it could not reach the library goes on trying. `serve_forever()` starts
@@ -378,24 +396,31 @@ type serves on the threaded class unchanged.
   `stop()` was called or a drain is over: `Ok(())`, or
   `Err(ServeError::Handler(error))` for a handler failure that
   `on_handler_error()` said ends the server, or `Err(ServeError::Client(error))`
-  when the client failed. `drain` caps a drain, `None` for no cap.
+  when the client failed. `drain` caps a drain, `None` for no cap: while a
+  drain with a cap runs, a wait lasts no longer than what is left of it, so
+  that the cap ends the drain on time whatever the poll.
   `loop_iter(timeout)` is one step, `OperationTimedOut` when no message
   came, for a loop of your own.
 - `handle()` is a `ServerHandle`, `Clone + Send + Sync`: what
   `periodic_task()` is given, and what another thread, a signal's watcher
-  say, holds. `stop()` makes `serve_forever()` return within one poll;
+  say, holds. `stop()` makes `serve_forever()` return, its wait woken;
   `start_draining()` and `draining()`; `working()`; `instance_id()`;
   `send(type, payload)` and `send_message(message)` for a message that is
   no reply, routed by its type, as every client sends; `set_key_filters()`
-  and `set_key_filters_then()`; `connections_count()` and
-  `routing_acknowledged()`. From another thread than the server's own,
-  a call that needs the client waits for the loop's current wait to end,
-  `poll` at most.
-- `instance_id()`, `handler()`, `dropped_while_closing()`, and `close(timeout)`,
-  also run by `Drop`: what arrives meanwhile and what was read and not
-  handled is refused with `DELIVERY_ERROR`, so that its senders retry
-  elsewhere at once, and the client shuts down as `SyncClient::shutdown()`
-  does, the last replies written first.
+  and `set_key_filters_then()`; `connections_count()`,
+  `routing_acknowledged()` and `held_for_a_connection()`; `dropped()`, the
+  requests dropped, here those the client's full receive queue dropped.
+  From another thread than the server's own, a call that needs the client
+  wakes the loop's wait and has its turn at once, ahead of the loop's next
+  wait.
+- `instance_id()`, `handler()`, `dropped_while_closing()`; `dropped()`
+  and `incoming_dropped()`, the client's counts of what the server sent
+  and gave up on and of what its full receive queue dropped, kept past
+  the close; and `close(timeout)`, also run by `Drop`: what arrives
+  meanwhile and what was read and not handled is refused with
+  `DELIVERY_ERROR`, so that its senders retry elsewhere at once, and the
+  client shuts down as `SyncClient::shutdown()` does, the last replies
+  written first.
 
 **A request.** `Request` has `message()`, `payload()` and `connection()`;
 `reply(type, payload)` and `reply_message(message)`, the reply going to the
@@ -408,8 +433,8 @@ and `answered()`. One reply per request: `references` means "this is the
 reply", so a follow-up that is not the reply goes through the handle with
 `to` set. A request dropped without a reply or `no_response()` is logged.
 A handler may keep the request, it is `Send`, and answer it later from any
-thread; on `BaseMultiplexerServer` that reply goes out once the loop's
-current wait ends.
+thread; on `BaseMultiplexerServer` that reply wakes the loop's wait and
+goes out at once.
 
 **A handler that fails**, returning `Err`, any error boxed as a
 `HandlerError`, or panicking, gets its requester a `BACKEND_ERROR`
@@ -420,7 +445,8 @@ handlers fail on what they do not expect would answer each other's
 reports for good. A Rust or Python requester's query fails with that
 error, `Error::Backend` here; a C++ requester gets the message itself.
 Then `on_handler_error(&error)` decides: `true`, the default, keeps
-serving; `false` ends `serve_forever()` with the error.
+serving; `false` ends `serve_forever()` with the error, and so does a
+panic in it, with the panic's text.
 
 **The handler's other methods**, each with a default: `periodic_task()`
 above; `should_answer_search()`, whether to answer a client's search for
@@ -428,7 +454,14 @@ a backend of this type now, yes by default, which on the threaded class
 runs on the io thread and must be quick; and `drained(by_default)`,
 whether the drain is over, the library's answer given: the drain's cap
 passed, or, with every path turned off and no last resort, every
-multiplexer confirmed it and nothing is left to handle.
+multiplexer confirmed it, nothing is left to handle and nothing the
+server sent waits for a connection to come up: with no connection live
+the confirmation holds at once, so a reply made while every multiplexer
+was down is held for the next connection and written once one is back,
+where the close would drop it. A panic out of
+one that runs on the serving thread, `periodic_task()` or `drained()`,
+closes the server as `close()` does before it goes on up out of
+`serve_forever()`, as C++ and Python close theirs.
 
 **Leaving gracefully.** From `periodic_task()`, call
 `server.start_draining()` when asked to leave: the backend tells every
@@ -461,7 +494,7 @@ server.serve_forever(Duration::from_secs(1), None)?;
 - The builder takes `workers(n)` (1), `queue_size(n)` (1024, the requests
   waiting for a worker; beyond it a request is dropped, logged at the drop
   lines' rate, its requester waiting out its first stage before the
-  search), `decline_searches_when_full(bool)` (false: searches are
+  search; `usize::MAX` is no limit), `decline_searches_when_full(bool)` (false: searches are
   answered while the server serves; true leaves them unanswered while
   every worker is busy and requests wait), `connect_timeout(timeout)`,
   `drain_routing(routing)`, `options(ThreadedServerOptions)` for all of
@@ -472,7 +505,8 @@ server.serve_forever(Duration::from_secs(1), None)?;
 - `connect()` starts the workers and connects to every address at once
   against one `connect_timeout`, once; `serve_forever(poll, drain)` calls it
   first, then only polls, `periodic_task()` every `poll` or sooner when
-  woken, by a stop, a drain, an acknowledgement or a drain's last request,
+  woken, by a stop, a drain, an acknowledgement, a drain's last request or
+  the last message held for a connection written, and at a drain's cap,
   and closes the server when it returns. It takes `&self`: a server in an
   `Arc` serves on one thread while others hold it. `handle()`, `handler()`
   and `client()`, the server's `ThreadedClient`, for messages that are not
@@ -527,11 +561,14 @@ type need not be passive, and any thread may use it. Its handles are
   io thread, where it fails with `OnIoThread` rather than wait for good;
   `.await`, on any executor; or `then(|result| ...)`, which returns at once
   and calls back on the io thread, where the callback must be quick, or at
-  once, on the calling thread, with `NotConnected` after `shutdown()`. Any
+  once, on the calling thread, with `NotConnected` after `shutdown()`; one
+  made from a callback while the shutdown writes out is refused too, its
+  callback run on the io thread. Any
   number of threads may query at once; replies are matched by the ids
   they reference. A late reply to a query that ended, for twice the longer
-  of its timeout and 10 s, 131072 queries at most, is dropped whatever its
-  type, so a follow-up that is not the reply must not reference the request
+  of its timeout and 10 s, 10 s standing for no deadline, is dropped
+  whatever its type, the ids of 131072 attempts and searches kept at most,
+  one per attempt and per search, so a follow-up that is not the reply must not reference the request
   ([semantics](semantics.md#delivery)).
 - A send is built as on `SyncClient`, and ends in `queue()`, which returns
   its id at once, the io thread placing it; `written()`, a `Pending<u64>`,
@@ -550,15 +587,16 @@ type need not be passive, and any thread may use it. Its handles are
   returns whether the client had it.
 - `flush_all(timeout)`, a `Pending<bool>`: whether everything sent before
   the call was written, `false` once one was given up on or at the
-  timeout; `true` at once after `shutdown()`, nothing being left.
+  timeout; `true` at once after `shutdown()`: what is left to write is
+  the shutdown's, whose result comes once it is over.
 - What arrives on its own, not a reply to a query: a `PING` is answered, a
   search for a backend when the search policy says yes, without a policy
   never; the rest goes to every subscription of its type, `subscribe(type)`,
   to the inbox once `messages()` was asked for, and to `on_message`, each
   getting it; with none of them it is logged and dropped. `messages()` and
   `subscribe()` are `Messages` streams of `DEFAULT_INCOMING_QUEUE_MAX_SIZE`
-  that drop their oldest, with a warning and `dropped()` counting, when
-  nobody reads them; `recv(timeout)`, `try_recv()` and `next().await`
+  that drop their oldest when nobody reads them, `dropped()` counting,
+  with a warning at the first drop of each run; `recv(timeout)`, `try_recv()` and `next().await`
   read them, from any number of readers, each message going to one, `None`
   once the client was shut down and the stream is empty. Dropping a
   subscription ends it.
@@ -572,7 +610,11 @@ type need not be passive, and any thread may use it. Its handles are
   writes what was sent before it, and what the io thread sends meanwhile,
   `timeout` in all, closes the connections the polite way, and ends the io
   thread; the `Pending<()>` it returns completes once the thread has
-  ended. Every other call fails with `NotConnected` from then on.
+  ended. From then on a send, a query, a connect, `connections_count()`
+  and `routing_acknowledged()` fail with `NotConnected`; `flush_all()`
+  completes with `true`; the routing and key-filter setters return `Ok`
+  and change nothing, a `_then` callback never running; and `messages()`
+  and `subscribe()` give a stream that ends at once.
   Dropping the last handle does it with `CLOSE_FLUSH_SECONDS` and waits,
   but on the io thread itself, from a callback, where it only starts it.
 
@@ -585,7 +627,11 @@ completes and wakes: `client.query(...).await`, `send(...).written().await`,
 `messages.next().await` for a stream. It needs no runtime of its own and
 works on any executor, tokio's included, its waker called from the io
 thread; the same `Pending` is `wait()`ed for from a thread that does not
-await. This is what the Python `AsyncClient` is for asyncio:
+await. Dropping the future cancels nothing, as cancelling the await of an
+`AsyncClient` query does not: the query runs its stages on, sending its
+request again to the backend a search finds, and its reply is dropped. A
+query that must end by a deadline takes `.timeout(d)` rather than an
+outer timeout around the await. This is what the Python `AsyncClient` is for asyncio:
 
 ```rust
 async fn handler(client: ThreadedClient) -> Result<String, mx_multiplexer::Error> {
@@ -608,7 +654,7 @@ server classes send through their client:
 | `SyncClient`'s `send(...).wait()` | once written, the id | waits for one, the timeout at most | `NotConnected` when nothing wrote it with no connection live, else `OperationTimedOut` |
 | `ThreadedClient`'s `send(...).written()`, `.wait()` | the id once a copy is written | waits | `NotConnected` or `OperationTimedOut`, as above |
 | `flush_all(timeout)` | `true` once everything sent before it was written; `false` once one was given up on, or at the timeout | waits | `false`, and the observer for which |
-| `shutdown(timeout)`, the servers' `close(timeout)` | after writing what was sent before it, `CLOSE_FLUSH_SECONDS` at most | waits, then drops | the observer, `ShutDown` |
+| `shutdown(timeout)`, the servers' `close(timeout)` | after writing what was sent before it, `timeout` at most, `CLOSE_FLUSH_SECONDS` when `Drop` runs it | waits, then drops | the observer, `ShutDown` |
 
 Written means handed to the kernel on a live connection: only a reply says
 a message arrived ([semantics](semantics.md#failure-modes)).
@@ -628,9 +674,11 @@ reasons, `DropReason`:
   pinned lane's, or a copy sent to ALL.
 - `ShutDown`: the client shut down before it went.
 
-The observer runs inside whichever `SyncClient` call runs the loop when
-the drop happens, and on a `ThreadedClient`'s io thread, where it must
-return quickly. Each drop is also logged, the first of a kind at once,
+The drop is counted at once, in `dropped()`, and the observer hears of it
+in the pass that runs the sends' callbacks, ahead of them, once the handler
+the drop happened in is done: inside whichever `SyncClient` call runs the
+loop next, and on a `ThreadedClient`'s io thread, where it must return
+quickly. A flush returns once the observer heard of every drop before it. Each drop is also logged, the first of a kind at once,
 naming the message's id and type, and the rest counted in a line a
 second. A message the library wrote is not dropped, whatever happens to it
 next.
@@ -685,13 +733,21 @@ written.
 thread does not exist in the child, its locks may be held by threads that
 do not exist there either, and its sockets are shared with the parent.
 Every call on it fails with `UsedAfterFork` first, before it takes any
-lock, and so does every use of a `Lane` made before the fork;
-`orphaned()` tells without failing. Dropping it, or `shutdown()`, closes
-the child's copies of its sockets with `close(2)` alone, which leaves the
-parent's connections open, and leaks the rest on purpose. A
-`pthread_atfork` child handler, registered when the first client is made,
-bumps a fork generation every client compares with the one it was made
-in: one load per call. Create clients after forking. [The C++
+lock, and so does a send or a query through a `Lane` made before the
+fork, whose getters answer as for a lane nothing goes through:
+`connection()` None, `connected()` false, `closed()` true. The calls
+that cannot fail answer for the child, before any lock too:
+`messages()` gives a stream that ends at once, never the parent's
+inbox, and a threaded server's `pending()` is 0. `orphaned()` tells
+without failing. Dropping it, or `shutdown()`, closes the child's copies
+of its sockets with `close(2)` alone, once however many calls do it,
+which leaves the parent's connections open, and leaks the rest on
+purpose, the parent's threads with their handles; a server class's
+`close()` and drop do the same. A `pthread_atfork` child handler,
+registered when the first client is made, with no lock a child forked
+meanwhile could find held, bumps a fork generation every client
+compares with the one it was made in: one load per call. Create clients
+after forking. [The C++
 page](api_cpp.md#threads) says what a forked child of a process with
 threads can still wait on, the resolver's and the dynamic loader's locks;
 the same holds for a Rust program, whose library looks names up on a

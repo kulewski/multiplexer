@@ -4,17 +4,24 @@
 // passed to ThreadedClient's on_message, handled by the server classes, on
 // their loop's thread), and the server classes' loops wake at the
 // acknowledgement rather than at their next poll, an hour away here, for a
-// drain as for a change of filters. The Python mirror is
+// drain as for a change of filters. A connection's welcome confirms the
+// routing it carries, so a client is acknowledged once connected, a change
+// made before connecting is heard after it, and a drain survives its
+// multiplexer's restart. A drain also waits for what its server holds for
+// a connection, every multiplexer down, and ends on its cap whatever the
+// poll. The Python mirror is
 // multiplexer/acknowledged_test.py. Counted, not timed: the sender's own
 // marker coming back says the multiplexer routed everything it sent
 // before; a held handler says what a threaded server still has; a bound
 // on a wait only detects a failure.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -303,6 +310,282 @@ TEST(Acknowledged, AThreadedServerHearsItOnceItsWorkersFinishedWhatCameBefore) {
   EXPECT_EQ(loop, heard.thread(0)) << "on serve_forever()'s thread";
   EXPECT_EQ(ThreadedClient::REPLIED, answered.get_future().get());
   server.stop();
+  serving.join();
+}
+
+// Waits until `condition` holds, BOUND at most; whether it does. For a state
+// no event tells the test of: how many connections a client has.
+template <typename Condition>
+bool eventually(Condition condition) {
+  const std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + BOUND;
+  while (!condition()) {
+    if (std::chrono::steady_clock::now() > until) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return true;
+}
+
+// A connection's welcome carries the client's routing, which the
+// multiplexer takes with it: once connected, with no change made and
+// nothing received, the routing reads acknowledged.
+TEST(Acknowledged, AConnectionsWelcomeConfirmsTheRouting) {
+  InProcessMultiplexer mx;
+  Client sync(multiplexer::peers::TEST_EVENT_BACKEND);
+  ASSERT_TRUE(sync.connect("127.0.0.1", mx.port, 5));
+  EXPECT_TRUE(sync.routing_acknowledged());
+  ThreadedClient threaded(multiplexer::peers::TEST_EVENT_BACKEND);
+  ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, 5));  // registered once it returns
+  EXPECT_TRUE(threaded.routing_acknowledged());
+}
+
+// A change made with no connection is in effect at once, and its callback
+// runs at the next receive; a connection made before that receive carries
+// the change in its welcome and takes nothing back.
+TEST(Acknowledged, AChangeMadeBeforeConnectingIsHeardAfter) {
+  InProcessMultiplexer mx;
+  Client receiver(multiplexer::peers::TEST_EVENT_BACKEND);
+  int heard = 0;
+  receiver.set_key_filters({{multiplexer::types::TEST_EVENT, {}}}, [&] { ++heard; });
+  ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
+  for (int tries = 0; tries < 600 && !heard; ++tries) {  // the caller back for more, as a loop is
+    try {
+      receiver.receive_message(0.05f);
+    } catch (const Client::OperationTimedOut&) {
+    }
+  }
+  EXPECT_EQ(1, heard) << "at a receive after the connection";
+  EXPECT_TRUE(receiver.routing_acknowledged());
+}
+
+// A threaded server drains with a request in a worker, the drain
+// confirmed; its multiplexer restarts, and the connection that comes back
+// carries the drain routing in its welcome, which confirms it again: the
+// drain ends once the worker is done, not at its cap, an hour away. The
+// worker is let go only once the connection is back, so that the drain
+// cannot end while no multiplexer is connected.
+TEST(Acknowledged, ADrainAcrossARestartEndsOnceItsWorkIsDone) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  Held server({{"127.0.0.1", port}});
+  server.connect();
+  std::promise<void> left;
+  std::thread serving([&] {
+    server.serve_forever(HOUR, HOUR);
+    left.set_value();
+  });
+  Client asking(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(asking.connect("127.0.0.1", port, 5));
+  MultiplexerMessage hold;
+  hold.set_id(asking.random64());
+  hold.set_sender(asking.instance_id());
+  hold.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  hold.set_message("hold");
+  asking.flush(asking.schedule_one(hold));
+  ASSERT_EQ(std::future_status::ready, server.holding.get_future().wait_for(BOUND))
+      << "the request reached a worker, which holds it";
+  server.start_draining();
+  EXPECT_TRUE(eventually([&] { return server.client().routing_acknowledged(); })) << "the drain confirmed";
+  mx.reset();  // stopped: every connection to it ends
+  EXPECT_TRUE(eventually([&] { return server.client().connections_count() == 0; }));
+  mx.reset(new InProcessMultiplexer(port));  // back on the same address
+  EXPECT_TRUE(eventually([&] { return server.client().connections_count() == 1; })) << "reconnected";
+  server.release.set_value();
+  std::future<void> leaving = left.get_future();
+  const bool drained = leaving.wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over once the worker is done";
+  if (!drained) {
+    server.stop();  // the test fails; the stop ends the loop at its next look
+  }
+  serving.join();
+}
+
+// The request a test holds: what Held and HeldPlain hold until released.
+MultiplexerMessage hold_request(Client& asking) {
+  MultiplexerMessage hold;
+  hold.set_id(asking.random64());
+  hold.set_sender(asking.instance_id());
+  hold.set_type(multiplexer::types::PYTHON_TEST_REQUEST);
+  hold.set_message("hold");
+  return hold;
+}
+
+// A threaded server drains while its only multiplexer is down, a request
+// in a worker: the worker's reply is held for the next connection, and the
+// drain waits for it, the multiplexer back, where the confirmation, with
+// no connection, held at once and the close dropped the reply. Counted:
+// what the server's client gave up on.
+TEST(Acknowledged, ADrainWaitsForWhatItHoldsForAConnection) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  Held server({{"127.0.0.1", port}});
+  server.connect();
+  std::promise<void> left;
+  std::thread serving([&] {
+    server.serve_forever(HOUR, HOUR);
+    left.set_value();
+  });
+  Client asking(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(asking.connect("127.0.0.1", port, 5));
+  asking.flush(asking.schedule_one(hold_request(asking)));
+  ASSERT_EQ(std::future_status::ready, server.holding.get_future().wait_for(BOUND))
+      << "the request reached a worker, which holds it";
+  mx.reset();  // stopped: every connection to it ends
+  EXPECT_TRUE(eventually([&] { return server.client().connections_count() == 0; }));
+  server.start_draining();
+  server.release.set_value();
+  EXPECT_TRUE(eventually([&] {
+    try {
+      return server.client().held_for_a_connection() == 1;
+    } catch (const ThreadedClient::NotConnected&) {
+      return true;  // closed, the reply not waited for: dropped() below says so
+    }
+  })) << "the reply held";
+  mx.reset(new InProcessMultiplexer(port));  // back on the same address
+  std::future<void> leaving = left.get_future();
+  const bool drained = leaving.wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over once the reply went";
+  if (!drained) {
+    server.stop();  // the test fails; the stop ends the loop at its next look
+  }
+  serving.join();
+  EXPECT_EQ(0u, server.client().dropped()) << "the reply written once a connection was back, not dropped";
+}
+
+// Starts draining at the request it is told to hold, holds it until the
+// test releases it, then answers it; notes, on its loop's thread, the most
+// messages its client held for a connection. Built on the test's client,
+// which the close shuts down and leaves to the test.
+class HeldPlain : public BaseMultiplexerServer {
+ public:
+  explicit HeldPlain(Client* client) : BaseMultiplexerServer(client, multiplexer::peers::PYTHON_TEST_SERVER) {}
+  std::promise<void> holding;
+  std::promise<void> release;
+  std::atomic<std::size_t> held{0};
+
+ protected:
+  void handle_message(MultiplexerMessage& mxmsg) override {
+    if (mxmsg.message() == "hold") {
+      start_draining();
+      holding.set_value();
+      release.get_future().wait_for(BOUND);
+    }
+    send_message(mx::util::kwargs::Kwargs()
+                     .set("message", std::string("ok"))
+                     .set("type", multiplexer::types::PYTHON_TEST_RESPONSE));
+  }
+  void periodic_task() override { held = std::max(held.load(), conn->held_for_a_connection()); }
+};
+
+// The same for the plain server: its reply, made as its only multiplexer
+// went down, held for the next connection, which the drain waits for.
+TEST(Acknowledged, APlainDrainWaitsForWhatItHoldsForAConnection) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  Client client(multiplexer::peers::PYTHON_TEST_SERVER);
+  ASSERT_TRUE(client.connect("127.0.0.1", port, 5));
+  const std::uint64_t server_id = client.instance_id();
+  HeldPlain server(&client);
+  std::promise<void> left;
+  std::thread serving([&] {
+    server.serve_forever(HOUR, HOUR);
+    left.set_value();
+  });
+  Client asking(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(asking.connect("127.0.0.1", port, 5));
+  asking.flush(asking.schedule_one(hold_request(asking)));
+  ASSERT_EQ(std::future_status::ready, server.holding.get_future().wait_for(BOUND))
+      << "the request reached the server, which holds it, draining";
+  mx.reset();  // stopped: every connection to it ends
+  server.release.set_value();
+  EXPECT_TRUE(eventually([&] { return server.held.load() == 1; })) << "the reply held";
+  mx.reset(new InProcessMultiplexer(port));  // back on the same address
+  std::future<void> leaving = left.get_future();
+  const bool drained = leaving.wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over once the reply went";
+  if (!drained) {
+    server.stop();  // the test fails; a request addressed to the server wakes its loop to see the stop
+    Client waking(multiplexer::peers::WEBSITE);  // `asking` has not reconnected: nothing drove it
+    if (waking.connect("127.0.0.1", port, 5)) {
+      MultiplexerMessage wake = hold_request(waking);
+      wake.set_message("wake");
+      wake.set_to(server_id);
+      waking.flush(waking.schedule_one(wake));
+    }
+  }
+  serving.join();
+  EXPECT_EQ(0u, client.dropped()) << "the reply written once a connection was back, not dropped";
+}
+
+// Leaving, its drain keeping events coming: only the cap can end it.
+class OpenLeaving : public Leaving {
+ public:
+  explicit OpenLeaving(const MultiplexerAddresses& addresses) : Leaving(addresses), id(conn->instance_id()) {
+    Routing routing = drain_routing();
+    routing.set_all(true);
+    set_drain_routing(routing);
+  }
+  const std::uint64_t id;  // what a message addressed to it carries
+};
+
+// A drain that keeps a path open ends on its cap alone: with a poll of an
+// hour the loop's wait ends at the cap, where nothing woke the loop after
+// the confirmation and the drain went on for good.
+TEST(Acknowledged, APlainDrainEndsOnItsCapWhateverThePoll) {
+  InProcessMultiplexer mx;
+  OpenLeaving backend({{"127.0.0.1", mx.port}});
+  backend.connect();
+  std::promise<void> left;
+  std::thread serving([&] {
+    backend.serve_forever(HOUR, 1.0f);
+    left.set_value();
+  });
+  ThreadedClient asking(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(asking.connect("127.0.0.1", mx.port, 5));
+  EXPECT_EQ(ThreadedClient::REPLIED, asking.query("leave", multiplexer::types::PYTHON_TEST_REQUEST, 30).outcome);
+  const bool drained = left.get_future().wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over at its cap";
+  if (!drained) {
+    backend.stop();  // the test fails; a request addressed to it wakes the loop to see the stop
+    MultiplexerMessage wake = asking.new_message(multiplexer::types::PYTHON_TEST_REQUEST, "wake");
+    wake.set_to(backend.id);
+    asking.query(wake, 30);
+  }
+  serving.join();
+}
+
+// A threaded server whose drain keeps events coming: only the cap can end
+// it.
+class OpenThreaded : public BaseThreadedMultiplexerServer {
+ public:
+  explicit OpenThreaded(const MultiplexerAddresses& addresses)
+      : BaseThreadedMultiplexerServer(addresses, multiplexer::peers::PYTHON_TEST_SERVER, options()) {}
+  static Options options() {
+    Options options;
+    options.drain_routing.set_all(true);
+    return options;
+  }
+
+ protected:
+  void handle_message(const RequestPtr& request) override { request->no_response(); }
+};
+
+TEST(Acknowledged, AThreadedDrainEndsOnItsCapWhateverThePoll) {
+  InProcessMultiplexer mx;
+  OpenThreaded server({{"127.0.0.1", mx.port}});
+  server.connect();
+  std::promise<void> left;
+  std::thread serving([&] {
+    server.serve_forever(HOUR, 1.0f);
+    left.set_value();
+  });
+  server.start_draining();
+  const bool drained = left.get_future().wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over at its cap";
+  if (!drained) {
+    server.stop();  // the test fails; the stop ends the loop at its next look
+  }
   serving.join();
 }
 

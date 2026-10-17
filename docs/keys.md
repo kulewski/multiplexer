@@ -17,7 +17,13 @@ them while they serve.
 ## A key and a key filter
 
 **The key.** A message's `key` (field 9 of the envelope) is a string of at
-most `MAX_KEY_SIZE` bytes, 256.
+most `MAX_KEY_SIZE` bytes, 256: text, in UTF-8, as protobuf's `string`
+fields are, and what the filters' regular expressions match. Python's and
+Rust's keys are text by their type; a C++ program sets bytes, and one that
+sets bytes that are not UTF-8, a binary digest say, sends a frame that a
+Rust peer refuses, closing the connection it came on, and that a debug
+build of a C++ peer logs protobuf's error for. Such a key goes as hex or
+base64.
 
 - Python: `query(..., key=...)`, and `key=` among the fields of
   `send_message()` and `new_message()`.
@@ -47,15 +53,23 @@ of a type when it has no filter for the type, or when its filter takes the
 key. Routing passes over the peers that do not take a message's key and
 treats the rest as it always does:
 
-- **`whom: ANY`.** One of them, round robin, skipping full queues; a last
-  resort among them only when none of the others can take it.
+- **`whom: ANY`.** One of them, round robin: the one that has waited
+  longest for a message of its type, a peer that has just registered
+  first, so that the peers taking a key take its messages in turn, as the
+  peers of a type with no filters take every message in turn, and one
+  that another key's messages keep busy lets the others take its turn;
+  full queues skipped, a last resort among them only when none of the
+  others can take it.
 - **`whom: ALL`.** Every one of them.
 - **`to`.** An addressed message ignores filters, as it ignores rules.
 - **The search.** The search a query falls back to
   (`BACKEND_FOR_PACKET_SEARCH`) carries the request's key and goes to the
   same peers. So the backend it finds, which then gets the request
-  addressed to it, takes the key: a failover never moves a request to a
-  backend that does not take its key.
+  addressed to it, took the key when it answered: a failover never moves a
+  request to a backend whose filters had dropped its key before the search.
+  A backend that answered the search and changed its filters right after
+  can still get that addressed request, after its acknowledgement, since
+  `to` ignores filters.
 
 **A filter keeps keys away from its own peer only.** A peer with no filter
 for the type takes every key, those a dedicated pool serves included. To
@@ -131,13 +145,20 @@ routed before has been handed to the peer, the change is acknowledged:
 That ordering makes a handover safe:
 
 - **Unloading a model:** remove its pattern, and free the model in
-  `on_acknowledged`: the requests routed before have been served by then,
-  and no more come. A worker unloading its last model keeps the type with
-  an empty list: dropping the type from its filters would take every key.
+  `on_acknowledged`: the requests routed by the rules before have been
+  served by then, and no more come so. One can still come addressed: the
+  third stage of a query whose search the worker answered just before the
+  change. Its handler answers it, with an error when the model is gone,
+  rather than assume the model, so that the caller gets the error at once;
+  or the worker waits a client's round trip after `on_acknowledged` before
+  it frees the model.
+  A worker unloading its last model keeps the type with an empty list:
+  dropping the type from its filters would take every key.
   [examples/models](../examples/models/walkthrough.md) does it.
 - **Moving a tenant between pools:** the new owner adds the key and waits
   for its acknowledgement; then the old owner removes it and waits for
-  its own. Both may serve the tenant in between.
+  its own. Both may serve the tenant in between, and the old owner may
+  still get an addressed request after its acknowledgement, as above.
 
 **The drain keeps them.** A drain's routing leaves the filters as they are,
 and a change of filters leaves a drain as it is
@@ -157,7 +178,10 @@ Python also refuses one string where the list of patterns goes
 **Refused by the multiplexer**, which compiles every pattern:
 
 - a pattern that does not compile;
-- a second filter for one type.
+- a second filter for one type;
+- in a `PEER_CONTROL`, filters whose answer, `PEER_STATUS`, which repeats
+  them, would be over `MAX_MESSAGE_SIZE`: a request within a few dozen
+  bytes of the limit.
 
 There is no limit on the number of patterns or keys but the frame that
 carries them, `MAX_MESSAGE_SIZE`; what they cost is below.
@@ -178,7 +202,13 @@ and `routing_acknowledged()` stays false until a change succeeds.
     punctuation: 20 ns, 36 ns with 100,000 of them;
   - one match of the key against all of its other patterns at once, an
     RE2::Set: 60 ns, 75 ns with 400 patterns, 100 ns with 10,000;
-  - one comparison per peer, about 1 ns.
+  - a write for each peer that holds a key or a pattern that matched;
+  - for `whom: ANY`, about 6 ns for each peer of the type that does not
+    take the key and stands ahead of the one that does, in the order of
+    the turns: 6 µs a message for a key a thousand others pass over. A
+    type whose keys are each taken by few of many peers pays for the
+    peers it passes over; one whose keys most of its peers take pays next
+    to nothing.
 - **Peers declaring the same pattern share it:** a pool of a hundred
   backends with one filter costs what one backend does.
 - **A pattern new to its type** is compiled once, about 5 µs, and the set
@@ -187,6 +217,14 @@ and `routing_acknowledged()` stays false until a change succeeds.
   which the multiplexer routes nothing else. Exact keys need neither:
   100,000 are declared in 15 ms. A filter that changes often, or lists
   many keys, is best made of them.
+- **The set's memory** is sized from what its patterns compile to, 128
+  bytes for each instruction of their programs, 8 MiB at least and 1 GiB
+  at most: a thousand long patterns with repetitions, which RE2 unrolls
+  into some 260 instructions each, take about 32 MiB at most, and only as
+  matching needs it. A set that cannot be built all the same is
+  said in a `WARNING`, and its type's keyed messages are matched against
+  its patterns one by one, with the same answer, about 18 µs a message
+  for a thousand of them.
 
 Only the multiplexer links RE2. The Bazel build fetches it; the build
 without Bazel needs `libre2-dev` ([building](building.md)).
@@ -196,7 +234,7 @@ without Bazel needs `libre2-dev` ([building](building.md)).
 - **[tests/scenarios/key_routing](../tests/scenarios/key_routing/README.md):**
   pools by key through every client mode and both server classes; the
   search carrying the key from `SyncClient` and `ThreadedClient`; events by
-  key. In both languages.
+  key. In Python, C++ and Rust.
 - **[multiplexer/key_routing_test.py](../multiplexer/key_routing_test.py):**
   the protocol itself:
   - whom `whom: ANY` picks from and whom `whom: ALL` reaches;

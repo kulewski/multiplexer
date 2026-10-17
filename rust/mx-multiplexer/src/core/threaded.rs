@@ -114,10 +114,9 @@ impl Core {
     /// A message for the threaded client: a query's, or one for nobody
     /// here.
     pub(crate) fn dispatch_incoming(&mut self, incoming: Incoming) {
-        if self.query_takes(&incoming) {
-            return;
+        if let Some(incoming) = self.query_takes(incoming) {
+            self.on_unmatched(incoming);
         }
-        self.on_unmatched(incoming);
     }
 
     /// A message that is no reply to a query in flight: REQUEST_RECEIVED
@@ -487,6 +486,27 @@ impl Core {
     pub(crate) fn drain_expired(&mut self) {
         self.threaded.drain_timer = None;
         self.teardown();
+    }
+
+    /// messages()'s stream, registered; after the teardown, which a
+    /// callback's call can come after, ended instead.
+    pub(crate) fn register_inbox(&mut self, queue: Arc<Queue>) {
+        if self.threaded.torn_down {
+            queue.close();
+            return;
+        }
+        self.threaded.inbox = Some(queue);
+    }
+
+    /// A subscribe()'s stream, registered as `register_inbox` registers.
+    pub(crate) fn register_subscription(&mut self, r#type: u32, queue: Weak<Queue>) {
+        if self.threaded.torn_down {
+            if let Some(queue) = queue.upgrade() {
+                queue.close();
+            }
+            return;
+        }
+        self.threaded.subscriptions.push((Some(r#type), queue));
     }
 
     /// The end of a shutdown, once: the flush_all() calls still waiting

@@ -15,6 +15,7 @@ use crate::core::harness::Harness;
 use crate::core::lane::Lane;
 use crate::core::outbox::{FlushDone, SendDone};
 use crate::core::SendState;
+use crate::proto::multiplexer::Routing;
 use crate::test_log::capture;
 
 const TEN: Option<Duration> = Some(Duration::from_secs(10));
@@ -41,6 +42,36 @@ fn messages_go_round_robin_over_the_connections_with_room() {
     let (first, second) = (h.written_ids(one), h.written_ids(two));
     assert_eq!(2, first.len());
     assert_eq!(2, second.len());
+}
+
+#[test]
+fn a_message_given_no_connection_passes_over_a_full_one_and_then_goes_where_fewer_wait() {
+    // The round robin had room on every connection in every test: one that
+    // gave every other message to a full connection, a hung multiplexer's,
+    // passed them all.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let one = h.up(1);
+    let two = h.up(2);
+    h.written(one);
+    h.written(two);
+    h.hold_writes = true;
+    let lane = Lane::new(false);
+    let mut ids = 1..;
+    // The lane's connection full, two more waiting for its room.
+    let through_lane: Vec<u64> = ids.by_ref().take(DEFAULT_OUT_QUEUE_SIZE + 2).collect();
+    for id in &through_lane {
+        assert!(h.send_with(*id, TEN, false, Some(&lane)).0);
+    }
+    let full = lane.connection().unwrap().conn.unwrap();
+    let other = if full == one { two } else { one };
+    // The other filled, then two more waiting there, where fewer wait.
+    let given_none: Vec<u64> = ids.take(DEFAULT_OUT_QUEUE_SIZE + 2).collect();
+    for id in &given_none {
+        assert!(h.send(*id));
+    }
+    h.complete_writes();
+    assert_eq!(through_lane, h.written_ids(full));
+    assert_eq!(given_none, h.written_ids(other));
 }
 
 #[test]
@@ -78,6 +109,35 @@ fn a_message_waits_for_room_until_its_deadline_and_is_reported_no_room() {
             == "message dropped: it waited for room on its connection past its timeout; id 5000, type 300"));
     h.complete_writes();
     assert!(!h.written_ids(conn).contains(&5000), "never written late");
+}
+
+#[test]
+fn a_drop_is_told_in_the_pass_after_its_handler_ahead_of_the_sends_callback() {
+    // Given up on at once, with no time and nothing connected: counted in
+    // the send, told to the observer in the posted pass that runs the
+    // program's callbacks, and the send's own `done` after it.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let drops = h.observe_drops();
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let hearing = Arc::clone(&heard);
+    let done = SendDone::Callback(Box::new(move |written| hearing.lock().unwrap().push(written)));
+    let frame = h.event(5, 300, b"event");
+    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, Some(done)));
+    assert_eq!(1, h.core.client.dropped.load(std::sync::atomic::Ordering::Relaxed), "counted at once");
+    assert!(drops.lock().unwrap().is_empty(), "not told inside the send");
+    assert!(h.core.run_one_posted());
+    assert_eq!(vec![(5, DropReason::NoConnection)], *drops.lock().unwrap());
+    assert_eq!(vec![0], *heard.lock().unwrap(), "in the same pass, after the drop");
+}
+
+#[test]
+fn a_flush_begun_after_a_drop_ends_after_it_was_told() {
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let drops = h.observe_drops();
+    let frame = h.event(5, 300, b"event");
+    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, None));
+    h.core.begin_flush(None);
+    assert_eq!(vec![(5, DropReason::NoConnection)], *drops.lock().unwrap(), "told as the flush begins");
 }
 
 #[test]
@@ -253,6 +313,34 @@ fn a_flush_ends_not_all_written_when_one_was_given_up_on() {
     assert!(ends.lock().unwrap().is_empty());
     h.advance(Duration::from_secs(1));
     assert_eq!(vec!["flush false"], *ends.lock().unwrap());
+}
+
+#[test]
+fn a_flush_ends_when_its_connection_goes_with_the_clients_own_frame_last() {
+    // The flush followed the frame queued last on each connection, the
+    // client's own PEER_CONTROL on the stalled one, behind a message whose
+    // write hangs. That write fails, the message goes to the other
+    // connection and is written there, and the PEER_CONTROL goes with its
+    // connection, told to nobody: the flush waited for it for good. It
+    // follows the last frame the program sent now.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let stalled = h.up(1);
+    let other = h.up(2);
+    h.written(stalled);
+    h.written(other);
+    h.hold_writes = true;
+    assert!(h.send(1));
+    assert!(h.send(2)); // one on each connection, round robin, each write held
+    h.core.set_routing(Routing { any: Some(false), all: Some(false), last_resort: Some(false) }, None);
+    h.settle();
+    h.complete_write(other);
+    h.complete_write(other); // the other's message and PEER_CONTROL written
+    let ends = Arc::new(Mutex::new(Vec::new()));
+    flush_into(&mut h, &ends);
+    assert!(ends.lock().unwrap().is_empty(), "the message on the stalled connection is still to be written");
+    h.fail_write(stalled);
+    h.complete_writes();
+    assert_eq!(vec!["flush true"], *ends.lock().unwrap());
 }
 
 #[test]

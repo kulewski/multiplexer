@@ -255,6 +255,28 @@ py_test(
 )
 
 py_test(
+    name = "port_file_test",
+    size = "small",
+    srcs = ["port_file_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
+    name = "file_size_limit_test",
+    size = "small",
+    srcs = ["file_size_limit_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+py_test(
     name = "rules_check_interval_test",
     size = "small",
     srcs = ["rules_check_interval_test.py"],

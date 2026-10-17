@@ -1,16 +1,19 @@
 //! `SyncClient` against real multiplexers: connecting, a query answered by
 //! a backend, events to every backend of a type, what a query reads
-//! meanwhile, receiving, a wait ended by an acknowledgement, and the
-//! addresses it refuses. Each test starts the multiplexers it needs
+//! meanwhile, receiving, a wait ended by an acknowledgement, the addresses
+//! it refuses, a connect that ended while it idled, and one busy
+//! connection beside another. Each test starts the multiplexers it needs
 //! (tests/support).
 
 mod support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use mx_multiplexer::{Error, Routing, SyncClient};
+use mx_multiplexer::{
+    Error, Message, Routing, SyncClient, AUTO_RECONNECT_TIME, CONNECT_ATTEMPT_SECONDS, MAX_MESSAGE_SIZE,
+};
 use support::testing_constants::{peers, types};
 use support::{beside, Multiplexer};
 
@@ -145,4 +148,91 @@ fn a_query_survives_its_multiplexers_restart() {
     let reply = client.query(types::TEST_REQUEST_A, "again").wait().unwrap();
     assert_eq!(&b"AGAIN"[..], &reply.message.payload[..]);
     backend.join().unwrap();
+}
+
+#[test]
+fn a_connect_that_ended_while_the_client_idled_is_kept() {
+    // Started and left: the connect ends while nothing runs the loop, and
+    // its deadline passes too. The next call saw the deadline's timer first,
+    // which cancelled the connect that had ended, and the connection came
+    // up only at the reconnect, AUTO_RECONNECT_TIME later, if a call was
+    // waiting then; the end of the connect comes first now.
+    let mx = Multiplexer::start();
+    let mut client = SyncClient::builder(peers::TEST_CLIENT).build().unwrap();
+    client.connect_all([mx.address()], Some(Duration::ZERO)).unwrap();
+    std::thread::sleep(CONNECT_ATTEMPT_SECONDS + Duration::from_secs(1));
+    let until = Instant::now() + AUTO_RECONNECT_TIME - Duration::from_secs(1);
+    while client.connections_count().unwrap() == 0 && Instant::now() < until {
+        let _ = client.receive(Some(Duration::from_millis(10))); // runs the loop
+    }
+    assert_eq!(1, client.connections_count().unwrap(), "up before a reconnect could have brought it");
+}
+
+#[test]
+fn a_busy_connection_keeps_no_other_unread() {
+    // The receiver has a backlog from A in its socket and reads it one
+    // message at a time while B brings a marker. Readiness was looked at
+    // only when nothing was ready, so B was read once A's backlog was gone.
+    const BACKLOG: usize = 5000;
+    let (a, b) = (Multiplexer::start(), Multiplexer::start());
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([a.address(), b.address()]).unwrap();
+    let mut from_a = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([a.address()]).unwrap();
+    let mut from_b = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([b.address()]).unwrap();
+    for index in 0..BACKLOG {
+        from_a.send(types::TEST_EVENT, index.to_string()).queue().unwrap();
+    }
+    routed(&mut from_a); // the backlog is the receiver's to read now
+    for _ in 0..10 {
+        receiver.receive(TEN).unwrap(); // A is the connection with frames now
+    }
+    from_b.send(types::TEST_EVENT, "marker").queue().unwrap();
+    routed(&mut from_b);
+    let mut before = 0;
+    while receiver.receive(TEN).unwrap().message.payload.as_ref() != b"marker" {
+        before += 1;
+    }
+    assert!(before < BACKLOG / 2, "{before} of A's messages came before B's marker");
+}
+
+/// Returns once `sender`'s multiplexer has routed everything it sent: a
+/// marker it addresses to itself comes back after it, frames from one
+/// connection being routed in their order.
+fn routed(sender: &mut SyncClient) {
+    let own = sender.instance_id();
+    let marker = sender.send(types::TEST_EVENT, "routed").to(own).wait().unwrap();
+    while sender.receive(TEN).unwrap().message.id != marker {}
+}
+
+#[test]
+fn a_send_waited_for_with_no_deadline_as_duration_max_is_written() {
+    // Duration::MAX, the usual "forever", is no deadline everywhere else;
+    // the flushing send added its grace to it and panicked on the overflow.
+    let mx = Multiplexer::start();
+    let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
+    let own = client.instance_id();
+    let id = client.send(types::TEST_EVENT, "forever").to(own).timeout(Duration::MAX).wait().unwrap();
+    assert_eq!(id, client.receive(TEN).unwrap().message.id);
+}
+
+#[test]
+fn a_query_too_large_once_its_sender_is_filled_in_is_refused_at_the_call() {
+    // The size check measured the request before its sender was filled in:
+    // up to 11 bytes the frames carry went uncounted, and such a request
+    // was sent, to fail as something else.
+    let mut client = SyncClient::builder(peers::TEST_CLIENT).build().unwrap();
+    let request = |payload_size: usize, sender: u64| Message {
+        r#type: types::TEST_REQUEST_A,
+        payload: vec![0; payload_size].into(),
+        sender,
+        ..Default::default()
+    };
+    let own = client.instance_id();
+    let Err(Error::TooLarge { size, .. }) = client.query_message(request(MAX_MESSAGE_SIZE, own)).wait() else {
+        panic!("a query over the limit is refused")
+    };
+    let envelope = size - MAX_MESSAGE_SIZE;
+    match client.query_message(request(MAX_MESSAGE_SIZE - envelope + 1, 0)).wait() {
+        Err(Error::TooLarge { size, .. }) => assert_eq!(MAX_MESSAGE_SIZE + 1, size),
+        other => panic!("refused as too large, not {other:?}"),
+    }
 }

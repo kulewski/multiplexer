@@ -2,6 +2,7 @@
 // messages a backend answers itself. See the header for the design.
 #include "multiplexer/backend/base_multiplexer_server.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -107,7 +108,7 @@ void BaseMultiplexerServer::serve_forever(float poll, float drain_seconds) {
       // on_handler_exception(). An acknowledgement ends the wait too, so
       // that a drain is over, and periodic_task() hears of a change, as
       // soon as every multiplexer has it.
-      if (_receive_one(poll, /*end_on_acknowledgement=*/true)) {
+      if (_receive_one(_wait(poll), /*end_on_acknowledgement=*/true)) {
         _handle_received();
       }
       periodic_task();
@@ -147,9 +148,21 @@ bool BaseMultiplexerServer::drained() const {
   }
   // A negative drain_seconds is no cap, as an infinite one, the drain
   // ending on the confirmation alone; 0 and NaN end it at once: as
-  // mx::from_seconds reads them, and the threaded server too.
+  // mx::from_seconds reads them, and the threaded server too. With no
+  // connection live the confirmation holds at once, so what is held for
+  // the next connection is waited for too.
   return std::chrono::steady_clock::now() - draining_since_ >= mx::from_seconds(drain_seconds_) ||
-         (nothing_more_arrives(drain_routing_) && conn->routing_acknowledged());
+         (nothing_more_arrives(drain_routing_) && conn->routing_acknowledged() && conn->held_for_a_connection() == 0);
+}
+
+float BaseMultiplexerServer::_wait(float poll) const {
+  if (!draining_ || drain_seconds_ < 0) {
+    return poll;  // no drain, or one with no cap: the poll alone
+  }
+  const std::chrono::duration<double> left =
+      mx::from_seconds(drain_seconds_) - (std::chrono::steady_clock::now() - draining_since_);
+  const double cap_left = std::max(0.0, left.count());
+  return poll < 0 || cap_left < poll ? static_cast<float>(cap_left) : poll;
 }
 
 // Builds and queues a message. While a request is being handled the

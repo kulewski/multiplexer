@@ -345,15 +345,19 @@ void BasicClient::_try_next_candidate(Connection::pointer conn) {
   // timeout, two minutes: past CONNECT_ATTEMPT_SECONDS the connect is
   // cancelled, and _connected takes it for the failure it is. Only while it
   // is under way, so that a deadline met by a connect that had just
-  // succeeded leaves the connection's first read alone.
+  // succeeded leaves the connection's first read alone; and only its own
+  // attempt's: a deadline that expired in the loop pass that also read its
+  // connect's failure runs after that failure started the next address,
+  // the cancel in _connected too late for a handler already queued.
   if (!data.connect_deadline) {
     data.connect_deadline = std::make_shared<Timer>(io_service_);
   }
   data.connecting = true;
+  const std::uint64_t attempt = ++data.connect_attempt;
   data.connect_deadline->expires_after(mx::from_seconds(CONNECT_ATTEMPT_SECONDS));
-  data.connect_deadline->async_wait([conn](const asio::error_code& error) {
+  data.connect_deadline->async_wait([conn, attempt](const asio::error_code& error) {
     auto& data = conn->managers_private_data();
-    if (!error && data.connecting) {
+    if (!error && data.connecting && data.connect_attempt == attempt) {
       data.connect_timed_out = true;
       asio::error_code ignored;
       conn->socket().cancel(ignored);

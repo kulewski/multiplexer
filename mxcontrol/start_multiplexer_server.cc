@@ -1,14 +1,16 @@
 // run_multiplexer: creates the Server, reads the rules, binds, optionally
 // writes the port file, and runs the io_service until a signal stops it;
 // SIGHUP reloads the rules on the way. The first SIGTERM or SIGINT drains,
-// a second one stops at once; SIGPIPE is ignored.
+// a second one stops at once; SIGPIPE and SIGXFSZ are ignored.
 #include "mxcontrol/start_multiplexer_server.h"
 
 #include <signal.h>  // sigaction
 
 #include <asio.hpp>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -28,13 +30,21 @@ namespace {
 constexpr std::uint16_t DEFAULT_PORT = 1980;
 
 // Writes `address` to `path` atomically (temporary file plus rename), so a
-// reader never sees a partially written file.
+// reader never sees a partially written file. A write that failed, a full
+// disk say, ends the start, as a file that cannot be opened does, the
+// temporary file removed and `path` left as it was.
 void write_port_file(const std::string& path, const std::string& address) {
   const std::string tmp = path + ".tmp";
   {
     std::ofstream out(tmp.c_str(), std::ios::out | std::ios::trunc);
     AssertMsg(out.good(), "cannot write port file " + tmp);
     out << address << "\n";
+    out.close();
+    if (out.fail()) {
+      const std::string why = std::strerror(errno);
+      std::remove(tmp.c_str());
+      AssertMsg(false, "cannot write port file " + tmp + ": " + why + "; " + path + " left as it was");
+    }
   }
   AssertMsg(std::rename(tmp.c_str(), path.c_str()) == 0, "cannot rename port file to " + path);
 }
@@ -132,6 +142,11 @@ int StartMultiplexerServer::run() {
   // EPIPE instead, and the binary stream is dropped (lib/logging). The other
   // commands keep the default, so that `mxcontrol ... | head` ends quietly.
   std::signal(SIGPIPE, SIG_IGN);
+  // Nor a file that reaches the process's size limit (RLIMIT_FSIZE: ulimit
+  // -f, systemd's LimitFSIZE=), a recording or a log: its write fails with
+  // EFBIG, which the recorder and the logger handle as they do a full disk,
+  // where the signal's default action ended the process.
+  std::signal(SIGXFSZ, SIG_IGN);
 
   asio::io_service io_service;
   multiplexer::Server::pointer server = multiplexer::Server::Create(io_service, host_, port_);

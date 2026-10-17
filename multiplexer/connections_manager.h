@@ -19,6 +19,7 @@
 #include <asio/ip/tcp.hpp>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "lib/logging/logging.h"
 #include "lib/random.h"
@@ -238,7 +239,8 @@ class ConnectionsManager {
   }
 
   // Hook for the derived class, right after register_connection accepted a
-  // peer; the multiplexer sends its welcome here, the client tells its observer.
+  // peer, whose connection is registered() by then; the multiplexer sends
+  // its welcome here, the client tells its observer.
   void inline after_connection_registration(typename Connection::pointer, const WelcomeMessage&) {}
 
   // Why `newcomer`, announcing the instance id of the live `previous`, is
@@ -341,13 +343,15 @@ class ConnectionsManager {
   }
 
   // The next connection at or after `begin` that is alive, has room in
-  // its outgoing queue and takes messages routed by whom: ANY; expired
+  // its outgoing queue and takes messages routed by whom: ANY, into
+  // `chosen`, locked once here, where the caller locked it again; expired
   // entries are erased on the way. This is the skip-the-full-peer rule of
   // whom: ANY. In the `last_resort` pass, made when the first found
   // nobody, only the peers that take no such message but are a last
   // resort qualify.
   static inline typename ConnectionsList::iterator choose_free_connections(ConnectionsList& connections,
                                                                            typename ConnectionsList::iterator begin,
+                                                                           typename Connection::pointer* chosen,
                                                                            bool last_resort = false) {
     for (typename ConnectionsList::iterator current, next = begin;
          next != connections.end() && (current = next++, true);) {
@@ -361,6 +365,7 @@ class ConnectionsManager {
         if (last_resort ? conn->accepts_any() || !conn->last_resort() : !conn->accepts_any()) {
           continue;  // takes nothing by this path, or is not wanted in this pass
         }
+        *chosen = std::move(conn);
         return current;
       } else {
         connections.erase(current);
@@ -398,7 +403,7 @@ class ConnectionsManager {
   // the first thread that checks it, so an object may be constructed on one
   // thread and driven from another as long as it is then driven from that
   // one only.
-  const mx::ThreadChecker& owner_thread() const { return owner_thread_; }
+  const mx::ThreadChecker& owner_thread() const MX_RETURN_CAPABILITY(owner_thread_) { return owner_thread_; }
   // Makes the calling thread the owner, whatever it was before.
   void bind_owner_to_current_thread() { owner_thread_.bind_to_current(); }
 

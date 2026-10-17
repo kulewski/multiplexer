@@ -46,6 +46,20 @@ fn a_change_with_no_connection_is_acknowledged_at_once() {
 }
 
 #[test]
+fn a_connections_welcome_confirms_the_routing_it_carried() {
+    // A change made with no connection is acknowledged at once; the
+    // connection made after carries it in its welcome, which the
+    // multiplexer takes with it, so it stays acknowledged once registered.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let (callback, count) = counted();
+    h.core.set_routing(draining(), Some(callback));
+    h.up(1);
+    assert!(h.core.routing_acknowledged(), "registered with the change in its welcome");
+    h.core.run_acknowledged_callbacks();
+    assert_eq!(1, count.load(Ordering::SeqCst));
+}
+
+#[test]
 fn a_change_goes_to_every_connection_and_is_acknowledged_by_their_status() {
     let mut h = Harness::new(200, IncomingMode::Dispatch);
     let one = h.up(1);

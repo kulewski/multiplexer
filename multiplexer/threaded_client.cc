@@ -45,7 +45,14 @@ ThreadedClient::ThreadedClient(std::uint32_t peer_type, MessageSink on_message)
 // callback or where the last reference to a Python client was dropped, it
 // leaves the thread to end on its own and the Core with it; an orphan gets
 // the orphan teardown.
-ThreadedClient::~ThreadedClient() { core_->shutdown(CLOSE_FLUSH_SECONDS); }
+ThreadedClient::~ThreadedClient() {
+  if (core_) {  // none once moved from
+    core_->shutdown(CLOSE_FLUSH_SECONDS);
+  }
+}
+
+ThreadedClient::ThreadedClient(ThreadedClient&& other) noexcept
+    : core_(std::move(other.core_)), peer_type_(other.peer_type_), instance_id_(other.instance_id_) {}
 
 void ThreadedClient::set_search_policy(SearchPolicy answer) { core_->set_search_policy(answer); }
 void ThreadedClient::set_drop_observer(DropObserver observer) { core_->set_drop_observer(observer); }
@@ -59,6 +66,7 @@ void ThreadedClient::set_key_filters(const BasicClient::KeyFilters& filters,
   core_->set_key_filters(filters, std::move(acknowledged));
 }
 bool ThreadedClient::routing_acknowledged() { return core_->routing_acknowledged(); }
+std::size_t ThreadedClient::held_for_a_connection() { return core_->held_for_a_connection(); }
 bool ThreadedClient::flush_all(float timeout) { return core_->flush_all(timeout); }
 void ThreadedClient::flush_all_with_callback(float timeout, FlushCallback done) {
   core_->flush_all_with_callback(timeout, done);
@@ -175,7 +183,13 @@ void ThreadedClient::Core::start(const std::shared_ptr<Core>& self) {
     });
     ready.set_value();
   });
-  thread_ = std::thread([self] { self->_io_thread_main(); });
+  thread_ = std::thread([self = std::shared_ptr<Core>(self), end = end_]() mutable {
+    self->_io_thread_main();
+    self.reset();  // the Core goes here when nothing else holds it
+    mx::MutexLock lock(end->mutex);
+    end->ended = true;
+    end->changed.notify_all();
+  });
   ready.get_future().wait();
 }
 
@@ -225,6 +239,15 @@ void ThreadedClient::Core::_io_thread_main() {
       MX_LOG(ERROR, LOWVERBOSITY,
              CTX("ThreadedClient") TEXT(std::string("exception escaped an io handler: ") + e.what()));
     }
+  }
+}
+
+// Waits for the io thread's end, told once it let go of the Core.
+void ThreadedClient::Core::_wait_ended() {
+  const std::shared_ptr<End> end = end_;
+  mx::UniqueLock lock(end->mutex);
+  while (!end->ended) {
+    end->changed.wait(lock);
   }
 }
 
@@ -457,6 +480,13 @@ bool ThreadedClient::Core::routing_acknowledged() {
   });
 }
 
+std::size_t ThreadedClient::Core::held_for_a_connection() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->held_for_a_connection();
+  });
+}
+
 bool ThreadedClient::Core::flush_all(float timeout) {
   basic_client_->check_not_orphaned();
   if (io_thread_.is_current()) {
@@ -518,8 +548,18 @@ void ThreadedClient::Core::shutdown(float timeout) {
     _orphan_teardown();
     return;
   }
+  // The Core outlives this call whoever lets go of it meanwhile, a handle
+  // destroyed on another thread or the io thread at its end: the thread
+  // is joined, or waited for, before the Core can go.
+  const std::shared_ptr<Core> keep = shared_from_this();
   if (stopped_.exchange(true)) {
-    return;  // already done, or being done by another thread
+    // Begun already, on another thread or on the io thread: this call, as
+    // the one that began it, returns once it is over, the io thread ended,
+    // but on the io thread itself, which cannot wait for its own end.
+    if (!io_thread_.is_current()) {
+      _wait_ended();
+    }
+    return;
   }
   {
     mx::UniqueLock lock(lifecycle_mutex_);

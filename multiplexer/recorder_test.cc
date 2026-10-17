@@ -2,9 +2,11 @@
 // recording that keep a request from choosing a path. And a recording file
 // appended to: a record a multiplexer that died left half written at its
 // end is cut first, so that every record after it reads, where the reader
-// stopped at the torn one; and a recorder counts the bytes it wrote, not
-// the file's, where an appended --record file's earlier runs were counted
-// as this session's.
+// stopped at the torn one; a file that is not a recording, or a recording
+// garbled before its end, is left as it is and not recorded into, where
+// it was cut at its first record that did not parse; and a recorder counts
+// the bytes it wrote, not the file's, where an appended --record file's
+// earlier runs were counted as this session's.
 #include "multiplexer/recorder.h"
 
 #include <fcntl.h>
@@ -126,6 +128,96 @@ TEST(RecorderAppend, CutsARecordLeftHalfWritten) {
     second.flush();
   }
   EXPECT_EQ(std::make_pair(4, false), whole_records(file.path)) << "two headers, two records, to the end";
+}
+
+// A file ending inside a record's length, its first byte of two written:
+// cut as any torn record is.
+TEST(RecorderAppend, CutsARecordWhoseLengthWasLeftHalfWritten) {
+  ScratchFile file;
+  {
+    Recorder first(file.path, 0);
+    first.header(1, "rules", "");
+    first.flush();
+  }
+  std::ostringstream framed;
+  mx::protobuf::OstreamMessageOutputStream(&framed, false).write(routed(20));
+  ASSERT_NE(0, framed.str()[0] & 0x80) << "a length of two bytes";
+  {
+    std::ofstream out(file.path, std::ios::app | std::ios::binary);
+    out << framed.str().substr(0, 1);
+  }
+  {
+    Recorder second(file.path, 0);
+    ASSERT_TRUE(second.ok());
+    second.header(2, "rules", "");
+    second.flush();
+  }
+  EXPECT_EQ(std::make_pair(2, false), whole_records(file.path)) << "two headers, to the end";
+}
+
+// The bytes of the file at `path`.
+std::string contents_of(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream all;
+  all << in.rdbuf();
+  return all.str();
+}
+
+// A file that is not a recording, a rules file named by mistake, long or
+// short, is left as it is and nothing is recorded into it, where the first
+// record that did not parse was taken for a torn one and the file was cut
+// there, at its first byte: emptied, then appended to.
+TEST(RecorderAppend, LeavesAFileThatIsNotARecordingAsItIs) {
+  const std::string rules =
+      "# The rules of this deployment.\n"
+      "peer {\n    type: 102\n    name: \"WEBSITE\"\n    is_passive: true\n}\n";
+  for (const std::string& text : {rules, std::string("peer {\n")}) {
+    ScratchFile file;
+    {
+      std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
+      out << text;
+    }
+    {
+      Recorder recorder(file.path, 0);
+      EXPECT_FALSE(recorder.ok()) << "recording into " << text;
+      recorder.header(1, "rules", "");
+      recorder.write(routed(10));
+      recorder.flush();
+    }
+    EXPECT_EQ(text, contents_of(file.path));
+  }
+}
+
+// A recording with a record garbled in its middle, its length whole but
+// its bytes not a record, is left as it is too: what follows the damage
+// is someone's to recover by hand, where it was cut away with the damage.
+TEST(RecorderAppend, LeavesARecordingGarbledInItsMiddleAsItIs) {
+  ScratchFile file;
+  {
+    Recorder first(file.path, 0);
+    first.header(1, "rules", "");
+    first.write(routed(10));
+    first.flush();
+  }
+  std::string damaged = contents_of(file.path);
+  {
+    std::ostringstream framed;
+    mx::protobuf::OstreamMessageOutputStream(&framed, false).write(routed(20));
+    std::string garbled = framed.str();
+    for (std::size_t at = 2; at < garbled.size(); ++at) {
+      garbled[at] = '\xff';  // the length whole, the rest no record
+    }
+    damaged += garbled + framed.str();
+    std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
+    out << damaged;
+  }
+  {
+    Recorder second(file.path, 0);
+    EXPECT_FALSE(second.ok());
+    second.header(2, "rules", "");
+    second.flush();
+  }
+  EXPECT_EQ(damaged, contents_of(file.path));
 }
 
 // A recorder on a file that exists counts what it wrote, the file growing

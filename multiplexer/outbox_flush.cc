@@ -7,8 +7,10 @@
 // wait, for room or held, and per connection the last of them queued
 // there, which everything queued there before it goes out ahead of. The
 // copies of a followed send, written or given up on, are heard in one pass
-// per loop turn (_process_follows), outside the connection's handlers, and
-// a flush that waits for those callbacks ends after them.
+// per loop turn (_process_callbacks), outside the connection's handlers
+// and the outbox's bookkeeping, after the drop observer heard of the drops
+// reported meanwhile, and a flush that waits for those callbacks ends after
+// them.
 #include <algorithm>
 
 #include "lib/logging/logging.h"
@@ -42,17 +44,53 @@ void BasicClient::_follow_event(const std::shared_ptr<SendState>& state, bool wr
     return;  // a flush's mark, or a send nobody follows
   }
   outbox.follow_events.emplace_back(state, written);
-  if (outbox.follow_posted) {
+  _post_callbacks();
+}
+
+// The pass that runs the program's callbacks, posted once for whatever
+// gathers until it runs.
+void BasicClient::_post_callbacks() {
+  Outbox& outbox = *outbox_;
+  if (outbox.callbacks_posted) {
     return;
   }
-  outbox.follow_posted = true;
+  outbox.callbacks_posted = true;
   std::weak_ptr<BasicClient> self = weak_from_this();
   io_service_.post([self] {
     if (std::shared_ptr<BasicClient> client = self.lock()) {
-      client->outbox_->follow_posted = false;
-      client->_process_follows();
+      client->outbox_->callbacks_posted = false;
+      client->_process_callbacks();
     }
   });
+}
+
+// The program's callbacks of a loop turn: the drops reported, told to the
+// observer, then the followed sends' ends, and then the flushes that
+// waited for them. Nothing of the outbox is in the middle of a change
+// here, so a callback may send, or shut the client down.
+void BasicClient::_process_callbacks() {
+  _tell_drops();
+  _process_follows();
+}
+
+// Each drop reported, told to the observer: the one there is now, called
+// through a copy, since a callback that shuts a Python client down lets go
+// of it. One let go of meanwhile is told nothing more.
+void BasicClient::_tell_drops() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  std::vector<std::pair<std::uint64_t, DropReason>> events;
+  events.swap(outbox_->drop_events);
+  for (const std::pair<std::uint64_t, DropReason>& event : events) {
+    DropObserver observer = drop_observer_;
+    if (!observer) {
+      break;
+    }
+    try {
+      observer(event.first, event.second);
+    } catch (const std::exception& error) {
+      MX_LOG(ERROR, LOWVERBOSITY, CTX("BasicClient") TEXT(std::string("the drop observer raised: ") + error.what()));
+    }
+  }
 }
 
 // The followed sends whose copies were written or given up on: one written
@@ -109,6 +147,7 @@ void BasicClient::release_follows() {
 
 void BasicClient::end_follows() {
   MX_DCHECK_RUN_ON(&owner_thread());
+  _tell_drops();
   std::vector<FollowPtr> left;
   for (const std::pair<const SendState* const, FollowPtr>& entry : outbox_->follows) {
     if (!entry.second->over) {
@@ -124,8 +163,8 @@ void BasicClient::end_follows() {
 
 BasicClient::FlushPtr BasicClient::begin_flush(std::function<void(bool all_written)> done) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  if (!outbox_->follow_events.empty()) {
-    _process_follows();  // what ended before the flush began is heard before it ends
+  if (!outbox_->follow_events.empty() || !outbox_->drop_events.empty()) {
+    _process_callbacks();  // what ended before the flush began is heard before it ends
   }
   FlushPtr flush(new Flush());
   flush->last_number = outbox_->last_number;
@@ -170,10 +209,11 @@ void BasicClient::_wait_flushes(std::uint64_t number, int copies) {
 
 // A flush is done once the messages it counts no longer wait and every
 // frame it marked is out, written or lost, and the callbacks of the sends
-// that ended meanwhile have run: a pass of them due (_process_follows)
-// checks again. `done` is told after the flush left the list.
+// that ended meanwhile and of the drops have run: a pass of them due
+// (_process_callbacks) checks again. `done` is told after the flush left
+// the list.
 void BasicClient::_check_flushes() {
-  if (outbox_->flushes.empty() || !outbox_->follow_events.empty()) {
+  if (outbox_->flushes.empty() || !outbox_->follow_events.empty() || !outbox_->drop_events.empty()) {
     return;
   }
   std::vector<FlushPtr> finished;

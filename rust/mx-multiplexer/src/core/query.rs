@@ -177,11 +177,15 @@ impl Queries {
     }
 }
 
-/// Measures `request` as a query frames it at its largest, its id and, for
-/// a typed query, its request sent again with the `to` of the backend found
-/// and a delivery error asked for: refused over MAX_MESSAGE_SIZE before
-/// anything goes out. `request` comes back as it was.
-pub(crate) fn check_size_sent_again(request: &mut MultiplexerMessage) -> Result<()> {
+/// Measures `request` as a query frames it at its largest, its sender,
+/// its id and, for a typed query, its request sent again with the `to` of
+/// the backend found and a delivery error asked for: refused over
+/// MAX_MESSAGE_SIZE before anything goes out. `request` comes back as it
+/// was but for an empty sender, `sender` there as start_query would put it.
+pub(crate) fn check_size_sent_again(request: &mut MultiplexerMessage, sender: u64) -> Result<()> {
+    if request.sender.unwrap_or(0) == 0 {
+        request.sender = Some(sender);
+    }
     let (id, to, asked) = (request.id, request.to, request.report_delivery_error);
     request.id = Some(u64::MAX);
     if to.unwrap_or(0) == 0 {
@@ -299,9 +303,11 @@ impl Core {
     }
 
     /// The request's stage: the request goes out, or waits for a
-    /// connection within the deadline.
+    /// connection within the deadline. Refused from a ThreadedClient's
+    /// shutdown() on, where a callback's query would otherwise go out
+    /// during the write-out and hold the io thread for its whole stage.
     fn start_request(&mut self, query: QueryId, keep_deadline: bool) {
-        if self.client.shuts_down {
+        if self.client.shuts_down || self.threaded.shut_down {
             self.finish(query, Outcome::ShutDown);
             return;
         }
@@ -409,13 +415,14 @@ impl Core {
         }
     }
 
-    /// A message for a query in flight, by the id it references: true when
-    /// it was one, handled here; false when it is for nobody here. A late
-    /// reply to a finished query is dropped, and true too.
-    pub(crate) fn query_takes(&mut self, incoming: &Incoming) -> bool {
+    /// A message for a query in flight, by the id it references: None when
+    /// it was one, handled here, a reply moved into the query's outcome;
+    /// the message back when it is for nobody here. A late reply to a
+    /// finished query is dropped, and None too.
+    pub(crate) fn query_takes(&mut self, incoming: Incoming) -> Option<Incoming> {
         let references = incoming.message.references.unwrap_or(0);
         if references == 0 {
-            return false;
+            return Some(incoming);
         }
         if let Some(query) = self.queries.by_id.get(&references).copied() {
             if incoming.message.r#type == types::REQUEST_RECEIVED {
@@ -423,13 +430,13 @@ impl Core {
             } else {
                 self.advance(query, incoming);
             }
-            return true;
+            return None;
         }
         if self.client.mode == IncomingMode::Dispatch && self.queries.finished_ids.contains(&references) {
             log::debug!("late reply #{} to finished query #{references} dropped", incoming.message.id.unwrap_or(0));
-            return true;
+            return None;
         }
-        false
+        Some(incoming)
     }
 
     /// A backend acknowledged an attempt: the query's on_received hears
@@ -449,7 +456,7 @@ impl Core {
 
     /// An answer to one of the query's messages: a search's PING or
     /// delivery error, or the reply or a delivery error for an attempt.
-    fn advance(&mut self, query: QueryId, incoming: &Incoming) {
+    fn advance(&mut self, query: QueryId, incoming: Incoming) {
         let Some(in_flight) = self.queries.in_flight.get(&query) else { return };
         let references = incoming.message.references.unwrap_or(0);
         let to_a_search = in_flight.search_ids.contains(&references);
@@ -458,7 +465,7 @@ impl Core {
             if delivery_error {
                 self.refused(query, references);
             } else {
-                self.finish(query, Outcome::Replied(incoming.clone()));
+                self.finish(query, Outcome::Replied(incoming));
             }
             return;
         }
@@ -471,7 +478,7 @@ impl Core {
                 self.wait_late(query, false); // nobody behind any multiplexer
             }
         } else if incoming.message.r#type == types::PING {
-            self.direct(query, incoming);
+            self.direct(query, &incoming);
         }
     }
 
@@ -712,7 +719,7 @@ impl Core {
     /// The pass: the queries that waited for a connection start again.
     pub(crate) fn fill(&mut self) {
         self.queries_fill_posted = false;
-        if !self.client.shuts_down && !self.queries.waiting.is_empty() {
+        if !self.client.shuts_down && !self.threaded.shut_down && !self.queries.waiting.is_empty() {
             self.restart_waiting_queries();
         }
     }

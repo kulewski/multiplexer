@@ -21,10 +21,11 @@ with it the Rust toolchain Bazel would fetch.
   --port-file`, `spawn(role, lang, ...)` launches a role and collects its
   Event events, `Role.wait_for(event, **fields)` waits for one, the
   first the role ever printed, so a second wait for the same returns at
-  once, `Role.wait_for_count(event, n)` and `wait_for_total(roles, event, n)`
-  return the events once n have arrived (a count of another process's
-  events, taken right after the client finished, may otherwise miss lines
-  still in the pipe), `Cluster.wait_for_peer(type)` and
+  once, `Role.wait_for_count(event, n)` returns the events and
+  `wait_for_total(roles, event, n)` their number once n have arrived, or at
+  the timeout, 5 s by default, without failing, so the caller asserts on
+  what came (a count of another process's events, taken right after the
+  client finished, may otherwise miss lines still in the pipe), `Cluster.wait_for_peer(type)` and
   `wait_for_peer_gone(type)` wait on the multiplexers' peers files,
   `wait_until(predicate, timeout, what)` on anything else. Every process's
   stderr and events land in the test's undeclared outputs directory.

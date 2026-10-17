@@ -2,6 +2,9 @@
 // workers, the workers, and the request's replies. See the header.
 #include "multiplexer/backend/base_threaded_multiplexer_server.h"
 
+#include <algorithm>
+#include <chrono>
+#include <limits>
 #include <new>
 
 #include "lib/exception.h"
@@ -58,6 +61,9 @@ void Request::notify_start() {
 BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAddresses& addresses, PeerType type,
                                                              const Options& options)
     : options_(options),
+      capacity_(options.queue_size > std::numeric_limits<std::size_t>::max() - options.workers
+                    ? std::numeric_limits<std::size_t>::max()
+                    : options.workers + options.queue_size),
       addresses_(addresses),
       type_(type),
       client_(type, [this](const IncomingMessage& incoming) { _on_message(incoming); }) {
@@ -118,7 +124,7 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
       {
         mx::UniqueLock lock(wake_mutex_);
         if (!woken_) {
-          wake_.wait_for(lock, mx::from_seconds(poll));  // as long as it takes for a negative poll
+          wake_.wait_for(lock, _wait(poll));  // as long as it takes for a negative poll and no cap
         }
         woken_ = false;
       }
@@ -138,16 +144,13 @@ void BaseThreadedMultiplexerServer::serve_forever(float poll, float drain_second
   }
 }
 
+thread_local const BaseThreadedMultiplexerServer* BaseThreadedMultiplexerServer::worker_of_ = nullptr;
+
 void BaseThreadedMultiplexerServer::close(float timeout) {
   _check_not_inherited();
   std::vector<std::thread> threads;
-  {
-    mx::MutexLock lock(mutex_);
-    for (const std::thread::id& worker : worker_ids_) {
-      if (worker == std::this_thread::get_id()) {
-        throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
-      }
-    }
+  if (worker_of_ == this) {
+    throw std::logic_error("close() called from a worker thread, which it would join; call stop() instead");
   }
   mx::MutexLock closing(close_mutex_);  // a second close() returns once the first is done, not before
   if (closed_.exchange(true)) {
@@ -194,7 +197,18 @@ void BaseThreadedMultiplexerServer::set_key_filters(const BasicClient::KeyFilter
   client_.set_key_filters(filters, [this, acknowledged] { _acknowledged(acknowledged); });
 }
 
-void BaseThreadedMultiplexerServer::_wake() {
+std::chrono::microseconds BaseThreadedMultiplexerServer::_wait(float poll) const {
+  const std::chrono::microseconds wait = mx::from_seconds(poll);
+  if (!draining() || drain_seconds_ < 0) {
+    return wait;  // no drain, or one with no cap: the poll alone
+  }
+  const std::chrono::steady_clock::time_point since(std::chrono::steady_clock::duration(draining_since_ticks_.load()));
+  const std::chrono::microseconds left = std::chrono::duration_cast<std::chrono::microseconds>(
+      mx::from_seconds(drain_seconds_) - (std::chrono::steady_clock::now() - since));
+  return std::max(std::chrono::microseconds(0), std::min(wait, left));
+}
+
+void BaseThreadedMultiplexerServer::_wake() const {
   mx::MutexLock lock(wake_mutex_);
   woken_ = true;
   wake_.notify_all();
@@ -253,7 +267,24 @@ bool BaseThreadedMultiplexerServer::drained() const {
     return false;
   }
   try {
-    return client_.routing_acknowledged();
+    if (!client_.routing_acknowledged()) {
+      return false;
+    }
+    // With no connection live the confirmation holds at once, so what is
+    // held for the next connection, a reply made while every multiplexer
+    // was down, is waited for too, where the close would drop it: a flush
+    // wakes the loop once it is written, a connection back, or given up on
+    // at its own deadline.
+    if (client_.held_for_a_connection() == 0) {
+      return true;
+    }
+    if (!held_flush_armed_.exchange(true)) {
+      client_.flush_all_with_callback(-1, [this](bool) {
+        held_flush_armed_ = false;
+        _wake();
+      });
+    }
+    return false;
   } catch (const ThreadedClient::NotConnected&) {
     return true;  // shut down under us: nothing more is coming
   }
@@ -295,7 +326,7 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
     // What a worker will take, an idle one's included, and queue_size more
     // that wait for one: queue_ also holds what an idle worker is about to
     // take, and busy_ counts only the requests taken.
-    if (accepting_ && queue_.size() + busy_ < options_.workers + options_.queue_size) {
+    if (accepting_ && queue_.size() + busy_ < capacity_) {
       request->accepted_ = accepted_++;
       queue_.push_back(request);
       cond_.notify_one();
@@ -377,7 +408,6 @@ void BaseThreadedMultiplexerServer::_start_workers() {
   }
   for (unsigned int index = 0; index < options_.workers; ++index) {
     threads_.emplace_back(&BaseThreadedMultiplexerServer::_work, this);
-    worker_ids_.push_back(threads_.back().get_id());
   }
 }
 
@@ -388,6 +418,7 @@ void BaseThreadedMultiplexerServer::_start_workers() {
 // server, whose serve_forever() rethrows it, as BaseMultiplexerServer's
 // does, and the worker leaves.
 void BaseThreadedMultiplexerServer::_work() {
+  worker_of_ = this;
   for (;;) {
     RequestPtr request;
     {

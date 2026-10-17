@@ -55,7 +55,7 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
         compression: Some(compression::Values::Gzip as i32),
         timestamp: Some(4_294_967_295),
         references: Some(1),
-        workflow: Some(Bytes::from_static(b"\x00\xffworkflow")),
+        workflow: Some("\u{0}\u{ff}workflow".into()),
         override_rrules: vec![
             RoutingRule {
                 peer: Some("backend".into()),

@@ -38,7 +38,7 @@ read and write it with `parse_endpoint()` and `format_endpoint()`
 | `--help` | print help for the command that follows |
 | `--logging-file PATH` | write the log as a binary stream of `LogEntry` records to this file |
 | `--logging-fd N` | write the same stream to an already open file descriptor instead |
-| `--verbosity NAME` | the most verbose `DEBUG` entries still emitted: `ZEROVERBOSITY` (none), `LOWVERBOSITY`, `MEDIUMVERBOSITY` (default), `HIGHVERBOSITY` or `CHATTERBOX`; the other levels are always emitted. The environment variable `MX_LOG_VERBOSITY` ([operations](operations.md#logs)) replaces the default where it names `DEBUG`, or every level; one that names other levels only, or that does not parse, leaves it; an explicit flag wins over it |
+| `--verbosity NAME` | the most verbose `DEBUG` entries still emitted: `ZEROVERBOSITY` (none), `LOWVERBOSITY`, `MEDIUMVERBOSITY` (default), `HIGHVERBOSITY` or `CHATTERBOX`; the other levels keep their own caps, `HIGHVERBOSITY`, within which every line above `DEBUG` falls. The environment variable `MX_LOG_VERBOSITY` ([operations](operations.md#logs)) replaces the default where it names `DEBUG`, and lowers the other levels' caps where it names them, a bare value naming every level: `MEDIUM` drops the `HIGHVERBOSITY` lines above `DEBUG`, registrations and drops among them, and `ZERO` silences every level, errors too; one that does not parse changes nothing. An explicit flag wins over it for `DEBUG` alone |
 
 The log always goes to stderr as text as well, one entry per line: level,
 timestamp, pid, context, workflow id, text, and the source location.
@@ -51,6 +51,7 @@ Runs one multiplexer.
 mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address HOST:PORT]
                           [--port-file PATH] [--peers-file PATH] [--record PATH]
                           [--record-payload-bytes N] [--recording-dir DIR] [--allow-tap]
+                          [--drain-seconds S] [--memory-log-every N]
 ```
 
 | Option | Default | Effect |
@@ -58,13 +59,14 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md), read at start and again whenever it changes |
 | `--rules-check-interval S` | 2 | seconds between reads of the rules file, 0.01 at least, a shorter one refused as a malformed command line; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
 | `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on, `[ADDRESS]:PORT` for an IPv6 one ([addresses](#addresses)); `HOST` or `[ADDRESS]` alone keeps port 1980 |
-| `--port-file PATH` | none | after binding, write the address with the port bound, `host:port` or `[address]:port`, to this file, atomically |
-| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, written at start and rewritten atomically after a change, at most once every 10 ms |
-| `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording) |
+| `--port-file PATH` | none | after binding, write the address with the port bound, `host:port` or `[address]:port`, to this file, atomically; a write that fails, a full disk say, ends the start with exit 1 and the reason, the file left as it was |
+| `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, written at start and rewritten atomically after a change, at most once every 10 ms; a write that fails, a full disk say, leaves the file as it was and is logged at `ERROR` with the reason, once while the reason stays the same |
+| `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording). A file that cannot be opened is logged at `ERROR`, and the multiplexer runs on without recording |
 | `--record-payload-bytes N` | 0 (whole payloads) | keep only the first N bytes of each recorded payload |
 | `--recording-dir DIR` | off | let peers start and stop recording sessions over the protocol, written under `DIR`; see [recording on demand](operations.md#recording-on-demand-over-the-protocol) |
 | `--allow-tap` | off | let peers receive every record over their connection |
-| `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0 stops at once |
+| `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0, or a negative value, stops at once, dropping what is queued |
+| `--memory-log-every N` | 0 (never) | log the C heap in use after every N routed messages, for soak tests |
 
 `--address` takes an IP address, not a host name, which would leave the
 multiplexer listening on one of the addresses the name has. `0.0.0.0`
@@ -91,7 +93,10 @@ anything. `SIGHUP` makes it read the rules file again now, and it no longer
 exits on one. An exception thrown while handling one connection is logged
 and the process keeps serving. So does a log reader that goes away, the
 other end of `--logging-fd` or of stderr: the multiplexer ignores
-`SIGPIPE`, drops the binary stream with a `WARNING`, and serves on.
+`SIGPIPE`, drops the binary stream with a `WARNING`, and serves on. And
+so does a file that reaches the process's size limit (`ulimit -f`,
+systemd's `LimitFSIZE=`), the recording or a log: the multiplexer ignores
+`SIGXFSZ`, and the write fails as on a full disk.
 
 Each peer that connects is logged at `INFO` with its instance id and peer
 type, and again when it leaves. A message nobody could receive is
@@ -192,7 +197,7 @@ mxcontrol recording start|stop|status|tap -M HOST:PORT [-M ...] [options]
 | `--max-bytes N` | `start`: close the session at this size; default 1 GiB, 0 for no cap |
 | `--max-seconds N` | `start`: close the session after this long |
 | `--stay` | `start`: keep running and start the session, once each, on every multiplexer it reaches that is not recording, whatever sessions it had before: a replica that comes back, under its old address or a new one of its name, or one reached later; stop every session on SIGINT or SIGTERM. One whose session of this run ended, at its cap or by a stop, or that refused it, is not started again |
-| `--out FILE` | `tap`: append the records to this file instead of stdout, after its last whole record: one a tap that died left half written is cut first, said on stderr |
+| `--out FILE` | `tap`: append the records to this file instead of stdout, after its last whole record: one a tap that died left half written is cut first, said on stderr. A file that is not a recording, or one damaged before its end, is left as it is: the tap says so and exits 1 |
 | `--timeout S` | seconds to wait for connections and answers; default 5. The wait for answers ends then, however much else still arrives; a multiplexer that has not answered by then is said not to have, exit 1 |
 
 One line per multiplexer comes back, `multiplexer <id>: recording <path>
@@ -202,7 +207,9 @@ the taps. For `start`, `stop` and `status` the exit code is 0 when every
 `-M` reached a multiplexer and every multiplexer answered without an
 error, and nothing reachable fails at once. `tap` writes the records as a
 stream in the recording's own format, readable by `dump_recording`, and
-its status lines to stderr; SIGINT untaps and exits.
+its status lines to stderr; SIGINT untaps and exits, writing first the
+records each multiplexer had queued for it, the untap's status lines
+saying how many records each dropped for the tap, its queue to it full.
 
 `start --stay` and `tap` keep running, so they start with nothing
 reachable too, a name not published yet or nothing listening at its
@@ -223,10 +230,12 @@ is down at an address a name still resolves to, cut off maybe, its
 session going on; for `tap`, when a replica last seen streaming to it,
 over a connection that lives, did not answer the untap, a tap ending
 with its connection anyway, or when the records could not all be
-written to the output, a write failing or records dropped here for a
-full incoming queue; and for both, when a multiplexer refused the START
-or the TAP, taps being off say, which is said once and not asked
-again; 0 otherwise. Each such replica is named on stderr.
+written to the output, a write failing, records dropped here for a full
+incoming queue, or records a multiplexer dropped for a full queue to the
+tap, which the answers to the untap count; and for both, when a
+multiplexer refused the START or the TAP, taps being off say, which is
+said once and not asked again; 0 otherwise. Each such replica is named
+on stderr.
 
 ```
 mxcontrol recording start -M mx-0.mx.svc:1980 -M mx-1.mx.svc:1980 --label checkout-bug
@@ -275,8 +284,10 @@ mxcontrol streamlogs [--multiplexer [HOST]:PORT ...] [--chunksize N] [--timeout 
 
 Reads a binary log stream, as written by `--logging-file`, from stdin, and
 sends it as `LOGS_STREAM` messages through every listed multiplexer, `N`
-entries per message, 32 by default and 0 for everything in one message. It
-connects as the peer type `LOG_STREAMER`. `--multiplexer` may be repeated
+entries per message at most, 32 by default and 0 for no limit; a message
+goes as soon as stdin has nothing more ready, however few entries it
+holds, so a busy program's log goes in full messages and a quiet one's
+last lines at once. It connects as the peer type `LOG_STREAMER`. `--multiplexer` may be repeated
 ([addresses](#addresses)); an empty host means `127.0.0.1`. It exits with
 0 at the end of stdin, however long the stream; one that breaks off, an
 entry cut short or garbled, is sent up to there, logged as an error, and
@@ -306,10 +317,14 @@ mxcontrol receivelogs [--multiplexer [HOST]:PORT ...]
 ```
 
 Connects as the peer type `LOG_RECEIVER_EXAMPLE`, a backend, and prints every
-message it receives on stdout in protocol buffer text format. With the example
-rules file it receives what `streamlogs` sends. It is the smallest complete
-backend in the repository and a handy way to watch a message type: give its
-peer type a rule and point `receivelogs` at the multiplexer.
+message it receives on stdout in protocol buffer text format. With the system
+rules it receives what `streamlogs` sends. It answers every message with a
+`PING` to its sender that references the message. It is the smallest
+complete backend in the repository and a handy way to watch an event type:
+give its peer type a rule for that type and point `receivelogs` at the
+multiplexer. Never a request type: a query takes any message that
+references its request for the reply, so the query would get the empty
+`PING`, in every client and language, and drop the backend's reply.
 
 ## help
 

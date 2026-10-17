@@ -56,7 +56,7 @@ bazel test //tests/scenarios:threaded_mx_restarts_py
 ```
 
 The suffix is the client's language: `_py` a Python client, `_cc` a C++
-one; the backend is the Python one.
+one, `_rust` a Rust one; the backend is the Python one.
 
 The scenario is [threaded_mx_restarts.py](threaded_mx_restarts.py); the roles it spawns are described in
 [tests/README.md](../../README.md).

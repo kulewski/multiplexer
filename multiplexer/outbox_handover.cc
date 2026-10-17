@@ -99,7 +99,7 @@ BasicClient::Connection::pointer BasicClient::_handed_to(const ConnectionWrapper
 void BasicClient::_lose(const WaitingPtr& waiting) {
   waiting->over = true;
   if (!waiting->on) {
-    --outbox_->held_live;
+    _held_left();
   }
   --outbox_->waiting;
   _wait_flushes(waiting->number, -1);
@@ -187,45 +187,40 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection* dead, Connection
 }
 
 // A message somebody follows went to `conn` from a dead connection, or
-// from the held when a connection came up; see followed(). Nobody follows
-// one whose tracker is null.
+// from the held when a connection came up; see followed(). The last move
+// wins. Nobody follows one whose tracker is null.
 void BasicClient::_moved(const BasicScheduledMessageTracker& state, const ConnectionWrapper& conn) {
   if (!state) {
     return;
   }
   Outbox& outbox = *outbox_;
   if (outbox.moved.size() >= outbox.moved_compact_at) {
-    outbox.moved.erase(std::remove_if(outbox.moved.begin(), outbox.moved.end(),
-                                      [](const std::pair<std::weak_ptr<SendState>, ConnectionWrapper>& entry) {
-                                        return entry.first.expired();
-                                      }),
-                       outbox.moved.end());
+    for (auto entry = outbox.moved.begin(); entry != outbox.moved.end();) {
+      if (entry->second.first.expired()) {
+        entry = outbox.moved.erase(entry);
+      } else {
+        ++entry;
+      }
+    }
     outbox.moved_compact_at = std::max<std::size_t>(64, 2 * outbox.moved.size());
   }
-  outbox.moved.emplace_back(state, conn);
+  outbox.moved[state.get()] = std::make_pair(std::weak_ptr<SendState>(state), conn);
 }
 
 ConnectionWrapper BasicClient::followed(const BasicScheduledMessageTracker& state, const ConnectionWrapper& first) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  ConnectionWrapper last = first;
-  std::vector<std::pair<std::weak_ptr<SendState>, ConnectionWrapper>>& moved = outbox_->moved;
+  auto& moved = outbox_->moved;
   if (moved.empty() || !state) {
-    return last;
+    return first;
   }
-  // In the order handed over: the last entry for the message is where it
-  // went. Its entries leave the list, the others keep their order.
-  std::size_t kept = 0;
-  for (std::size_t index = 0; index < moved.size(); ++index) {
-    if (moved[index].first.lock() == state) {
-      last = moved[index].second;
-      continue;
-    }
-    if (kept != index) {
-      moved[kept] = moved[index];
-    }
-    ++kept;
+  const auto entry = moved.find(state.get());
+  if (entry == moved.end()) {
+    return first;
   }
-  moved.resize(kept);
+  // The caller holds the tracker: an entry at its address whose tracker has
+  // not expired is its own. The entry goes either way.
+  const ConnectionWrapper last = entry->second.first.expired() ? first : entry->second.second;
+  moved.erase(entry);
   return last;
 }
 
