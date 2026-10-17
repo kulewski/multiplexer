@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Everything a change is checked with, in the order that fails fastest:
 #   formatting and generated docs, every Mermaid block rendered, the fast
-#   tests, the clang thread-safety analysis, the fast tests built against
-#   libc++ instead of libstdc++, ThreadSanitizer on the C++ unit tests,
+#   tests, the same with every multiplexer on two event loops, the clang
+#   thread-safety analysis, the fast tests built against libc++ instead of
+#   libstdc++, ThreadSanitizer on the C++ unit tests and on the scenarios
+#   with C++ roles, their multiplexers on two loops,
 #   AddressSanitizer on the threaded client's (which shut connections
 #   down in the middle of large frames), clippy over the Rust code and the
 #   vendored crates' freshness (rust/vendor.sh), the Python package type-checked,
@@ -38,6 +40,9 @@ fi
 ./format.sh --check
 python3 docs/check_mermaid.py          # renders every Mermaid block with mermaid-cli
 bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
+# Every multiplexer the tests start on two event loops (run_multiplexer
+# --threads), the in-process ones aside.
+bazel test --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 --test_env=MX_SERVER_THREADS=2 //...
 bazel build --config=clang //...
 # The fast tests again against libc++ (.bazelrc), the standard library a
 # build of @mx with clang may use instead of libstdc++.
@@ -46,7 +51,16 @@ if ! echo '#include <vector>' | clang-18 -stdlib=libc++ -x c++ -fsyntax-only - 2
   exit 1
 fi
 bazel test --config=libcxx --test_tag_filters=-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
-bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test
+bazel test --config=tsan //lib/... //multiplexer:threaded_client_test //multiplexer:soak_test \
+  //multiplexer:server_loops_test //multiplexer/io:shared_outgoing_test //multiplexer:write_through_test \
+  //multiplexer:several_loops_test
+# The scenarios whose roles are all C++, every multiplexer on two loops: the
+# multiplexer and the roles are built with the sanitizer, as is the Python
+# extension the harness loads, which the tunable leaves room to load late,
+# its runtime not preloaded (a Python client cannot run so, nor a shell
+# with it preloaded).
+bazel test --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLES=glibc.rtld.optional_static_tls=262144 \
+  --build_tests_only --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...
 bazel test --config=asan --test_env=ASAN_OPTIONS=detect_leaks=0 //multiplexer:threaded_client_test //multiplexer:server_release_test
 # The Rust code: clippy's warnings are errors, as the compilers' are, and an
 # unsafe block without its SAFETY comment is one by every Cargo.toml's

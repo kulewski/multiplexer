@@ -11,7 +11,8 @@
 // Connections are held by weak_ptr only. The shared_ptr lives in the
 // asynchronous handlers (see connection.h), so a connection whose I/O has
 // ended disappears from these maps on the next lookup that finds an expired
-// entry. Not thread-safe.
+// entry. Not thread-safe: one thread, or, for a multiplexer on several
+// event loops, whichever holds its routing lock (Server::RoutingScope).
 #ifndef MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
 #define MX_MULTIPLEXER_CONNECTIONS_MANAGER_H_
 
@@ -64,6 +65,11 @@ struct DefaultConnectionsManagerTraits {
   // nothing of a message past handle_message. A client's goes to the
   // program, so each frame gets a message of its own.
   static constexpr bool REUSES_PARSE_TARGET = false;
+  // Whether a connection may be shared between event loops, each writing
+  // to it (Connection::share, multiplexer/io/shared_outgoing.h): the
+  // multiplexer's, when it runs on several. A client's never is, and its
+  // connections compile none of it.
+  static constexpr bool WRITES_THROUGH = false;
 
   struct MessagesBufferTraits {
     struct SendingResultNotifier {
@@ -221,7 +227,7 @@ class ConnectionsManager {
           conn->shutdown();
           return;
         }
-        previous->shutdown();  // logs its own "unregistered connection"
+        static_cast<ConnectionsManagerImplementation&>(*this).replace_connection(previous);
         replaced = true;
       }
     }
@@ -253,6 +259,12 @@ class ConnectionsManager {
   // peer, whose connection is registered() by then; the multiplexer sends
   // its welcome here, the client tells its observer.
   void inline after_connection_registration(typename Connection::pointer, const WelcomeMessage&) {}
+
+  // Hook for the derived class: `previous`, the live connection a newcomer
+  // with its instance id replaces, ends now, and its shutdown logs its own
+  // "unregistered connection". A multiplexer on several loops ends it on
+  // its own loop (Server::replace_connection).
+  void inline replace_connection(const typename Connection::pointer& previous) { previous->shutdown(); }
 
   // Why `newcomer`, announcing the instance id of the live `previous`, is
   // refused, the end of the log line that says so; NULL when it replaces

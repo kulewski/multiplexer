@@ -25,6 +25,23 @@ cc_library(
 )
 
 cc_library(
+    name = "adaptive_mutex",
+    hdrs = ["adaptive_mutex.h"],
+    visibility = ["//:__subpackages__"],
+    deps = [":thread_annotations"],
+)
+
+cc_test(
+    name = "adaptive_mutex_test",
+    size = "small",
+    srcs = ["adaptive_mutex_test.cc"],
+    deps = [
+        ":adaptive_mutex",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "thread_checker",
     hdrs = ["thread_checker.h"],
     visibility = ["//:__subpackages__"],

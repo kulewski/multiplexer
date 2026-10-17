@@ -17,6 +17,7 @@ def mx_integration_test(
         scenario,
         roles = {},
         mx = 1,
+        threads = 1,
         params = {},
         rules = Label("//:multiplexer_rules"),
         size = "small",
@@ -32,7 +33,9 @@ def mx_integration_test(
     it. A target with a Rust role is tagged rust, as every Rust target of
     this repository is, so that a build that leaves Rust out
     (--build_tag_filters=-rust) leaves it out too. mx is
-    the number of multiplexers; rules the rules file they run with, by
+    the number of multiplexers; threads the event loops each runs on
+    (run_multiplexer --threads), given to it as MX_SERVER_THREADS, a target
+    with more than one tagged several_loops; rules the rules file they run with, by
     default the one the multiplexer_rules flag names, so that it matches
     the generated constants; params is free-form and reaches the scenario
     through CONFIG.param(). deps and data add what the scenario needs
@@ -65,6 +68,9 @@ def mx_integration_test(
     ]
     if role_binaries:
         args += ["--role-binaries", "'%s'" % json.encode(role_binaries)]
+    env = dict(kwargs.pop("env", {}))
+    if threads != 1:
+        env["MX_SERVER_THREADS"] = str(threads)
     native.py_test(
         name = name,
         srcs = [scenario],
@@ -72,8 +78,9 @@ def mx_integration_test(
         args = args,
         data = data,
         deps = [Label("//multiplexer/testing")] + deps,
+        env = env,
         size = size,
         tags = tags + ["integration"] + ["lang-" + lang for lang in sorted(langs.keys())] +
-               (["rust"] if "rust" in langs else []),
+               (["rust"] if "rust" in langs else []) + (["several_loops"] if threads != 1 else []),
         **kwargs
     )

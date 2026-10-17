@@ -51,7 +51,7 @@ Runs one multiplexer.
 mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address HOST:PORT]
                           [--port-file PATH] [--peers-file PATH] [--record PATH]
                           [--record-payload-bytes N] [--recording-dir DIR] [--allow-tap]
-                          [--drain-seconds S] [--memory-log-every N]
+                          [--drain-seconds S] [--threads N] [--memory-log-every N]
 ```
 
 | Option | Default | Effect |
@@ -66,6 +66,7 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--recording-dir DIR` | off | let peers start and stop recording sessions over the protocol, written under `DIR`; see [recording on demand](operations.md#recording-on-demand-over-the-protocol) |
 | `--allow-tap` | off | let peers receive every record over their connection |
 | `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0, or a negative value, stops at once, dropping what is queued |
+| `--threads N` | 0: the environment's `MX_SERVER_THREADS`, else 1 | the event loops the connections are dealt out over as they are accepted, each on a thread of its own, every message routed under one lock they share; 1 is the multiplexer on one thread, more for a host where that thread is full, see [several event loops](operations.md#several-event-loops). At most 256, and `MX_SERVER_THREADS` a number from 1 to 256, or the command line is refused as malformed. `MX_SERVER_THREADS` lets a deployment or a test suite set it for every multiplexer it starts |
 | `--memory-log-every N` | 0 (never) | log the C heap in use after every N routed messages, for soak tests |
 
 `--address` takes an IP address, not a host name, which would leave the

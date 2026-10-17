@@ -4,10 +4,35 @@ cc_library(
     hdrs = ["connection.h"],
     visibility = ["//multiplexer:__pkg__"],
     deps = [
+        ":shared_outgoing",
         "//:protobuf_runtime",
         "//lib:functors",
         "//lib:seconds",
         "//lib:thread_checker",
+    ],
+)
+
+cc_library(
+    name = "shared_outgoing",
+    hdrs = ["shared_outgoing.h"],
+    deps = [
+        ":raw_message",
+        "//lib:adaptive_mutex",
+        "//lib:thread_annotations",
+        "//multiplexer:defaults",
+    ],
+)
+
+cc_test(
+    name = "shared_outgoing_test",
+    size = "small",
+    srcs = ["shared_outgoing_test.cc"],
+    deps = [
+        ":raw_message",
+        ":shared_outgoing",
+        "//lib:functors",
+        "//multiplexer:multiplexer_cc_proto",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

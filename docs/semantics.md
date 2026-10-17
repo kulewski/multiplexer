@@ -22,7 +22,10 @@ that changes.
   messages it saw and drops repeats, so a backend sees each id once unless
   more than 2048 other messages arrived between the copies.
 - **Order holds per connection only.** Two messages from one peer through
-  one multiplexer reach a backend in the order they were sent. Through two
+  one multiplexer reach a backend in the order they were sent, on several
+  event loops too: one loop reads the peer's connection, and each message
+  is queued for its receivers in the order it was routed ([several event
+  loops](operations.md#several-event-loops)). Through two
   multiplexers there is no order. A lane keeps a stream on one connection
   while that connection lives, so the stream is in order. When that
   connection dies, what it had not written moves, in order, to one other

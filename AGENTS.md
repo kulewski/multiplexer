@@ -58,7 +58,10 @@ npx pyright                                # the Python package type-checked, af
 ./format.sh --check                        # what CI runs on every push, with the fast tests, also under libc++
 bazel build --config=clang //...           # clang thread-safety analysis (lib/thread_annotations.h)
 bazel test --config=libcxx --test_tag_filters=-slow //...  # against libc++ instead of libstdc++; needs libc++-18-dev
-bazel test --config=tsan //lib/...         # ThreadSanitizer; C++ targets only
+bazel test --config=tsan //lib/... //multiplexer:several_loops_test //multiplexer:write_through_test  # ThreadSanitizer; C++ targets only
+bazel test --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLES=glibc.rtld.optional_static_tls=262144 \
+  --build_tests_only --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...  # the scenarios with C++ roles on two loops under ThreadSanitizer; the tunable lets the harness load the instrumented extension
+bazel test --test_env=MX_SERVER_THREADS=4 --test_tag_filters=-slow //...  # every multiplexer the tests start on four event loops (run_multiplexer --threads)
 bazel build --config=asan //...            # AddressSanitizer
 ./check.sh --leaks                         # LeakSanitizer over the scenarios; soak_memory samples RSS per process
 ./docker/check.sh [bazel|make] [debian:12] # the build and the fast tests on a clean distribution, needs Docker

@@ -16,15 +16,22 @@ namespace mxcontrol {
 // and --allow-tap (recording sessions and taps peers may ask for),
 // --peers-file (the connected peers, rewritten on every change),
 // --drain-seconds (how long a stop goes on sending what is queued; see
-// Server::stop). See docs/mxcontrol.md.
+// Server::stop), --threads (the event loops the connections are dealt out
+// over, each on a thread of its own, Server::set_threads; the
+// environment's MX_SERVER_THREADS when it is not given, so that a test
+// suite runs its multiplexers on several loops without a change to its
+// harness). See docs/mxcontrol.md.
 class StartMultiplexerServer : public Task {
  public:
   virtual int run();
   // The options, refused as a malformed line, with the usage, when the
   // rules check interval is one the server refuses
-  // (Server::rules_check_interval_refused) or --address is not an IP
-  // address and a port (multiplexer/endpoint.h).
+  // (Server::rules_check_interval_refused), --address is not an IP
+  // address and a port (multiplexer/endpoint.h), or the threads, given or
+  // from MX_SERVER_THREADS, are not a number from 1 to MAX_THREADS.
   virtual void parse_options(std::vector<std::string>& args);
+  // The most event loops --threads asks for.
+  static constexpr unsigned int MAX_THREADS = 256;
   virtual std::string short_description() const { return "run a multiplexer"; }
   virtual std::string short_synopsis(const std::string& commandname) {
     return "<" + commandname + "-options> [--address] address:port";
@@ -61,6 +68,11 @@ class StartMultiplexerServer : public Task {
     options.add("drain-seconds", &drain_seconds_, 5.0,
                 "on SIGTERM or SIGINT, seconds to go on routing and sending what is queued before each "
                 "connection closes, then exit; a second signal, or 0, stops at once");
+    options.add("threads", &threads_, 0,
+                "event loops the connections are dealt out over as they arrive, each on a thread of its own, "
+                "the routing under one lock: 1 runs the multiplexer on one thread, more for a host where one "
+                "thread is full (docs/operations.md); 0 takes MX_SERVER_THREADS from the environment, 1 when it "
+                "is not set");
   }
 
  private:
@@ -77,6 +89,7 @@ class StartMultiplexerServer : public Task {
   bool allow_tap_ = false;
   std::string peers_file_;
   float drain_seconds_;
+  unsigned int threads_ = 0;  // --threads as given, then as parse_options() settled it
 };
 
 };  // namespace mxcontrol

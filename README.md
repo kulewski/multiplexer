@@ -287,7 +287,9 @@ Bazel build.
   found again behind another multiplexer; a lane keeps a stream of
   messages on one connection, in order, following a failover or pinned
   ([lanes, pinning and addressed queries](docs/api_python.md#lanes-pinning-and-addressed-queries)).
-- **High performance, low latency.** One thread and one event loop per multiplexer, frames forwarded
+- **High performance, low latency.** One thread and one event loop per multiplexer, or several where
+  one core is not enough, a frame written by the thread that routed it
+  ([several event loops](docs/operations.md#several-event-loops)); frames forwarded
   as they arrived, never re-serialized, a burst of them read in one system
   call, one write per frame with Nagle's algorithm off on every connection: over 120,000 request/reply round
   trips per second through one multiplexer on 70% of one core, 17 µs per

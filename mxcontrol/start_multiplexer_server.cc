@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -135,6 +136,23 @@ void StartMultiplexerServer::parse_options(std::vector<std::string>& args) {
     throw mx::options::Error("--address: '" + host_port_ +
                              "': not an IP address; 0.0.0.0 listens on every IPv4 one, [::] on every one");
   }
+  // --threads, else MX_SERVER_THREADS, else one loop.
+  if (!threads_) {
+    threads_ = 1;
+    const char* environment = std::getenv("MX_SERVER_THREADS");
+    if (environment && *environment) {
+      char* end = nullptr;
+      const unsigned long threads = std::strtoul(environment, &end, 10);
+      if (*end || !threads || threads > MAX_THREADS) {
+        throw mx::options::Error(std::string("MX_SERVER_THREADS: '") + environment + "': not a number from 1 to " +
+                                 mx::repr(MAX_THREADS));
+      }
+      threads_ = static_cast<unsigned int>(threads);
+    }
+  }
+  if (threads_ > MAX_THREADS) {
+    throw mx::options::Error("--threads: " + mx::repr(threads_) + " is more than " + mx::repr(MAX_THREADS));
+  }
 }
 
 int StartMultiplexerServer::run() {
@@ -185,6 +203,7 @@ int StartMultiplexerServer::run() {
     }
   }
   server->set_rules_check_interval(rules_check_interval_);
+  server->set_threads(threads_);
   server->set_memory_log_every(memory_log_every_);
   server->set_recording_dir(recording_dir_);
   server->set_allow_tap(allow_tap_);
@@ -214,6 +233,7 @@ int StartMultiplexerServer::run() {
       MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception escaped an io handler: ") + e.what()));
     }
   }
+  server->finish_loops();  // the other loops, on several: every connection has ended by now
   MX_LOG(INFO, LOWVERBOSITY, TEXT("MX server stopped"));
 
   return 0;

@@ -21,21 +21,44 @@
 // filters (KeyPatterns, multiplexer/key_filters.h) which keys of a type
 // do; `to` always does. docs/wire_format.md describes the same order from
 // the outside, docs/keys.md the keys.
+//
+// Several event loops (set_threads(), run_multiplexer --threads): the
+// connections are dealt out over N loops as they are accepted
+// (ServerLoops, multiplexer/server_loops.h), and each is read, checked
+// and parsed on its own. The routing state is what it is at one loop,
+// under one routing lock instead of one thread (RoutingScope): every entry
+// point takes it, and a frame is routed under it, queued on each peer it
+// goes to under that connection's own lock, and written once the routing
+// lock is let go, by the thread that routed it, whatever loop the peer
+// lives on (Connection's "Shared between loops"); a write that would
+// block is left to the peer's own loop. Since every frame is queued in
+// the order it was routed, what one connection sends reaches each peer in
+// the order it was sent, read by one loop, and a PEER_STATUS still follows
+// everything routed to its peer before it. What only a connection's own
+// loop may do, start it, end it, change its heartbeats, is posted there
+// (server_shared.cc). Recording and taps run under the routing lock as the
+// rest does, the records in the order the routing made them. At one loop,
+// the default, none of this runs: the routing lock is the loop's thread.
 #ifndef MX_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_SERVER_H_
 
+#include <asio/executor_work_guard.hpp>
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "lib/adaptive_mutex.h"
 #include "lib/functors.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/config.h"
@@ -46,6 +69,7 @@
 #include "multiplexer/log_summary.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 #include "multiplexer/recorder.h"
+#include "multiplexer/server_loops.h"
 
 namespace multiplexer {
 
@@ -58,6 +82,9 @@ struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits
   // Every frame is parsed into one message the server keeps
   // (Server::parse_target).
   static constexpr bool REUSES_PARSE_TARGET = true;
+  // On several loops (Server::set_threads), every connection is shared
+  // between them and written through.
+  static constexpr bool WRITES_THROUGH = true;
 
   struct MessagesBufferTraits : public DefaultConnectionsManagerTraits::MessagesBufferTraits {
     typedef std::shared_ptr<const RawMessage> value_type;
@@ -111,14 +138,28 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // the last one after all, or its strings hold more than KEPT_PARSE_BYTES,
   // or it held override rules or fields this multiplexer does not know,
   // which a clear keeps the room of too, a fresh one, so that an odd
-  // frame's memory goes.
+  // frame's memory goes. On several loops, each loop keeps one of its own,
+  // which takes no lock.
   std::shared_ptr<MultiplexerMessage> parse_target();
   // The most a kept parse target's strings may hold: its payload, batch,
   // key and workflow.
   static constexpr std::size_t KEPT_PARSE_BYTES = 4 * 1024 * 1024;
 
-  // Starts accepting connections, and checking the rules file.
+  // Starts accepting connections, and checking the rules file; on several
+  // loops, the threads of the loops beside the main one.
   void start();
+
+  // How many event loops serve the connections: the io_service given to
+  // Create() the first, the main one, and `threads` - 1 more, each on a
+  // thread of its own (see the file comment). Once, before start(), on
+  // the thread that runs that io_service; 1, the default, is the one loop
+  // of old, whose code path this leaves as it was. A server on several
+  // loops is let go of only after finish_loops(), once the main loop's
+  // run() returned after a stop(): it lets the other loops run out of
+  // work and joins their threads, so that none of them holds the server
+  // last, which would make it join its own thread.
+  void set_threads(unsigned int threads);
+  void finish_loops();
 
   // The rules file. set_rules_file() names it and load_rules() reads it:
   // when the text differs from the rules in use, it is parsed and put in
@@ -151,12 +192,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   static std::string rules_check_interval_refused(float seconds);
   // Whether stop() has run: the acceptor is closed and nothing re-arms.
   bool stopped() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return stopping_;
   }
   // The CRC-32 of the rules in use, as the generated constants carry it.
   std::string rules_fingerprint() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return rules_fingerprint_;
   }
 
@@ -199,7 +240,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // Closes the file session, if one is open, noting `reason` for the status.
   void stop_recording(const std::string& reason);
   bool recording() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return recorder_ != nullptr;
   }
 
@@ -213,21 +254,21 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   }
   // How many peer types the routing index holds: those some peer has
   // connected as, a type a rule only names never entering it. For tests;
-  // on the io thread.
+  // on the io thread, or any on several loops.
   std::size_t peer_types_indexed() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return connections_by_type_.size();
   }
   // How many connections are accepted and not ended yet, registered or
-  // not. For tests; on the io thread.
+  // not. For tests; on the io thread, or any on several loops.
   std::size_t accepted_count() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return accepted_.size();
   }
 
   // Port the acceptor is bound to; meaningful when constructed with port 0.
   unsigned short local_port() const {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     return acceptor_.local_endpoint().port();
   }
 
@@ -256,11 +297,23 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   void register_connection(Connection::pointer conn, const WelcomeMessage& welcome);
   void connection_closed(Connection* conn);
   void handle_orphaned_outgoing_messages(Connection*, Connection::MessagesBuffer& queue) {
-    MX_DCHECK_RUN_ON(&owner_thread());
+    RoutingScope routing(*this);
     if (stopping_) {
       stop_dropped_queued_ += queue.size();
     }
   }
+  // The base class's, but for a connection a newcomer with its instance id
+  // replaced on several loops: it left routing at the replacement
+  // (replace_connection), the newcomer holding the id by now, and what is
+  // left is the rest of its leaving (_leave_routing); what it reads until
+  // it has closed is dropped (handle_message).
+  void unregister_connection(Connection* conn);
+  // The base class's hook: `previous`, whose instance id a newcomer takes,
+  // ends. At one loop it is shut down now, its shutdown taking it out of
+  // routing. On several it may live on another loop, which alone may shut
+  // it down: it leaves routing here, logged and recorded ahead of the
+  // newcomer's arrival as at one loop, and is shut down on its own loop.
+  void replace_connection(const Connection::pointer& previous);
 
   // Peers may not announce a reserved type (1 to 99), and must be in the
   // rules file; the exceptions are a rules controller, always accepted,
@@ -285,35 +338,107 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // The peer's welcome was accepted: now send ours and arm the heartbeats,
   // and note the arrival for the recording and the peers file, with the
   // routing its welcome carried when that turns anything off. A
-  // controller is passive (controller()).
+  // controller is passive (controller()). On several loops
+  // register_connection() did it, under the routing lock the peer
+  // registered under, so that no loop routes to the peer ahead of our
+  // welcome.
   void after_connection_registration(Connection::pointer new_connection, const WelcomeMessage&) {
+    if (loops_) {
+      return;
+    }
     MX_DCHECK_RUN_ON(&owner_thread());
-    if (controller(new_connection->peer_type())) {
-      new_connection->set_is_passive(true);
-    }
-    new_connection->start_rest();
-    _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
-    if (restricted(new_connection->routing())) {
-      _emit_peer_routing(*new_connection);
-    }
-    _peers_changed();
+    _registered(new_connection);
   }
 
-  // A registered peer's connection ended for routing; a tap it held ends
-  // with it, and its key filters' patterns are given back. Its
-  // DISCONNECTED is recorded when the connection closes
-  // (connection_closed): after a failed write it reads on to the peer's
-  // end, delivering what it reads, whose records come before it.
+  // A registered peer's connection ended for routing. Its DISCONNECTED is
+  // recorded when the connection closes (connection_closed): after a
+  // failed write it reads on to the peer's end, delivering what it reads,
+  // whose records come before it.
   void connection_unregistered(Connection* conn) {
     MX_DCHECK_RUN_ON(&owner_thread());
     departed_.insert(conn);
-    _untap(conn);
-    key_patterns_.remove_owner(conn->key_owner());
-    conn->set_key_filters(google::protobuf::RepeatedPtrField<KeyFilter>(), KeyPatterns::NO_OWNER);
-    _peers_changed();
+    _leave_routing(conn);
   }
 
  private:
+  // Who may touch the routing state for the scope's life. At one loop the
+  // loop's thread, which it checks in a debug build as MX_DCHECK_RUN_ON
+  // does; on several, whoever holds the routing lock, which it takes,
+  // unless this thread holds it already, a scope within a scope. For the
+  // static analysis it holds owner_thread_ either way, so that every
+  // member guarded by it is proven touched within one. A debug build binds
+  // owner_thread_ to the holder, so that the checks of the code it calls
+  // pass for the holder alone. The outermost scope of a thread, once it
+  // let go of the lock, writes the frames its routing queued and took the
+  // writing of (_queue, _write_claimed).
+  class MX_SCOPED_CAPABILITY RoutingScope {
+   public:
+    explicit RoutingScope(const Server& server) MX_ACQUIRE(server.owner_thread_) : server_(server) {
+      if (!server.loops_) {
+        DbgAssertMsg(server.owner_thread_.is_current(), "called on a thread other than the one that owns this object");
+        return;
+      }
+      server._lock_routing();
+    }
+    ~RoutingScope() MX_RELEASE() {
+      if (server_.loops_) {
+        server_._unlock_routing();
+      }
+    }
+    RoutingScope(const RoutingScope&) = delete;
+    RoutingScope& operator=(const RoutingScope&) = delete;
+
+   private:
+    const Server& server_;
+  };
+  // RoutingScope's halves on several loops: the routing lock taken unless
+  // this thread holds it, and let go by its outermost scope, which then
+  // writes what it claimed. Out of the static analysis, which cannot see a
+  // lock taken by one scope of a thread and let go by another of the same
+  // thread: RoutingScope declares what is held.
+  void _lock_routing() const MX_NO_THREAD_SAFETY_ANALYSIS;
+  void _unlock_routing() const MX_NO_THREAD_SAFETY_ANALYSIS;
+
+  // What became of a frame routing queued on a connection: QUEUED; FULL,
+  // refused for the connection's full queue; GONE, refused because the
+  // connection ended, closing on its own loop while another loop routed to
+  // it, which routing takes for a peer no longer there, as one loop never
+  // finds a closed one to route to. At one loop a refusal is FULL.
+  enum class Queued { QUEUED, FULL, GONE };
+  // Queues `raw` on `connection`, which routing chose: schedule() at one
+  // loop. On several, queued under the connection's own lock, and written
+  // once this thread let go of the routing lock when it took the writing
+  // on (_queue_shared), so that no system call holds the lock.
+  Queued _queue(const Connection::pointer& connection, const std::shared_ptr<const RawMessage>& raw, bool force = false)
+      MX_RUN_ON(owner_thread_) {
+    if (!loops_) {
+      return connection->schedule(raw, force) ? Queued::QUEUED : Queued::FULL;
+    }
+    return _queue_shared(connection, raw, force);
+  }
+  // _queue() on several loops: the frame queued on the connection's shared
+  // side, and the connection noted for this thread to write when the
+  // writing fell to it.
+  Queued _queue_shared(const Connection::pointer& connection, const std::shared_ptr<const RawMessage>& raw, bool force)
+      MX_RUN_ON(owner_thread_);
+  // The writes this thread's routing claimed, outside every lock.
+  static void _write_claimed();
+
+  // after_connection_registration() at one loop; register_connection() on
+  // several, under the routing lock.
+  void _registered(const Connection::pointer& new_connection) MX_RUN_ON(owner_thread_);
+  // The rest of a peer leaving routing: a tap it held ends with it, its
+  // key filters' patterns are given back, and the peers file follows.
+  void _leave_routing(Connection* conn) MX_RUN_ON(owner_thread_);
+  // On several loops: `connection` ends on its own loop, the one that may
+  // end it, as stop() ends it at one loop: closed once flushed when
+  // `drain` and registered, else shut down.
+  static void _end_on_its_loop(const Connection::pointer& connection, bool drain);
+  // On several loops: what a rules reload changes of a connected peer's,
+  // its passive flag and its queue's size; the flag, which its heartbeats
+  // follow, on its own loop.
+  static void _follow_rules(const Connection::pointer& connection, bool passive, unsigned int queue_size);
+
   void _start_accept() MX_RUN_ON(owner_thread_);
   void _handle_accept(Connection::pointer new_connection, const asio::error_code& error);
   // An accept that failed for want of a descriptor or memory is tried
@@ -439,6 +564,10 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // A peer's copy its full queue refused; the line names the peer.
   void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection)
       MX_RUN_ON(owner_thread_);
+  // A message addressed to an instance id no connection holds, or, on
+  // several loops, one whose connection is closing on its own loop:
+  // dropped, its sender told when it asked, as for an id not connected.
+  void _not_connected(MessageMetaHandler& meta_handler) MX_RUN_ON(owner_thread_);
 
   // Recording. A record is built once per delivery attempt, one for each
   // recipient of a message, and goes to the file session and to every
@@ -623,6 +752,28 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   LogSummary drops_ MX_GUARDED_BY(owner_thread_);
   // The patterns of every connected peer's key filters, by message type.
   KeyPatterns key_patterns_ MX_GUARDED_BY(owner_thread_);
+
+  // Several loops (see the file comment): null at one. Set by
+  // set_threads() before start() and never changed, so every loop reads
+  // it freely.
+  std::unique_ptr<ServerLoops> loops_;
+  // The connections a newcomer replaced on several loops, which left
+  // routing then, leave the rest of it when they end
+  // (unregister_connection), and have what they read dropped until they
+  // have closed (handle_message, connection_closed).
+  std::set<const Connection*> replaced_ MX_GUARDED_BY(owner_thread_);
+  // On several loops, from stop() until the stop is over: the main loop
+  // runs, so that its run() returns once every connection on every loop
+  // has ended, as it does at one loop.
+  std::optional<asio::executor_work_guard<asio::io_service::executor_type>> stop_work_ MX_GUARDED_BY(owner_thread_);
+  // The routing lock on several loops (RoutingScope): the mutex, the
+  // thread holding it, and how deep its scopes are on that thread, which
+  // that thread alone touches. On a cache line of their own, which every
+  // loop writes for every frame, apart from loops_, which every loop
+  // reads before it takes the lock.
+  alignas(64) mutable mx::AdaptiveMutex routing_mutex_;
+  mutable std::atomic<std::thread::id> routing_holder_{std::thread::id()};
+  mutable unsigned int routing_depth_ = 0;
 };  // class Server
 
 };  // namespace multiplexer

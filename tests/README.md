@@ -140,8 +140,14 @@ mx_integration_test(
 )
 ```
 
-`mx = 2` starts two multiplexers, `params` reaches the scenario through
-`cfg.param()`, `deps` and `data` add what it needs. From another workspace,
+`mx = 2` starts two multiplexers, `threads = 2` runs each on two event
+loops (`run_multiplexer --threads`, given to it as `MX_SERVER_THREADS`,
+the target tagged `several_loops`), `params` reaches the scenario through
+`cfg.param()`, `deps` and `data` add what it needs. Each area of the
+scenarios has a configuration on two loops, `*_several_loops`, its roles
+in C++ where it has roles, so that ThreadSanitizer runs it too
+(AGENTS.md's commands); `--test_env=MX_SERVER_THREADS=4` runs every
+multiplexer of a whole suite on four. From another workspace,
 `load("@mx//multiplexer/testing:defs.bzl", "mx_integration_test")`; there
 `rules` defaults to the file the `multiplexer_rules` flag names, the one
 your constants come from, and the scenario imports `multiplexer.testing`

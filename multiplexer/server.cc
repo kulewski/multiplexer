@@ -1,6 +1,7 @@
 // Server: construction, accepting, and the routing path. The design is in
 // server.h; this file is the whole per-message path, kept in one
-// translation unit so it inlines the way it did as header code.
+// translation unit so it inlines the way it did as header code. What runs
+// on several loops alone is in server_shared.cc.
 #include "multiplexer/server.h"
 
 #include <fcntl.h>
@@ -44,6 +45,23 @@ void close_on_exec(int descriptor) {
     ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC);
   }
 }
+
+// The message a frame is parsed into, `kept` from frame to frame and
+// cleared: see Server::parse_target().
+std::shared_ptr<MultiplexerMessage> reuse_parse_target(std::shared_ptr<MultiplexerMessage>& kept) {
+  if (kept == nullptr || kept.use_count() != 1 ||
+      kept->message().capacity() + kept->batch().capacity() + kept->key().capacity() + kept->workflow().capacity() >
+          Server::KEPT_PARSE_BYTES ||
+      kept->override_rrules_size() > 0 || !kept->unknown_fields().empty()) {
+    kept = std::make_shared<MultiplexerMessage>();
+  } else {
+    kept->Clear();
+  }
+  return kept;
+}
+
+// On several loops, each loop's thread's own parse target.
+thread_local std::shared_ptr<MultiplexerMessage> loop_parse_target;
 }  // namespace
 
 // `host` must be an IP address; names are not resolved. Port 0 lets the
@@ -65,16 +83,19 @@ Server::Server(asio::io_service& io_service, const std::string& host, unsigned s
 // The peers file is written first, empty: a file a process that died
 // left listed its peers until the first arrival or departure here.
 void Server::start() {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (!peers_file_.empty()) {
     _write_peers_file();
+  }
+  if (loops_) {
+    loops_->start();
   }
   _start_accept();
   _arm_rules_check();
 }
 
 void Server::stop(float drain_seconds, std::function<void()> stopped) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (stopped) {
     on_stopped_ = std::move(stopped);
   }
@@ -82,6 +103,9 @@ void Server::stop(float drain_seconds, std::function<void()> stopped) {
   if (!again) {
     stopping_ = true;
     stop_started_ = std::chrono::steady_clock::now();
+    if (loops_) {
+      stop_work_.emplace(asio::make_work_guard(io_service_));  // let go of by _stop_if_done()
+    }
   }
   asio::error_code ignored;
   acceptor_.close(ignored);
@@ -98,7 +122,9 @@ void Server::stop(float drain_seconds, std::function<void()> stopped) {
   if (drain) {
     unsigned int registered = 0;
     for (const Connection::pointer& connection : live) {
-      registered += connection->registered();
+      // On several loops a connection's own flag is its loop's to read;
+      // whether it is in the routing index is the routing state's.
+      registered += loops_ ? connection->in_type_list : connection->registered();
     }
     MX_LOG(INFO, LOWVERBOSITY,
            CTX("multiplexer.server") TEXT("stopping: " + repr(registered) +
@@ -111,6 +137,10 @@ void Server::stop(float drain_seconds, std::function<void()> stopped) {
     drain_timer_.cancel(ignored);
   }
   for (const Connection::pointer& connection : live) {
+    if (loops_) {
+      _end_on_its_loop(connection, drain);
+      continue;
+    }
     if (connection->shuts_down()) {
       continue;
     }
@@ -131,7 +161,7 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
   if (error || !self) {
     return;
   }
-  MX_DCHECK_RUN_ON(&self->owner_thread());
+  RoutingScope routing(*self);
   std::vector<Connection::pointer> late;
   for (const auto& entry : self->accepted_) {
     Connection::pointer connection = entry.second.lock();
@@ -145,7 +175,16 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
                                           " connection(s) still held messages at the deadline; closing them"));
   }
   for (const Connection::pointer& connection : late) {
-    if (!connection->shuts_down()) {
+    if (self->loops_) {
+      // On its own loop, where it may have begun to read to its end
+      // meanwhile, keeping its own bound then, as one already doing so
+      // does here.
+      asio::post(connection->socket().get_executor(), [connection] {
+        if (connection->living() && !connection->shuts_down()) {
+          connection->shutdown();
+        }
+      });
+    } else if (!connection->shuts_down()) {
       connection->shutdown();
     }
   }
@@ -156,7 +195,7 @@ void Server::_on_drain_deadline(weak_pointer server, const asio::error_code& err
 // before anything can be routed, so that nothing reaches the peer against
 // them; given back when the base class refuses the connection after all.
 void Server::register_connection(Connection::pointer conn, const WelcomeMessage& welcome) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (stopping_) {
     conn->shutdown();
     return;
@@ -182,11 +221,44 @@ void Server::register_connection(Connection::pointer conn, const WelcomeMessage&
            CTX("multiplexer.server") TEXT("peer " + repr(conn->peer_id()) + " (" + _peer_name(conn->peer_type()) +
                                           ") takes keys: " + key_filters_text(conn->key_filters())));
   }
+  if (loops_) {
+    _registered(conn);  // see after_connection_registration()
+    if (conn->shuts_down()) {
+      // Our welcome could not be queued, which a live connection's always
+      // is: the connection ended at once, counting itself refused, so it
+      // neither unregistered itself nor, closed already, records its
+      // departure, which follows its arrival here.
+      Base::unregister_connection(conn.get());
+      if (departed_.erase(conn.get())) {
+        _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
+      }
+    }
+  }
+}
+
+void Server::_registered(const Connection::pointer& new_connection) {
+  if (controller(new_connection->peer_type())) {
+    new_connection->set_is_passive(true);
+  }
+  new_connection->start_rest();
+  _emit_peer(PeerEvent::CONNECTED, new_connection->peer_id(), new_connection->peer_type());
+  if (restricted(new_connection->routing())) {
+    _emit_peer_routing(*new_connection);
+  }
+  _peers_changed();
+}
+
+void Server::_leave_routing(Connection* conn) {
+  _untap(conn);
+  key_patterns_.remove_owner(conn->key_owner());
+  conn->set_key_filters(google::protobuf::RepeatedPtrField<KeyFilter>(), KeyPatterns::NO_OWNER);
+  _peers_changed();
 }
 
 void Server::connection_closed(Connection* conn) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   accepted_.erase(conn);
+  replaced_.erase(conn);
   if (departed_.erase(conn)) {
     _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
   }
@@ -220,9 +292,19 @@ void Server::_stop_if_done() {
   // After the peers left, so their departures are in the file; the
   // session's deadline timer would otherwise keep the loop alive.
   stop_recording("the multiplexer stopped");
-  if (on_stopped_) {
-    std::function<void()> stopped = std::move(on_stopped_);
-    on_stopped_ = nullptr;
+  std::function<void()> stopped = std::move(on_stopped_);
+  on_stopped_ = nullptr;
+  if (loops_) {
+    // On the main loop, whose objects `stopped` may touch, a signal set
+    // say; that loop's run() returns after it, its work let go.
+    asio::post(io_service_, [stopped = std::move(stopped), work = std::move(*stop_work_)]() mutable {
+      if (stopped) {
+        stopped();
+      }
+      work.reset();
+    });
+    stop_work_.reset();
+  } else if (stopped) {
     stopped();
   }
 }
@@ -273,7 +355,12 @@ void keep_alive(asio::ip::tcp::socket& socket) {
 // after stop() while the loop runs has its aborted accept's handler find
 // nothing, where it touched the freed Server.
 void Server::_start_accept() {
-  Connection::pointer new_connection = Connection::Create(io_service_, this->shared_from_this());
+  // On several loops the connection lives on the next one, its socket and
+  // timers that loop's, and is shared between them all.
+  Connection::pointer new_connection = Connection::Create(loops_ ? loops_->next() : io_service_, shared_from_this());
+  if (loops_) {
+    new_connection->share();
+  }
   acceptor_.async_accept(new_connection->socket(),
                          [weak = weak_pointer(shared_from_this()), new_connection](const asio::error_code& error) {
                            if (pointer self = weak.lock()) {
@@ -283,7 +370,7 @@ void Server::_start_accept() {
 }
 
 void Server::_handle_accept(Connection::pointer new_connection, const asio::error_code& error) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (!acceptor_.is_open()) {
     // stop() closed the acceptor: do not re-arm, just drop the connection
     new_connection->shutdown();
@@ -307,7 +394,15 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
     close_on_exec(new_connection->socket().native_handle());
     accepted_[new_connection.get()] = new_connection;
     keep_alive(new_connection->socket());
-    new_connection->start_only_read();
+    if (loops_) {
+      // Started on its own loop, which its checks are bound to from then on.
+      asio::post(new_connection->socket().get_executor(), [new_connection] {
+        new_connection->bind_io_thread_to_current();
+        new_connection->start_only_read();
+      });
+    } else {
+      new_connection->start_only_read();
+    }
   } else {
     // the connection is dropped, or -- in fact -- has never been established
     new_connection->shutdown();
@@ -321,7 +416,7 @@ void Server::_accept_later() {
     if (error || !self) {
       return;
     }
-    MX_DCHECK_RUN_ON(&self->owner_thread());
+    RoutingScope routing(*self);
     if (self->acceptor_.is_open()) {
       self->_start_accept();
     }
@@ -330,28 +425,31 @@ void Server::_accept_later() {
 
 void Server::handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
                             const std::shared_ptr<MultiplexerMessage>& msg) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (msg->sender() == instance_id_) {
     MX_LOG(ERROR, MEDIUMVERBOSITY,
            CTX("multiplexer.server") TEXT("received message from self") FLOW(msg->workflow())
                SKIPFILEIF(!(msg->logging_method() & multiplexer::LoggingMethod::FILE)));
     return;
   }
+  // Read by a connection a newcomer with its instance id replaced, from
+  // another loop, before its own loop ended it: dropped, as at one loop,
+  // where the replacement ends the old connection at once and nothing it
+  // still held is read. At one loop replaced_ stays empty.
+  if (!replaced_.empty() && replaced_.count(conn.get())) {
+    return;
+  }
   return _handle_message(conn, *msg, raw);
 }
 
+// On several loops each loop's thread keeps its own, no routing state, so
+// no lock.
 std::shared_ptr<MultiplexerMessage> Server::parse_target() {
-  MX_DCHECK_RUN_ON(&owner_thread());
-  if (parse_target_ == nullptr || parse_target_.use_count() != 1 ||
-      parse_target_->message().capacity() + parse_target_->batch().capacity() + parse_target_->key().capacity() +
-              parse_target_->workflow().capacity() >
-          KEPT_PARSE_BYTES ||
-      parse_target_->override_rrules_size() > 0 || !parse_target_->unknown_fields().empty()) {
-    parse_target_ = std::make_shared<MultiplexerMessage>();
-  } else {
-    parse_target_->Clear();
+  if (loops_) {
+    return reuse_parse_target(loop_parse_target);
   }
-  return parse_target_;
+  MX_DCHECK_RUN_ON(&owner_thread());
+  return reuse_parse_target(parse_target_);
 }
 
 // ---------------------------------------------------------------------------
@@ -543,29 +641,26 @@ bool Server::_handle_message_inlined_rules(MessageMetaHandler& meta_handler) {
     ConnectionById::iterator entry = connection_by_id_.find(meta_handler.msg.to());
     Connection::pointer connection;
     if (entry == connection_by_id_.end() || !(connection = entry->second.lock())) {
-      if (meta_handler.msg.report_delivery_error()) {
-        meta_handler.failed(meta_handler.msg.to());
-      }
-      _record(meta_handler, meta_handler.msg.to(), 0, RoutedMessage::NO_RECIPIENT,
-              meta_handler.msg.report_delivery_error());
-      if (const std::string* line = drops_.first({NOT_CONNECTED, WARNING, 0, meta_handler.msg.to()}, [&] {
-            return "message to " + repr(meta_handler.msg.to()) + " which is not connected; dropping";
-          })) {
-        MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
-      }
+      _not_connected(meta_handler);
       return true;
     }
-    // A full queue drops the message like an absent peer does, and the
-    // sender is told the same way.
-    if (connection->schedule(meta_handler.raw)) {
-      _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
-    } else {
-      if (meta_handler.msg.report_delivery_error()) {
-        meta_handler.failed(meta_handler.msg.to());
-      }
-      _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL,
-              meta_handler.msg.report_delivery_error());
-      _dropped_queue_full(meta_handler, *connection);
+    switch (_queue(connection, meta_handler.raw)) {
+      case Queued::QUEUED:
+        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
+        break;
+      case Queued::FULL:
+        // A full queue drops the message like an absent peer does, and the
+        // sender is told the same way.
+        if (meta_handler.msg.report_delivery_error()) {
+          meta_handler.failed(meta_handler.msg.to());
+        }
+        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL,
+                meta_handler.msg.report_delivery_error());
+        _dropped_queue_full(meta_handler, *connection);
+        break;
+      case Queued::GONE:
+        _not_connected(meta_handler);  // closing on its own loop: gone for the routing
+        break;
     }
     return true;
   }
@@ -821,6 +916,19 @@ void Server::_match_key(MessageMetaHandler& meta_handler, std::uint32_t type) {
   meta_handler.key_type = type;
 }
 
+void Server::_not_connected(MessageMetaHandler& meta_handler) {
+  if (meta_handler.msg.report_delivery_error()) {
+    meta_handler.failed(meta_handler.msg.to());
+  }
+  _record(meta_handler, meta_handler.msg.to(), 0, RoutedMessage::NO_RECIPIENT,
+          meta_handler.msg.report_delivery_error());
+  if (const std::string* line = drops_.first({NOT_CONNECTED, WARNING, 0, meta_handler.msg.to()}, [&] {
+        return "message to " + repr(meta_handler.msg.to()) + " which is not connected; dropping";
+      })) {
+    MX_LOG(WARNING, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
+  }
+}
+
 void Server::_dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection) {
   if (const std::string* line = drops_.first({QUEUE_FULL, WARNING, connection.peer_type(), connection.peer_id()}, [&] {
         return "outgoing queue full, dropping message to peer " + repr(connection.peer_id()) + " of type " +
@@ -918,12 +1026,17 @@ unsigned int Server::send_to_all(MessageMetaHandler& meta_handler, ConnectionsLi
         _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::NOT_ACCEPTED, false);
         continue;
       }
-      if (connection->schedule(meta_handler.raw)) {
-        ++scheduled;
-        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
-      } else {
-        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
-        _dropped_queue_full(meta_handler, *connection);
+      switch (_queue(connection, meta_handler.raw)) {
+        case Queued::QUEUED:
+          ++scheduled;
+          _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
+          break;
+        case Queued::FULL:
+          _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
+          _dropped_queue_full(meta_handler, *connection);
+          break;
+        case Queued::GONE:
+          break;  // closing on its own loop: passed over as one not living is
       }
     } else {
       connections.erase(current);  // dead connection
@@ -953,9 +1066,12 @@ unsigned int Server::send_to_one(MessageMetaHandler& meta_handler, ConnectionsLi
       if (meta_handler.keyed && !_takes_key(*connection, meta_handler)) {
         continue;
       }
-      if (!connection->schedule(meta_handler.raw)) {
-        _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
-        continue;
+      const Queued queued = _queue(connection, meta_handler.raw);
+      if (queued != Queued::QUEUED) {
+        if (queued == Queued::FULL) {
+          _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::QUEUE_FULL, false);
+        }
+        continue;  // or closing on its own loop: passed over as one not living is
       }
       _record(meta_handler, connection->peer_id(), connection->peer_type(), RoutedMessage::DELIVERED, false);
       connections.splice(connections.end(), connections, current);
@@ -980,7 +1096,7 @@ void Server::_peers_changed() {
     if (error || !self) {
       return;
     }
-    MX_DCHECK_RUN_ON(&self->owner_thread());
+    RoutingScope routing(*self);
     if (self->peers_write_pending_) {
       self->_write_peers_file();
     }
@@ -1057,7 +1173,7 @@ std::string Server::_peer_name(std::uint32_t peer_type) const {
 // The rules file.
 
 Server::RulesLoad Server::load_rules(std::string* error) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   std::string text;
   if (!_read_rules_file(&text, error)) {
     // The error is the read's now: bytes that failed before and come back
@@ -1145,7 +1261,9 @@ Server::RulesLoad Server::_apply_rules_text(const std::string& text, std::string
       continue;
     }
     const MultiplexerPeerDescription* peer = config_.peer_description(connection->peer_type());
-    if (peer) {
+    if (peer && loops_) {
+      _follow_rules(connection, peer->is_passive() || controller(connection->peer_type()), peer->queue_size());
+    } else if (peer) {
       connection->set_is_passive(peer->is_passive() || controller(connection->peer_type()));
       connection->set_outgoing_queue_max_size(peer->queue_size());
     } else if (connection->peer_type() > peers::MAX_MULTIPLEXER_SPECIAL_PEER_TYPE) {
@@ -1222,7 +1340,7 @@ void Server::_on_rules_check(weak_pointer server, const asio::error_code& error)
   if (!self) {
     return;
   }
-  MX_DCHECK_RUN_ON(&self->owner_thread());
+  RoutingScope routing(*self);
   if (self->stopping_) {
     return;  // stop() came after the timer had expired: do not re-arm
   }
@@ -1345,7 +1463,7 @@ void Server::_fill_rules_status(RulesStatus& status) {
 
 bool Server::start_recording(const std::string& path, const std::string& label, unsigned int payload_limit,
                              std::uint64_t max_bytes, unsigned int max_seconds, std::string* error) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (recorder_) {
     *error = "already recording " + recorder_->path();
     return false;
@@ -1394,7 +1512,7 @@ bool Server::start_recording(const std::string& path, const std::string& label, 
 }
 
 void Server::stop_recording(const std::string& reason) {
-  MX_DCHECK_RUN_ON(&owner_thread());
+  RoutingScope routing(*this);
   if (!recorder_) {
     return;
   }
@@ -1419,7 +1537,7 @@ void Server::_on_session_deadline(weak_pointer server, std::uint64_t session, co
   if (!self) {
     return;
   }
-  MX_DCHECK_RUN_ON(&self->owner_thread());
+  RoutingScope routing(*self);
   if (self->sessions_ == session) {
     self->stop_recording("max_seconds reached");
   }
@@ -1443,7 +1561,7 @@ void Server::_on_recording_flush(weak_pointer server, const asio::error_code& er
   if (!self) {
     return;
   }
-  MX_DCHECK_RUN_ON(&self->owner_thread());
+  RoutingScope routing(*self);
   if (!self->recorder_) {
     return;  // the session ended after the timer had expired: no next tick
   }
@@ -1596,8 +1714,8 @@ void Server::_stream(Tap& tap, const std::string& serialized) {
     return;
   }
   std::shared_ptr<const RawMessage> raw(RawMessage::FromMessage(mxmsg));
-  if (!connection->schedule(raw)) {
-    tap.dropped += 1;
+  if (_queue(connection, raw) == Queued::FULL) {
+    tap.dropped += 1;  // a tap closing on its own loop is gone, as one not living is
   }
 }
 
@@ -1746,7 +1864,7 @@ void Server::_reply(const MessageMetaHandler& meta_handler, std::uint32_t type,
   // frames faster than it reads loses the answers past the forced frames'
   // room (FORCED_FRAMES_PAST_FULL_QUEUE), logged, rather than growing its
   // queue for good.
-  if (!meta_handler.conn->schedule(raw, /*force=*/true)) {
+  if (_queue(meta_handler.conn, raw, /*force=*/true) == Queued::FULL) {
     _dropped_queue_full(meta_handler, *meta_handler.conn);
   }
 }

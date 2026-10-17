@@ -726,3 +726,196 @@ mx_integration_test(
     ],
     scenario = "remote_recording_new_address/remote_recording_new_address.py",
 )
+
+# The multiplexer on several event loops (run_multiplexer --threads): one
+# configuration per area, every multiplexer on two loops, the connections
+# dealt out over them, so that routing crosses from one loop to the other.
+# C++ roles where a scenario has roles: ThreadSanitizer runs those too
+# (AGENTS.md), where a Python client cannot load its runtime late.
+[
+    mx_integration_test(
+        name = "%s_cc_cc_several_loops" % scenario,
+        size = size,
+        extra_deps = extra_deps,
+        mx = mx,
+        roles = {
+            "backend": "cc",
+            "client": "cc",
+        },
+        scenario = "%s/%s.py" % (scenario, scenario),
+        threads = 2,
+    )
+    for (scenario, size, mx, extra_deps) in [
+        ("query_one", "small", 1, []),
+        ("round_robin", "small", 1, []),
+        ("concurrent_clients", "small", 1, []),
+        ("threaded_queries", "small", 2, []),
+        ("two_mx_backend_on_one", "small", 2, []),
+        ("backend_drains", "medium", 1, []),
+        ("idle_cpu", "medium", 1, []),
+    ]
+]
+
+[
+    mx_integration_test(
+        name = "%s_cc_cc_several_loops" % scenario,
+        size = size,
+        extra_deps = extra_deps,
+        roles = {
+            "event_backend": "cc",
+            "event_client": "cc",
+        },
+        scenario = "%s/%s.py" % (scenario, scenario),
+        threads = 2,
+    )
+    for (scenario, size, extra_deps) in [
+        ("event_all_backends", "small", []),
+        (
+            "batched_events",
+            "small",
+            ["//multiplexer:multiplexer_py_proto"],
+        ),
+        ("mx_restarts_under_events", "medium", []),
+    ]
+]
+
+mx_integration_test(
+    name = "direct_addressing_cc_several_loops",
+    roles = {
+        "event_backend": "cc",
+        "event_client": "cc",
+    },
+    scenario = "direct_addressing/direct_addressing.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "large_payload_cc_several_loops",
+    size = "medium",
+    roles = {
+        "backend": "cc",
+        "client": "cc",
+    },
+    scenario = "large_payload/large_payload.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "key_routing_cc_several_loops",
+    size = "medium",
+    extra_deps = ["//multiplexer:multiplexer_py_proto"],
+    roles = {
+        "backend": "cc",
+        "client": "cc",
+        "event_backend": "cc",
+        "event_client": "cc",
+    },
+    scenario = "key_routing/key_routing.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "recording_cc_cc_several_loops",
+    extra_deps = [
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    roles = {
+        "backend": "cc",
+        "client": "cc",
+        "event_backend": "cc",
+        "event_client": "cc",
+    },
+    scenario = "recording/recording.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "recording_tap_py_py_several_loops",
+    size = "medium",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    roles = {
+        "backend": "py",
+        "client": "py",
+        "event_client": "py",
+    },
+    scenario = "recording_tap/recording_tap.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "remote_recording_cc_py_several_loops",
+    size = "medium",
+    extra_deps = [
+        "//multiplexer:clients",
+        "//multiplexer:recording",
+        "//multiplexer:recording_py_proto",
+    ],
+    roles = {
+        "backend": "cc",
+        "client": "py",
+    },
+    scenario = "remote_recording/remote_recording.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "rules_reload_peers_several_loops_test",
+    size = "medium",
+    extra_deps = ["//multiplexer:multiplexer_py_proto"],
+    scenario = "rules_reload_peers/rules_reload_peers.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "server_lifecycle_several_loops_test",
+    scenario = "server_lifecycle/server_lifecycle.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "direct_queue_full_several_loops_test",
+    size = "medium",
+    extra_deps = ["//multiplexer:multiplexer_py_proto"],
+    scenario = "direct_queue_full/direct_queue_full.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "idle_passive_peers_several_loops_test",
+    scenario = "idle_passive_peers/idle_passive_peers.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "hostile_input_py_several_loops",
+    roles = {"event_backend": "py"},
+    scenario = "hostile_input/hostile_input.py",
+    threads = 2,
+)
+
+mx_integration_test(
+    name = "connected_peers_py_several_loops",
+    mx = 2,
+    roles = {"backend": "py"},
+    scenario = "connected_peers/connected_peers.py",
+    threads = 2,
+)
+
+# The heartbeats of connections shared between loops, both drop intervals
+# waited out; slow.
+mx_integration_test(
+    name = "idle_client_cc_several_loops",
+    size = "medium",
+    roles = {
+        "backend": "cc",
+        "client": "cc",
+    },
+    scenario = "idle_client/idle_client.py",
+    tags = ["slow"],
+    threads = 2,
+)

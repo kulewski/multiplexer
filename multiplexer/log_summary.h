@@ -14,7 +14,9 @@
 // The cost is on the failure path only: a map lookup per line counted, and
 // nothing at all for a level the logging settings drop. The timer runs only
 // while something is counted, so an idle process never wakes for it. Not
-// thread-safe: one io thread, as the connections.
+// thread-safe: one io thread, as the connections; or, for a multiplexer on
+// several event loops, whichever holds its routing lock, which the timer's
+// tick then takes too (set_guard()).
 #ifndef MX_MULTIPLEXER_LOG_SUMMARY_H_
 #define MX_MULTIPLEXER_LOG_SUMMARY_H_
 
@@ -22,6 +24,7 @@
 #include <asio/steady_timer.hpp>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -87,6 +90,14 @@ class LogSummary {
   // whatever it counted would never be said.
   void flush();
 
+  // For an owner that calls first() and flush() from several threads, each
+  // holding a lock of the owner's while it does and while it reads the
+  // text first() returned: `guard(tick)` runs the timer's tick holding that
+  // lock too. Unset, the default, the tick runs as it is, on the one
+  // thread there is.
+  typedef std::function<void(const std::function<void()>& tick)> Guard;
+  void set_guard(Guard guard) { state_->guard = std::move(guard); }
+
  private:
   // The counts and the timer, shared with the timer's handler, which holds
   // them weakly: a handler that runs after its owner is gone does nothing.
@@ -105,6 +116,7 @@ class LogSummary {
     asio::steady_timer timer;
     bool armed = false;
     std::string context;
+    Guard guard;  // see set_guard()
 
     // Logs every count above zero and resets it; with `forget`, drops
     // every kind, else only the ones that had nothing to say.

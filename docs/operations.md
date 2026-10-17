@@ -19,7 +19,9 @@ to every multiplexer, which is the point of the full mesh. The
 
 Two multiplexers on one host, on two ports, protect against a multiplexer
 process dying but not against the host going, and they double every
-`whom: ALL` fan-out's cost, so prefer one per host.
+`whom: ALL` fan-out's cost, so prefer one per host. A host where one
+multiplexer's thread is the limit runs it on two event loops instead
+([several event loops](#several-event-loops)).
 
 ## On Kubernetes
 
@@ -200,10 +202,11 @@ picks the change up on its own, seconds apart, as a rolling restart would.
 The multiplexers read the file at the path they were given, following
 symlinks, so any way of changing it works: an editor, `cp`, a
 configuration management tool, or a mount that changes underneath. Each
-check reads it on the multiplexer's io thread, the one that routes, with
-a blocking read, so keep the file on local storage, a local disk or a
-ConfigMap volume: a network or FUSE mount that stalls holds up routing,
-heartbeats and signals for as long as a read waits. Where the file must
+check reads it with a blocking read where the multiplexer routes, on its
+io thread, or holding the routing lock on [several event
+loops](#several-event-loops), so keep the file on local storage, a local
+disk or a ConfigMap volume: a network or FUSE mount that stalls holds up
+routing, heartbeats and signals for as long as a read waits. Where the file must
 live on such a mount, `--rules-check-interval 0` stops the checks, and a
 `SIGHUP` or `mxcontrol rules reload` reads it when asked. The
 tidy way is to write the new file next to the old one and rename it over,
@@ -563,8 +566,9 @@ payload a record copies only what the sink that keeps the most keeps, the
 file or a tap, and every other sink cuts that copy in place; each record
 is serialized and buffered once for the file, and once for the taps at
 each payload limit they have between them. The file grows by the
-payloads it keeps. The file is opened, written and closed on the
-multiplexer's io thread, the one that routes, with blocking calls, and a
+payloads it keeps. The file is opened, written and closed where the
+multiplexer routes, on its io thread, or holding the routing lock on
+[several event loops](#several-event-loops), with blocking calls, and a
 full buffer, or the flush once a second, waits for the disk there: record
 to local storage, since a slow or stalled file system, a network mount gone
 quiet say, holds up routing, heartbeats and signals while it waits.
@@ -667,7 +671,8 @@ good as their clocks.
 
 ## Sizing
 
-One multiplexer is one thread with one event loop. Every message is forwarded
+One multiplexer is one thread with one event loop, unless it is given
+more ([several event loops](#several-event-loops)). Every message is forwarded
 as the bytes it arrived in, without re-serialization: the cost per message is
 the frame's checksum, its parse, which copies the payload once while the message
 is routed, a few map lookups and the socket writes. Memory is the sum of the outgoing
@@ -699,3 +704,68 @@ requests over them. A backend built on `BaseMultiplexerServer` handles one
 message at a time, so a slow handler is a slow backend, and a request that
 takes longer than the client's timeout is repeated to another backend by the
 search.
+
+### Several event loops
+
+`run_multiplexer --threads N`, or `MX_SERVER_THREADS=N` in its
+environment ([mxcontrol](mxcontrol.md#run_multiplexer)), runs the
+multiplexer on N event loops, each on a thread of its own, the
+connections dealt out over them, round robin, as they are accepted. Each
+loop reads, checks and parses the frames of its own connections; every
+frame is routed under one routing lock, which the loops take in turn; and
+the loop that routed a frame writes it to each receiving peer's socket
+itself, whatever loop that peer lives on, leaving the rest to the peer's
+own loop only when its socket is full. While the receivers keep up, no
+frame waits for a hand-off between threads, and a message crosses as fast
+as on one loop.
+
+Use it when the multiplexer's one thread is full while its peers are
+not: the process at a whole core, the producers waiting on it. Large
+batched messages from several producers are the case for it. With four
+producers sending batches of kilobyte events, most of the one thread's
+time goes to copying bytes from and to the kernel, which the loops share:
+two loops lifted the rate by more than half, until the producers were the
+limit, and four did no better than two. Where the peers are the limit, as
+with small batched events or one producer, more loops change nothing.
+Start with `--threads 2`.
+
+What holds on one loop holds on several. The integration scenarios run
+on two loops too, in their `_several_loops` configurations
+(`tests/scenarios/BUILD`), and so do the tests of a stop, the drop lines
+and the forced frames:
+
+- What one connection sends reaches each receiver in the order it was
+  sent: one loop reads the connection, and a frame is queued for its
+  receivers in the order it was routed
+  ([event_all_backends](../tests/scenarios/event_all_backends/README.md),
+  [multiplexer/several_loops_test.cc](../multiplexer/several_loops_test.cc)).
+- A peer's `PEER_STATUS` follows everything routed to it before
+  ([backend_drains](../tests/scenarios/backend_drains/README.md)).
+- Recording and taps work as on one loop, the records in the order the
+  routing made them, every loop's in one file or stream
+  ([recording](../tests/scenarios/recording/README.md),
+  [recording_tap](../tests/scenarios/recording_tap/README.md)).
+- A peer that comes back under its instance id from another loop replaces
+  its old connection as on one loop, the old one's departure recorded
+  before the newcomer's arrival, and nothing the old connection still held
+  routed after it
+  ([multiplexer/several_loops_test.cc](../multiplexer/several_loops_test.cc)).
+- A stop drains the connections of every loop, and the process exits once
+  all of them have ended
+  ([multiplexer/graceful_stop_test.py](../multiplexer/graceful_stop_test.py)).
+  A connection that closes once its queue is written out, as the drain
+  closes them, leaves the routing of every loop as its last frame is
+  written, as on one loop: a message for it routed from then on goes to
+  the other peers, or is recorded and logged as reaching nobody, never as
+  a full queue
+  ([multiplexer/several_loops_test.cc](../multiplexer/several_loops_test.cc)).
+
+What it costs: on one loop, a branch or two per message on whether there
+are several, the code path otherwise as it always was. On several, each
+frame takes the routing lock, which every loop shares, and
+the lock of each receiver's queue; each loop keeps a message of its own
+to parse frames into, whose strings hold up to 4 MiB
+(`Server::KEPT_PARSE_BYTES`); and whatever runs under the routing lock,
+the rules check's read, a recording's writes, the peers file, holds up the
+routing of every loop for as long as it takes, as it holds up the one
+thread on one loop.

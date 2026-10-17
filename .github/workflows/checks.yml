@@ -2,7 +2,8 @@
 # a job of its own: ./format.sh --check, the formatting and the generated
 # files, with the tools pinned in requirements-dev.txt and
 # tools/dev_tools.sh, the ones a check on a developer's machine uses; the
-# fast tests; the fast tests built with clang against libc++
+# fast tests, and ThreadSanitizer over the multiplexer on several event
+# loops; the fast tests built with clang against libc++
 # (--config=libcxx), which runs the thread-safety analysis on the way; and
 # the Rust library's. The Rust targets are tagged rust, and only the rust
 # job builds them, so that the other jobs never fetch a Rust toolchain. The
@@ -46,6 +47,14 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - run: bazel test --build_tag_filters=-rust --test_tag_filters=-slow,-rust --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
+      # ThreadSanitizer over the multiplexer on several event loops: its
+      # unit tests, and the scenarios whose roles are C++ with every
+      # multiplexer on two loops (AGENTS.md's commands say why the tunable).
+      # The runner's kernel randomizes mappings over more bits than the
+      # sanitizer's runtime takes.
+      - run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - run: bazel test --config=tsan //lib:adaptive_mutex_test //multiplexer:server_loops_test //multiplexer/io:shared_outgoing_test //multiplexer:write_through_test //multiplexer:several_loops_test
+      - run: bazel test --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLES=glibc.rtld.optional_static_tls=262144 --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 --build_tests_only --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...
 
   libcxx:
     # The fast tests against libc++, the standard library a build of @mx

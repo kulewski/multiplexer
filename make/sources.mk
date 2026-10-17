@@ -37,6 +37,8 @@ LIB_SRCS := \
   multiplexer/outbox_handover.cc \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
+  multiplexer/server_loops.cc \
+  multiplexer/server_shared.cc \
   multiplexer/threaded_client.cc \
   multiplexer/threaded_client_inbox.cc \
   multiplexer/threaded_client_io.cc \
@@ -76,6 +78,7 @@ GENERATE_CONSTANTS_SRCS := \
 
 # Every header, for `make install`.
 HEADERS := \
+  lib/adaptive_mutex.h \
   lib/assertion.h \
   lib/core_dump.h \
   lib/crc32.h \
@@ -127,11 +130,13 @@ HEADERS := \
   multiplexer/endpoint.h \
   multiplexer/io/connection.h \
   multiplexer/io/raw_message.h \
+  multiplexer/io/shared_outgoing.h \
   multiplexer/key_filters.h \
   multiplexer/log_summary.h \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
+  multiplexer/server_loops.h \
   multiplexer/spent_bodies.h \
   multiplexer/threaded_client.h \
   multiplexer/threaded_client_core.h \
@@ -178,6 +183,7 @@ PY_FILES := \
 
 # Unit tests: one binary per C++ test file, one unittest module per Python one.
 CC_TEST_SRCS := \
+  lib/adaptive_mutex_test.cc \
   lib/core_dump_test.cc \
   lib/digest_test.cc \
   lib/encoding/little_endian_test.cc \
@@ -216,6 +222,7 @@ CC_TEST_SRCS := \
   multiplexer/flooded_client_test.cc \
   multiplexer/foreign_lane_test.cc \
   multiplexer/fork_test.cc \
+  multiplexer/io/shared_outgoing_test.cc \
   multiplexer/key_filters_test.cc \
   multiplexer/live_id_test.cc \
   multiplexer/log_summary_test.cc \
@@ -235,12 +242,15 @@ CC_TEST_SRCS := \
   multiplexer/rules_check_interval_test.cc \
   multiplexer/rules_read_errors_test.cc \
   multiplexer/send_allocations_test.cc \
+  multiplexer/server_loops_test.cc \
   multiplexer/server_release_test.cc \
+  multiplexer/several_loops_test.cc \
   multiplexer/soak_test.cc \
   multiplexer/spent_bodies_test.cc \
   multiplexer/threaded_client_inbox_test.cc \
   multiplexer/threaded_client_test.cc \
   multiplexer/timer_syscalls_test.cc \
+  multiplexer/write_through_test.cc \
   multiplexer/zero_nan_timeout_test.cc \
 
 

@@ -1,7 +1,9 @@
 // LogSummary on its own, with an io_service of the test's: the first line
 // of a kind is the caller's, the rest come out as one count a second, a
 // kind gone quiet is forgotten and the timer stops, kinds beyond the cap
-// share one count, and a level the settings drop costs nothing. Every check
+// share one count, a level the settings drop costs nothing, and an owner's
+// guard, the routing lock of a multiplexer on several loops, holds every
+// tick. Every check
 // is on counts in what was logged; the io_service runs until it has no
 // work left, which is also the proof that nothing keeps waking it.
 #include "multiplexer/log_summary.h"
@@ -9,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <asio/io_service.hpp>
+#include <functional>
 #include <regex>
 #include <string>
 
@@ -117,6 +120,27 @@ TEST_F(LogSummaryTest, FlushSaysTheCountsAtOnceAndStopsTheTimer) {
   io_service.run();  // only the cancelled wait's handler
   const std::string after = ::testing::internal::GetCapturedStderr();
   EXPECT_EQ(0, said_more(after, "leaving").second) << after;
+}
+
+// An owner on several threads guards the ticks with its own lock: each tick
+// runs inside the guard, which sees the count said.
+TEST_F(LogSummaryTest, AGuardHoldsEveryTick) {
+  LogSummary summary(io_service, "test");
+  const LogSummary::Kind kind{1, WARNING, 207, 0};
+  int ticks = 0;
+  summary.set_guard([&ticks](const std::function<void()>& tick) {
+    ++ticks;
+    tick();
+  });
+  for (int line = 0; line < 10; ++line) {
+    summary.first(kind, [] { return std::string("routing nowhere (TEST)"); });
+  }
+  ::testing::internal::CaptureStderr();
+  const std::size_t handlers = io_service.run();
+  const std::string log = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(2u, handlers);
+  EXPECT_EQ(2, ticks) << "every tick, the one that said the count and the one that forgot the kind";
+  EXPECT_EQ(9u, said_more(log, "routing nowhere (TEST)").first);
 }
 
 }  // namespace

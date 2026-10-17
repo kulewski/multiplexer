@@ -1,6 +1,7 @@
 // InProcessMultiplexer: a multiplexer on a free port, driven by a thread of
-// its own, for unit tests that need a real one without the integration
-// harness. Uses the tests' rules file, tests/testing.rules. Also what a
+// its own, the main loop's, and on as many event loops as a test asks
+// (Server::set_threads), for unit tests that need a real one without the
+// integration harness. Uses the tests' rules file, tests/testing.rules. Also what a
 // test that fills a connection whose far end reads nothing sends first,
 // whatever this machine's TCP buffers: FILL_FRAMES frames of fill_size().
 #ifndef MX_MULTIPLEXER_IN_PROCESS_MULTIPLEXER_H_
@@ -21,21 +22,26 @@ namespace testing {
 
 struct InProcessMultiplexer {
   // On an ephemeral port, or on `port`: a test that kills one and brings
-  // it back on the same address gives the port the first one got.
-  explicit InProcessMultiplexer(unsigned short listen_port = 0) {
+  // it back on the same address gives the port the first one got. On
+  // `threads` event loops, 1 the one loop of old.
+  explicit InProcessMultiplexer(unsigned short listen_port = 0, unsigned int threads = 1) {
     // Everything of the server's happens on its io thread, including its
     // creation: connections bind their thread checker where they are made.
+    // On several loops, its run() returns once a stop ended every
+    // connection, and the other loops are then let go, on the same thread.
     std::promise<unsigned short> bound;
-    thread = std::thread([this, &bound, listen_port] {
+    thread = std::thread([this, &bound, listen_port, threads] {
       const char* srcdir = getenv("TEST_SRCDIR");
       std::string rules = std::string(srcdir ? srcdir : ".") + (srcdir ? "/mx/" : "/") + "tests/testing.rules";
       server = multiplexer::Server::Create(io_service, "127.0.0.1", listen_port);
       server->set_rules_file(rules);
       std::string error;
       AssertMsg(server->load_rules(&error) == multiplexer::Server::RulesLoad::LOADED, error);
+      server->set_threads(threads);
       server->start();
       bound.set_value(server->local_port());
       io_service.run();
+      server->finish_loops();
     });
     port = bound.get_future().get();
   }

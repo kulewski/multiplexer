@@ -119,6 +119,17 @@ INDEX = [
     ),
     ("Per-connection queues and dropping when full", "multiplexer/io/connection.h", "`Connection::schedule`"),
     (
+        "The multiplexer on several event loops: the loops and the routing lock",
+        "multiplexer/server_loops.h",
+        "`ServerLoops`; `Server::RoutingScope` in `multiplexer/server.h`, what runs on several loops alone in "
+        "`multiplexer/server_shared.cc`",
+    ),
+    (
+        "Writing through: a connection several loops route to",
+        "multiplexer/io/shared_outgoing.h",
+        "`SharedOutgoing`; `Connection::enqueue_shared` and `write_claimed` in `multiplexer/io/connection.h`",
+    ),
+    (
         "A client's messages waiting for room, and flush_all()",
         "multiplexer/outbox.cc",
         "`BasicClient::outgoing_queue_has_room`; `begin_flush` in `multiplexer/outbox_flush.cc`; what a dead "

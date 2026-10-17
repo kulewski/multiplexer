@@ -1079,8 +1079,68 @@ cc_library(
 )
 
 cc_library(
+    name = "server_loops",
+    srcs = ["server_loops.cc"],
+    hdrs = ["server_loops.h"],
+    deps = [
+        "//lib:assert",
+        "//lib:thread_checker",
+        "//lib/logging",
+        "@asio",
+    ],
+)
+
+cc_test(
+    name = "server_loops_test",
+    size = "small",
+    srcs = ["server_loops_test.cc"],
+    deps = [
+        ":server_loops",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "several_loops_test",
+    size = "small",
+    srcs = ["several_loops_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":connections_manager",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":server",
+        "//lib/protobuf:stream",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "write_through_test",
+    size = "small",
+    srcs = ["write_through_test.cc"],
+    deps = [
+        ":connections_manager",
+        ":multiplexer_cc_constants",
+        ":multiplexer_cc_proto",
+        "//lib:functors",
+        "//lib:mutex",
+        "//multiplexer/io:connection",
+        "//multiplexer/io:raw_message",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "server",
-    srcs = ["server.cc"],
+    srcs = [
+        "server.cc",
+        "server_shared.cc",
+    ],
     hdrs = ["server.h"],
     visibility = ["//mxcontrol:__pkg__"],
     deps = [
@@ -1089,6 +1149,8 @@ cc_library(
         ":log_summary",
         ":multiplexer_cc_proto",
         ":recorder",
+        ":server_loops",
+        "//lib:adaptive_mutex",
         "//lib:exception",
         "//lib:fingerprint",
         "//lib:functors",
@@ -1524,6 +1586,21 @@ py_test(
     ],
 )
 
+# The same with every multiplexer on two event loops (Server::set_threads).
+py_test(
+    name = "forced_frames_several_loops_test",
+    size = "medium",
+    srcs = ["forced_frames_test.py"],
+    env = {"MX_SERVER_THREADS": "2"},
+    main = "forced_frames_test.py",
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "full_connection_test",
     size = "medium",
@@ -1712,6 +1789,23 @@ py_test(
     ],
 )
 
+# The same with every multiplexer on two event loops (Server::set_threads).
+py_test(
+    name = "drop_lines_several_loops_test",
+    size = "medium",
+    srcs = ["drop_lines_test.py"],
+    env = {"MX_SERVER_THREADS": "2"},
+    main = "drop_lines_test.py",
+    deps = [
+        ":clients",
+        ":multiplexer_constants",
+        ":mxclient",
+        ":threaded_client_py",
+        ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
 py_test(
     name = "keepalive_test",
     size = "small",
@@ -1755,6 +1849,20 @@ py_test(
     name = "graceful_stop_test",
     size = "medium",
     srcs = ["graceful_stop_test.py"],
+    deps = [
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+# The same with every multiplexer on two event loops (Server::set_threads).
+py_test(
+    name = "graceful_stop_several_loops_test",
+    size = "medium",
+    srcs = ["graceful_stop_test.py"],
+    env = {"MX_SERVER_THREADS": "2"},
+    main = "graceful_stop_test.py",
     deps = [
         ":multiplexer_constants",
         ":multiplexer_py_proto",

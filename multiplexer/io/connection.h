@@ -14,7 +14,13 @@
 // writes what is queued. Every asynchronous handler holds
 // a shared_ptr to the connection (via shared_from_this), so a Connection is
 // destroyed only when no I/O is in flight; the manager keeps weak_ptrs.
-// Nothing here is thread-safe: one io_service, one thread.
+// Nothing here is thread-safe: one io_service, one thread. The exception is
+// a multiplexer on several event loops (Server::set_threads): there a
+// connection is shared between the loops (share()), each of which routes
+// to it, and its outgoing side, a SharedOutgoing (shared_outgoing.h), is
+// written to from every loop under a lock of its own ("Shared between
+// loops" below); its reading side and its timers stay its own loop's. A
+// client's connections are never shared, and its traits compile that out.
 //
 // Protocol pieces that live here: the CONNECTION_WELCOME handshake, the
 // heartbeat timers with the passive-peer exemption, and the rule that any
@@ -25,6 +31,7 @@
 #include <google/protobuf/message.h>
 
 #include <algorithm>
+#include <array>
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/post.hpp>
@@ -41,6 +48,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "lib/functors.h"
 #include "lib/logging/logging.h"
@@ -50,6 +58,7 @@
 #include "multiplexer/Multiplexer.pb.h" /* generated */
 #include "multiplexer/defaults.h"
 #include "multiplexer/io/raw_message.h"
+#include "multiplexer/io/shared_outgoing.h"
 #include "multiplexer/multiplexer.constants.h" /* generated */
 
 namespace multiplexer {
@@ -82,6 +91,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   typedef multiplexer::ConnectionsManagerTraits<ConnectionsManagerImplementation> ConnectionsManagerTraits;
   typedef typename ConnectionsManagerTraits::MessagesBufferTraits MessagesBufferTraits;
   typedef std::deque<typename MessagesBufferTraits::value_type> MessagesBuffer;
+  // The outgoing side of a connection shared between loops; see share().
+  typedef SharedOutgoing<typename MessagesBufferTraits::value_type,
+                         typename MessagesBufferTraits::ToRawMessagePointerConverter>
+      Shared;
 
   // Each direction of the socket is a channel with its own state. Outgoing:
   // FREE (nothing being written), BUSY (one async_write in flight). Incoming:
@@ -177,9 +190,14 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   void start_only_read() {
     MX_DCHECK_RUN_ON(&io_thread_);
     MX_LOG(DEBUG, HIGHVERBOSITY, TEXT("starting Connection " + repr((void*)this)));
-    Assert(!is_living_);
+    Assert(!living());
     Assert(!shuts_down_);
     _set_living(true);
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        shared_->start(socket_.native_handle(), &is_living_);  // what the writes through write to
+      }
+    }
     // Every write is one whole frame, so Nagle's algorithm has nothing to
     // coalesce and only delays a small frame sent right after another one
     // until the peer's ACK arrives. Off on both sides.
@@ -197,13 +215,13 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     if (shuts_down_) {
       return;
     }
-    Assert(is_living_);
+    Assert(living());
     ManagerPointer manager = manager_.lock();
     std::shared_ptr<const RawMessage> welcome = manager ? manager->get_welcome_message() : nullptr;
-    if (welcome) {
-      welcome->mark_own();
+    if (welcome && !welcome->own()) {
+      welcome->mark_own();  // once: a multiplexer's welcome is every connection's, read by every loop
     }
-    if (welcome && schedule(welcome, true, true)) {
+    if (welcome && _schedule_own(welcome)) {
       _send_heartbit_later();  // included in schedule() >> _process_send_queue()
       _require_heartbit_later();
     } else {
@@ -312,9 +330,13 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   }
 
  private:
-  // Live or not, for this thread (is_living_) and for the others (living_flag_).
+  // Live or not, for this thread and a shared connection's other loops,
+  // which read it while they route (is_living_, relaxed: what a plain bool
+  // costs), and for a client's lanes (living_flag_). A shared connection's
+  // close once flushed clears is_living_ first, as it ends the channel
+  // (SharedOutgoing::start); nothing reads its living_flag_.
   void _set_living(bool living) {
-    is_living_ = living;
+    is_living_.store(living, std::memory_order_relaxed);
     living_flag_->store(living, std::memory_order_release);
   }
 
@@ -427,6 +449,14 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     close_when_flushed_ = true;
     close_bound_ = bound;
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        if (shared_->close_when_flushed()) {
+          close_gracefully(bound);  // else the writer that empties the queue posts it (_hand_on)
+        }
+        return;
+      }
+    }
     if (outgoing_queue_.empty()) {
       close_gracefully(bound);
     }
@@ -450,10 +480,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   typename MessagesBufferTraits::SchedulingResultFunctor::result_type schedule(std::shared_ptr<const RawMessage> msg,
                                                                                bool force = false, bool asap = false) {
     MX_DCHECK_RUN_ON(&io_thread_);
+    DbgAssertMsg(!_is_shared(), "schedule() on a connection shared between loops: enqueue_shared()");
 
     using mx::repr;
 
-    if (!is_living_) {
+    if (!living()) {
       return scheduling_result_type_default_functor_();  // drop
     }
 
@@ -500,7 +531,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // connection is dead or full.
   bool inline take_over(typename MessagesBuffer::value_type internal) {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (!is_living_ || outgoing_queue_full()) {
+    if (!living() || outgoing_queue_full()) {
       return false;
     }
     outgoing_queue_.push_back(internal);
@@ -512,8 +543,25 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   inline std::uint64_t peer_id() const { return peer_id_; }
   inline bool registered() const { return is_registered_; }
 
-  inline void set_outgoing_queue_max_size(unsigned int ms) { outgoing_queue_max_size_ = ms; }
+  // The most the queue holds but the forced frames; from any loop for a
+  // shared connection, whose queue a rules reload on any loop sizes.
+  inline void set_outgoing_queue_max_size(unsigned int ms) {
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        shared_->set_limit(ms);
+        return;
+      }
+    }
+    outgoing_queue_max_size_ = ms;
+  }
+  // Whether the queue holds its most; from any loop for a shared
+  // connection, which the routing of every loop asks for whom: ANY.
   inline bool outgoing_queue_full() const {
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        return shared_->full();
+      }
+    }
     MX_DCHECK_RUN_ON(&io_thread_);
     return outgoing_queue_max_size_ <= outgoing_queue_.size();
   }
@@ -539,7 +587,9 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     return nullptr;
   }
-  inline bool living() const { return is_living_; }
+  // Whether the connection is live: started and not ended, nor reading to
+  // its end. From any loop for a shared connection.
+  inline bool living() const { return is_living_.load(std::memory_order_relaxed); }
   // living(), readable from any thread without a reference to the
   // connection: what a lane holding it reads (Lane::closed), since a dead
   // connection's object lives on while it reads to the end.
@@ -584,10 +634,16 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // reading to the end bounds itself with this timer (_read_to_the_end).
   void _send_heartbit_later() {
     MX_DCHECK_RUN_ON(&io_thread_);
-    if (!is_living_) {
+    if (!living()) {
       return;
     }
     heartbit_timer_off_ = false;
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        _send_heartbit_later_shared();
+        return;
+      }
+    }
     if (!outgoing_queue_.empty()) {
       return;
     }
@@ -618,11 +674,11 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     // Not while closing either: a wait that had expired just before the
     // connection began closing gracefully runs all the same, and would
     // log that the heartbeat could not be queued.
-    if (shuts_down_ || !is_living_) {
+    if (shuts_down_ || !living()) {
       return;
     }
     // The queue emptied since the wait was armed: it moves on.
-    const std::chrono::steady_clock::time_point due = quiet_since_ + mx::from_seconds(HEARTBIT_INTERVAL);
+    const std::chrono::steady_clock::time_point due = _quiet_since() + mx::from_seconds(HEARTBIT_INTERVAL);
     if (due > std::chrono::steady_clock::now()) {
       _arm_send(due);
       return;
@@ -636,12 +692,52 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       }
       should_send_heartbit_ = false;
     }
-    if (!schedule(heartbit_message_, true, true)) {
+    // A shared connection closing once flushed has its channel ended
+    // before its own loop closes it: no heartbeat goes, and nothing is lost.
+    if (!_schedule_own(heartbit_message_) && !(_is_shared() && close_when_flushed_)) {
       MX_LOG(ERROR, MEDIUMVERBOSITY,
              CTX("connection") TEXT("failed to schedule Heartbit message, we may lose the connection")
              // TODO add peer_type() with DATA()
       );
     }
+    // Shared, the heartbeat may be written through already, where at one
+    // loop the write's end arms the next wait: armed now, or by the
+    // writer that empties the queue.
+    if (_is_shared()) {
+      _send_heartbit_later();
+    }
+  }
+
+  // _send_heartbit_later() for a shared connection, whose queue another
+  // loop may be writing: asked under its lock, and when it is not empty,
+  // the writer that empties it owes this loop the call
+  // (SharedOutgoing::quiet, Ending::HEARTBEAT). A passive peer owed nothing
+  // leaves the timer off as at one loop, the queue full or not.
+  void _send_heartbit_later_shared() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (is_passive_ && !should_send_heartbit_) {
+      heartbit_timer_off_ = true;
+      return;
+    }
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (!shared_->quiet(now)) {
+      return;
+    }
+    if (!send_wait_) {
+      _arm_send(now + mx::from_seconds(HEARTBIT_INTERVAL));
+    }
+  }
+
+  // When the queue last emptied: quiet_since_ at one loop, the shared
+  // side's stamp, which every loop's writer makes, for a shared connection.
+  std::chrono::steady_clock::time_point _quiet_since() const {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        return shared_->quiet_since();
+      }
+    }
+    return quiet_since_;
   }
 
   // A frame read, or the peer's type turned active: the drop's first wait
@@ -1018,7 +1114,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     MX_DCHECK_RUN_ON(&io_thread_);
     // check if the outgoing channel is free and we have anything to send
     if (outgoing_channel_state_ == ChannelState::FREE && !outgoing_queue_.empty() && !shuts_down_) {
-      Assert(is_living_);
+      Assert(living());
       typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw_converter;
       const typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter::result_type raw =
           to_raw_converter(outgoing_queue_.front());
@@ -1112,6 +1208,176 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     notify_when_idle_ = true;
   }
 
+  /* Shared between loops: a multiplexer on several event loops
+   * (Server::set_threads) routes to a connection from every loop, whose
+   * outgoing side is then a SharedOutgoing, under a lock of its own: a
+   * loop that routes a frame here queues it (enqueue_shared) and, when it
+   * took the writing on, writes it itself once it let go of the routing
+   * lock (write_claimed), what it cannot do itself handed to the
+   * connection's own loop by a post (_hand_on): the rest of a write that
+   * would block (_owner_write), the next heartbeat, the close once flushed
+   * and the end of a frame set aside. The reading side and the timers stay
+   * the own loop's, and so does everything else here but the living flag,
+   * which the writer that ends the channel for a close once flushed clears
+   * on its own thread, so that every loop's routing takes the connection
+   * for gone at once, as one loop's does (SharedOutgoing::start). */
+
+  // Shares the connection between loops from now on, its outgoing side a
+  // SharedOutgoing; by the multiplexer, before the connection starts.
+  void share() { shared_.reset(new Shared()); }
+
+  // Queues `raw` from any loop, as schedule() does at one, without writing
+  // it: QUEUED; CLAIMED, nothing was being written, the caller taking the
+  // writing on, to call write_claimed() once it holds no lock; refused,
+  // FULL, its queue full, or ENDED, the connection gone or closing, which
+  // the routing takes for a peer no longer there, as one loop's routing
+  // never finds a closed one.
+  typename Shared::Queued enqueue_shared(const std::shared_ptr<const RawMessage>& raw, bool force) {
+    Assert(raw->usability() == RawMessage::WRITING);
+    if (!living()) {
+      return Shared::Queued::ENDED;
+    }
+    return shared_->enqueue(raw_to_buffer_converter_(raw), force, /*asap=*/false, std::this_thread::get_id());
+  }
+
+  // The writing enqueue_shared() gave this thread, from any loop: the
+  // queue's front frames, written through until the queue is empty, the
+  // own loop takes over, or the connection ended meanwhile.
+  void write_claimed() { _hand_on(shared_->write_through(std::this_thread::get_id(), &send_rest)); }
+
+ private:
+  // Whether the connection is shared between loops; never a client's.
+  bool _is_shared() const {
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      return shared_ != nullptr;
+    }
+    return false;
+  }
+
+  // Queues one of the connection's own frames, its welcome or a
+  // heartbeat, past a full queue and right behind the frame being
+  // written: schedule() at one loop; on a shared connection, its shared
+  // side, written at once when nothing was being written. False when it
+  // is dropped.
+  bool _schedule_own(const std::shared_ptr<const RawMessage>& msg) {
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        if (!living()) {
+          return false;
+        }
+        switch (shared_->enqueue(raw_to_buffer_converter_(msg), /*force=*/true, /*asap=*/true,
+                                 std::this_thread::get_id())) {
+          case Shared::Queued::FULL:
+          case Shared::Queued::ENDED:
+            return false;
+          case Shared::Queued::QUEUED:
+            return true;
+          case Shared::Queued::CLAIMED:
+            write_claimed();
+            return true;
+        }
+        return false;
+      }
+    }
+    return static_cast<bool>(schedule(msg, true, true));
+  }
+
+  // What a write through, from any loop, hands to the connection's own
+  // loop when it stops (SharedOutgoing::Ending), by a post: the rest of
+  // the writing, the heartbeat's call it was owed, the close once flushed,
+  // or the end of the frame set aside when the connection ended under it.
+  void _hand_on(typename Shared::Ending ending) {
+    const typename asio::ip::tcp::socket::executor_type owner = socket_.get_executor();
+    switch (ending) {
+      case Shared::Ending::HAND_OVER:
+        asio::post(owner, [self = this->shared_from_this()] { self->_owner_write(); });
+        break;
+      case Shared::Ending::HEARTBEAT:
+        asio::post(owner, [self = this->shared_from_this()] { self->_send_heartbit_later(); });
+        break;
+      case Shared::Ending::CLOSE:
+        asio::post(owner, [self = this->shared_from_this()] { self->close_gracefully(self->close_bound_); });
+        break;
+      case Shared::Ending::WRITTEN:
+      case Shared::Ending::LOST:
+        asio::post(owner, [self = this->shared_from_this(), whole = ending == Shared::Ending::WRITTEN] {
+          self->_settle(whole);
+        });
+        break;
+      case Shared::Ending::IDLE:
+      case Shared::Ending::GONE:
+      case Shared::Ending::MORE:
+      case Shared::Ending::FAILED:
+        break;  // nothing owed; the last two are the own loop's alone
+    }
+  }
+
+  // The own loop's turn at a shared connection's writing, handed over by
+  // a write through that could not go on: the queue's front, from where
+  // that write stopped, by async_write, as at one loop.
+  void _owner_write() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    typename MessagesBuffer::value_type front;
+    std::size_t offset = 0;
+    if (!shared_->owner_next(&front, &offset)) {
+      return;  // the connection ended meanwhile
+    }
+    typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw;
+    const std::shared_ptr<const RawMessage> raw = to_raw(front);
+    std::array<asio::const_buffer, 2> rest;
+    std::size_t skip = offset;
+    std::size_t parts = 0;
+    for (const asio::const_buffer& buffer : raw->get_message_buffer()) {
+      if (parts == rest.size()) {
+        break;
+      }
+      const std::size_t skipped = std::min(skip, buffer.size());
+      rest[parts++] = buffer + skipped;
+      skip -= skipped;
+    }
+    // The handler holds the connection and the frame, as at one loop.
+    asio::async_write(socket_, rest, TransferRest(),
+                      [self = this->shared_from_this(), raw, offset](const asio::error_code& error, size_t bytes) {
+                        self->_owner_written(error, bytes, raw->get_header_length() + raw->get_body_length() - offset);
+                      });
+  }
+
+  // The own loop's write of the front ended, `rest` bytes asked for: the
+  // next frame, the channel free again for the writes through once the
+  // queue is empty, the close owed, a failed write's end as at one loop,
+  // or the end of the frame set aside.
+  void _owner_written(const asio::error_code& error, size_t bytes_transferred, std::size_t rest) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (error) {
+      MX_LOG(DEBUG, HIGHVERBOSITY,
+             TEXT("write error on " + repr((void*)this) + " error=" + repr(error) +
+                  " bytes_transferred=" + repr(bytes_transferred)));
+    }
+    const typename Shared::Ending ending = shared_->owner_written(!error && bytes_transferred == rest);
+    switch (ending) {
+      case Shared::Ending::MORE:
+        _owner_write();
+        break;
+      case Shared::Ending::IDLE:
+      case Shared::Ending::HEARTBEAT:
+        _send_heartbit_later();
+        break;
+      case Shared::Ending::CLOSE:
+        close_gracefully(close_bound_);  // everything is written: now this end of the stream
+        break;
+      case Shared::Ending::FAILED:
+        _write_failed();
+        break;
+      case Shared::Ending::WRITTEN:
+      case Shared::Ending::LOST:
+        _settle(ending == Shared::Ending::WRITTEN);
+        break;
+      case Shared::Ending::HAND_OVER:
+      case Shared::Ending::GONE:
+        break;
+    }
+  }
+
  private:
   // On shutdown, offers the unsent queue to the manager (the client moves
   // entries to another connection and takes them out of the queue, and
@@ -1124,6 +1390,22 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // arrives nor handed to another connection and sent twice.
   void inline _orphan_outgoing_messages() {
     MX_DCHECK_RUN_ON(&io_thread_);
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        // The channel ends here for every loop; a frame a write had under
+        // way, by another loop or by this one's async_write, is set aside
+        // for that write's end to settle (_hand_on, _owner_written).
+        bool under_way = false;
+        MessagesBuffer taken = shared_->take(&under_way);
+        if (under_way) {
+          set_aside_.push_back(taken.front());
+          set_aside_manager_ = manager_;
+          taken.pop_front();
+        }
+        _give_up(taken, manager_);
+        return;
+      }
+    }
     if (write_in_flight_ && !outgoing_queue_.empty()) {
       set_aside_.push_back(outgoing_queue_.front());
       set_aside_manager_ = manager_;
@@ -1141,8 +1423,16 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       return;
     }
     typename ConnectionsManagerTraits::MessagesBufferTraits::ToRawMessagePointerConverter to_raw_converter;
-    const bool whole = !error && bytes_transferred == to_raw_converter(set_aside_.front())->get_header_length() +
-                                                          to_raw_converter(set_aside_.front())->get_body_length();
+    _settle(!error && bytes_transferred == to_raw_converter(set_aside_.front())->get_header_length() +
+                                               to_raw_converter(set_aside_.front())->get_body_length());
+  }
+  // The frame set aside, written `whole` or not: reported written, or gone
+  // the way the rest of the queue went.
+  void _settle(bool whole) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (set_aside_.empty()) {
+      return;
+    }
     std::weak_ptr<ConnectionsManagerImplementation> manager;
     manager.swap(set_aside_manager_);
     if (whole) {
@@ -1203,7 +1493,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   google::protobuf::RepeatedPtrField<KeyFilter> key_filters_;
   std::uint32_t key_owner_ = 0xffffffffu;  // KeyPatterns::NO_OWNER until registered
 
-  bool is_living_;
+  std::atomic<bool> is_living_;                     // see _set_living()
   std::shared_ptr<std::atomic<bool>> living_flag_;  // is_living_, for other threads; see living_flag()
   bool shuts_down_;
   bool is_registered_;
@@ -1250,6 +1540,10 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   bool notify_when_idle_ MX_GUARDED_BY(io_thread_) = false;  // see notify_when_idle()
   MessagesBuffer set_aside_ MX_GUARDED_BY(io_thread_);
   std::weak_ptr<ConnectionsManagerImplementation> set_aside_manager_ MX_GUARDED_BY(io_thread_);
+  // The outgoing side when the connection is shared between loops, in
+  // place of the members above (share()); null otherwise. Set before the
+  // connection starts and never changed, so every loop reads it freely.
+  std::unique_ptr<Shared> shared_;
 
   /* incoming channel */
   // Bytes read and not yet taken as frames: read_buffer_[read_begin_,

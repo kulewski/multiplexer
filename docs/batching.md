@@ -1,9 +1,9 @@
 # Batching: many events in one message
 
-The multiplexer parses, routes and writes every message on its own, on its
-one thread, so for small messages what it costs is per message, not per
-byte. A client that sends many small events, log lines, metrics,
-readings, can send them several in one message instead, a batch. To the
+The multiplexer parses, routes and writes every message on its own, so
+for small messages what it costs is per message, not per byte. A client
+that sends many small events, log lines, metrics, readings, can send them
+several in one message instead, a batch. To the
 multiplexer a batch is one message of the events' type and key, routed by
 the rules as any message is. The receiving library splits it back into
 the events and hands each to the program as if it had come alone, with

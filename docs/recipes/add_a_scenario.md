@@ -19,8 +19,10 @@ roles, their options and their events.
    `roles` dict says who plays each role, `"py"`, `"cc"`, `"rust"` or the
    label of a binary of your own; a list comprehension over `LANGS` runs the
    scenario in every combination. Use `mx = 2` for two multiplexers,
-   `params` for anything the scenario reads with `cfg.param()`, and
-   `tags = ["slow"]` if it waits on heartbeat intervals.
+   `threads = 2` for each on two event loops (a scenario of a new area gets
+   one such configuration, C++ roles where it has roles, named
+   `*_several_loops`), `params` for anything the scenario reads with
+   `cfg.param()`, and `tags = ["slow"]` if it waits on heartbeat intervals.
 3. **Run it**: `bazel test //tests/scenarios:name_py_py`, then the fast
    suite, `bazel test --test_tag_filters=-slow //...`.
 4. **When it fails**, every process's stderr and events are under the

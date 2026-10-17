@@ -66,10 +66,17 @@ void LogSummary::State::arm() {
     if (error == asio::error::operation_aborted || !state) {
       return;
     }
-    state->armed = false;
-    state->say(/*forget=*/false);
-    if (!state->counts.empty() || state->other) {
-      state->arm();
+    const auto tick = [&state] {
+      state->armed = false;
+      state->say(/*forget=*/false);
+      if (!state->counts.empty() || state->other) {
+        state->arm();
+      }
+    };
+    if (state->guard) {
+      state->guard(tick);
+    } else {
+      tick();
     }
   });
 }
