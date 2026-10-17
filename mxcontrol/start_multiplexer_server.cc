@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "lib/memory.h"
 #include "lib/repr.h"
 #include "multiplexer/endpoint.h"
 #include "multiplexer/recorder.h"
@@ -147,6 +148,14 @@ int StartMultiplexerServer::run() {
   // EFBIG, which the recorder and the logger handle as they do a full disk,
   // where the signal's default action ended the process.
   std::signal(SIGXFSZ, SIG_IGN);
+  // glibc's malloc keeps the memory of large frames for the next ones
+  // (lib/memory.h), before anything is allocated; only a refusal is worth
+  // a line.
+  if (mx::keep_large_buffers() == mx::KeptBuffers::REFUSED) {
+    MX_LOG(WARNING, LOWVERBOSITY,
+           TEXT("glibc refused to keep large buffers in the heap: a frame over 128 KiB may cost page faults until "
+                "glibc's own thresholds settle"));
+  }
 
   asio::io_service io_service;
   multiplexer::Server::pointer server = multiplexer::Server::Create(io_service, host_, port_);

@@ -28,6 +28,7 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
@@ -54,6 +55,10 @@ class Server;  // forward
 // scheduling a frame answers true or false, and that is all a sender learns.
 template <>
 struct ConnectionsManagerTraits<Server> : public DefaultConnectionsManagerTraits {
+  // Every frame is parsed into one message the server keeps
+  // (Server::parse_target).
+  static constexpr bool REUSES_PARSE_TARGET = true;
+
   struct MessagesBufferTraits : public DefaultConnectionsManagerTraits::MessagesBufferTraits {
     typedef std::shared_ptr<const RawMessage> value_type;
     typedef mx::ReferencingFunctor<value_type> ToRawMessagePointerConverter;
@@ -96,6 +101,21 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // queue that keeps the frame, and changes no reference count before.
   void handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
                       const std::shared_ptr<MultiplexerMessage>& msg);
+
+  // The message the connections parse every frame into, kept from frame to
+  // frame and cleared, so that its strings keep their capacity and the
+  // payload or the batch of a frame is copied into memory already there:
+  // the parse of a frame of a batch, a megabyte, allocates nothing, where
+  // it allocated a megabyte and freed it after routing. Routing keeps
+  // nothing of a message past handle_message; when something still holds
+  // the last one after all, or its strings hold more than KEPT_PARSE_BYTES,
+  // or it held override rules or fields this multiplexer does not know,
+  // which a clear keeps the room of too, a fresh one, so that an odd
+  // frame's memory goes.
+  std::shared_ptr<MultiplexerMessage> parse_target();
+  // The most a kept parse target's strings may hold: its payload, batch,
+  // key and workflow.
+  static constexpr std::size_t KEPT_PARSE_BYTES = 4 * 1024 * 1024;
 
   // Starts accepting connections, and checking the rules file.
   void start();
@@ -558,6 +578,7 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   asio::io_service& io_service_;
   unsigned int memory_log_every_ MX_GUARDED_BY(owner_thread_) = 0;
   unsigned long routed_messages_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::shared_ptr<MultiplexerMessage> parse_target_ MX_GUARDED_BY(owner_thread_);  // see parse_target()
   std::string rules_file_ MX_GUARDED_BY(owner_thread_);
   std::string rules_fingerprint_ MX_GUARDED_BY(owner_thread_);
   std::uint64_t rules_loaded_us_ MX_GUARDED_BY(owner_thread_) = 0;

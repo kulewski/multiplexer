@@ -436,7 +436,7 @@ IncomingMessage Client::_receive(mx::SimpleTimer& timer, const std::vector<uint6
       }
       result = basic_client_->next_incoming_message();
     } else {
-      result = read_raw_message(timer);
+      result = _read(timer);  // a reply has its frame, and what is passed over needs none
     }
     const MultiplexerMessage& mxmsg = *result.third;
 

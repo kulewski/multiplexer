@@ -132,6 +132,7 @@ impl Core {
         let Ok(bytes) = frame::encode(&message) else { return };
         let frame = Arc::new(OutFrame {
             bytes,
+            head: None,
             id,
             r#type: types::PEER_CONTROL,
             pinned: true,

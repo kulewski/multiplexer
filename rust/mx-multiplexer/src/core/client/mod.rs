@@ -249,6 +249,7 @@ impl Core {
         let bytes = frame::encode(&message).unwrap_or_default();
         let frame = Arc::new(OutFrame {
             bytes,
+            head: None,
             id: 0,
             r#type: types::CONNECTION_WELCOME,
             pinned: false,
@@ -574,6 +575,7 @@ impl Core {
         let Ok(bytes) = frame::encode(&refusal) else { return };
         let frame = super::outbox::Frame {
             bytes,
+            head: None,
             id: refusal_id,
             r#type: types::DELIVERY_ERROR,
             batch: super::batching::BatchMark::None,

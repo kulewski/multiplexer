@@ -1,8 +1,10 @@
 //! `ThreadedClient` against real multiplexers: queries waited for, awaited
 //! with no runtime, and called back; what arrives on its own through
 //! on_message, the inbox and a subscription; a reply sent from a callback;
-//! a blocking call refused on the io thread; the shutdown; and a message
-//! that arrives while other threads keep the io thread busy.
+//! a blocking call refused on the io thread; the shutdown; a message that
+//! arrives while other threads keep the io thread busy; and plain sends,
+//! which go to the io thread as data, batched as their bytes beside sends
+//! followed, and written out by the shutdown.
 
 mod support;
 
@@ -12,9 +14,9 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use mx_multiplexer::{Error, Message, Messages, SyncClient, ThreadedClient, MAX_MESSAGE_SIZE};
+use mx_multiplexer::{Batching, Error, Message, Messages, SyncClient, ThreadedClient, MAX_MESSAGE_SIZE};
 use support::testing_constants::{peers, types};
-use support::{beside, block_on, Multiplexer};
+use support::{arrived_by_key, beside, block_on, Multiplexer};
 
 const TEN: Option<Duration> = Some(Duration::from_secs(10));
 
@@ -293,4 +295,133 @@ fn a_send_a_callback_makes_once_the_write_out_step_is_queued_is_written() {
     client.shutdown(TEN).wait().unwrap();
     assert_eq!(Ok(true), written.recv_timeout(BOUND), "the send written");
     assert_eq!(&b"after"[..], &backend.receive(TEN).unwrap().message.payload[..]);
+}
+
+#[test]
+fn plain_sends_arrive_in_their_batches_in_order_beside_sends_followed() {
+    // A queue() nobody follows goes to the io thread as data and to the
+    // batching as its bytes, one with on_end as a frame, both in the same
+    // batches: every message arrives once, with its id, payload and key, in
+    // the order sent within its key, and each followed send hears it was
+    // written. From two threads, each its own keys.
+    let mx = Multiplexer::start();
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
+    let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
+    let batching = Batching { max_records: 7, max_delay: HOUR, ..Batching::default() };
+    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let senders: Vec<_> = ["even", "odd"]
+        .into_iter()
+        .map(|parity| {
+            let (client, written) = (client.clone(), Arc::clone(&written));
+            beside(move || {
+                let mut sent = std::collections::BTreeMap::new();
+                for number in 0..100 {
+                    let key = format!("{parity} {}", number % 3);
+                    let send = client.send(types::TEST_EVENT, number.to_string()).key(key.clone());
+                    let id = if number % 10 == 0 {
+                        let written = Arc::clone(&written);
+                        send.on_end(move |was| {
+                            written.fetch_add(usize::from(was), Ordering::SeqCst);
+                        })
+                        .queue()
+                    } else {
+                        send.queue()
+                    }
+                    .unwrap();
+                    sent.entry(Some(key)).or_insert_with(Vec::new).push((id, number.to_string().into_bytes()));
+                }
+                sent
+            })
+        })
+        .collect();
+    let mut sent = std::collections::BTreeMap::new();
+    for sender in senders {
+        sent.extend(sender.join().unwrap());
+    }
+    assert!(client.flush_all(TEN).wait().unwrap());
+    assert_eq!(20, written.load(Ordering::SeqCst), "each followed send heard written");
+    assert_eq!(sent, arrived_by_key(&mut receiver, 200));
+}
+
+#[test]
+fn big_plain_sends_that_go_alone_arrive_whole_in_order() {
+    // Each too big for its batch: the frame its own body, its header kept
+    // apart, written with it in one call, a few megabytes each, so that the
+    // socket takes it in several writes.
+    let mx = Multiplexer::start();
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
+    let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
+    let batching = Batching { max_bytes: 64 * 1024, max_delay: HOUR, ..Batching::default() };
+    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let payloads: Vec<Vec<u8>> = (0..4u8)
+        .map(|number| (0..3 * 1024 * 1024).map(|index: usize| (index as u8).wrapping_add(number)).collect())
+        .collect();
+    let sent: Vec<u64> =
+        payloads.iter().map(|payload| client.send(types::TEST_EVENT, payload.clone()).queue().unwrap()).collect();
+    for (id, payload) in sent.iter().zip(&payloads) {
+        let arrived = receiver.receive(TEN).unwrap().message;
+        assert_eq!(*id, arrived.id);
+        assert!(arrived.payload[..] == payload[..], "message {id} arrived whole");
+    }
+}
+
+#[test]
+fn the_shutdown_writes_out_the_plain_sends_made_before_it() {
+    let mx = Multiplexer::start();
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
+    let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
+    client.set_batching(types::TEST_EVENT, None, Batching { max_delay: HOUR, ..Batching::default() }).unwrap();
+    let sent: Vec<u64> =
+        (0..10).map(|number| client.send(types::TEST_EVENT, number.to_string()).queue().unwrap()).collect();
+    client.shutdown(None).wait().unwrap();
+    let arrived: Vec<u64> = sent.iter().map(|_| receiver.receive(TEN).unwrap().message.id).collect();
+    assert_eq!(sent, arrived, "the batch let go first, whole");
+    assert!(matches!(client.send(types::TEST_EVENT, "late").queue(), Err(Error::NotConnected)));
+}
+
+/// A thread-local whose destructor sends what it holds, as a per-thread log
+/// buffer flushing at the thread's end would.
+struct FlushedAtExit {
+    client: Option<ThreadedClient>,
+    sent: Option<mpsc::Sender<Result<u64, Error>>>,
+}
+
+impl Drop for FlushedAtExit {
+    fn drop(&mut self) {
+        if let (Some(client), Some(sent)) = (&self.client, &self.sent) {
+            let _ = sent.send(client.send(types::TEST_EVENT, "flushed at the thread's end").queue());
+        }
+    }
+}
+
+thread_local! {
+    static FLUSHED_AT_EXIT: std::cell::RefCell<FlushedAtExit> =
+        const { std::cell::RefCell::new(FlushedAtExit { client: None, sent: None }) };
+}
+
+#[test]
+fn a_plain_send_from_a_thread_locals_destructor_goes_out() {
+    let mx = Multiplexer::start();
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
+    let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
+    client.set_batching(types::TEST_EVENT, None, Batching::default()).unwrap();
+    let (sent, results) = mpsc::channel();
+    let theirs = client.clone();
+    std::thread::spawn(move || {
+        // This thread-local first, then a plain send: the send's spare body
+        // is made after it, so it goes before it at the thread's end.
+        FLUSHED_AT_EXIT.with(|flushed| {
+            let mut flushed = flushed.borrow_mut();
+            flushed.client = Some(theirs.clone());
+            flushed.sent = Some(sent);
+        });
+        theirs.send(types::TEST_EVENT, "a plain send").queue().unwrap();
+    })
+    .join()
+    .unwrap();
+    let id = results.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    assert!(client.flush_all(TEN).wait().unwrap());
+    let ids: Vec<u64> = (0..2).map(|_| receiver.receive(TEN).unwrap().message.id).collect();
+    assert_eq!(id, ids[1], "the one sent at the thread's end, after the other");
 }

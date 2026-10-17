@@ -255,7 +255,7 @@ impl Core {
         let mut request = prototype.clone();
         request.id = Some(id);
         let bytes = frame::encode(&request).ok()?;
-        Some(Frame { bytes, id, r#type: request.r#type, batch: BatchMark::None })
+        Some(Frame { bytes, head: None, id, r#type: request.r#type, batch: BatchMark::None })
     }
 
     /// Hands `frame` to the outbox through the query's lane: on the lane's
@@ -538,7 +538,7 @@ impl Core {
             self.finish(query, Outcome::Failed);
             return;
         };
-        let frame = Frame { bytes, id, r#type: message.r#type, batch: BatchMark::None };
+        let frame = Frame { bytes, head: None, id, r#type: message.r#type, batch: BatchMark::None };
         let wait = if left.is_some_and(|left| !left.is_zero()) { left } else { in_flight.timeout };
         let mut sent = Vec::new();
         if in_flight.pinned() {
@@ -625,7 +625,8 @@ impl Core {
             self.finish(query, Outcome::Failed);
             return;
         };
-        let frame = Frame { bytes, id: in_flight.direct_id, r#type: request.r#type, batch: BatchMark::None };
+        let frame =
+            Frame { bytes, head: None, id: in_flight.direct_id, r#type: request.r#type, batch: BatchMark::None };
         let pinned = in_flight.pinned();
         let lane = in_flight.lane.clone();
         if !keep_deadline {

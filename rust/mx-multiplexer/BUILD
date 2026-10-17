@@ -57,6 +57,7 @@ rust_test(
         ],
     )
     for test in [
+        "allocations",
         "fork",
         "servers",
         "soak",

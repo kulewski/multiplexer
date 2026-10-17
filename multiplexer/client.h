@@ -30,7 +30,10 @@
 #include <asio/io_service.hpp>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
@@ -230,19 +233,13 @@ class Client : public ExceptionDefinitions {
 
   // Incoming messages: the next one in arrival order, waiting up to
   // `timeout` (negative: forever). Throws OperationTimedOut, NotConnected.
+  // A message taken from a batch gets its raw frame here, the message
+  // serialized again (BasicClient::with_raw_frame).
   BasicClient::IncomingMessagesBuffer::value_type read_raw_message(float timeout = DEFAULT_READ_TIMEOUT) {
-    basic_client_->check_not_orphaned();
-    if (basic_client_->has_incoming_messages()) {
-      return basic_client_->next_incoming_message();  // no timer for a wait that does not happen
-    }
-    std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
-    return read_raw_message(*timer);
+    return _with_raw_frame(_read(timeout));
   }
   BasicClient::IncomingMessagesBuffer::value_type read_raw_message(mx::SimpleTimer& timer) {
-    basic_client_->check_not_orphaned();
-    basic_client_->wait_for_incoming_message(timer);
-    Assert(basic_client_->has_incoming_messages());
-    return basic_client_->next_incoming_message();
+    return _with_raw_frame(_read(timer));
   }
 
   // The next message, as read_raw_message(), running the callbacks of
@@ -254,24 +251,14 @@ class Client : public ExceptionDefinitions {
   // once rather than at its next poll.
   BasicClient::IncomingMessagesBuffer::value_type receive_raw_message(float timeout = DEFAULT_READ_TIMEOUT,
                                                                       bool end_on_acknowledgement = false) {
-    basic_client_->check_not_orphaned();
-    // A message waiting is taken with no timer made, armed and cancelled,
-    // a syscall per message in a busy serve loop: as wait_to_receive()'s
-    // first look, its callbacks run first.
-    basic_client_->run_acknowledged_callbacks();
-    if (basic_client_->has_incoming_messages()) {
-      return basic_client_->next_incoming_message();
-    }
-    std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
-    if (!basic_client_->wait_to_receive(*timer, end_on_acknowledgement)) {
-      MXTHROW(OperationTimedOut());
-    }
-    return basic_client_->next_incoming_message();
+    return _with_raw_frame(_receive_next(timeout, end_on_acknowledgement));
   }
+  // The message alone, which makes no raw frame for a message taken from
+  // a batch.
   std::pair<shared_ptr<MultiplexerMessage>, ConnectionWrapper> receive_message(float timeout = DEFAULT_READ_TIMEOUT,
                                                                                bool end_on_acknowledgement = false) {
-    BasicClient::IncomingMessagesBuffer::value_type raw = receive_raw_message(timeout, end_on_acknowledgement);
-    return std::make_pair(raw.third, raw.second);
+    BasicClient::IncomingMessagesBuffer::value_type next = _receive_next(timeout, end_on_acknowledgement);
+    return std::make_pair(std::move(next.third), std::move(next.second));
   }
 
   // Sending. schedule_* queue the message; on an idle connection it is
@@ -367,6 +354,12 @@ class Client : public ExceptionDefinitions {
   template <typename T>
   ScheduledMessageTracker queue(const T& msg, float timeout = DEFAULT_TIMEOUT, LanePtr lane = LanePtr(),
                                 SendCallback done = SendCallback()) {
+    basic_client_->check_not_orphaned();
+    if constexpr (std::is_base_of<MultiplexerMessage, T>::value) {
+      if (!lane && RawMessage::plain_event(msg) && basic_client_->batching()) {
+        return _queue_plain(msg, timeout, done);
+      }
+    }
     return _queue(_serialize(msg), false, lane, timeout, done);
   }
   template <typename T>
@@ -612,24 +605,94 @@ class Client : public ExceptionDefinitions {
     }
   }
   // queue() and queue_all(), and the binding's non-flushing send.
+  // queue() for a plain event while something is batched: its bytes
+  // alone (BasicClient::send_plain), so that a message that joins a batch
+  // has no frame made for it.
+  // Its body is one the batching handed back (BasicClient::
+  // keep_spent_bodies) when one was.
+  ScheduledMessageTracker _queue_plain(const MultiplexerMessage& msg, float timeout, const SendCallback& done) {
+    if (!spent_bodies_) {
+      spent_bodies_ = std::make_shared<SpentBodies>();
+      basic_client_->keep_spent_bodies(spent_bodies_);
+    }
+    std::string body;
+    spent_bodies_->take(&body);
+    const std::uint64_t id = serialize_stamped(msg, instance_id(), [this] { return random64(); }, &body);
+    Trackers trackers(&trackers_room_);
+    // The loop runs first unless the message only joins a batch (poll_first).
+    if (!basic_client_->send_plain(&body, id, msg.type(), msg.has_key(), msg.key(), timeout, &trackers.list, done,
+                                   /*poll_first=*/true) ||
+        trackers.list.empty()) {
+      return ScheduledMessageTracker(BasicScheduledMessageTracker());
+    }
+    return ScheduledMessageTracker(trackers.list.front());
+  }
   ScheduledMessageTracker _queue(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
                                  const SendCallback& done) {
     basic_client_->check_not_orphaned();
-    std::vector<BasicScheduledMessageTracker> trackers;
+    Trackers trackers(&trackers_room_);
     // The loop runs first unless the message only joins a batch (poll_first).
-    if (!basic_client_->send(raw, all, lane, timeout, 0, &trackers, NULL, done, /*may_batch=*/true,
+    if (!basic_client_->send(raw, all, lane, timeout, 0, &trackers.list, NULL, done, /*may_batch=*/true,
                              /*poll_first=*/true) ||
-        trackers.empty()) {
+        trackers.list.empty()) {
       return ScheduledMessageTracker(BasicScheduledMessageTracker());
     }
-    return ScheduledMessageTracker(trackers.front());
+    return ScheduledMessageTracker(trackers.list.front());
   }
+  // A send's list of trackers in the room the last one left, taken for the
+  // call and given back at its end, so that a queue() allocates none: a
+  // queue() made inside it, from a callback the loop runs, finds no room
+  // and makes its own.
+  struct Trackers {
+    explicit Trackers(std::vector<BasicScheduledMessageTracker>* room) : room(room) { list.swap(*room); }
+    ~Trackers() {
+      list.clear();
+      list.swap(*room);
+    }
+    std::vector<BasicScheduledMessageTracker>* room;
+    std::vector<BasicScheduledMessageTracker> list;
+  };
   // What a flushing send that wrote nothing throws, as the Python
   // ThreadedClient raises: NotConnected when the message was given up on, when no
   // connection is live or `lane` is a pinned one whose connection is gone,
   // OperationTimedOut otherwise.
   [[noreturn]] void _raise_for_nothing_written(const LanePtr& lane, bool lost);
   MultiplexerMessage _locator_for(const MultiplexerMessage& query);
+  // read_raw_message() and receive_raw_message() but for the raw frame of
+  // a message taken from a batch, which they make and these leave null.
+  IncomingMessage _read(float timeout) {
+    basic_client_->check_not_orphaned();
+    if (basic_client_->has_incoming_messages()) {
+      return basic_client_->next_incoming_message();  // no timer for a wait that does not happen
+    }
+    std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
+    return _read(*timer);
+  }
+  IncomingMessage _read(mx::SimpleTimer& timer) {
+    basic_client_->check_not_orphaned();
+    basic_client_->wait_for_incoming_message(timer);
+    Assert(basic_client_->has_incoming_messages());
+    return basic_client_->next_incoming_message();
+  }
+  IncomingMessage _receive_next(float timeout, bool end_on_acknowledgement) {
+    basic_client_->check_not_orphaned();
+    // A message waiting is taken with no timer made, armed and cancelled,
+    // a syscall per message in a busy serve loop: as wait_to_receive()'s
+    // first look, its callbacks run first.
+    basic_client_->run_acknowledged_callbacks();
+    if (basic_client_->has_incoming_messages()) {
+      return basic_client_->next_incoming_message();
+    }
+    std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
+    if (!basic_client_->wait_to_receive(*timer, end_on_acknowledgement)) {
+      MXTHROW(OperationTimedOut());
+    }
+    return basic_client_->next_incoming_message();
+  }
+  static IncomingMessage _with_raw_frame(IncomingMessage incoming) {
+    BasicClient::with_raw_frame(&incoming);
+    return incoming;
+  }
   IncomingMessage _receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper* watch = NULL, bool* lost = NULL);
   // A send's `msg` as a frame: a whole message stamped (frame_stamped),
@@ -642,6 +705,10 @@ class Client : public ExceptionDefinitions {
  private:
   shared_ptr<asio::io_service> io_service_ptr_;
   ReceivedCallback received_;  // the on_received of the query under way, see _query
+  // queue()'s: the bodies the batching hands back, once a plain event was
+  // queued, and the room of a send's list of trackers (Trackers).
+  shared_ptr<SpentBodies> spent_bodies_;
+  std::vector<BasicScheduledMessageTracker> trackers_room_;
   // The ids _awaiting() named, shared with the refusals, which a move of
   // the client leaves where they are; none before refuse_arrivals().
   shared_ptr<std::vector<std::uint64_t>> awaited_;

@@ -7,6 +7,7 @@
 #include "lib/encoding/decode_from_range.h"
 #include "lib/encoding/encode_to_range.h"
 #include "lib/encoding/little_endian.h"
+#include "lib/resize_uninitialized.h"
 #include "lib/xxh3.h"
 
 using namespace multiplexer;
@@ -15,9 +16,8 @@ using namespace multiplexer;
 // both already in place, so writing a frame copies nothing.
 void RawMessage::switch_to_writing() const {
   Assert(usability_ == PRE_WRITING || usability_ == READING);
-  Assert(writing_buffers_.empty());
-  writing_buffers_.push_back(asio::buffer(header_.data(), header_.size()));
-  writing_buffers_.push_back(asio::buffer(contents_.data(), contents_.size()));
+  writing_buffers_[0] = asio::buffer(header_.data(), header_.size());
+  writing_buffers_[1] = asio::buffer(contents_.data(), contents_.size());
   usability_ = WRITING;
 }
 
@@ -45,9 +45,10 @@ bool RawMessage::unpack_header() {
     return false;
   }
 
-  // allocate memory for reading
+  // Room for the body, which is read or copied into it whole next: not
+  // filled first, a pass over every byte of a big frame for nothing.
   Assert(contents_.empty());
-  contents_.resize(length_);
+  mx::resize_uninitialized(&contents_, length_);
 
   // indicate success
   return true;

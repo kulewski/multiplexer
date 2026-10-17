@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "lib/mutex.h"
 #include "multiplexer/basic_client.h"
 
 namespace multiplexer {
@@ -26,19 +27,39 @@ struct BatchGroup {
   std::string key;
 };
 
+// One message in a batch: the frame it would have gone as, or, sent as
+// its bytes alone (send_plain, send_bytes), those bytes and its id, with no
+// frame until one is needed (_record_frame); the tracker the program holds
+// when it asked for one, its `done`, its timeout, and, in a batch that
+// waits for a connection with nothing left to write, its deadline from its
+// send (see Batch::waits_for_idle).
+struct BasicClient::BatchRecord {
+  std::shared_ptr<const RawMessage> raw;  // null for bytes alone
+  std::string body;                       // the bytes, when `raw` is null
+  std::uint64_t id = 0;                   // their message's id
+  std::shared_ptr<SendState> state;
+  SendCallback done;
+  float timeout = 0;
+  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+};
+
+// The buffers of batch frames that were written, for the next batches'
+// frames (BasicClient::_batch_frame): a buffer back from a frame keeps its
+// size, so serializing a frame of about the same size into it fills no
+// bytes first, as a new string's resize does, and touches no page the
+// process has not used. At most FRAME_BUFFERS_KEPT, each up to
+// FRAME_BUFFER_BYTES_KEPT. Shared with the frames, which give their buffer
+// back where their last holder lets go of them, hence the lock.
+struct BatchFramePool {
+  static constexpr std::size_t FRAME_BUFFERS_KEPT = 4;
+  static constexpr std::size_t FRAME_BUFFER_BYTES_KEPT = 4 * 1024 * 1024;
+  mx::Mutex mutex;
+  std::vector<std::string> spare MX_GUARDED_BY(mutex);
+};
+
 // One batch open: its group, what it may hold, and its messages so far.
 struct BasicClient::Batch {
-  // One message: the frame it would have gone as, the tracker the program
-  // holds when it asked for one, its `done`, its timeout, and, in a batch
-  // that waits for a connection with nothing left to write, its deadline
-  // from its send (see `waits_for_idle`).
-  struct Record {
-    std::shared_ptr<const RawMessage> raw;
-    std::shared_ptr<SendState> state;
-    SendCallback done;
-    float timeout = 0;
-    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
-  };
+  typedef BatchRecord Record;
   std::uint64_t began = 0;  // its place in the order batches began
   BatchGroup group;
   Batching batching;
@@ -67,6 +88,11 @@ struct BasicClient::Batcher {
   // reused, keeps its strings' room from one read to the next, which a new
   // one would allocate each time, a third of the read.
   MultiplexerMessage scratch;
+  // Where every batch is made (_send_batch), kept: its messages' strings,
+  // emptied once a frame is made, take the next batch's bodies without an
+  // allocation each.
+  BatchEnvelope envelope;
+  std::shared_ptr<BatchFramePool> frame_pool = std::make_shared<BatchFramePool>();
 
   // The batches open, in the order they began, and found by group: per
   // type, its keyless one and its keyed ones by key.

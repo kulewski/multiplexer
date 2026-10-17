@@ -41,7 +41,15 @@ PY := $(BUILD)/python
 # _native.pyi needs pybind11-stubgen in $(PYTHON); without it the package has no stub for the extension.
 NATIVE_PYI := $(if $(shell $(PYTHON) -c "import pybind11_stubgen" 2>/dev/null && echo yes),$(PY)/multiplexer/_native.pyi,)
 
-ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread -DASIO_STANDALONE
+# <cstddef> first in every file: asio 1.22 and 1.18, which Debian 12 and
+# Ubuntu 22.04 ship, decide how they allocate aligned memory (aligned_alloc
+# and free, or operator new and delete) by a macro the standard library
+# defines only once one of its headers is in, where 1.28 includes one
+# itself: a file that included asio first decided otherwise than the rest,
+# and memory one way allocated went back the other, harmless with the
+# default allocator, a crash with an operator new of a program's own, as
+# the allocation tests have.
+ALL_CXXFLAGS := $(CXXFLAGS) -std=c++17 -Wall -Wextra -fPIC -pthread -DASIO_STANDALONE -include cstddef
 ALL_CPPFLAGS := -I. -I$(GEN) $(CPPFLAGS)
 # RE2 for the multiplexer's key filters, which only mxcontrol links in.
 ALL_LDLIBS := -lprotobuf -lre2 -pthread $(LDLIBS)

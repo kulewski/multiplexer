@@ -341,17 +341,13 @@ struct PythonClient : public Client {
   }
   // `observer`, a callable or None: see drop_observer_for.
   void set_drop_observer(pybind11::object observer) { Client::set_drop_observer(drop_observer_for(observer)); }
-  // The frame every send here queues: a serialized MultiplexerMessage,
-  // with the id and the type mxclient gives beside it. A send that lets
-  // go of the GIL makes it after, so that the checksum of a large message
-  // holds no other thread. Unsealed, its checksum computed only if it goes
-  // alone, when it may go in a batch (RawMessage::Unsealed).
-  static std::shared_ptr<const RawMessage> _frame(std::string* serialized, std::uint64_t id, std::uint32_t type,
-                                                  bool sealed = true) {
-    if (!sealed) {
-      return std::shared_ptr<const RawMessage>(new RawMessage(RawMessage::Unsealed(), serialized, id, type));
-    }
-    return std::shared_ptr<const RawMessage>(new RawMessage(serialized, id, type));
+  // The frame every send here queues but one that may go in a batch,
+  // which goes as its bytes alone (BasicClient::send_bytes): a serialized
+  // MultiplexerMessage, with the id and the type mxclient gives beside it.
+  // A send that lets go of the GIL makes it after, so that the checksum of
+  // a large message holds no other thread.
+  static std::shared_ptr<const RawMessage> _frame(std::string* serialized, std::uint64_t id, std::uint32_t type) {
+    return std::make_shared<RawMessage>(serialized, id, type);
   }
 
   mxtyping::Tuple<pybind11::bytes, ConnectionWrapper> read_message(float timeout) {
@@ -415,6 +411,7 @@ struct PythonClient : public Client {
     if (!got) {
       return std::nullopt;
     }
+    BasicClient::with_raw_frame(&next);  // a message from a batch has none yet
     return mxtyping::Tuple<pybind11::bytes, ConnectionWrapper>(
         pybind11::make_tuple((pybind11::bytes)next.first->get_message(), next.second));
   }
@@ -456,11 +453,13 @@ struct PythonClient : public Client {
             float timeout, std::optional<mxtyping::Callable<void(unsigned int)>> callback) {
     basic_client_->check_not_orphaned();
     std::string message(serialized);
-    const bool may_batch = !all && !lane && basic_client_->batching();
+    BasicClient::SendCallback done = callback ? send_callback_for(*callback) : BasicClient::SendCallback();
     // The loop runs first unless the message only joins a batch (poll_first).
-    return basic_client_->send(_frame(&message, id, type, /*sealed=*/!may_batch), all, lane.value_or(LanePtr()),
-                               timeout, 0, NULL, NULL,
-                               callback ? send_callback_for(*callback) : BasicClient::SendCallback(),
+    if (!all && !lane && basic_client_->batching()) {
+      check_message_size(message.size());  // here, as a frame made of it would check
+      return basic_client_->send_bytes(&message, id, type, timeout, NULL, done, /*poll_first=*/true);
+    }
+    return basic_client_->send(_frame(&message, id, type), all, lane.value_or(LanePtr()), timeout, 0, NULL, NULL, done,
                                /*may_batch=*/true, /*poll_first=*/true);
   }
   // What mxclient's query names as it sends, and forgets as it ends, for

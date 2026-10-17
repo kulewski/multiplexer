@@ -1,19 +1,22 @@
 //! The frame tests: the golden frames the Python package's protobuf wrote
 //! (testdata/golden.py), encoded byte for byte and decoded back; the limits
 //! a frame is refused at, where the message is built; the header's refusals
-//! and the checksum check a received body goes through.
+//! and the checksum check a received body goes through; a header kept apart
+//! from its body, the header a whole frame carries.
 
 use bytes::Bytes;
 use prost::Message as _;
 
-use super::{check_key_size, decode, encode, unpack_header, verify, Header, HEADER_LENGTH};
+use super::{
+    check_key_size, decode, encode, encode_into, frame_of_body, head_of, unpack_header, verify, Header, HEADER_LENGTH,
+};
 use crate::defaults::{MAX_KEY_SIZE, MAX_MESSAGE_SIZE};
 use crate::error::{Error, Limit};
 use crate::proto::multiplexer::multiplexer_message_description::routing_rule::Whom;
 use crate::proto::multiplexer::multiplexer_message_description::RoutingRule;
 use crate::proto::multiplexer::{
-    compression, logging_method, BackendForPacketSearch, DeliveryError, KeyFilter, MultiplexerMessage, PeerControl,
-    PeerStatus, Routing, WelcomeMessage,
+    compression, logging_method, BackendForPacketSearch, BatchEnvelope, DeliveryError, KeyFilter, MessageBatch,
+    MultiplexerMessage, PeerControl, PeerStatus, Routing, WelcomeMessage,
 };
 
 const MAX_U64: u64 = u64::MAX;
@@ -115,7 +118,29 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
         ("peer_status", message(18, 19, 12, peer_status.encode_to_vec())),
         ("search", search),
         ("delivery_error", MultiplexerMessage { to: Some(25), ..message(23, 24, 5, delivery_error.encode_to_vec()) }),
+        (
+            "batch",
+            MultiplexerMessage {
+                id: Some(26),
+                sender: Some(27),
+                r#type: 300,
+                key: Some("shard.1".into()),
+                batch: Some(golden_batch().encode_to_vec().into()),
+                ..Default::default()
+            },
+        ),
     ]
+}
+
+/// The batch of golden.py's "batch" case: two events of type 300, keyed.
+fn golden_batch() -> MessageBatch {
+    let event = |id: u64, payload: &[u8]| MultiplexerMessage {
+        key: Some("shard.1".into()),
+        ..message(id, 27, 300, payload.to_vec())
+    };
+    MessageBatch {
+        message: vec![event(28, b"first").encode_to_vec().into(), event(29, b"second").encode_to_vec().into()],
+    }
 }
 
 /// The bytes of a line's hex.
@@ -144,6 +169,32 @@ fn every_golden_frame_is_encoded_byte_for_byte() {
     for ((name, frame), (_, message)) in frames.iter().zip(&messages) {
         assert_eq!(&encode(message).unwrap()[..], &frame[..], "{name}");
     }
+}
+
+/// A client's batch goes from a BatchEnvelope, its MessageBatch inside it
+/// encoded once, straight into the frame: byte for byte the frame of the
+/// MultiplexerMessage whose `batch` holds the same MessageBatch encoded,
+/// which the Python package's protobuf wrote; and so does the envelope the
+/// client keeps, whose messages are the vectors they were serialized into,
+/// written into a buffer that held a frame before.
+#[test]
+fn a_batch_envelope_is_the_frame_of_its_message() {
+    use crate::core::bodies::{BodiesBatch, BodiesEnvelope};
+    let (_, golden) = golden_frames().into_iter().find(|(name, _)| name == "batch").expect("golden.py's batch");
+    let key = Some("shard.1".to_string());
+    let envelope =
+        BatchEnvelope { id: Some(26), sender: Some(27), r#type: 300, key: key.clone(), batch: Some(golden_batch()) };
+    assert_eq!(&encode_into(&envelope, key.as_deref(), Vec::new()).unwrap()[..], &golden[..]);
+    let bodies = golden_batch().message.iter().map(|body| body.to_vec()).collect();
+    let kept = BodiesEnvelope {
+        id: Some(26),
+        sender: Some(27),
+        r#type: 300,
+        key: key.clone(),
+        batch: Some(BodiesBatch { message: bodies }),
+    };
+    let used = vec![0xEE; golden.len() * 2]; // what an earlier frame left in it is overwritten
+    assert_eq!(&encode_into(&kept, key.as_deref(), used).unwrap()[..], &golden[..]);
 }
 
 #[test]
@@ -316,4 +367,14 @@ fn a_reader_gives_nothing_after_an_error() {
     reader.read_from(&mut source).unwrap();
     assert_eq!(super::Next::BadHeader, reader.next());
     assert_eq!(super::Next::Nothing, reader.next(), "the frame behind a bad header is not read");
+}
+
+#[test]
+fn a_header_kept_apart_is_the_header_a_whole_frame_carries() {
+    for size in [1, 7, 8, 100, 70_000] {
+        let body = payload(size);
+        let whole = frame_of_body(&body);
+        assert_eq!(&whole[..HEADER_LENGTH], &head_of(&body)[..], "a body of {size}");
+        assert_eq!(&whole[HEADER_LENGTH..], &body[..]);
+    }
 }

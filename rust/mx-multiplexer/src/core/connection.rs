@@ -221,6 +221,7 @@ pub(crate) fn heartbit_frame(instance_id: u64) -> Arc<OutFrame> {
     let bytes = frame::encode(&message).unwrap_or_default();
     Arc::new(OutFrame {
         bytes,
+        head: None,
         id: 0,
         r#type: types::HEARTBIT,
         pinned: false,
@@ -343,8 +344,8 @@ impl Core {
         let Some(front) = state.outgoing.front() else { return };
         state.out = Channel::Busy;
         state.write_in_flight = true;
-        let bytes = front.1.bytes.clone();
-        self.actions.push(Action::Write(conn, bytes));
+        let (head, bytes) = (front.1.head, front.1.bytes.clone());
+        self.actions.push(Action::Write(conn, head, bytes));
     }
 
     /// The driver's word on the write in flight: `written` bytes of it went
@@ -361,7 +362,7 @@ impl Core {
             self.forget_if_finished(conn);
             return;
         }
-        let whole = state.outgoing.front().is_some_and(|front| front.1.bytes.len() == written);
+        let whole = state.outgoing.front().is_some_and(|front| front.1.wire_length() == written);
         if failed || written == 0 || !whole {
             self.write_failed(conn);
             return;
@@ -735,7 +736,7 @@ impl Core {
     fn settle_set_aside(&mut self, conn: ConnId, written: usize, failed: bool) {
         let Some(state) = self.conns.get_mut(&conn) else { return };
         let Some(entry) = state.set_aside.pop_front() else { return };
-        if !failed && written == entry.1.bytes.len() {
+        if !failed && written == entry.1.wire_length() {
             if let Some(tracker) = entry.0.upgrade() {
                 tracker.set(SendState::Sent);
                 self.tracked_message_done(&tracker, true);

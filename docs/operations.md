@@ -676,6 +676,16 @@ frames past that, each held as long as it is unsent, so a slow backend can
 pin up to 1024 messages of whatever size your peers send. Lower
 `queue_size` for peer types that receive large messages.
 
+At its start the multiplexer asks glibc's malloc to keep the memory of
+large frames for the next ones: a block of up to 32 MiB comes from its
+heap, and up to 64 MiB of free memory stays there, so that the frame of
+a batch, a megabyte, is not mapped and faulted in afresh each time
+([lib/memory.h](../lib/memory.h)). Its resident memory therefore stays at
+what its queues held at their fullest, less what is over 64 MiB free,
+rather than falling back as they empty; a frame over 32 MiB goes back as
+it is written. A `GLIBC_TUNABLES` naming a `glibc.malloc` tunable, or a
+`MALLOC_*_` variable, in its environment wins: it then sets nothing.
+
 Every connection takes a file descriptor, as do a recording session and
 each read of the rules file, so the descriptor limit (`ulimit -n`,
 systemd's `LimitNOFILE`, a container runtime's `nofile`) must exceed the

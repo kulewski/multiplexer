@@ -104,6 +104,12 @@ void ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane, Sen
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // a pinned lane whose connection is gone; the Python client raises it too
   }
+  // A plain event nobody follows, while something is batched, goes as its
+  // bytes (threaded_client_inbox.cc); after shutdown() as any send does.
+  if (!lane && !done && batching_.load(std::memory_order_relaxed) && RawMessage::plain_event(msg) &&
+      _send_plain(msg, DEFAULT_TIMEOUT)) {
+    return;
+  }
   _submit_send(_stamped(msg), false, false, DEFAULT_TIMEOUT, done, lane);
 }
 
@@ -150,6 +156,12 @@ void ThreadedClient::Core::send_serialized(std::string serialized, std::uint64_t
                                            float timeout, SendCallback done) {
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // as send() does
+  }
+  // Bytes nobody follows, while something is batched, go as they are,
+  // read on the io thread (threaded_client_inbox.cc).
+  if (!lane && !done && batching_.load(std::memory_order_relaxed) &&
+      _send_plain_bytes(&serialized, id, type, timeout)) {
+    return;
   }
   // Once anything is batched, a frame that may go in a batch is made
   // unsealed, its checksum computed on the io thread only if it goes alone.

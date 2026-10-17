@@ -398,6 +398,7 @@ cc_library(
         "threaded_client.cc",
         "threaded_client_core.h",
         "threaded_client_io.cc",
+        "threaded_client_plain.cc",
         "threaded_client_query.cc",
     ],
     hdrs = ["threaded_client.h"],
@@ -408,6 +409,7 @@ cc_library(
         ":defaults",
         ":multiplexer_cc_constants",
         ":multiplexer_cc_proto",
+        ":threaded_client_inbox",
         "//lib:mutex",
         "//lib:random",
         "//lib:seconds",
@@ -415,6 +417,21 @@ cc_library(
         "//lib/logging",
         "@asio",
     ],
+)
+
+cc_library(
+    name = "threaded_client_inbox",
+    srcs = ["threaded_client_inbox.cc"],
+    hdrs = ["threaded_client_inbox.h"],
+    deps = [
+        ":spent_bodies",
+        "//lib:mutex",
+    ],
+)
+
+cc_library(
+    name = "spent_bodies",
+    hdrs = ["spent_bodies.h"],
 )
 
 cc_library(
@@ -533,6 +550,67 @@ cc_test(
         ":client",
         ":in_process_multiplexer",
         ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "route_allocations_test",
+    size = "small",
+    srcs = ["route_allocations_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":connections_manager",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "plain_send_exit_test",
+    size = "small",
+    srcs = ["plain_send_exit_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "send_allocations_test",
+    size = "small",
+    srcs = ["send_allocations_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":threaded_client",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "spent_bodies_test",
+    size = "small",
+    srcs = ["spent_bodies_test.cc"],
+    deps = [
+        ":spent_bodies",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "threaded_client_inbox_test",
+    size = "small",
+    srcs = ["threaded_client_inbox_test.cc"],
+    deps = [
+        ":threaded_client_inbox",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -792,6 +870,20 @@ cc_test(
 # A global operator new of its own counts the multiplexer's allocations:
 # a binary to itself.
 cc_test(
+    name = "parse_target_test",
+    size = "small",
+    srcs = ["parse_target_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":server",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "recording_copies_test",
     size = "small",
     srcs = ["recording_copies_test.cc"],
@@ -938,6 +1030,7 @@ cc_library(
         "basic_client.cc",
         "basic_client_batching.cc",
         "basic_client_connect.cc",
+        "basic_client_plain.cc",
         "basic_client_routing.cc",
         "batching.h",
         "outbox.cc",
@@ -953,8 +1046,10 @@ cc_library(
         ":endpoint",
         ":log_summary",
         ":multiplexer_cc_constants",
+        ":spent_bodies",
         "//lib:fork",
         "//lib:mutex",
+        "//lib:resize_uninitialized",
         "//lib:seconds",
         "//lib:spanset",
         "//lib:timer",

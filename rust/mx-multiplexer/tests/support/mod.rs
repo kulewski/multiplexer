@@ -242,6 +242,21 @@ impl Drop for Multiplexer {
     }
 }
 
+/// The next `count` messages `receiver` gets, by key, each with its id and
+/// payload, in the order they arrived: what a test of batches compares,
+/// order being kept within a key.
+pub fn arrived_by_key(
+    receiver: &mut mx_multiplexer::SyncClient,
+    count: usize,
+) -> std::collections::BTreeMap<Option<String>, Vec<(u64, Vec<u8>)>> {
+    let mut arrived: std::collections::BTreeMap<Option<String>, Vec<(u64, Vec<u8>)>> = Default::default();
+    for _ in 0..count {
+        let message = receiver.receive(Some(Duration::from_secs(10))).expect("a message").message;
+        arrived.entry(message.key).or_default().push((message.id, message.payload.to_vec()));
+    }
+    arrived
+}
+
 /// Runs `body` on a thread of its own, joined at the end of the test: a
 /// peer the test plays beside the client under test.
 pub fn beside<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> std::thread::JoinHandle<T> {

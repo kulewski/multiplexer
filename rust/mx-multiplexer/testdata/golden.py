@@ -20,6 +20,7 @@ from multiplexer.Multiplexer_pb2 import (
     DeliveryError,
     KeyFilter,
     LoggingMethod,
+    MessageBatch,
     MultiplexerMessage,
     MultiplexerMessageDescription,
     PeerControl,
@@ -45,6 +46,12 @@ def key_filters() -> list[KeyFilter]:
 
 def messages() -> list[tuple[str, MultiplexerMessage]]:
     """The table: a name and a message, each a case the encoding could get wrong."""
+    batch = MessageBatch(
+        message=[
+            MultiplexerMessage(id=28, sender=27, type=300, key="shard.1", message=b"first").SerializeToString(),
+            MultiplexerMessage(id=29, sender=27, type=300, key="shard.1", message=b"second").SerializeToString(),
+        ]
+    )
     every_field = MultiplexerMessage(
         id=MAX_U64,
         sender=0x0123456789ABCDEF,
@@ -122,6 +129,9 @@ def messages() -> list[tuple[str, MultiplexerMessage]]:
             "delivery_error",
             MultiplexerMessage(id=23, sender=24, to=25, type=5, message=delivery_error.SerializeToString()),
         ),
+        # A client's batch: what the crate writes from a BatchEnvelope, the
+        # MessageBatch inside it, must be what this writes, its bytes.
+        ("batch", MultiplexerMessage(id=26, sender=27, type=300, key="shard.1", batch=batch.SerializeToString())),
     ]
 
 

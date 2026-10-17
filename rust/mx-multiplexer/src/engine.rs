@@ -10,9 +10,10 @@ use std::time::Instant;
 
 use crate::core::client::IncomingMode;
 use crate::core::Core;
-use crate::driver::{Driver, Inbox, Step};
+use crate::driver::{Driver, Step};
 use crate::error::{Error, Result};
 use crate::ids::Ids;
+use crate::inbox::Inbox;
 
 /// The core and its driver.
 #[derive(Debug)]

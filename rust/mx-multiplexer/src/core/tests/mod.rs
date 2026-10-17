@@ -5,5 +5,6 @@
 mod batching;
 mod connection;
 mod outbox;
+mod plain;
 mod query;
 mod routing;

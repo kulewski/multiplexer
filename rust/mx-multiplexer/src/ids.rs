@@ -17,8 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The counter's step, 2^64 over the golden ratio, as SplitMix64 has it.
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// A generator of ids, seeded once; see the module comment.
+/// A generator of ids, seeded once; see the module comment. On a cache line
+/// of its own: every send on any thread draws from it.
 #[derive(Debug)]
+#[repr(align(64))]
 pub(crate) struct Ids {
     counter: AtomicU64,
 }

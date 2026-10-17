@@ -2,9 +2,10 @@
 //! a backend, events to every backend of a type, what a query reads
 //! meanwhile, receiving, a wait ended by an acknowledgement, the addresses
 //! it refuses, a connect that ended while it idled, one busy connection
-//! beside another, and batches: split by a receiver of any class, and a
-//! DELIVERY_ERROR for one nobody took told for each message inside. Each
-//! test starts the multiplexers it needs (tests/support).
+//! beside another, and batches: split by a receiver of any class, a
+//! DELIVERY_ERROR for one nobody took told for each message inside, and
+//! plain sends batched as their bytes beside sends followed. Each test
+//! starts the multiplexers it needs (tests/support).
 
 mod support;
 
@@ -17,7 +18,7 @@ use mx_multiplexer::{
     CONNECT_ATTEMPT_SECONDS, MAX_MESSAGE_SIZE,
 };
 use support::testing_constants::{peers, types};
-use support::{beside, Multiplexer};
+use support::{arrived_by_key, beside, Multiplexer};
 
 const TEN: Option<Duration> = Some(Duration::from_secs(10));
 
@@ -277,4 +278,37 @@ fn a_delivery_error_for_a_batch_is_told_for_each_message() {
         }
     }
     threaded.shutdown(None).wait().unwrap();
+}
+
+#[test]
+fn plain_sends_arrive_in_their_batches_in_order_beside_sends_followed() {
+    // A queue() nobody follows goes to the batching as its bytes, one with
+    // on_end as a frame, both in the same batches: every message arrives
+    // once, with its id, payload and key, in the order sent within its key,
+    // and each followed send hears it was written.
+    let mx = Multiplexer::start();
+    let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
+    let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
+    let batching = Batching { max_records: 7, max_delay: Duration::from_secs(3600), ..Batching::default() };
+    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let written = Arc::new(AtomicUsize::new(0));
+    let mut sent: std::collections::BTreeMap<Option<String>, Vec<(u64, Vec<u8>)>> = Default::default();
+    for number in 0..100 {
+        let key = if number % 2 == 0 { "even" } else { "odd" };
+        let send = client.send(types::TEST_EVENT, number.to_string()).key(key);
+        let id = if number % 10 == 0 {
+            let written = Arc::clone(&written);
+            send.on_end(move |was| {
+                written.fetch_add(usize::from(was), Ordering::SeqCst);
+            })
+            .queue()
+        } else {
+            send.queue()
+        }
+        .unwrap();
+        sent.entry(Some(key.to_string())).or_default().push((id, number.to_string().into_bytes()));
+    }
+    assert!(client.flush_all(TEN).unwrap());
+    assert_eq!(10, written.load(Ordering::SeqCst), "each followed send heard written");
+    assert_eq!(sent, arrived_by_key(&mut receiver, 100));
 }

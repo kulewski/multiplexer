@@ -88,10 +88,10 @@ void BasicClient::handle_message(const Connection::pointer& conn, const std::sha
     incoming_sink_(incoming);
     return;
   }
-  queue_incoming(incoming);
+  queue_incoming(std::move(incoming));
 }
 
-void BasicClient::queue_incoming(const IncomingMessagesBuffer::value_type& incoming) {
+void BasicClient::queue_incoming(IncomingMessagesBuffer::value_type incoming) {
   MX_DCHECK_RUN_ON(&owner_thread());
   if (incoming_queue_full()) {
     // Not seen after all: its copy through another multiplexer, coming
@@ -105,11 +105,13 @@ void BasicClient::queue_incoming(const IncomingMessagesBuffer::value_type& incom
     }
     return;  // drop
   }
-  _enqueue(incoming);
+  _enqueue(std::move(incoming));
 }
 
-void BasicClient::_enqueue(const IncomingMessagesBuffer::value_type& incoming) {
-  incoming_messages_.push_back(incoming);
+// Moved in, as everything the queue takes and gives: a copy of the triple
+// would count each of its shared pointers up and down again.
+void BasicClient::_enqueue(IncomingMessagesBuffer::value_type incoming) {
+  incoming_messages_.push_back(std::move(incoming));
   ++enqueued_;
 }
 
@@ -122,10 +124,54 @@ void BasicClient::_enqueue(const IncomingMessagesBuffer::value_type& incoming) {
 // another multiplexer once there is room; one with room takes every
 // message of it, past its limit by one batch at most, and a poll counts
 // each.
+//
+// The batch is read into strings kept from one batch to the next
+// (split_scratch_), so that each message's bytes are copied into memory
+// already there, and each message is parsed from its string: what a
+// message from a batch costs is its own allocations, the message and its
+// payload; once the strings kept hold more than KEPT_SPLIT_BYTES, each
+// the room of the biggest message it ever held, or after a batch of more
+// than MAX_BATCH_RECORDS messages, they go, so that neither one huge batch
+// nor big messages at ever other places in batches under the limit hold
+// their memory for good. A message queued goes without its raw frame, which most
+// readers never ask for, receive_message() among them, and which
+// with_raw_frame() makes for those that do; one handed to a sink goes
+// with it, as a sink's reader may read it.
 void BasicClient::_split_batch(const Connection::pointer& conn, const MultiplexerMessage& envelope) {
-  MessageBatch batch;
-  if (envelope.type() <= types::MAX_MULTIPLEXER_META_PACKET || !batch.ParseFromString(envelope.batch()) ||
-      batch.message_size() > static_cast<int>(MAX_BATCH_RECORDS)) {
+  MessageBatch& batch = split_scratch_;
+  const bool split = envelope.type() > types::MAX_MULTIPLEXER_META_PACKET && batch.ParseFromString(envelope.batch()) &&
+                     batch.message_size() <= static_cast<int>(MAX_BATCH_RECORDS);
+  const bool full = split && !incoming_sink_ && incoming_queue_full();
+  const int count = batch.message_size();
+  // Every message parsed first, then each checked against the ids seen and
+  // handed on: the check's table stays in the cache for the batch, where
+  // parsing a message between two checks pushed it out.
+  std::vector<std::shared_ptr<MultiplexerMessage>> parsed;
+  if (split && !full) {
+    parsed.reserve(static_cast<std::size_t>(count));
+    for (const std::string& body : batch.message()) {
+      std::shared_ptr<MultiplexerMessage> mxmsg = std::make_shared<MultiplexerMessage>();
+      if (!mxmsg->ParseFromString(body) || !mxmsg->id() || !RawMessage::plain_event(*mxmsg) ||
+          mxmsg->type() != envelope.type() || mxmsg->has_key() != envelope.has_key() ||
+          mxmsg->key() != envelope.key()) {
+        if (const std::string* line = drop_lines_.first({BATCH_NOT_SPLIT, WARNING, envelope.type(), 1}, [] {
+              return "a message in a batch that arrived dropped: no plain event of the batch's type and key";
+            })) {
+          MX_LOG(WARNING, LogSummary::VERBOSITY,
+                 CTX("BasicClient")
+                     TEXT(*line + "; batch id " + repr(envelope.id()) + ", type " + repr(envelope.type())));
+        }
+        continue;
+      }
+      parsed.push_back(std::move(mxmsg));
+    }
+  }
+  // What the strings keep counted, the emptied ones a batch before left
+  // among them: one pass over a batch's strings, not one per message.
+  if (count > static_cast<int>(MAX_BATCH_RECORDS) || batch.message().SpaceUsedExcludingSelfLong() > KEPT_SPLIT_BYTES) {
+    MessageBatch().Swap(&batch);  // a huge batch's memory goes, where a usual one's stays for the next
+  }
+  if (!split) {
     if (const std::string* line = drop_lines_.first({BATCH_NOT_SPLIT, WARNING, envelope.type(), 0}, [] {
           return "a batch that arrived dropped: of a protocol type, not parsing, or of more than MAX_BATCH_RECORDS "
                  "messages";
@@ -135,44 +181,41 @@ void BasicClient::_split_batch(const Connection::pointer& conn, const Multiplexe
     }
     return;
   }
-  if (!incoming_sink_ && incoming_queue_full()) {
+  if (full) {
     last_seen_message_ids_.forget_last();
-    incoming_dropped_.fetch_add(batch.message_size(), std::memory_order_relaxed);
+    incoming_dropped_.fetch_add(count, std::memory_order_relaxed);
     if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
       MX_LOG(WARNING, LogSummary::VERBOSITY,
-             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping a batch of " +
-                                                    repr(batch.message_size()) + ", #" + repr(envelope.id())));
+             CTX("BasicClient.handle_message")
+                 TEXT("incoming_queue_full, dropping a batch of " + repr(count) + ", #" + repr(envelope.id())));
     }
     return;
   }
-  if (batch.message_size() > 1) {
-    frames_handled_ += batch.message_size() - 1;  // poll() reads a queue's worth of messages at most
+  if (count > 1) {
+    frames_handled_ += count - 1;  // poll() reads a queue's worth of messages at most
   }
   const ConnectionWrapper wrapper = _wrap(conn);
-  for (std::string& body : *batch.mutable_message()) {
-    std::shared_ptr<MultiplexerMessage> mxmsg = std::make_shared<MultiplexerMessage>();
-    if (!mxmsg->ParseFromString(body) || !mxmsg->id() || !RawMessage::plain_event(*mxmsg) ||
-        mxmsg->type() != envelope.type() || mxmsg->has_key() != envelope.has_key() || mxmsg->key() != envelope.key()) {
-      if (const std::string* line = drop_lines_.first({BATCH_NOT_SPLIT, WARNING, envelope.type(), 1}, [] {
-            return "a message in a batch that arrived dropped: no plain event of the batch's type and key";
-          })) {
-        MX_LOG(WARNING, LogSummary::VERBOSITY,
-               CTX("BasicClient")
-                   TEXT(*line + "; batch id " + repr(envelope.id()) + ", type " + repr(envelope.type())));
-      }
-      continue;
-    }
+  for (std::shared_ptr<MultiplexerMessage>& mxmsg : parsed) {
     if (!last_seen_message_ids_.insert(mxmsg->id())) {
       continue;  // seen before, as a message that came alone would be
     }
     IncomingMessagesBuffer::value_type incoming =
-        mx::make_triple(RawMessage::FromBatch(&body, mxmsg->id(), mxmsg->type()), wrapper, mxmsg);
+        mx::make_triple(std::shared_ptr<const RawMessage>(), wrapper, std::move(mxmsg));
     if (incoming_sink_) {
+      with_raw_frame(&incoming);
       incoming_sink_(incoming);
     } else {
-      _enqueue(incoming);
+      _enqueue(std::move(incoming));
     }
   }
+}
+
+void BasicClient::with_raw_frame(IncomingMessagesBuffer::value_type* incoming) {
+  if (incoming->first || !incoming->third) {
+    return;
+  }
+  std::string serialized = incoming->third->SerializeAsString();
+  incoming->first = RawMessage::FromBatch(&serialized, incoming->third->id(), incoming->third->type());
 }
 
 // A DELIVERY_ERROR for a batch this client sent, which the multiplexer
@@ -226,11 +269,11 @@ bool BasicClient::_split_delivery_error(const Connection::pointer& conn, const M
     each.SerializeToString(told->mutable_message());
     std::string serialized = told->SerializeAsString();
     IncomingMessagesBuffer::value_type incoming =
-        mx::make_triple(RawMessage::FromBatch(&serialized, told->id(), told->type()), wrapper, told);
+        mx::make_triple(RawMessage::FromBatch(&serialized, told->id(), told->type()), wrapper, std::move(told));
     if (incoming_sink_) {
       incoming_sink_(incoming);
     } else {
-      _enqueue(incoming);
+      _enqueue(std::move(incoming));
     }
   }
   return true;
@@ -374,7 +417,7 @@ BasicClient::IncomingMessagesBuffer::value_type BasicClient::next_incoming_messa
   MX_DCHECK_RUN_ON(&owner_thread());
 
   Assert(has_incoming_messages());
-  IncomingMessagesBuffer::value_type next = incoming_messages_.front();
+  IncomingMessagesBuffer::value_type next = std::move(incoming_messages_.front());
   incoming_messages_.pop_front();
   ++dequeued_;
   return next;

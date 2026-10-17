@@ -5,9 +5,9 @@
 //! executor, which makes it Rust's `AsyncClient`, or in a callback that
 //! runs on the io thread. Mirrors multiplexer/threaded_client.cc: the
 //! engine lives on the io thread, which owns it, and every call from
-//! another thread reaches it as a command posted to the io thread, as C++
-//! posts to its io_service. docs/api_rust.md describes it from the
-//! caller's side.
+//! another thread reaches it through the io thread's inbox (inbox.rs), as
+//! C++'s does through its own (threaded_client_inbox.h). docs/api_rust.md
+//! describes it from the caller's side.
 //!
 //! What arrives on its own, not a reply to a query: the protocol's own is
 //! handled or dropped; a PING is answered, and a search for a backend when
@@ -27,7 +27,18 @@
 //! it reads `stopped`, and `shutdown()` sets `stopped` before it waits for
 //! `posting` to fall to 0, so a call that found the client up is run before
 //! the shutdown, and no caller waits on an io thread that has ended.
+//!
+//! A send nobody follows, `queue()` without `on_end`, a lane or `all()`, of
+//! a plain event, once the client batches, goes to the io thread as data,
+//! not as a command (`core::plain`): serialized on the caller's thread into
+//! a body the io thread handed back, taken from the inbox under the lock
+//! it is pushed with and kept by the thread till its next such send
+//! (`SPARE_BODY`), its deadline counted from the send. So a stream of them
+//! allocates nothing on either thread, and nothing one thread allocated is
+//! freed on the other, which with glibc's malloc made each thread wait on
+//! the other's arena lock.
 
+use std::cell::Cell;
 use std::future::IntoFuture;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -37,25 +48,45 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
-use crate::core::batching::{check_batching, Batching};
+use crate::core::batching::{check_batching, plain_event, Batching};
+use crate::core::bodies::BODY_KEPT_MAX;
 use crate::core::client::{check_key_filters, DropReason, IncomingMode};
+use crate::core::plain::Plain;
 use crate::core::query::{check_size_sent_again, Outcome};
 use crate::core::{deadline_after, Core, Posted};
 use crate::defaults::{CLOSE_FLUSH_SECONDS, DEFAULT_INCOMING_QUEUE_MAX_SIZE, DEFAULT_TIMEOUT};
-use crate::driver::Inbox;
 use crate::endpoint::{format_endpoint, parse_endpoint};
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::fork::DescriptorTable;
 use crate::handles::{Incoming, Lane};
 use crate::ids::Ids;
-use crate::message::{frame_of, KeyFilters, Message, Routing};
+use crate::inbox::Inbox;
+use crate::message::{frame_of, framed, plain_of, stamped, KeyFilters, Message, Routing};
 use crate::pending::{pending, ready, Completer, Messages, Pending, Queue};
 use crate::proto::multiplexer as proto;
 
 /// Locks `mutex`, which nothing panics under.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+thread_local! {
+    /// This thread's next body for a plain send: one an io thread handed
+    /// back, or empty, which the send's serialization then allocates. Any
+    /// client's: a body is only bytes. Read and kept with `try_with`: a send
+    /// made from another thread-local's destructor, once this one is gone,
+    /// makes a body of its own.
+    static SPARE_BODY: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
+}
+
+/// `body` kept as this thread's spare, while the thread's locals live, when
+/// it is no bigger than the batching keeps one (`BODY_KEPT_MAX`): a body a
+/// refused send leaves may be a whole message's.
+fn keep_spare(body: Vec<u8>) {
+    if body.capacity() <= BODY_KEPT_MAX {
+        let _ = SPARE_BODY.try_with(|spare| spare.set(body));
+    }
 }
 
 /// A query's outcome as a caller gets it: the reply, or why not; a
@@ -178,7 +209,9 @@ impl ThreadedClientBuilder {
     }
 }
 
-/// What the io thread and every handle share.
+/// What the io thread and every handle share; on cache lines of its own,
+/// since every send reads `stopped` and counts itself in `posting`.
+#[repr(align(64))]
 struct Shared {
     inbox: Arc<Inbox>,
     waker: Arc<mio::Waker>,
@@ -266,6 +299,59 @@ impl Shared {
             let _ = self.waker.wake();
         }
         true
+    }
+
+    /// Posts a plain send, with its deadline, as `post` posts a command;
+    /// the body handed back for this thread's next one, or, when the client
+    /// was shut down first, the send itself back.
+    fn post_plain(&self, plain: Plain, deadline: Option<Instant>) -> std::result::Result<Vec<u8>, Plain> {
+        if self.on_io_thread() {
+            if self.torn_down.load(Ordering::Acquire) {
+                return Err(plain);
+            }
+            return Ok(self.inbox.push_plain(plain, deadline).0);
+        }
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err(plain);
+        }
+        self.posting.fetch_add(1, Ordering::SeqCst);
+        let _posting = Posting(self);
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err(plain);
+        }
+        let (spare, wake) = self.inbox.push_plain(plain, deadline);
+        if wake {
+            let _ = self.waker.wake();
+        }
+        Ok(spare)
+    }
+
+    /// A plain send of the stamped `encoded`, serialized into this thread's
+    /// spare body, here, and posted as data (see the module comment): its
+    /// id, `TooLarge` before anything is posted, `NotConnected` after the
+    /// shutdown.
+    fn queue_plain(&self, encoded: proto::MultiplexerMessage, timeout: Option<Duration>) -> Result<u64> {
+        let id = encoded.id.unwrap_or(0);
+        let spare = SPARE_BODY.try_with(Cell::take).unwrap_or_default();
+        let plain = match plain_of(&encoded, spare) {
+            Ok(plain) => plain,
+            Err((error, body)) => {
+                keep_spare(body);
+                return Err(error);
+            }
+        };
+        drop(encoded); // here, on the thread that made its payload and key
+        let deadline = deadline_after(Instant::now(), timeout);
+        match self.post_plain(plain, deadline) {
+            Ok(spare) => {
+                keep_spare(spare);
+                Ok(id)
+            }
+            Err(plain) => {
+                keep_spare(plain.body);
+                Err(Error::NotConnected)
+            }
+        }
     }
 
     /// Runs `body` on the io thread and returns what it gave: for the short
@@ -1037,7 +1123,19 @@ impl ThreadedSend<'_> {
     /// `NotConnected` after `shutdown()` and for a pinned lane whose
     /// connection is gone; `TooLarge` before anything is queued.
     pub fn queue(mut self) -> Result<u64> {
-        let frame = self.frame()?;
+        let shared = self.client.shared();
+        let frame =
+            if self.on_end.is_none() && self.lane.is_none() && !self.all && shared.batching.load(Ordering::Relaxed) {
+                // Nobody follows it: a plain event goes as data (`core::plain`).
+                shared.check()?;
+                let encoded = stamped(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id);
+                if plain_event(&encoded) {
+                    return shared.queue_plain(encoded, self.timeout);
+                }
+                framed(encoded, true)?
+            } else {
+                self.frame()?
+            };
         let id = frame.id;
         let ThreadedSend { client, all, lane, timeout, on_end, .. } = self;
         let deadline = deadline_after(Instant::now(), timeout);

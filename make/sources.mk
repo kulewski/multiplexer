@@ -21,6 +21,7 @@ LIB_SRCS := \
   multiplexer/basic_client.cc \
   multiplexer/basic_client_batching.cc \
   multiplexer/basic_client_connect.cc \
+  multiplexer/basic_client_plain.cc \
   multiplexer/basic_client_routing.cc \
   multiplexer/client.cc \
   multiplexer/client_query.cc \
@@ -37,7 +38,9 @@ LIB_SRCS := \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
   multiplexer/threaded_client.cc \
+  multiplexer/threaded_client_inbox.cc \
   multiplexer/threaded_client_io.cc \
+  multiplexer/threaded_client_plain.cc \
   multiplexer/threaded_client_query.cc \
 
 
@@ -101,6 +104,7 @@ HEADERS := \
   lib/random.h \
   lib/release.h \
   lib/repr.h \
+  lib/resize_uninitialized.h \
   lib/seconds.h \
   lib/spanset.h \
   lib/thread_annotations.h \
@@ -128,8 +132,10 @@ HEADERS := \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
+  multiplexer/spent_bodies.h \
   multiplexer/threaded_client.h \
   multiplexer/threaded_client_core.h \
+  multiplexer/threaded_client_inbox.h \
   mxcontrol/driver.h \
   mxcontrol/every_address.h \
   mxcontrol/help.h \
@@ -182,8 +188,10 @@ CC_TEST_SRCS := \
   lib/logging/stderr_test.cc \
   lib/logging/stream_test.cc \
   lib/logging/verbosity_test.cc \
+  lib/memory_test.cc \
   lib/options_test.cc \
   lib/protobuf/stream_test.cc \
+  lib/resize_uninitialized_test.cc \
   lib/spanset_test.cc \
   lib/thread_checker_test.cc \
   lib/xxh3_test.cc \
@@ -213,18 +221,24 @@ CC_TEST_SRCS := \
   multiplexer/log_summary_test.cc \
   multiplexer/negative_timeout_test.cc \
   multiplexer/oversized_message_test.cc \
+  multiplexer/parse_target_test.cc \
   multiplexer/peers_file_start_test.cc \
+  multiplexer/plain_send_exit_test.cc \
   multiplexer/query_stages_test.cc \
   multiplexer/read_syscalls_test.cc \
   multiplexer/receive_allocations_test.cc \
   multiplexer/recorder_test.cc \
   multiplexer/recording_copies_test.cc \
   multiplexer/recording_session_test.cc \
+  multiplexer/route_allocations_test.cc \
   multiplexer/routing_index_test.cc \
   multiplexer/rules_check_interval_test.cc \
   multiplexer/rules_read_errors_test.cc \
+  multiplexer/send_allocations_test.cc \
   multiplexer/server_release_test.cc \
   multiplexer/soak_test.cc \
+  multiplexer/spent_bodies_test.cc \
+  multiplexer/threaded_client_inbox_test.cc \
   multiplexer/threaded_client_test.cc \
   multiplexer/timer_syscalls_test.cc \
   multiplexer/zero_nan_timeout_test.cc \

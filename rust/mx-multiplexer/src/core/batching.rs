@@ -6,45 +6,48 @@
 //! this follows.
 //!
 //! A message for a batch joins the open batch of its group, its type and
-//! key, or opens one. A batch is a list of the messages' frames: nothing is
-//! encoded again until it goes. It goes (`close_batch`) when it is full, by
-//! messages or by bytes, when its max_delay is over, one timer running to
-//! the earliest, or, with max_delay zero, when a connection has nothing
-//! left to write, on it: while one has, a message goes at once and alone,
-//! as without batching, and only while every connection is busy do
-//! messages gather, each batch going as soon as one is not (`Conn`'s
-//! notify_when_idle), or at its first message's deadline, the time it
-//! waited being a wait for room. A batch that goes on its own account,
-//! full, at its delay or at its deadline, takes those waiting for a
-//! connection with nothing left to write with it. Anything sent that does
-//! not join a batch, a flush, a shutdown and a change of what is batched
-//! first let every batch go, in the order they began, so that a message
-//! overtakes no batched one sent before it; a batch may go before an older
-//! one of another group. Open batches are indexed by the order they began
-//! and by when they are due, so that each step is a look-up however many
-//! keys are open.
+//! key, or opens one. A batch is a list of the messages' bodies, each
+//! serialized once, where it was sent: a plain send's bytes as they came
+//! (`plain`), a frame's body copied into a body kept (`bodies`). It goes
+//! (`close_batch`) when it is full, by messages or by bytes, when its
+//! max_delay is over, one timer running to the earliest, or, with
+//! max_delay zero, when a connection has nothing left to write, on it:
+//! while one has, a message goes at once and alone, as without batching,
+//! and only while every connection is busy do messages gather, each batch
+//! going as soon as one is not (`Conn`'s notify_when_idle), or at its first
+//! message's deadline, the time it waited being a wait for room. A batch
+//! that goes on its own account, full, at its delay or at its deadline,
+//! takes those waiting for a connection with nothing left to write with
+//! it. Anything sent that does not join a batch, a flush, a shutdown and a
+//! change of what is batched first let every batch go, in the order they
+//! began, so that a message overtakes no batched one sent before it; a
+//! batch may go before an older one of another group. Open batches are
+//! indexed by the order they began and by when they are due, so that each
+//! step is a look-up however many keys are open.
 //!
-//! Going, a batch becomes one frame (`send_batch`): an envelope with the
-//! group's type and key, a fresh id and this client as its sender, and the
-//! messages' encoded forms in a MessageBatch, measured as it goes on the
-//! wire and cut where it would be over max_bytes, as many at once as cover
-//! the excess, what is cut going next in a batch of its own; a batch of one
-//! goes as the message itself. The frame then goes as any message does
-//! (`send_at`): round robin, waiting for room and for a connection until the
-//! earliest deadline among its messages, counted from their sends in a
-//! batch with no delay and from now in one with a delay. Its
-//! end is each message's: their trackers and `done`s hear it from the
-//! frame's (`SendDone::Batch`), and a drop of the frame is told for each
-//! message (`report_drop`, `OutFrame::batch`).
+//! Going, a batch becomes one frame (`send_batch`, in `bodies`): an
+//! envelope with the group's type and key, a fresh id and this client as
+//! its sender, and the messages' bodies in a MessageBatch inside it
+//! (`BodiesEnvelope`, the one envelope the batcher keeps, the bodies moved
+//! in and encoded once, straight into a frame buffer an earlier batch frame
+//! left), measured as it goes on the wire and cut where it would be over
+//! max_bytes, as many at once as cover the excess, what is cut going next
+//! in a batch of its own; the bodies then go back for the next plain
+//! sends. A batch of one goes as the message itself, a frame made of its
+//! body. The frame then goes as any message does (`send_at`): round robin,
+//! waiting for room and for a connection until the earliest deadline among
+//! its messages, counted from their sends in a batch with no delay and from
+//! now in one with a delay. Its end is each message's: their trackers and
+//! `done`s hear it from the frame's (`SendDone::Batch`), and a drop of the
+//! frame is told for each message (`report_drop`, `OutFrame::batch`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use prost::Message as _;
-
-use super::lane::Lane;
+use super::bodies::{Bodies, BodiesEnvelope, FramePool};
 use super::outbox::{Frame, SendDone};
+use super::plain::Plain;
 use super::timers::TimerKey;
 use super::{deadline_after, ConnId, Core, Due, SendState, Tracker, MAX_TIMEOUT};
 use crate::constants::types;
@@ -52,8 +55,8 @@ use crate::defaults::{
     DEFAULT_BATCH_MAX_BYTES, DEFAULT_BATCH_MAX_RECORDS, MAX_BATCH_RECORDS, MAX_KEY_SIZE, MAX_MESSAGE_SIZE,
 };
 use crate::error::{Error, Result};
-use crate::frame::{self, HEADER_LENGTH};
-use crate::proto::multiplexer::{compression, logging_method, MessageBatch, MultiplexerMessage};
+use crate::frame::HEADER_LENGTH;
+use crate::proto::multiplexer::{compression, logging_method, MultiplexerMessage};
 
 /// How the events of a type, or of one key of it, are batched
 /// (`SyncClient::set_batching`): a batch goes once it holds `max_records`
@@ -162,15 +165,50 @@ pub(crate) fn check_batching(r#type: u32, key: Option<&str>, batching: &Batching
     Ok(())
 }
 
-/// One message waiting in a batch, with what its send asked for: its
-/// timeout, and, in a batch that waits for a connection with nothing left
-/// to write, its deadline from its send (see `Batch::waits_for_idle`).
-struct Record {
-    frame: Frame,
-    timeout: Option<Duration>,
-    deadline: Option<Instant>,
-    done: Option<SendDone>,
-    tracker: Option<Arc<Tracker>>,
+/// What joins a batch: a frame a send made, or a plain send's bytes.
+pub(crate) enum Joining {
+    Frame(Frame),
+    Plain(Plain),
+}
+
+impl Joining {
+    /// The message's type.
+    fn r#type(&self) -> u32 {
+        match self {
+            Joining::Frame(frame) => frame.r#type,
+            Joining::Plain(plain) => plain.r#type,
+        }
+    }
+
+    /// The key it batches by, if it has one.
+    fn key(&self) -> Option<&str> {
+        match self {
+            Joining::Frame(Frame { batch: BatchMark::Event(key), .. }) => key.as_deref(),
+            Joining::Frame(_) => None,
+            Joining::Plain(plain) => plain.key(),
+        }
+    }
+
+    /// The bytes of the serialized message, without a frame's header.
+    fn bytes(&self) -> usize {
+        match self {
+            Joining::Frame(frame) => frame.bytes.len() - HEADER_LENGTH,
+            Joining::Plain(plain) => plain.length,
+        }
+    }
+}
+
+/// One message waiting in a batch, its body and id, with what its send
+/// asked for: its timeout, and, in a batch that waits for a connection with
+/// nothing left to write, its deadline from its send (see
+/// `Batch::waits_for_idle`).
+pub(super) struct Record {
+    pub(super) body: Vec<u8>,
+    pub(super) id: u64,
+    pub(super) timeout: Option<Duration>,
+    pub(super) deadline: Option<Instant>,
+    pub(super) done: Option<SendDone>,
+    pub(super) tracker: Option<Arc<Tracker>>,
 }
 
 /// A batch open: its group's messages, in the order sent, and their bytes
@@ -180,13 +218,13 @@ struct Record {
 /// their deadlines, and the batch goes by it at the latest. With a delay
 /// `due` is when the delay is over, and a message's time in the batch is
 /// the batching's, its timeout counting from when the batch goes.
-struct Batch {
-    r#type: u32,
-    key: Option<String>,
-    batching: Batching,
-    records: Vec<Record>,
+pub(super) struct Batch {
+    pub(super) r#type: u32,
+    pub(super) key: Option<String>,
+    pub(super) batching: Batching,
+    pub(super) records: Vec<Record>,
     bytes: usize,
-    waits_for_idle: bool,
+    pub(super) waits_for_idle: bool,
     due: Option<Instant>,
 }
 
@@ -208,6 +246,14 @@ pub(crate) struct Batcher {
     by_due: BTreeSet<(Instant, u64)>,
     timer: Option<TimerKey>,
     armed: Option<Instant>,
+    /// The envelope every batch is built in, kept with its list of bodies.
+    pub(super) envelope: BodiesEnvelope,
+    /// The bodies handed back: what a synchronous client serializes its next
+    /// plain sends into, or, on a threaded client's io thread, what its
+    /// inbox hands back to the senders at its next take (`inbox::Inbox`).
+    pub(crate) bodies: Bodies,
+    /// The buffers of batch frames written, for the next batch frames.
+    pub(super) frames: Arc<FramePool>,
 }
 
 impl Batcher {
@@ -277,6 +323,18 @@ impl Core {
         self.batcher.open.values().map(|batch| batch.records.len()).sum()
     }
 
+    /// How many bodies the kept envelope has room for; for tests.
+    #[cfg(test)]
+    pub(crate) fn envelope_room(&self) -> usize {
+        self.batcher.envelope.batch.as_ref().map_or(0, |inside| inside.message.capacity())
+    }
+
+    /// How many batch frame buffers are kept for the next; for tests.
+    #[cfg(test)]
+    pub(crate) fn frame_buffers_kept(&self) -> usize {
+        self.batcher.frames.len()
+    }
+
     /// When the batch timer is armed to fire, if it is; for tests.
     #[cfg(test)]
     pub(crate) fn batcher_armed(&self) -> Option<Instant> {
@@ -286,17 +344,23 @@ impl Core {
     /// What batching applies to `frame`, or None: the setting for its key,
     /// else for its type, when it is a plain event.
     pub(super) fn batching_for(&self, frame: &Frame) -> Option<Batching> {
+        let BatchMark::Event(key) = &frame.batch else { return None };
+        self.batching_of(frame.r#type, key.as_deref())
+    }
+
+    /// What batching applies to a plain event of `r#type` and `key`, or
+    /// None: the setting for its key, else for its type.
+    pub(crate) fn batching_of(&self, r#type: u32, key: Option<&str>) -> Option<Batching> {
         let batcher = &self.batcher;
         if batcher.by_type.is_empty() && batcher.by_key.is_empty() {
             return None; // nothing batched: no look-up per message
         }
-        let BatchMark::Event(key) = &frame.batch else { return None };
         if let Some(key) = key {
-            if let Some(batching) = batcher.by_key.get(&frame.r#type).and_then(|keys| keys.get(key.as_str())) {
+            if let Some(batching) = batcher.by_key.get(&r#type).and_then(|keys| keys.get(key)) {
                 return Some(*batching);
             }
         }
-        batcher.by_type.get(&frame.r#type).copied()
+        batcher.by_type.get(&r#type).copied()
     }
 
     /// Whether a synchronous client's send of `frame` must run the loop
@@ -315,43 +379,55 @@ impl Core {
         timeout: Option<Duration>,
         now: Instant,
     ) -> bool {
+        let BatchMark::Event(key) = &frame.batch else { return true };
+        let bytes = frame.bytes.len() - HEADER_LENGTH;
+        self.needs_loop_for(frame.r#type, key.as_deref(), bytes, all, lane, timeout, now)
+    }
+
+    /// `send_needs_loop` for a plain event of `r#type` and `key` whose
+    /// serialized message has `bytes`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn needs_loop_for(
+        &self,
+        r#type: u32,
+        key: Option<&str>,
+        bytes: usize,
+        all: bool,
+        lane: bool,
+        timeout: Option<Duration>,
+        now: Instant,
+    ) -> bool {
         if all || lane || timeout == Some(Duration::ZERO) {
             return true;
         }
-        let Some(batching) = self.batching_for(frame) else { return true };
+        let Some(batching) = self.batching_of(r#type, key) else { return true };
         if batching.max_delay.is_zero() || self.batcher.by_due.first().is_some_and(|(due, _)| *due <= now) {
             return true;
         }
-        let key = match &frame.batch {
-            BatchMark::Event(key) => key.as_deref(),
-            _ => None,
-        };
         let (records, held) = self
             .batcher
-            .find(frame.r#type, key)
+            .find(r#type, key)
             .map_or((0, 0), |began| (self.batcher.open[&began].records.len(), self.batcher.open[&began].bytes));
-        records + 1 >= batching.max_records || held + frame.bytes.len() - HEADER_LENGTH >= batching.max_bytes
+        records + 1 >= batching.max_records || held + bytes >= batching.max_bytes
     }
 
-    /// `frame` into the open batch of its group, or one it opens; with no
+    /// A message into the open batch of its group, or one it opens; with no
     /// room there, that batch goes first. A message too big for a batch,
     /// or, with no delay, sent while a connection is free to write it or
-    /// none is live, goes alone, at once, after every batch. Its tracker,
-    /// when the caller keeps them, reads QUEUED until its batch ends.
-    pub(super) fn batch(
+    /// none is live, goes alone, at once, after every batch: a frame as it
+    /// is, a plain send as a frame made of its bytes. Its tracker, when the
+    /// caller keeps them, reads QUEUED until its batch ends.
+    pub(crate) fn batch(
         &mut self,
-        frame: Frame,
+        joining: Joining,
         batching: Batching,
         timeout: Option<Duration>,
         trackers: Option<&mut Vec<Arc<Tracker>>>,
         done: Option<SendDone>,
     ) -> bool {
-        let bytes = frame.bytes.len() - HEADER_LENGTH;
-        let r#type = frame.r#type;
-        let key = match &frame.batch {
-            BatchMark::Event(key) => key.as_deref(),
-            _ => None,
-        };
+        let bytes = joining.bytes();
+        let r#type = joining.r#type();
+        let key = joining.key();
         let mut open = self.batcher.find(r#type, key);
         if let Some(began) = open {
             let batch = &self.batcher.open[&began];
@@ -366,9 +442,26 @@ impl Core {
                 if bytes >= batching.max_bytes || (batching.max_delay.is_zero() && self.idle_or_none()) {
                     self.close_batches();
                     let deadline = deadline_after(self.now, timeout);
+                    let frame = match joining {
+                        Joining::Frame(frame) => frame,
+                        Joining::Plain(plain) => self.frame_of_plain(plain),
+                    };
                     return self.send_at(frame, false, None, deadline, 0, trackers, None, done);
                 }
                 self.open_batch(r#type, key.map(str::to_string), batching)
+            }
+        };
+        let (body, id) = match joining {
+            Joining::Plain(plain) => {
+                let id = plain.id;
+                (plain.into_body(), id)
+            }
+            Joining::Frame(frame) => {
+                // A frame's body, copied into a body kept: its own frame is
+                // never written.
+                let mut body = self.batcher.bodies.take();
+                body.extend_from_slice(&frame.bytes[HEADER_LENGTH..]);
+                (body, frame.id)
             }
         };
         let tracker = trackers.map(|trackers| {
@@ -385,7 +478,7 @@ impl Core {
         }
         let batch = self.batcher.open.get_mut(&began).expect("the batch is open");
         batch.bytes += bytes;
-        batch.records.push(Record { frame, timeout, deadline, done, tracker });
+        batch.records.push(Record { body, id, timeout, deadline, done, tracker });
         if batch.records.len() >= batching.max_records || batch.bytes >= batching.max_bytes {
             self.close_on_its_own(began);
         }
@@ -488,101 +581,6 @@ impl Core {
             }
         }
         self.send_batch(batch, idle);
-    }
-
-    /// A batch as frames: an envelope of its type and key holding as many
-    /// of its messages as fit in max_bytes, measured as it goes on the
-    /// wire, then the next, a message alone going as itself. Each frame
-    /// waits for room and for a connection until the earliest of its
-    /// messages' deadlines: from their sends in a batch that waited for a
-    /// connection with nothing left to write, from now in one that waited
-    /// for its delay. On `idle`, when given and live, rather than where the
-    /// round robin points, which may be a connection still writing.
-    fn send_batch(&mut self, batch: Batch, idle: Option<ConnId>) {
-        let Batch { r#type, key, batching, mut records, waits_for_idle, .. } = batch;
-        let lane = idle.filter(|conn| self.conn_living(*conn)).map(|conn| Lane::seeded(&self.wrap(conn), false));
-        let now = self.now;
-        while !records.is_empty() {
-            let mut end = records.len();
-            let mut envelope_frame = None;
-            if end > 1 {
-                let mut inside = MessageBatch {
-                    message: records.iter().map(|record| record.frame.bytes.slice(HEADER_LENGTH..)).collect(),
-                };
-                let id = self.random64();
-                let mut envelope = MultiplexerMessage {
-                    id: Some(id),
-                    sender: Some(self.instance_id),
-                    r#type,
-                    key: key.clone(),
-                    batch: Some(inside.encode_to_vec().into()),
-                    ..Default::default()
-                };
-                // Where the message would be over max_bytes, measured as it
-                // goes on the wire, its last messages are cut, to go next: at
-                // once as many as their own sizes cover the excess with,
-                // which each adds at least to the message, and the rest
-                // measured again.
-                let mut size = envelope.encoded_len();
-                while end > 1 && size > batching.max_bytes {
-                    let excess = size - batching.max_bytes;
-                    let mut cut = 0;
-                    while end > 1 && cut < excess {
-                        cut += records[end - 1].frame.bytes.len() - HEADER_LENGTH;
-                        inside.message.pop();
-                        end -= 1;
-                    }
-                    envelope.batch = Some(inside.encode_to_vec().into());
-                    size = envelope.encoded_len();
-                }
-                if end > 1 {
-                    if let Ok(bytes) = frame::encode(&envelope) {
-                        let ids: Arc<[u64]> = records[..end].iter().map(|record| record.frame.id).collect();
-                        envelope_frame = Some(Frame { bytes, id, r#type, batch: BatchMark::Batch(ids) });
-                    }
-                }
-            }
-            let taken: Vec<Record> = match envelope_frame {
-                Some(_) => records.drain(..end).collect(),
-                None => records.drain(..1).collect(), // a batch of one goes as the message itself
-            };
-            let deadline = taken
-                .iter()
-                .filter_map(|record| if waits_for_idle { record.deadline } else { deadline_after(now, record.timeout) })
-                .min();
-            let (frame, done) = match envelope_frame {
-                Some(frame) => {
-                    let ends: Vec<(Option<SendDone>, Option<Arc<Tracker>>)> =
-                        taken.into_iter().map(|record| (record.done, record.tracker)).collect();
-                    let followed = ends.iter().any(|(done, tracker)| done.is_some() || tracker.is_some());
-                    (frame, followed.then_some(SendDone::Batch(ends)))
-                }
-                None => {
-                    let record = taken.into_iter().next().expect("one message");
-                    let done = match record.tracker {
-                        None => record.done,
-                        Some(tracker) => Some(SendDone::Batch(vec![(record.done, Some(tracker))])),
-                    };
-                    (record.frame, done)
-                }
-            };
-            self.send_at(frame, false, lane.as_ref(), deadline, 0, None, None, done);
-        }
-    }
-
-    /// A batched send's end, each of its messages': its tracker reads SENT
-    /// or LOST, and its `done` hears `written`, in the order they were sent.
-    pub(crate) fn end_batch(&mut self, ends: Vec<(Option<SendDone>, Option<Arc<Tracker>>)>, written: u32) {
-        for (done, tracker) in ends {
-            if let Some(tracker) = tracker {
-                if tracker.get() == SendState::Queued {
-                    tracker.set(if written > 0 { SendState::Sent } else { SendState::Lost });
-                }
-            }
-            if let Some(done) = done {
-                self.end_send(done, written);
-            }
-        }
     }
 
     /// A connection with nothing queued, written or waiting for room, or

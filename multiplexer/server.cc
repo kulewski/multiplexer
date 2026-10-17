@@ -340,6 +340,20 @@ void Server::handle_message(const Connection::pointer& conn, const std::shared_p
   return _handle_message(conn, *msg, raw);
 }
 
+std::shared_ptr<MultiplexerMessage> Server::parse_target() {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (parse_target_ == nullptr || parse_target_.use_count() != 1 ||
+      parse_target_->message().capacity() + parse_target_->batch().capacity() + parse_target_->key().capacity() +
+              parse_target_->workflow().capacity() >
+          KEPT_PARSE_BYTES ||
+      parse_target_->override_rrules_size() > 0 || !parse_target_->unknown_fields().empty()) {
+    parse_target_ = std::make_shared<MultiplexerMessage>();
+  } else {
+    parse_target_->Clear();
+  }
+  return parse_target_;
+}
+
 // ---------------------------------------------------------------------------
 // MessageMetaHandler
 

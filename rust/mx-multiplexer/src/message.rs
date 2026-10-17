@@ -18,6 +18,7 @@ use bytes::Bytes;
 use prost::Message as _;
 
 use crate::core::batching::{plain_event, BatchMark};
+use crate::core::plain::Plain;
 use crate::proto::multiplexer as proto;
 
 /// The key filters of a peer: per message type, the patterns, RE2 regular
@@ -155,27 +156,69 @@ impl DeliveryError {
 /// encoded message rather than copied; a client that does not looks at
 /// nothing for it.
 pub(crate) fn frame_of(
-    mut message: Message,
+    message: Message,
     next_id: impl FnOnce() -> u64,
     sender: u64,
     batching: bool,
 ) -> crate::error::Result<crate::core::outbox::Frame> {
+    framed(stamped(message, next_id, sender), batching)
+}
+
+/// `message` as it goes on the wire: its empty id given by `next_id`, its
+/// empty sender `sender`.
+pub(crate) fn stamped(mut message: Message, next_id: impl FnOnce() -> u64, sender: u64) -> proto::MultiplexerMessage {
     if message.id == 0 {
         message.id = next_id();
     }
     if message.sender == 0 {
         message.sender = sender;
     }
-    let (id, r#type) = (message.id, message.r#type);
-    let mut encoded = proto::MultiplexerMessage::from(message);
+    proto::MultiplexerMessage::from(message)
+}
+
+/// A stamped message's frame, as `frame_of` makes it.
+pub(crate) fn framed(
+    mut encoded: proto::MultiplexerMessage,
+    batching: bool,
+) -> crate::error::Result<crate::core::outbox::Frame> {
+    let (id, r#type) = (encoded.id.unwrap_or(0), encoded.r#type);
     // An event that may go in a batch is framed unsealed, its checksum
     // written only if it goes alone (`frame::seal`): what its mark says.
     if batching && plain_event(&encoded) {
         let bytes = crate::frame::encode_unsealed(&encoded)?;
-        return Ok(crate::core::outbox::Frame { bytes, id, r#type, batch: BatchMark::Event(encoded.key.take()) });
+        let batch = BatchMark::Event(encoded.key.take());
+        return Ok(crate::core::outbox::Frame { bytes, head: None, id, r#type, batch });
     }
     let bytes = crate::frame::encode(&encoded)?;
-    Ok(crate::core::outbox::Frame { bytes, id, r#type, batch: BatchMark::None })
+    Ok(crate::core::outbox::Frame { bytes, head: None, id, r#type, batch: BatchMark::None })
+}
+
+/// A stamped plain event as a plain send's bytes (`core::plain`): the
+/// message serialized into `body`, emptied first, its key's bytes after it,
+/// its size and key checked as a frame's are. On a refusal, the error and
+/// `body` back, for the next send.
+pub(crate) fn plain_of(
+    encoded: &proto::MultiplexerMessage,
+    mut body: Vec<u8>,
+) -> std::result::Result<Plain, (crate::error::Error, Vec<u8>)> {
+    let key = encoded.key.as_deref();
+    let size = encoded.encoded_len();
+    let checked = crate::frame::check_key_size(key).and_then(|()| crate::frame::check_message_size(size));
+    if let Err(error) = checked {
+        return Err((error, body));
+    }
+    body.clear();
+    body.reserve(size + key.map_or(0, str::len));
+    // A vector grows as it is written to, so prost never runs out of room;
+    // the error is its only other way to say so.
+    if encoded.encode(&mut body).is_err() {
+        let limit = crate::defaults::MAX_MESSAGE_SIZE;
+        return Err((crate::error::Error::TooLarge { what: crate::error::Limit::Message, size, limit }, body));
+    }
+    if let Some(key) = key {
+        body.extend_from_slice(key.as_bytes());
+    }
+    Ok(Plain { body, length: size, keyed: key.is_some(), id: encoded.id.unwrap_or(0), r#type: encoded.r#type })
 }
 
 /// A u64 field the libraries read as absent when 0.

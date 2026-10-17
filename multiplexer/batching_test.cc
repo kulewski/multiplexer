@@ -1,7 +1,9 @@
 // A client's batching (BasicClient::set_batching): the events queued of a
 // batched type go several in one message, full batches as they fill and
 // the rest at a flush; the receiving library hands each out as it was
-// sent, with a frame of its own; the keys of a type batch apart, and one
+// sent, a reader of raw frames getting the bytes it went in the batch as,
+// for a message sent with its id and sender;
+// the keys of a type batch apart, and one
 // key's setting goes ahead of its type's; a send that does not batch lets
 // the batch go first; a batch's message is measured and kept within
 // max_bytes; with no delay, a message goes alone while the connection has
@@ -25,6 +27,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <future>
 #include <limits>
@@ -364,6 +367,46 @@ TEST(Batching, AReceiverGetsEachMessageAsItWasSent) {
   }
 }
 
+// A message taken from a batch is queued without its raw frame, which a
+// read of raw frames makes, the message serialized again: for a message
+// sent with its id and sender, the bytes it went in the batch as. A
+// ThreadedClient's on_message, which may read it, is handed it made.
+TEST(Batching, AMessageFromABatchIsReadRawAsItWentInTheBatch) {
+  InProcessMultiplexer mx;
+  RawPeer wire(mx.port, peers::TEST_EVENT_BACKEND, PEER);
+  SyncClient receiver(peers::TEST_EVENT_BACKEND);
+  ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, BOUND));
+  std::mutex mutex;
+  std::condition_variable arrived;
+  std::vector<std::string> handed;  // the bytes of the frames on_message was handed
+  ThreadedClient threaded(peers::TEST_EVENT_BACKEND, [&](const IncomingMessage& incoming) {
+    std::lock_guard<std::mutex> lock(mutex);
+    handed.push_back(incoming.first ? incoming.first->get_message() : "no frame");
+    arrived.notify_all();
+  });
+  ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, BOUND));
+  SyncClient sender(peers::TEST_EVENT_CLIENT);
+  ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
+  sender.set_batching(types::TEST_EVENT, by_count(3));
+  for (int number = 0; number < 3; ++number) {
+    ASSERT_TRUE(sender.queue(event(sender, number)));
+  }
+  ASSERT_TRUE(sender.flush_all(BOUND));
+  MultiplexerMessage on_the_wire;
+  ASSERT_TRUE(wire.next(&on_the_wire));
+  MessageBatch batch;
+  ASSERT_TRUE(batch.ParseFromString(on_the_wire.batch()));
+  ASSERT_EQ(3, batch.message_size());
+  EXPECT_EQ(batch.message(0), receiver.read_raw_message(BOUND).first->get_message());
+  EXPECT_EQ(batch.message(1), receiver.receive_raw_message(BOUND).first->get_message());
+  EXPECT_EQ(batch.message(2), receiver.receive_message(BOUND).first->SerializeAsString());
+  std::unique_lock<std::mutex> lock(mutex);
+  ASSERT_TRUE(arrived.wait_for(lock, std::chrono::seconds(BOUND), [&handed] { return handed.size() == 3; }));
+  for (int index = 0; index < 3; ++index) {
+    EXPECT_EQ(batch.message(index), handed[static_cast<std::size_t>(index)]);
+  }
+}
+
 TEST(Batching, TheKeysOfATypeBatchApart) {
   InProcessMultiplexer mx;
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
@@ -547,6 +590,40 @@ TEST(Batching, AQueuedMessageThatOnlyJoinsABatchRunsNoLoop) {
 // its own bytes rather than setting them in a copy: the frame reads as the
 // message with them, its other fields as they were, and a message that
 // lacks nothing is framed as it is.
+// A batch goes from a BatchEnvelope, its MessageBatch inside it serialized
+// once, straight into the frame: byte for byte the frame of the
+// MultiplexerMessage whose batch holds the same MessageBatch serialized,
+// which is what the multiplexer and every receiver parse.
+TEST(Batching, ABatchEnvelopeIsTheFrameOfItsMessage) {
+  MessageBatch inside;
+  for (const char* payload : {"first", "second"}) {
+    MultiplexerMessage event;
+    event.set_id(payload[0]);
+    event.set_sender(27);
+    event.set_type(types::TEST_EVENT);
+    event.set_key("shard.1");
+    event.set_message(payload);
+    event.SerializeToString(inside.add_message());
+  }
+  multiplexer::BatchEnvelope envelope;
+  envelope.set_id(26);
+  envelope.set_sender(27);
+  envelope.set_type(types::TEST_EVENT);
+  envelope.set_key("shard.1");
+  *envelope.mutable_batch() = inside;
+  MultiplexerMessage message;
+  message.set_id(26);
+  message.set_sender(27);
+  message.set_type(types::TEST_EVENT);
+  message.set_key("shard.1");
+  inside.SerializeToString(message.mutable_batch());
+  const std::unique_ptr<RawMessage> from_envelope(RawMessage::FromMessage(envelope));
+  const std::unique_ptr<RawMessage> from_message(RawMessage::FromMessage(message));
+  EXPECT_EQ(wire_bytes(*from_message), wire_bytes(*from_envelope));
+  EXPECT_EQ(26u, from_envelope->id());
+  EXPECT_EQ(types::TEST_EVENT, from_envelope->type());
+}
+
 TEST(Batching, AFrameIsStampedWithWhatItsMessageLacks) {
   MultiplexerMessage msg;
   msg.set_type(types::TEST_EVENT);

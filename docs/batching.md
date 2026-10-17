@@ -274,6 +274,17 @@ came in a batch. On the way in:
 The last two are logged as the library's other drops are, the first of
 a kind at once and the rest counted.
 
+**A raw frame is made when it is read.** In C++, `read_raw_message()`,
+`receive_raw_message()` and a `ThreadedClient`'s `on_message` hand out a
+message's frame with it, and Python reads every message from its frame.
+A message from a batch gets a frame of its own only then, the message
+serialized again: the same message, its fields in their numbers' order,
+which for a message sent with its id and sender are the bytes it went in
+the batch as. One the library gave its id or sender as it sent it had
+them added after its other fields, and a peer of your own may encode
+otherwise than protobuf does; theirs come out in protobuf's order.
+`receive_message()` makes none.
+
 **A full incoming queue**, a `SyncClient`'s or a `BaseMultiplexerServer`'s,
 1024 unread messages by default, drops a batch whole, `incoming_dropped`
 counting each message in it; a queue with room takes the whole batch,
@@ -334,22 +345,53 @@ the others.
 
 - **Nothing batched:** nothing; a send only sees that nothing is set, and
   a frame carries a null pointer for what batching would know of it.
-- **Something batched:** a client that batches marks each message it
-  frames, whether it is a plain event and a copy of its key; and each send
-  looks up its type, and its key for a type with keys set. A batch takes
-  each message's bytes from its frame, which is never written, rather
-  than copying them, wherever nothing else holds the frame. It frames a
-  plain event without the checksum every frame's header carries: a
-  message that goes in a batch never gets one, only the batch's frame
-  does, and one that goes alone gets it as it goes, as it would have when
-  it was framed. Python hands the library each message serialized, and
-  the library reads one of a batched type once more, to see whether it is
-  a plain event, of the type it was given, and what its key is.
+- **Something batched:** a client that batches hands each plain event it
+  queues, through no lane, to the batching as its bytes alone, with no
+  frame made for it: a message that goes in a batch never gets one, nor
+  the checksum every frame's header carries, and only one that goes alone
+  is framed, as it goes. Each send looks up its type, and its key for a
+  type with keys set. A batch takes each message's bytes as they are and
+  serializes them once, straight into the batch's frame (`BatchEnvelope`
+  in Multiplexer.proto, the same bytes as the `MultiplexerMessage` holding
+  them serialized), in a buffer an earlier batch's frame left once it was
+  written, and hands the bytes' room back to the client, which serializes
+  its next messages into it. Python hands the library each message
+  serialized, and the library reads one of a batched type once more, to
+  see whether it is a plain event, of the type it was given, and what its
+  key is.
+- **Sending from another thread:** a `ThreadedClient`, which batches on
+  its io thread, takes a plain event nobody follows from the calling
+  thread as its bytes, through one queue the io thread takes a batch at a
+  time, waking it once for as many as come meanwhile; and the room of the
+  bytes goes back to the calling thread through the same queue. So no
+  thread frees what another allocated, which glibc's malloc makes costly:
+  it gives a block back to the arena that allocated it, under that
+  arena's lock, which the allocating thread takes as it allocates.
 - **What it saves:** measured on a 24-core AMD Ryzen Threadripper PRO
   9965WX, one `SyncClient` sending events of 100 bytes through one
   multiplexer to one consumer moved about 440,000 a second unbatched, the
   multiplexer's CPU 2.3 s per million, and about 2,500,000 a second
   with a 5 ms delay, 0.03 s per million.
+- **Receiving:** the library reads a batch into strings it keeps from one
+  batch to the next, and each message from its string, so that a message
+  costs the receiver its own allocations alone, the message and its
+  payload, and no frame of its own until something reads one ([what the
+  receiver sees](#what-the-receiver-sees)): about three allocations a
+  message where it took six. On the same machine, a `SyncClient` taking
+  kilobyte events with `receive_message()` used 0.41 µs of CPU a message
+  where it used 0.53.
+- **Memory for big batches:** a batch of a megabyte is a frame of a
+  megabyte at the sender, in each multiplexer and at the receiver. The
+  sender serializes its batches into the buffers of those it wrote, four
+  of up to 4 MiB at most. Elsewhere, glibc's malloc maps a block that size
+  of its own and unmaps it when it is freed until its thresholds settle,
+  so a program just started faults the pages of such frames in afresh,
+  more so with several threads, each of which glibc gives a heap of its
+  own. The multiplexer sets
+  glibc's thresholds itself ([sizing](operations.md#sizing)); a library
+  cannot for its program, which can in its environment, both or neither,
+  since either alone turns glibc's own adjustment off:
+  `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=67108864`.
 
 ## Where it is shown
 

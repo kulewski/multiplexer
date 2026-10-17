@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -46,6 +47,7 @@
 #include "multiplexer/descriptor_table.h"
 #include "multiplexer/io/connection.h"
 #include "multiplexer/log_summary.h"
+#include "multiplexer/spent_bodies.h"
 
 namespace multiplexer {
 
@@ -62,47 +64,70 @@ struct BasicClientTraits {
 class BasicClient;
 class Client;
 
-// `msg` framed for a send, as every send that takes a whole message frames
-// it: as it is when it has an id and a sender, else with an empty id made
-// fresh by `fresh_id` and an empty sender set to `instance_id`, as
-// new_message() and a reply fill them, since every receiver drops a message
-// without an id, appended to its bytes rather than set in a copy. For a
-// client that batches, `batching`, the frame is marked as its batching
-// needs it (RawMessage::batchable), and the frame of a plain event, which
-// may go in a batch, is made unsealed (RawMessage::Unsealed), its checksum
-// computed only if it goes alone; a client that does not batch reads
-// nothing more of the message for it.
+// The most the stamp serialize_stamped() appends can take: an id and a
+// sender at their widest, measured. A body reserved with room for it takes
+// a later message of the same size whatever its id, which a body reused
+// for the next message (SpentBodies) needs, a random id's varint being 9
+// or 10 bytes.
+inline std::size_t widest_stamp_bytes() {
+  static const std::size_t bytes = [] {
+    MultiplexerMessage stamp;
+    stamp.set_id(std::numeric_limits<std::uint64_t>::max());
+    stamp.set_sender(std::numeric_limits<std::uint64_t>::max());
+    return stamp.ByteSizeLong();
+  }();
+  return bytes;
+}
+
+// `msg` serialized for a send, as every send that takes a whole message
+// serializes it, into `out`, which keeps its capacity: as it is when it has
+// an id and a sender, else with an empty id made fresh by `fresh_id` and an
+// empty sender set to `instance_id`, as new_message() and a reply fill
+// them, since every receiver drops a message without an id. What it lacks
+// is appended to its bytes rather than set in a copy of it: protobuf reads
+// serializations put end to end as one message, the later fields' values
+// winning, so the message is serialized once and its payload never copied
+// in between. `room_after`: room taken at once for what the caller appends
+// after the message. Returns the message's id. Throws std::length_error,
+// before any room is taken, for a key over MAX_KEY_SIZE or a message over
+// MAX_MESSAGE_SIZE, its size measured, and for one protobuf will not
+// serialize.
+template <typename FreshId>
+std::uint64_t serialize_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id, FreshId fresh_id,
+                                std::string* out, std::size_t room_after = 0) {
+  check_key_size(msg.key().size());
+  MultiplexerMessage stamp;
+  if (!msg.id()) {
+    stamp.set_id(fresh_id());
+  }
+  if (!msg.sender()) {
+    stamp.set_sender(instance_id);
+  }
+  const std::size_t message_bytes = msg.ByteSizeLong();
+  check_message_size(message_bytes + stamp.ByteSizeLong());  // before any room is taken for it
+  out->clear();
+  out->reserve(message_bytes + widest_stamp_bytes() + room_after);
+  if (!msg.AppendToString(out) || !stamp.AppendPartialToString(out)) {
+    throw std::length_error("a message protobuf could not serialize, of " + std::to_string(message_bytes) + " bytes");
+  }
+  return msg.id() ? msg.id() : stamp.id();
+}
+
+// `msg` framed for a send (serialize_stamped). For a client that batches,
+// `batching`, the frame is marked as its batching needs it
+// (RawMessage::batchable), and the frame of a plain event, which may go in
+// a batch, is made unsealed (RawMessage::Unsealed), its checksum computed
+// only if it goes alone; a client that does not batch reads nothing more
+// of the message for it.
 template <typename FreshId>
 std::shared_ptr<const RawMessage> frame_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id,
                                                 FreshId fresh_id, bool batching = false) {
   const bool plain = batching && RawMessage::plain_event(msg);
-  std::shared_ptr<const RawMessage> raw;
-  if (msg.id() && msg.sender()) {
-    raw.reset(RawMessage::FromMessage(msg, /*sealed=*/!plain));
-  } else {
-    // What the message lacks, appended to its own bytes rather than set in
-    // a copy of it: protobuf reads serializations put end to end as one
-    // message, the later fields' values winning, so the message is
-    // serialized once and its payload never copied in between.
-    MultiplexerMessage stamp;
-    if (!msg.id()) {
-      stamp.set_id(fresh_id());
-    }
-    if (!msg.sender()) {
-      stamp.set_sender(instance_id);
-    }
-    check_key_size(msg.key().size());
-    std::string serialized;
-    serialized.reserve(msg.ByteSizeLong() + stamp.ByteSizeLong());
-    if (!msg.AppendToString(&serialized) || !stamp.AppendPartialToString(&serialized)) {
-      check_message_size(msg.ByteSizeLong());
-      throw std::length_error("a message protobuf could not serialize, of " + std::to_string(msg.ByteSizeLong()) +
-                              " bytes");
-    }
-    const std::uint64_t id = msg.id() ? msg.id() : stamp.id();
-    raw = plain ? std::make_shared<RawMessage>(RawMessage::Unsealed(), &serialized, id, msg.type())
-                : std::make_shared<RawMessage>(&serialized, id, msg.type());
-  }
+  std::string serialized;
+  const std::uint64_t id = serialize_stamped(msg, instance_id, fresh_id, &serialized);
+  std::shared_ptr<const RawMessage> raw =
+      plain ? std::make_shared<RawMessage>(RawMessage::Unsealed(), &serialized, id, msg.type())
+            : std::make_shared<RawMessage>(&serialized, id, msg.type());
   if (batching) {
     raw->mark_batchable(plain ? RawMessage::Batchable::YES : RawMessage::Batchable::NO, plain && msg.has_key(),
                         plain ? msg.key() : std::string());
@@ -442,6 +467,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // definitions
   typedef ConnectionsManager<BasicClient> Base;
 
+  // What arrived: the raw frame, the connection it came on and the message.
+  // A message taken from a batch is queued without its raw frame, null,
+  // which with_raw_frame() makes for whatever reads it.
   typedef std::deque<
       mx::triple<std::shared_ptr<const RawMessage>, ConnectionWrapper, std::shared_ptr<MultiplexerMessage>>>
       IncomingMessagesBuffer;
@@ -775,13 +803,25 @@ class BasicClient : public ConnectionsManager<BasicClient>,
 
   inline bool has_incoming_messages() const { return !incoming_messages_.empty(); }
   IncomingMessagesBuffer::value_type next_incoming_message();  // pop the oldest; only when has_incoming_messages()
+  // The raw frame of a message taken from a batch, made when something
+  // reads it: such a message is queued without one (_split_batch), and
+  // every call that hands raw frames out makes it, Client's
+  // read_raw_message() and receive_raw_message(), Python's reads and the
+  // split itself for a sink, of the message serialized again, for a
+  // message one of the libraries made the bytes it was sent as. Nothing
+  // for a message that has its frame. Any thread that holds `incoming`.
+  static void with_raw_frame(IncomingMessagesBuffer::value_type* incoming);
+  // The most bytes a batch that arrived may leave in the strings it is
+  // read into, kept for the next (_split_batch): after a larger one they
+  // go, so that one huge batch does not hold its memory for good.
+  static constexpr std::size_t KEPT_SPLIT_BYTES = 4 * 1024 * 1024;
   inline bool incoming_queue_full() const { return incoming_queue_max_size_ <= incoming_messages_.size(); }
   // Queues `incoming`, the message handle_message() was given last, for a
   // receive to take, as it does when no sink is set: a full queue drops
   // it, and takes its copy through another multiplexer once there is room.
   // For a sink that passes a message by to the queue's reader, a query of
   // a leaving server's (Client::refuse_arrivals).
-  void queue_incoming(const IncomingMessagesBuffer::value_type& incoming);
+  void queue_incoming(IncomingMessagesBuffer::value_type incoming);
   // A query of a leaving server's sets what was read before aside, so that
   // it reads only what the refusals pass by to it, and puts it back as it
   // ends, in its order (Client::_awaiting): what was read stays to be
@@ -1000,6 +1040,29 @@ class BasicClient : public ConnectionsManager<BasicClient>,
             std::uint64_t number = 0, std::vector<BasicScheduledMessageTracker>* trackers = NULL,
             ConnectionWrapper* used = NULL, SendCallback done = SendCallback(), bool may_batch = false,
             bool poll_first = false);
+  // send() with `may_batch`, through no lane and not to ALL, for a message
+  // given as its bytes alone, `body`, swapped out and left empty, with its
+  // id and type: what a client that batches hands over without making a
+  // frame of it (basic_client_plain.cc). A message for a batch goes there
+  // as the bytes it is, with no frame of its own; any other is framed and
+  // sent as send() sends it. send_plain() takes a plain event
+  // (RawMessage::plain_event) the client serialized itself, its key `key`
+  // when `keyed`; send_bytes() takes bytes the program gave, read when
+  // their type is batched, as a frame of them would be, and sent alone
+  // when they are not a plain event of that type.
+  bool send_plain(std::string* body, std::uint64_t id, std::uint32_t type, bool keyed, const std::string& key,
+                  float timeout, std::vector<BasicScheduledMessageTracker>* trackers = NULL,
+                  const SendCallback& done = SendCallback(), bool poll_first = false);
+  bool send_bytes(std::string* body, std::uint64_t id, std::uint32_t type, float timeout,
+                  std::vector<BasicScheduledMessageTracker>* trackers = NULL, const SendCallback& done = SendCallback(),
+                  bool poll_first = false);
+  // Where the bodies of a batch's messages go once its frame is made, as
+  // far as it keeps them (SpentBodies), for the client to serialize its
+  // next messages into rather than freed here: a SyncClient's queue()
+  // takes them, a ThreadedClient's io thread hands them back to the threads
+  // that sent them (threaded_client_inbox.h). Null, the default: freed.
+  // Shared, as this client may outlive the one that set it.
+  void keep_spent_bodies(std::shared_ptr<SpentBodies> spent);
   // Batching (basic_client_batching.cc, docs/api_cpp.md "Batching"): the
   // events of a type, or of one key of a type, that the program sends
   // without waiting for them go together, several in one message, which
@@ -1232,6 +1295,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   bool acknowledged_wake_ = false;         // see take_acknowledged_wake()
   IncomingMessagesBuffer incoming_messages_;
   IncomingMessagesBuffer incoming_aside_;  // see set_incoming_aside()
+  // The strings a batch that arrived is read into, kept with their
+  // capacity for the next batch, owner thread; see _split_batch.
+  MessageBatch split_scratch_;
   unsigned int incoming_queue_max_size_;
   std::uint64_t frames_handled_ = 0;  // every frame handle_message() was given, owner thread; see poll()
   LogSummary drop_lines_;
@@ -1283,10 +1349,20 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   std::unique_ptr<Batcher> batcher_;
   struct Batch;
   typedef std::shared_ptr<Batch> BatchPtr;
+  struct BatchRecord;  // one message in a batch, a frame or its bytes alone; batching.h
   const Batching* _batching_for(const std::shared_ptr<const RawMessage>& raw);
-  bool _batch_needs_loop(const std::shared_ptr<const RawMessage>& raw, const Batching& batching) const;
+  const Batching* _batching_for(std::uint32_t type, bool keyed, const std::string& key) const;
+  bool _batch_needs_loop(std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
+                         const Batching& batching) const;
   bool _batch(const std::shared_ptr<const RawMessage>& raw, const Batching& batching, float timeout,
               std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done);
+  bool _batch_record(BatchRecord* record, std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
+                     const Batching& batching, float timeout, std::vector<BasicScheduledMessageTracker>* trackers,
+                     const SendCallback& done);
+  static std::shared_ptr<const RawMessage> _record_frame(BatchRecord* record, std::uint32_t type);
+  static void _give_back(BatchRecord* record, std::string* body);
+  std::shared_ptr<const RawMessage> _batch_frame(const BatchEnvelope& envelope);
+  std::shared_ptr<SpentBodies> spent_bodies_;  // see keep_spent_bodies()
   void _close_batch(const BatchPtr& batch, Connection* idle = nullptr);
   void _close_on_its_own(const BatchPtr& batch);
   void _due_at(const BatchPtr& batch, std::chrono::steady_clock::time_point due);
@@ -1302,7 +1378,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // A DELIVERY_ERROR for a batch, told for each message inside; see
   // basic_client.cc.
   bool _split_delivery_error(const Connection::pointer& conn, const MultiplexerMessage& error);
-  void _enqueue(const IncomingMessagesBuffer::value_type& incoming);
+  void _enqueue(IncomingMessagesBuffer::value_type incoming);
   // send() but for batching.
   bool _send(const std::shared_ptr<const RawMessage>& raw, bool all, const LanePtr& lane,
              std::chrono::steady_clock::time_point deadline, std::uint64_t number,

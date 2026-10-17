@@ -34,17 +34,20 @@ use bytes::Bytes;
 use state::{Backlog, WaitKey, Waiting};
 pub(crate) use state::{FlushId, Outbox};
 
-use super::batching::BatchMark;
+use super::batching::{BatchMark, Joining};
 use super::client::{DropReason, Wrapper};
 use super::lane::Lane;
 use super::{deadline_after, ConnId, Core, OutFrame, SendState, Tracker};
+use crate::frame::Head;
 
 /// A frame as a caller hands it over, before its first placement: the
-/// bytes, header and body, the id and type a drop is reported by, and what
-/// batching knows of it.
+/// bytes, header and body, or a big body behind its header kept apart
+/// (`head`, `Core::alone_frame`), the id and type a drop is reported by,
+/// and what batching knows of it.
 #[derive(Debug, Clone)]
 pub(crate) struct Frame {
     pub(crate) bytes: Bytes,
+    pub(crate) head: Option<Head>,
     pub(crate) id: u64,
     pub(crate) r#type: u32,
     pub(crate) batch: BatchMark,
@@ -88,6 +91,7 @@ impl Core {
         };
         Arc::new(OutFrame {
             bytes,
+            head: frame.head,
             id: frame.id,
             r#type: frame.r#type,
             pinned,
@@ -223,7 +227,7 @@ impl Core {
         // batch no time either.
         if may_batch && !all && lane.is_none() && timeout != Some(Duration::ZERO) {
             if let Some(batching) = self.batching_for(&frame) {
-                return self.batch(frame, batching, timeout, trackers, done);
+                return self.batch(Joining::Frame(frame), batching, timeout, trackers, done);
             }
         }
         self.close_batches();

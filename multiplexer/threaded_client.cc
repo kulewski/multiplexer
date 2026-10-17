@@ -171,7 +171,10 @@ ThreadedClient::Core::Core(std::uint32_t peer_type, MessageSink on_message)
       work_(new asio::io_service::work(io_service_)),
       basic_client_(BasicClient::Create(io_service_, peer_type)),
       instance_id_(basic_client_->instance_id()),
-      on_message_(on_message) {}
+      on_message_(on_message) {
+  mx::MutexLock lock(random_mutex_);
+  plain_id_start_ = random_();
+}
 
 void ThreadedClient::Core::start(const std::shared_ptr<Core>& self) {
   // The io thread binds the checkers to itself and installs the sink before
@@ -189,6 +192,7 @@ void ThreadedClient::Core::start(const std::shared_ptr<Core>& self) {
       MX_DCHECK_RUN_ON(&io_thread_);
       _on_connection(connection, up);
     });
+    basic_client_->keep_spent_bodies(spent_);  // handed back at the inbox's next turn
     ready.set_value();
   });
   thread_ = std::thread([self = std::shared_ptr<Core>(self), end = end_]() mutable {

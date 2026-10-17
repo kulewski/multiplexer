@@ -19,10 +19,10 @@
 #ifndef MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 #define MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 
+#include <array>
 #include <asio/buffer.hpp>
 #include <chrono>
 #include <cstdint>
-#include <list>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -120,14 +120,16 @@ class RawMessage {
     check_message_size(contents_.size());
   }
 
-  // `mxmsg` serialized into a frame, with its id and type, unsealed when
-  // `sealed` is false (Unsealed). One protobuf
-  // will not serialize, over 2 GiB, raises std::length_error as one over
-  // MAX_MESSAGE_SIZE does, its size measured: protobuf leaves the string
-  // empty, which went out as a frame with no body, and the multiplexer
-  // closed the connection. A key over MAX_KEY_SIZE raises
-  // std::length_error too: the multiplexer would drop the message.
-  static RawMessage* FromMessage(const MultiplexerMessage& mxmsg, bool sealed = true) {
+  // `mxmsg`, a MultiplexerMessage or a client's BatchEnvelope, serialized
+  // into a frame, with its id and type, unsealed when `sealed` is false
+  // (Unsealed). One protobuf will not serialize, over 2 GiB, raises
+  // std::length_error as one over MAX_MESSAGE_SIZE does, its size measured:
+  // protobuf leaves the string empty, which went out as a frame with no
+  // body, and the multiplexer closed the connection. A key over
+  // MAX_KEY_SIZE raises std::length_error too: the multiplexer would drop
+  // the message.
+  template <typename Message>
+  static RawMessage* FromMessage(const Message& mxmsg, bool sealed = true) {
     check_key_size(mxmsg.key().size());
     std::string serialized;
     if (!mxmsg.SerializeToString(&serialized)) {
@@ -149,13 +151,14 @@ class RawMessage {
   // Const, as a queued frame is shared as const; what it fills is mutable.
   void seal() const;
 
-  // A message taken out of a batch that arrived (MessageBatch), or made of
-  // one, a DELIVERY_ERROR for a message inside, its serialized form swapped
-  // out of `message`, with its id and type: for the program to read as it
-  // reads a frame's (get_message()), unframed, which a client sending it on
-  // frames then (outbox.cc's writable()).
+  // A message taken out of a batch that arrived, serialized again for a
+  // reader of raw frames (BasicClient::with_raw_frame), or a DELIVERY_ERROR
+  // made for a message inside one, its serialized form swapped out of
+  // `message`, with its id and type: for the program to read as it reads a
+  // frame's (get_message()), unframed, which a client sending it on frames
+  // then (outbox.cc's writable()).
   static std::shared_ptr<const RawMessage> FromBatch(std::string* message, std::uint64_t id, std::uint32_t type) {
-    return std::make_shared<RawMessage>(Unframed(), message, id, type);  // one allocation, for every message of a batch
+    return std::make_shared<RawMessage>(Unframed(), message, id, type);  // one allocation
   }
 
   // The body of a frame that goes in a batch, which only its body is read
@@ -172,6 +175,12 @@ class RawMessage {
       return std::move(const_cast<RawMessage&>(*raw).contents_);
     }
     return raw->contents_;
+  }
+  // The body of a frame its last holder let go of, moved out just before
+  // the frame is deleted, for its maker to reuse (BasicClient's batch
+  // frames, which a pool of buffers serves).
+  static std::string ReleaseBody(const RawMessage* frame) {
+    return std::move(const_cast<RawMessage*>(frame)->contents_);
   }
   static void GiveBodyBack(const std::shared_ptr<const RawMessage>& raw, std::string* body) {
     std::string& contents = const_cast<RawMessage&>(*raw).contents_;
@@ -299,9 +308,8 @@ class RawMessage {
 
   /* ASIO writing buffers (for writing RawMessage to channel) */
   // returns buffer for writing-out whole RawMessage (header + body)
-  inline const std::list<asio::const_buffer>& get_message_buffer() const {
+  inline const std::array<asio::const_buffer, 2>& get_message_buffer() const {
     Assert(usability_ == WRITING);
-    Assert(writing_buffers_.size());
     return writing_buffers_;
   }
 
@@ -363,8 +371,11 @@ class RawMessage {
   mutable std::uint64_t number_ = 0;
   mutable std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
   mutable bool deadline_marked_ = false;
-  mutable std::unique_ptr<BatchMarks> batch_marks_;        // see batchable() and batch_ids()
-  mutable std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
+  mutable std::unique_ptr<BatchMarks> batch_marks_;  // see batchable() and batch_ids()
+  // The header's buffer and the body's, which writing a frame gathers; two
+  // in place, where a list allocated a node for each, in every frame read
+  // and again in every write that copied the list.
+  mutable std::array<asio::const_buffer, 2> writing_buffers_;
 };
 
 };  // namespace multiplexer

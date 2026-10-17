@@ -2,9 +2,12 @@
 // the program holds. The io thread keeps a reference to the Core until it
 // ends, so a handle destroyed on the io thread itself, from a callback or by
 // the last reference dropped there, leaves the Core alive under the
-// handlers still running; see ThreadedClient::shutdown. Internal to
-// threaded_client.cc and its parts, threaded_client_io.cc and
-// threaded_client_query.cc; the calls are described in threaded_client.h.
+// handlers still running; see ThreadedClient::shutdown. What a caller
+// hands the io thread goes through one inbox (threaded_client_inbox.h),
+// which the io thread takes a batch at a time. Internal to
+// threaded_client.cc and its parts, threaded_client_io.cc,
+// threaded_client_plain.cc and threaded_client_query.cc; the calls are
+// described in threaded_client.h.
 #ifndef MX_MULTIPLEXER_THREADED_CLIENT_CORE_H_
 #define MX_MULTIPLEXER_THREADED_CLIENT_CORE_H_
 
@@ -32,6 +35,7 @@
 #include "lib/random.h"
 #include "lib/thread_checker.h"
 #include "multiplexer/threaded_client.h"
+#include "multiplexer/threaded_client_inbox.h"
 
 namespace multiplexer {
 
@@ -143,11 +147,22 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   void _wait_ended();
   template <typename F, typename D>
   void _guarded(F function, D description);
+  // What a caller hands the io thread goes through the inbox
+  // (threaded_client_inbox.h): a call, or a plain send as its bytes.
   template <typename F>
   void _post(F function);
   template <typename F>
   bool _post_unless_stopped(F function) MX_EXCLUDES(lifecycle_mutex_);
   void _end_posting() MX_EXCLUDES(lifecycle_mutex_);
+  bool _send_plain(const MultiplexerMessage& msg, float timeout) MX_EXCLUDES(lifecycle_mutex_);
+  bool _send_plain_bytes(std::string* serialized, std::uint64_t id, std::uint32_t type, float timeout)
+      MX_EXCLUDES(lifecycle_mutex_);
+  bool _push_plain(PlainSend* plain, std::string* body, float timeout) MX_EXCLUDES(lifecycle_mutex_);
+  std::uint64_t _plain_id();
+  void _wake();
+  struct WakeHandler;
+  void _drain() MX_RUN_ON(io_thread_);
+  void _run_plain(PlainSend* plain, std::chrono::steady_clock::time_point now) MX_RUN_ON(io_thread_);
   template <typename F>
   auto _call(F function) -> decltype(function());
 
@@ -182,6 +197,10 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   void _on_unmatched(const IncomingMessage& incoming) MX_RUN_ON(io_thread_);
 
   const std::uint32_t peer_type_;
+  // The io thread's wake-up handler's block (_wake), declared before the
+  // io_service, so that a pending handler the io_service destroys gives it
+  // back to a live one.
+  WakeMemory wake_memory_;
   // Held by pointer so that an orphan (a client inherited across a fork,
   // see BasicClient::orphaned) can leak it instead of running asio's
   // destructors with the parent's locks in an unknown state.
@@ -244,16 +263,35 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   // read on the io thread instead.
   std::atomic<bool> batching_{false};
 
+  // A cache line on x86-64 and most ARM cores: what alignas keeps apart.
+  // Not std::hardware_destructive_interference_size, which GCC warns may
+  // differ from one compilation to the next.
+  static constexpr std::size_t CACHE_LINE_BYTES = 64;
   // shutdown() is the only thing that touches the thread. Every other entry
-  // point posts through _post_unless_stopped(), which counts itself in
-  // posting_ and then reads stopped_, while shutdown() sets stopped_ and
-  // then waits for posting_ to be 0 before it posts its own handler: a
-  // post that found the client up is queued ahead of that handler and runs
-  // before the loop ends, and nothing posts to a stopped loop. No lock on
-  // the way: posts from several threads go on side by side.
-  std::atomic<bool> stopped_{false};
+  // point posts through _post_unless_stopped(), or _push_plain(), which
+  // count themselves in posting_ and then read stopped_, while shutdown()
+  // sets stopped_ and then waits for posting_ to be 0 before it posts its
+  // own handler: a post that found the client up is queued ahead of that
+  // handler and runs before the loop ends, and nothing posts to a stopped
+  // loop. No lock on the way but the inbox's own, held for a push.
+  //
+  // What the callers' threads touch on every send sits on cache lines of
+  // its own, apart from what the io thread writes as it goes (taken_,
+  // spent_), which would otherwise move between the cores at each send.
+  alignas(CACHE_LINE_BYTES) std::atomic<bool> stopped_{false};
   std::atomic<int> posting_{0};
-  mx::Mutex lifecycle_mutex_;
+  std::atomic<std::uint64_t> plain_ids_{0};  // plain sends' ids so far, see _plain_id()
+  std::uint64_t plain_id_start_ = 0;         // random, set by the constructor
+  ThreadedClientInbox inbox_;
+  // The io thread's side of the inbox: what it took, and the bodies the
+  // batching is done with (BasicClient::keep_spent_bodies), handed back at
+  // its next turn.
+  alignas(CACHE_LINE_BYTES) std::vector<ThreadedClientInbox::Entry> taken_ MX_GUARDED_BY(io_thread_);
+  std::shared_ptr<SpentBodies> spent_ MX_GUARDED_BY(io_thread_) = std::make_shared<SpentBodies>();
+  std::string plain_key_ MX_GUARDED_BY(io_thread_);        // a plain send's key, split off its body (_run_plain)
+  static constexpr std::size_t CLOCK_EVERY_PLAIN = 64;     // see _drain()
+  static constexpr std::size_t TAKEN_ENTRIES_KEPT = 4096;  // see _drain()
+  alignas(CACHE_LINE_BYTES) mx::Mutex lifecycle_mutex_;
   std::condition_variable_any posted_;  // posting_ fell to 0 once stopped_ was set
   std::thread thread_;
   // The io thread's end, told once it let go of the Core, which may go
@@ -312,7 +350,9 @@ void ThreadedClient::Core::_guarded(F function, D description) {
 
 template <typename F>
 void ThreadedClient::Core::_post(F function) {
-  io_service_.post(function);
+  if (inbox_.push(std::function<void()>(std::move(function)))) {
+    _wake();
+  }
 }
 
 // Posts `function` unless shutdown() came first, and says which. A call
@@ -338,7 +378,9 @@ bool ThreadedClient::Core::_post_unless_stopped(F function) {
   if (stopped_.load()) {
     return false;
   }
-  io_service_.post(std::move(function));
+  if (inbox_.push(std::function<void()>(std::move(function)))) {
+    _wake();
+  }
   return true;
 }
 

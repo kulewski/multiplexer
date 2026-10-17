@@ -19,6 +19,7 @@ cc_library(
     deps = [
         "//:protobuf_runtime",
         "//lib:assert",
+        "//lib:resize_uninitialized",
         "//lib:xxh3",
         "//lib/encoding:decode_from_range",
         "//lib/encoding:encode_to_range",

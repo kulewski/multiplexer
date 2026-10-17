@@ -17,6 +17,7 @@
 
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
+#include <list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -57,6 +58,12 @@ struct DefaultConnectionsManagerTraits {
   // are then no loss when they arrive while it closes, and are not counted
   // with what it dropped (Connection::dropped_while_closing).
   static constexpr bool READS_END_HERE = false;
+  // Whether the manager lends its connections the message each frame is
+  // parsed into (parse_target()), one it keeps from frame to frame so that
+  // its strings keep their capacity: for the multiplexer, which keeps
+  // nothing of a message past handle_message. A client's goes to the
+  // program, so each frame gets a message of its own.
+  static constexpr bool REUSES_PARSE_TARGET = false;
 
   struct MessagesBufferTraits {
     struct SendingResultNotifier {

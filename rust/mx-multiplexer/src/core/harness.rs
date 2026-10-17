@@ -18,7 +18,7 @@ use super::client::IncomingMode;
 use super::connection::ReadEnd;
 use super::{Action, ConnId, Core};
 use crate::constants::{peers, types};
-use crate::frame::{self, HEADER_LENGTH};
+use crate::frame::{self, Head, HEADER_LENGTH};
 use crate::ids::Ids;
 use crate::proto::multiplexer::{MultiplexerMessage, PeerStatus, Routing, WelcomeMessage};
 
@@ -33,8 +33,28 @@ pub(crate) struct FakeSocket {
     pub(crate) closed: bool,
     /// Frames written whole, decoded, in order.
     pub(crate) written: Vec<MultiplexerMessage>,
-    /// The write in flight, held while `hold_writes` says so.
+    /// The write in flight, held while `hold_writes` says so: its bytes, a
+    /// big body alone when its header is kept apart, and that header.
     pub(crate) in_flight: Option<Bytes>,
+    pub(crate) in_flight_head: Option<Head>,
+    /// The frames written with their header kept apart.
+    pub(crate) apart: usize,
+}
+
+impl FakeSocket {
+    /// The write in flight, taken, as it went on the wire.
+    fn take_in_flight(&mut self) -> Option<Bytes> {
+        let bytes = self.in_flight.take()?;
+        Some(on_the_wire(self.in_flight_head.take(), bytes))
+    }
+}
+
+/// A frame's bytes as they go on the wire: a header kept apart first.
+fn on_the_wire(head: Option<Head>, bytes: Bytes) -> Bytes {
+    match head {
+        None => bytes,
+        Some(head) => [&head[..], &bytes[..]].concat().into(),
+    }
 }
 
 /// The harness; see the module comment.
@@ -94,20 +114,23 @@ impl Harness {
                         self.core.connected(conn, Err("operation cancelled".to_string()));
                     }
                     Action::StartReading(conn) => self.sockets.entry(conn).or_default().reading = true,
-                    Action::Write(conn, bytes) => {
+                    Action::Write(conn, head, bytes) => {
                         let socket = self.sockets.entry(conn).or_default();
                         assert!(socket.in_flight.is_none(), "two writes at once on {conn:?}");
+                        socket.apart += usize::from(head.is_some());
                         if self.hold_writes {
                             socket.in_flight = Some(bytes);
+                            socket.in_flight_head = head;
                         } else {
-                            socket.written.push(decode(&bytes));
-                            self.write_dones.push_back((conn, bytes.len(), false));
+                            let whole = on_the_wire(head, bytes);
+                            socket.written.push(decode(&whole));
+                            self.write_dones.push_back((conn, whole.len(), false));
                         }
                     }
                     Action::ShutdownWrite(conn) => {
                         let socket = self.sockets.entry(conn).or_default();
                         socket.write_shut = true;
-                        if socket.in_flight.take().is_some() {
+                        if socket.take_in_flight().is_some() {
                             self.write_dones.push_back((conn, 0, true));
                         }
                     }
@@ -115,14 +138,14 @@ impl Harness {
                         let socket = self.sockets.entry(conn).or_default();
                         socket.shut = true;
                         socket.reading = false;
-                        if socket.in_flight.take().is_some() {
+                        if socket.take_in_flight().is_some() {
                             self.write_dones.push_back((conn, 0, true));
                         }
                     }
                     Action::Close(conn) => {
                         let socket = self.sockets.entry(conn).or_default();
                         socket.closed = true;
-                        if socket.in_flight.take().is_some() {
+                        if socket.take_in_flight().is_some() {
                             self.write_dones.push_back((conn, 0, true));
                         }
                     }
@@ -249,6 +272,7 @@ impl Harness {
         };
         super::outbox::Frame {
             bytes: frame::encode_unsealed(&message).expect("a frame"),
+            head: None,
             id,
             r#type,
             batch: super::batching::BatchMark::Event(None),
@@ -327,7 +351,7 @@ impl Harness {
 
     /// The write in flight on `conn` completes whole.
     pub(crate) fn complete_write(&mut self, conn: ConnId) {
-        let bytes = self.sockets.get_mut(&conn).and_then(|socket| socket.in_flight.take()).expect("a write in flight");
+        let bytes = self.sockets.get_mut(&conn).and_then(FakeSocket::take_in_flight).expect("a write in flight");
         self.sockets.get_mut(&conn).expect("socket").written.push(decode(&bytes));
         self.core.on_write_done(conn, bytes.len(), false);
         self.settle();
@@ -335,7 +359,7 @@ impl Harness {
 
     /// The write in flight on `conn` fails.
     pub(crate) fn fail_write(&mut self, conn: ConnId) {
-        self.sockets.get_mut(&conn).and_then(|socket| socket.in_flight.take()).expect("a write in flight");
+        self.sockets.get_mut(&conn).and_then(FakeSocket::take_in_flight).expect("a write in flight");
         self.core.on_write_done(conn, 0, true);
         self.settle();
     }

@@ -250,7 +250,8 @@ bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const La
   // what it ran may have changed what is batched, so that is asked again.
   if (may_batch && !all && !lane && (timeout > 0 || timeout < 0)) {
     const Batching* batching = _batching_for(raw);
-    if (batching && poll_first && _batch_needs_loop(raw, *batching)) {
+    if (batching && poll_first &&
+        _batch_needs_loop(raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), *batching)) {
       poll();
       poll_first = false;
       if (shuts_down_) {

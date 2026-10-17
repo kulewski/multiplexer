@@ -24,7 +24,8 @@
 //
 // Going, a batch becomes one frame (_send_batch): an envelope with the
 // group's type and key, a fresh id and this client as its sender, and the
-// messages' serialized forms in a MessageBatch, measured as it goes on the
+// messages' serialized forms in a MessageBatch inside it (BatchEnvelope,
+// serialized once, straight into the frame), measured as it goes on the
 // wire and cut where it would be over max_bytes, as many at once as cover
 // the excess, what is cut going next in a batch of its own; a batch of one
 // goes as the message itself. The frame then goes as any message does
@@ -44,6 +45,7 @@
 
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "lib/resize_uninitialized.h"
 #include "lib/seconds.h"
 #include "multiplexer/batching.h"
 #include "multiplexer/multiplexer.constants.h"
@@ -155,12 +157,23 @@ const BasicClient::Batching* BasicClient::_batching_for(const std::shared_ptr<co
   if (raw->batchable() != RawMessage::Batchable::YES) {
     return nullptr;
   }
-  if (keys != batcher.by_key.end() && raw->batch_keyed()) {
-    std::map<std::string, Batching>::const_iterator found = keys->second.find(raw->batch_key());
-    if (found != keys->second.end()) {
-      return &found->second;
+  return _batching_for(type, raw->batch_keyed(), raw->batch_key());
+}
+
+// What batching applies to a plain event of `type` with its key, `key`
+// when `keyed`, or null: the setting for its key, else for its type.
+const BasicClient::Batching* BasicClient::_batching_for(std::uint32_t type, bool keyed, const std::string& key) const {
+  const Batcher& batcher = *batcher_;
+  if (keyed) {
+    std::unordered_map<std::uint32_t, std::map<std::string, Batching>>::const_iterator keys = batcher.by_key.find(type);
+    if (keys != batcher.by_key.end()) {
+      std::map<std::string, Batching>::const_iterator found = keys->second.find(key);
+      if (found != keys->second.end()) {
+        return &found->second;
+      }
     }
   }
+  std::unordered_map<std::uint32_t, Batching>::const_iterator by_type = batcher.by_type.find(type);
   return by_type != batcher.by_type.end() ? &by_type->second : nullptr;
 }
 
@@ -171,25 +184,34 @@ const BasicClient::Batching* BasicClient::_batching_for(const std::shared_ptr<co
 // a batch's delay is over, which only the loop's timer lets go. Else it
 // joins its batch and nothing is written, and the call runs no loop, a
 // system call spared for each message.
-bool BasicClient::_batch_needs_loop(const std::shared_ptr<const RawMessage>& raw, const Batching& batching) const {
+bool BasicClient::_batch_needs_loop(std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
+                                    const Batching& batching) const {
   const Batcher& batcher = *batcher_;
   if (batching.max_delay == 0 ||
       (!batcher.by_due.empty() && batcher.by_due.begin()->first <= std::chrono::steady_clock::now())) {
     return true;
   }
-  const BatchPtr batch = batcher.find(raw->type(), raw->batch_keyed(), raw->batch_key());
+  const BatchPtr batch = batcher.find(type, keyed, key);
   const std::size_t records = batch ? batch->records.size() : 0;
-  const std::size_t bytes = (batch ? batch->bytes : 0) + raw->get_message().size();
-  return records + 1 >= batching.max_records || bytes >= batching.max_bytes;
+  return records + 1 >= batching.max_records || (batch ? batch->bytes : 0) + bytes >= batching.max_bytes;
 }
 
 bool BasicClient::_batch(const std::shared_ptr<const RawMessage>& raw, const Batching& batching, float timeout,
                          std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done) {
+  BatchRecord record;
+  record.raw = raw;
+  return _batch_record(&record, raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), batching,
+                       timeout, trackers, done);
+}
+
+// `record`, a frame or bytes alone of `bytes` bytes, moved into the open
+// batch of its group, `type` and its key, `key` when `keyed`, or one opened
+// for it; or sent alone at once, as without batching.
+bool BasicClient::_batch_record(BatchRecord* record, std::uint32_t type, bool keyed, const std::string& key,
+                                std::size_t bytes, const Batching& batching, float timeout,
+                                std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done) {
   Batcher& batcher = *batcher_;
-  const std::uint32_t type = raw->type();
-  const bool keyed = raw->batch_keyed();
-  const std::size_t bytes = raw->get_message().size();
-  BatchPtr batch = batcher.find(type, keyed, raw->batch_key());
+  BatchPtr batch = batcher.find(type, keyed, key);
   // A message the batch has no room for lets it go first.
   if (batch && (batch->records.size() >= batching.max_records || batch->bytes + bytes > batching.max_bytes)) {
     _close_on_its_own(batch);
@@ -201,13 +223,13 @@ bool BasicClient::_batch(const std::shared_ptr<const RawMessage>& raw, const Bat
     // without batching, after every batch.
     if (bytes >= batching.max_bytes || (batching.max_delay == 0 && _idle_or_none())) {
       close_batches();
-      return _send(raw, false, LanePtr(), _deadline_after(timeout), 0, trackers, NULL, done);
+      return _send(_record_frame(record, type), false, LanePtr(), _deadline_after(timeout), 0, trackers, NULL, done);
     }
     batch = std::make_shared<Batch>();
     batch->began = ++batcher.began;
     batch->group.type = type;
     batch->group.keyed = keyed;
-    batch->group.key = raw->batch_key();  // once a batch: a message's is never copied
+    batch->group.key = key;  // once a batch: a message's is never copied
     batch->batching = batching;
     Batcher::OfType& of_type = batcher.by_group[type];
     if (keyed) {
@@ -224,22 +246,20 @@ bool BasicClient::_batch(const std::shared_ptr<const RawMessage>& raw, const Bat
       _wait_for_idle();
     }
   }
-  Batch::Record record;
-  record.raw = raw;
-  record.done = done;
-  record.timeout = timeout;
+  record->done = done;
+  record->timeout = timeout;
   if (batch->waits_for_idle) {
-    record.deadline = _deadline_after(timeout);  // a wait for room: from now
-    if (record.deadline < batch->due) {
-      _due_at(batch, record.deadline);
+    record->deadline = _deadline_after(timeout);  // a wait for room: from now
+    if (record->deadline < batch->due) {
+      _due_at(batch, record->deadline);
     }
   }
   if (trackers) {
-    record.state = std::make_shared<SendState>(SendState::QUEUED);
-    trackers->push_back(record.state);
+    record->state = std::make_shared<SendState>(SendState::QUEUED);
+    trackers->push_back(record->state);
   }
   batch->bytes += bytes;
-  batch->records.push_back(std::move(record));
+  batch->records.push_back(std::move(*record));
   if (batch->records.size() >= batching.max_records || batch->bytes >= batching.max_bytes) {
     _close_on_its_own(batch);
   }
@@ -339,41 +359,46 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
     std::size_t end = records.size();
     std::shared_ptr<const RawMessage> frame;
     if (end - begin > 1) {
-      MultiplexerMessage envelope;
+      // The envelope holds the batch itself, so that its messages are
+      // serialized once, straight into the frame (BatchEnvelope): the same
+      // bytes as a MultiplexerMessage whose batch holds them serialized.
+      BatchEnvelope& envelope = batcher_->envelope;
+      envelope.Clear();
       envelope.set_id(random64());
       envelope.set_sender(instance_id());
       envelope.set_type(batch->group.type);
       if (batch->group.keyed) {
         envelope.set_key(batch->group.key);
       }
-      // Each message's body moved into the batch, not copied where its frame
-      // has no other holder (RawMessage::TakeBody); given back to the frame
-      // of a message that goes on outside this batch.
-      MessageBatch inside;
+      // Each message's body moved into the batch: a frame's, not copied
+      // where the frame has no other holder (RawMessage::TakeBody), or the
+      // bytes a message came as; given back to a message that goes on
+      // outside this batch (_give_back).
+      MessageBatch& inside = *envelope.mutable_batch();
       inside.mutable_message()->Reserve(static_cast<int>(end - begin));
       for (std::size_t index = begin; index < end; ++index) {
-        inside.mutable_message()->Add(RawMessage::TakeBody(records[index].raw));
+        inside.mutable_message()->Add(records[index].raw ? RawMessage::TakeBody(records[index].raw)
+                                                         : std::move(records[index].body));
       }
-      inside.SerializeToString(envelope.mutable_batch());
       // Where the message would be over max_bytes, measured as it goes on
       // the wire, its last messages are cut, to go next: at once as many as
       // their own sizes cover the excess with, which each adds at least to
-      // the message, and the rest measured again.
+      // the message, and the rest measured again, nothing serialized until
+      // the frame is made.
       for (std::size_t size = envelope.ByteSizeLong(); end - begin > 1 && size > batch->batching.max_bytes;
            size = envelope.ByteSizeLong()) {
         std::size_t cut = 0;
         while (end - begin > 1 && cut < size - batch->batching.max_bytes) {
           std::string* last = inside.mutable_message(inside.message_size() - 1);
           cut += last->size();
-          RawMessage::GiveBodyBack(records[end - 1].raw, last);
+          _give_back(&records[end - 1], last);
           inside.mutable_message()->RemoveLast();
           --end;
         }
-        inside.SerializeToString(envelope.mutable_batch());
       }
       if (end - begin > 1) {
         try {
-          frame.reset(RawMessage::FromMessage(envelope));
+          frame = _batch_frame(envelope);
         } catch (const std::exception& error) {
           // Nothing it holds should make it fail; should one, its messages
           // go alone, each as it would have without batching, their bodies
@@ -382,22 +407,30 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
                  CTX("BasicClient")
                      TEXT(std::string("a batch's message could not be made, its messages go alone: ") + error.what()));
           for (std::size_t index = begin; index < end; ++index) {
-            RawMessage::GiveBodyBack(records[index].raw, inside.mutable_message(static_cast<int>(index - begin)));
+            _give_back(&records[index], inside.mutable_message(static_cast<int>(index - begin)));
           }
         }
         if (frame) {
           std::shared_ptr<std::vector<std::uint64_t>> ids = std::make_shared<std::vector<std::uint64_t>>();
           ids->reserve(end - begin);
           for (std::size_t index = begin; index < end; ++index) {
-            ids->push_back(records[index].raw->id());
+            ids->push_back(records[index].raw ? records[index].raw->id() : records[index].id);
           }
           frame->mark_batch(ids);
+          // The bodies, in the frame now, go where the client reuses them
+          // (keep_spent_bodies) or are let go, not kept in the envelope
+          // until the next batch.
+          for (std::string& body : *inside.mutable_message()) {
+            if (!spent_bodies_ || !spent_bodies_->keep(&body)) {
+              std::string().swap(body);
+            }
+          }
         }
       }
     }
     if (!frame) {
       end = begin + 1;
-      frame = records[begin].raw;  // a batch of one goes as the message itself
+      frame = _record_frame(&records[begin], batch->group.type);  // a batch of one goes as the message itself
     }
     // The frame waits for room and for a connection until the earliest of
     // its messages' deadlines: from their sends in a batch that waited for
@@ -438,6 +471,48 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
     }
     _send(frame, false, lane, deadline, 0, NULL, NULL, ended);
     begin = end;
+  }
+}
+
+// A batch's frame, `envelope` serialized into a buffer a written batch
+// frame left (BatchFramePool), else a new one; the frame gives its buffer
+// back to the pool once its last holder lets go of it. Throws as
+// RawMessage::FromMessage does, the protobuf measured first.
+std::shared_ptr<const RawMessage> BasicClient::_batch_frame(const BatchEnvelope& envelope) {
+  check_key_size(envelope.key().size());
+  const std::size_t size = envelope.ByteSizeLong();
+  check_message_size(size);
+  const std::shared_ptr<BatchFramePool>& pool = batcher_->frame_pool;
+  std::string buffer;
+  {
+    mx::MutexLock lock(pool->mutex);
+    if (!pool->spare.empty()) {
+      buffer.swap(pool->spare.back());
+      pool->spare.pop_back();
+    }
+  }
+  mx::resize_uninitialized(&buffer, size);  // serialized over whole next: nothing filled first
+  envelope.SerializeWithCachedSizesToArray(reinterpret_cast<std::uint8_t*>(&buffer[0]));
+  RawMessage* frame = new RawMessage(&buffer, envelope.id(), envelope.type());
+  return std::shared_ptr<const RawMessage>(frame, [pool](const RawMessage* written) {
+    std::string body = RawMessage::ReleaseBody(written);
+    if (body.capacity() <= BatchFramePool::FRAME_BUFFER_BYTES_KEPT) {
+      mx::MutexLock lock(pool->mutex);
+      if (pool->spare.size() < BatchFramePool::FRAME_BUFFERS_KEPT) {
+        pool->spare.push_back(std::move(body));
+      }
+    }
+    delete written;
+  });
+}
+
+// A body taken into a batch given back to its message, which goes on
+// outside the batch: to its frame, or as its bytes.
+void BasicClient::_give_back(BatchRecord* record, std::string* body) {
+  if (record->raw) {
+    RawMessage::GiveBodyBack(record->raw, body);
+  } else {
+    record->body.swap(*body);
   }
 }
 

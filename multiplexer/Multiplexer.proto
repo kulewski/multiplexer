@@ -146,6 +146,24 @@ message MessageBatch {
     repeated bytes message = 1;
 }
 
+// What a client's batching writes: the fields of MultiplexerMessage that a
+// batch's envelope sets, under the same numbers and in their order, with
+// `batch` the MessageBatch itself rather than its serialization. A message
+// within a message is written as the bytes of its serialization, so a
+// frame made from this is byte for byte the MultiplexerMessage whose
+// `batch` holds the same MessageBatch serialized, which is what every
+// reader parses; the batch's messages are serialized once, straight into
+// the frame, where serializing the MessageBatch into `batch` first wrote
+// them into a string of their own, then copied it into the frame. Never
+// read.
+message BatchEnvelope {
+    optional uint64 id = 1;
+    optional uint64 sender = 2;
+    required uint32 type = 4;
+    optional string key = 9;
+    optional MessageBatch batch = 10;
+}
+
 // Which keys of one message type reach a peer by the rules: a filter on
 // what the peer receives, taking a key that one of the patterns, an RE2
 // regular expression, matches whole. A peer with no filter for a type

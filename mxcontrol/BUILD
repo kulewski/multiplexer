@@ -69,6 +69,7 @@ cc_library(
     deps = [
         ":task",
         ":tasks_holder",
+        "//lib:memory",
         "//multiplexer:endpoint",
         "//multiplexer:recorder",
         "//multiplexer:server",

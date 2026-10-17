@@ -6,6 +6,7 @@
 #include <cmath>
 #include <future>
 #include <limits>
+#include <list>
 #include <stdexcept>
 
 #include "lib/logging/logging.h"

@@ -748,8 +748,12 @@ client.shutdown();
   that a send just after the start misses none, and a lane waits
   for room on its own connection while that lives. The io thread takes
   sends and queries in the order they were made, from a queue of its own
-  that has no bound, so a program that sends faster than the io thread
-  places what it sends holds the difference in memory; a message's time
+  that has no bound, all that waits there at once, woken once for as many
+  as came while it was busy; a plain event sent with no lane or `done`
+  while something is batched goes there as its bytes alone ([what
+  batching costs](batching.md#what-it-costs)). A program that sends
+  faster than the io thread places what it sends holds the difference in
+  memory; a message's time
   counts from the call, and one the io thread reaches with its time up is
   placed only where a connection has room for it then, and dropped and
   reported otherwise. `send(msg, lane)` and
@@ -955,6 +959,11 @@ client.queue(sample);  // in a batch, which goes once full or at the first call 
 - Each message keeps its tracker and its `done`, which hear its batch's
   end; a batch given up on is counted in `dropped()` and told to the drop
   observer once for each message in it.
+- A message that came in a batch has no raw frame until one is read:
+  `receive_message()` makes none, and `read_raw_message()`,
+  `receive_raw_message()` and a `ThreadedClient`'s `on_message` get the
+  message serialized again, the same message, not always the same bytes
+  ([what the receiver sees](batching.md#what-the-receiver-sees)).
 
 ## Messages the library gives up on
 

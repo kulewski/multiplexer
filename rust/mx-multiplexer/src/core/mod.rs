@@ -4,7 +4,8 @@
 //! multiplexer/io/connection.h (`connection`), basic_client.cc and its
 //! parts with the client's half of connections_manager.h (`client`),
 //! outbox.cc and its parts (`outbox`), basic_client_batching.cc
-//! (`batching`), the query state machine of
+//! (`batching`, with `plain`, a plain send's bytes, and `bodies`, what a
+//! batch hands back and keeps), the query state machine of
 //! threaded_client_query.cc (`query`) and the io thread's other work of
 //! threaded_client_io.cc (`threaded`); this file holds what they share.
 //!
@@ -25,10 +26,12 @@
 pub(crate) mod timers;
 
 pub(crate) mod batching;
+pub(crate) mod bodies;
 pub(crate) mod client;
 pub(crate) mod connection;
 pub(crate) mod lane;
 pub(crate) mod outbox;
+pub(crate) mod plain;
 pub(crate) mod query;
 pub(crate) mod threaded;
 
@@ -53,6 +56,7 @@ use query::{Queries, QueryId};
 use threaded::Threaded;
 use timers::Timers;
 
+use crate::frame::Head;
 use crate::ids::Ids;
 
 /// A connection's number in the core and the driver, never reused: where
@@ -112,8 +116,9 @@ pub(crate) fn followed(tracker: &Arc<Tracker>) -> bool {
 }
 
 /// A frame to write: header and body in one buffer, which every connection
-/// it goes to shares, with what the client knows of it without parsing it
-/// back (C++ RawMessage's marks): the id and type a drop is reported by,
+/// it goes to shares, or a big body behind its header kept apart (`head`,
+/// `Core::alone_frame`), with what the client knows of it without parsing
+/// it back (C++ RawMessage's marks): the id and type a drop is reported by,
 /// whether it is pinned to its connection, one of a send to ALL, or a
 /// connection's own protocol frame, its place in the order sent, which
 /// flush_all() goes by, the deadline its first send gave it, and, for a
@@ -123,6 +128,7 @@ pub(crate) fn followed(tracker: &Arc<Tracker>) -> bool {
 #[derive(Debug)]
 pub(crate) struct OutFrame {
     pub(crate) bytes: Bytes,
+    pub(crate) head: Option<Head>,
     pub(crate) id: u64,
     pub(crate) r#type: u32,
     pub(crate) pinned: bool,
@@ -131,6 +137,13 @@ pub(crate) struct OutFrame {
     pub(crate) number: u64,
     pub(crate) deadline: Option<Instant>,
     pub(crate) batch: Option<Arc<[u64]>>,
+}
+
+impl OutFrame {
+    /// Its length on the wire: a header kept apart, then its bytes.
+    pub(crate) fn wire_length(&self) -> usize {
+        self.head.map_or(0, |head| head.len()) + self.bytes.len()
+    }
 }
 
 /// One entry of a connection's outgoing queue: the frame and its tracker,
@@ -198,9 +211,10 @@ pub(crate) enum Action {
     CancelConnect(ConnId),
     /// Read the connection's frames as they come: after the connect.
     StartReading(ConnId),
-    /// Write a frame; one at a time, the driver answering with
+    /// Write a frame, its header first when kept apart from its bytes
+    /// (`OutFrame::head`); one at a time, the driver answering with
     /// `on_write_done`.
-    Write(ConnId, Bytes),
+    Write(ConnId, Option<Head>, Bytes),
     /// No more writes: what the kernel holds goes out, then this end of the
     /// stream; reading goes on.
     ShutdownWrite(ConnId),
@@ -234,6 +248,9 @@ pub(crate) enum Posted {
     WriteOutStep,
     /// A command of the class on top, from another thread or a callback.
     Command(Box<dyn FnOnce(&mut Core) + Send>),
+    /// A threaded client's plain send, as data, with its deadline from the
+    /// send (`plain`).
+    Plain(plain::Plain, Option<Instant>),
 }
 
 impl std::fmt::Debug for Posted {
@@ -247,6 +264,7 @@ impl std::fmt::Debug for Posted {
             }
             Posted::WriteOutStep => write!(formatter, "WriteOutStep"),
             Posted::Command(_) => write!(formatter, "Command"),
+            Posted::Plain(plain, _) => write!(formatter, "Plain(#{})", plain.id),
         }
     }
 }
@@ -377,6 +395,7 @@ impl Core {
             Posted::FollowHandover(query, generation, request) => self.followed_handover(query, generation, request),
             Posted::WriteOutStep => self.write_out_step(),
             Posted::Command(command) => command(self),
+            Posted::Plain(plain, deadline) => self.place_plain(plain, deadline),
         }
     }
 

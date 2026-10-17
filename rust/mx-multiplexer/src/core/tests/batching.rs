@@ -28,18 +28,18 @@ use crate::error::Error;
 use crate::frame;
 use crate::proto::multiplexer::{DeliveryError, MessageBatch, MultiplexerMessage};
 
-const EVENT: u32 = 300;
-const TEN: Option<Duration> = Some(Duration::from_secs(10));
+pub(super) const EVENT: u32 = 300;
+pub(super) const TEN: Option<Duration> = Some(Duration::from_secs(10));
 /// A delay no test lasts: its batches close by count, a flush or a write.
-const HOUR: Duration = Duration::from_secs(3600);
+pub(super) const HOUR: Duration = Duration::from_secs(3600);
 
 /// Batching by `max_records`, its delay an hour.
-fn by_count(max_records: usize) -> Batching {
+pub(super) fn by_count(max_records: usize) -> Batching {
     Batching { max_records, max_delay: HOUR, ..Batching::default() }
 }
 
 /// An event of type EVENT from the client of `h`, with `key` when given.
-fn message(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> MultiplexerMessage {
+pub(super) fn message(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> MultiplexerMessage {
     MultiplexerMessage {
         id: Some(id),
         sender: Some(h.core.instance_id),
@@ -51,9 +51,10 @@ fn message(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> Multiplex
 }
 
 /// Its frame, made and marked as `message::frame_of` makes a plain event's.
-fn event(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> Frame {
+pub(super) fn event(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> Frame {
     Frame {
         bytes: frame::encode_unsealed(&message(h, id, key, payload)).expect("a frame"),
+        head: None,
         id,
         r#type: EVENT,
         batch: BatchMark::Event(key.map(str::to_string)),
@@ -61,7 +62,7 @@ fn event(h: &Harness, id: u64, key: Option<&str>, payload: &[u8]) -> Frame {
 }
 
 /// Sends an event as a send nobody waits for, which may batch.
-fn queue(h: &mut Harness, id: u64, key: Option<&str>, payload: &[u8]) {
+pub(super) fn queue(h: &mut Harness, id: u64, key: Option<&str>, payload: &[u8]) {
     let frame = event(h, id, key, payload);
     assert!(h.core.send(frame, false, None, TEN, 0, None, None, None, true));
     h.settle();
@@ -70,13 +71,13 @@ fn queue(h: &mut Harness, id: u64, key: Option<&str>, payload: &[u8]) {
 /// A frame written on the wire, of type EVENT: a batch's, its key and the
 /// ids of the messages inside it, in order, or one message's, alone.
 #[derive(Debug, PartialEq, Eq)]
-enum Wrote {
+pub(super) enum Wrote {
     Batch(Option<String>, Vec<u64>),
     Alone(Option<String>, u64),
 }
 
 /// What was written on `conn` since the last call, of type EVENT.
-fn wrote(h: &mut Harness, conn: ConnId) -> Vec<Wrote> {
+pub(super) fn wrote(h: &mut Harness, conn: ConnId) -> Vec<Wrote> {
     h.written(conn)
         .into_iter()
         .filter(|written| written.r#type == EVENT)
@@ -91,7 +92,7 @@ fn wrote(h: &mut Harness, conn: ConnId) -> Vec<Wrote> {
 }
 
 /// The messages inside a batch's message.
-fn inside(envelope: MultiplexerMessage) -> Vec<MultiplexerMessage> {
+pub(super) fn inside(envelope: MultiplexerMessage) -> Vec<MultiplexerMessage> {
     let batch = MessageBatch::decode(envelope.batch.expect("a batch")).expect("a MessageBatch");
     batch.message.into_iter().map(|body| MultiplexerMessage::decode(body).expect("a message")).collect()
 }

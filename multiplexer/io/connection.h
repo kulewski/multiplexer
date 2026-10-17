@@ -914,7 +914,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       return;
     }
 
-    std::shared_ptr<MultiplexerMessage> mxmsg(new MultiplexerMessage());
+    std::shared_ptr<MultiplexerMessage> mxmsg = _parse_target(*manager);
     if (!mxmsg->ParseFromString(message->get_message())) {
       MX_LOG(DEBUG, HIGHVERBOSITY,
              TEXT("received invalid message on " + repr((void*)this) + "(maybe id=" + repr(mxmsg->id()) + ")"));
@@ -935,6 +935,18 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
 
     manager->handle_message(this->shared_from_this(), message, mxmsg);
+  }
+
+  // The message a frame is parsed into: the manager's own, kept from frame
+  // to frame (REUSES_PARSE_TARGET), or one of its own, made with its count
+  // in one allocation.
+  std::shared_ptr<MultiplexerMessage> _parse_target(ConnectionsManagerImplementation& manager) {
+    if constexpr (ConnectionsManagerTraits::REUSES_PARSE_TARGET) {
+      return manager.parse_target();
+    } else {
+      (void)manager;
+      return std::make_shared<MultiplexerMessage>();
+    }
   }
 
   // The two message types a connection handles itself: the welcome, which
@@ -1014,7 +1026,6 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
       // start writing
       outgoing_channel_state_ = ChannelState::BUSY;
       write_in_flight_ = true;
-      Assert(raw->get_message_buffer().size());
       // The handler holds the connection and the frame: the write goes on in
       // steps after shutdown() handed the queue over or dropped it.
       asio::async_write(socket_, raw->get_message_buffer(), TransferRest(),

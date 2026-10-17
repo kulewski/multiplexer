@@ -14,6 +14,11 @@
 //! observer, `on_received`, an acknowledgement's) run inside whichever call
 //! runs the loop when their time comes.
 //!
+//! A send nobody follows, `queue()` without `on_end`, a lane or `all()`, of
+//! a plain event of a type or key it batches goes to the batching as bytes
+//! (`core::plain`), serialized into a body an earlier batch handed back,
+//! with no frame of its own.
+//!
 //! A `SyncClient` belongs to one thread at a time: it is `Send`, not
 //! `Sync`. One this process inherited across a fork fails every call with
 //! `UsedAfterFork`; dropped there, it closes the child's copies of its
@@ -25,7 +30,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
-use crate::core::batching::Batching;
+use crate::core::batching::{plain_event, Batching};
 use crate::core::client::{target_of, DropReason, IncomingMode};
 use crate::core::outbox::{Frame, SendDone};
 use crate::core::query::{check_size_sent_again, Outcome, QueryId};
@@ -35,7 +40,7 @@ use crate::endpoint::{format_endpoint, parse_endpoint};
 use crate::engine::Engine;
 use crate::error::{Error, Result};
 use crate::handles::{Connection, Incoming, Lane};
-use crate::message::{KeyFilters, Message, Routing};
+use crate::message::{framed, plain_of, stamped, KeyFilters, Message, Routing};
 use crate::proto::multiplexer as proto;
 
 /// A callback for the messages a query reads that are not its reply.
@@ -648,6 +653,31 @@ impl SyncClient {
         }
     }
 
+    /// A plain send of the stamped `encoded` (`core::plain`), serialized
+    /// into a body the batching handed back, and handed to it: its id,
+    /// `TooLarge` before anything is queued, `NotConnected` after
+    /// `shutdown()`. The loop runs first unless the message only joins a
+    /// batch, as for any `queue()`.
+    fn queue_plain(&mut self, encoded: proto::MultiplexerMessage, timeout: Option<Duration>) -> Result<u64> {
+        let id = encoded.id.unwrap_or(0);
+        let body = self.engine().core.batcher.bodies.take();
+        let plain = match plain_of(&encoded, body) {
+            Ok(plain) => plain,
+            Err((error, body)) => {
+                self.engine().core.batcher.bodies.give(body);
+                return Err(error);
+            }
+        };
+        drop(encoded);
+        if self.engine_ref().core.plain_needs_loop(&plain, timeout, Instant::now()) {
+            self.engine().poll();
+        }
+        if !self.engine().call(|core| core.send_plain(plain, timeout, 0)) {
+            return Err(Error::NotConnected);
+        }
+        Ok(id)
+    }
+
     /// A message as a frame to send: its empty id and sender filled in, its
     /// size and key checked.
     fn frame_of(&self, message: Message) -> Result<Frame> {
@@ -859,7 +889,19 @@ impl SyncSend<'_> {
         if lane.as_ref().is_some_and(Lane::closed) {
             return Err(Error::NotConnected);
         }
-        let frame = client.frame_of(message)?;
+        let core = &client.engine_ref().core;
+        let encoded = stamped(message, || core.random64(), core.instance_id);
+        let batching = core.batcher.configured();
+        if on_end.is_none()
+            && !all
+            && lane.is_none()
+            && batching
+            && plain_event(&encoded)
+            && core.batching_of(encoded.r#type, encoded.key.as_deref()).is_some()
+        {
+            return client.queue_plain(encoded, timeout);
+        }
+        let frame = framed(encoded, batching)?;
         let id = frame.id;
         // The loop runs first unless the message only joins a batch.
         let lane = lane.map(|lane| lane.0);

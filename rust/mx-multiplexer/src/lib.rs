@@ -30,6 +30,7 @@ mod fork;
 mod frame;
 mod handles;
 mod ids;
+mod inbox;
 mod log_summary;
 mod message;
 mod pending;

@@ -78,6 +78,12 @@ cc_library(
 )
 
 cc_library(
+    name = "resize_uninitialized",
+    hdrs = ["resize_uninitialized.h"],
+    visibility = ["//:__subpackages__"],
+)
+
+cc_library(
     name = "fork",
     srcs = ["fork.cc"],
     hdrs = ["fork.h"],
@@ -266,6 +272,26 @@ cc_test(
     srcs = ["xxh3_test.cc"],
     deps = [
         ":xxh3",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "resize_uninitialized_test",
+    size = "small",
+    srcs = ["resize_uninitialized_test.cc"],
+    deps = [
+        ":resize_uninitialized",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "memory_test",
+    size = "small",
+    srcs = ["memory_test.cc"],
+    deps = [
+        ":memory",
         "@com_google_googletest//:gtest_main",
     ],
 )

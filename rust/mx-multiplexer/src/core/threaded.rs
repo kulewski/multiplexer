@@ -204,7 +204,7 @@ impl Core {
             );
         }
         let Ok(bytes) = frame::encode(&pong) else { return };
-        let frame = Frame { bytes, id: pong.id.unwrap_or(0), r#type: pong.r#type, batch: BatchMark::None };
+        let frame = Frame { bytes, head: None, id: pong.id.unwrap_or(0), r#type: pong.r#type, batch: BatchMark::None };
         let timeout = Some(DEFAULT_TIMEOUT);
         if self.schedule_on(frame.clone(), false, &incoming.connection, timeout, 0, None).is_none() {
             self.schedule_one(frame, false, None, timeout, 0, None);
@@ -325,6 +325,7 @@ impl Core {
         // frame's buffer would make sealing it a copy (`frame::seal`).
         let report = OutFrame {
             bytes: bytes::Bytes::new(),
+            head: None,
             id: frame.id,
             r#type: frame.r#type,
             pinned: false,
