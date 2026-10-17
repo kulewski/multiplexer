@@ -1,0 +1,4 @@
+# The ledger the steps write, an SQLite file and the two files of its WAL.
+ledger.db
+ledger.db-wal
+ledger.db-shm

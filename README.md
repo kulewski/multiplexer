@@ -311,7 +311,9 @@ Bazel build.
   again when the receiver refused it, died with it or nobody took it, and
   gives up at its batch's deadline; the confirmations travel batched too,
   one small message for many events
-  ([confirmed sends](docs/delivery.md#confirmed-sends)).
+  ([confirmed sends](docs/delivery.md#confirmed-sends)), and
+  [a shop](examples/orders/) loses no order when the worker holding it
+  dies.
 - **Stateless and lightweight.** No external coordination service, no
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with
@@ -406,6 +408,10 @@ what the broker's latency makes possible:
   with its shard and batched by its source, a batch routed whole to the
   collector whose key filter takes the shard, and the multiplexers' CPU
   with batching and without.
+- [orders](examples/orders/): a shop's orders as confirmed sends, each
+  kept until a worker recorded it in a ledger, sent again when the worker
+  holding it died, recorded once though it came twice, and given up on at
+  its deadline with no worker.
 - [stream](examples/stream/): an answer that arrives token by token, as
   a language model's does, one request and one reply with the pieces
   addressed and numbered between them, a multiplexer killed under it

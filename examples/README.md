@@ -6,12 +6,12 @@ nothing, echo's apart, which runs it step by step. They are of two
 kinds. The building blocks are what a service needs and would otherwise
 get from Redis, Kafka, an HTTP pool or a task queue: a replicated cache,
 a channel layer, a pool of model workers, workers that each hold some of
-the models, a clickstream batched by shard, an answer streamed token by
-token. The others show what a broker with this latency makes possible,
-starting with an audio room where every 10 ms frame is a request. Four
-small ones come first: the shape of a backend and a client in both
-languages, the same in Rust, an asyncio gateway, and a health check that
-sees a backend's serve loop.
+the models, a clickstream batched by shard, orders that a worker's death
+cannot lose, an answer streamed token by token. The others show what a
+broker with this latency makes possible, starting with an audio room
+where every 10 ms frame is a request. Four small ones come first: the
+shape of a backend and a client in both languages, the same in Rust, an
+asyncio gateway, and a health check that sees a backend's serve loop.
 
 | example | what it shows | languages | built with | walkthrough |
 |---|---|---|---|---|
@@ -24,6 +24,7 @@ sees a backend's serve loop.
 | [inference](inference/) | a web app asking a pool of PyTorch workers, with a worker killed, a rolling restart and a multiplexer killed | Python | pip | [walkthrough.ipynb](inference/walkthrough.ipynb) |
 | [models](models/) | workers that each hold some of the models: a request's key names its model, a worker's key filter the models it holds, and a model is loaded, and unloaded while its requests keep coming | Python | pip | [walkthrough.md](models/walkthrough.md) |
 | [clicks](clicks/) | a clickstream: a click an event keyed with its shard, each collector's key filter taking some shards, and the sources batching the events, a batch one shard's clicks routed whole to its collector; clicks a second and the multiplexers' CPU with batching and without | Python | pip | [walkthrough.md](clicks/walkthrough.md) |
+| [orders](orders/) | orders that a worker's death cannot lose: each a confirmed send, kept by the shop until a worker recorded it in a ledger, sent again after the worker that held it died, recorded once though it came twice, and given up on at its deadline with no worker; a confirmation's latency in batches and one by one | Python | pip | [walkthrough.md](orders/walkthrough.md) |
 | [stream](stream/) | an answer that arrives token by token, as a language model's does: one request, its pieces addressed and numbered, one reply; a multiplexer killed under it and the lost pieces asked for again; the answer as Server-Sent Events | Python | pip | [walkthrough.md](stream/walkthrough.md) |
 | [audio](audio/) | an audio room: a query per 10 ms frame to a C++ worker, the answer heard by everyone in the room | Python, C++ | Bazel and pip | [walkthrough.md](audio/walkthrough.md) |
 
@@ -50,7 +51,7 @@ cd examples/echo
 bazel test //...
 ```
 
-The pip examples, health, cache, channels, inference, models, clicks, stream and the audio gateway, are
+The pip examples, health, cache, channels, inference, models, clicks, orders, stream and the audio gateway, are
 installed the way a Django project is: `mx-multiplexer` from PyPI, which
 brings the multiplexer, `mxcontrol`, with it, with a `requirements.txt`, a
 `test.py` on the harness and a `test.sh` that makes a virtual environment

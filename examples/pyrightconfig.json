@@ -18,6 +18,7 @@
     "health",
     "inference",
     "models",
+    "orders",
     "stream"
   ],
   "exclude": [
@@ -98,6 +99,13 @@
       "root": "models",
       "extraPaths": [
         "models",
+        ".venv/mxtree"
+      ]
+    },
+    {
+      "root": "orders",
+      "extraPaths": [
+        "orders",
         ".venv/mxtree"
       ]
     },

@@ -236,6 +236,13 @@ graph LR
   each, every line explained as it is added; a million clicks with and
   without batching, what the batches on the wire held and a shard nobody
   takes, with the measured steps and the test.
+- [Building the orders, step by step](../examples/orders/walkthrough.md):
+  a shop whose orders are confirmed sends, each kept until a worker
+  recorded it in a ledger, and a ledger that records an order once
+  though it came twice, every line explained as it is added; a worker
+  that dies holding orders, orders given up on, and a confirmation's
+  latency in batches and one by one, with the measured steps and the
+  test.
 - [Building the audio room, step by step](../examples/audio/walkthrough.md):
   live audio through a C++ worker, every 10 ms frame a query answered in
   a fifth of a millisecond and heard by everyone in the room, the worker

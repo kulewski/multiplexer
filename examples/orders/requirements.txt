@@ -1,0 +1,5 @@
+# What the example runs on: `pip install -r requirements.txt`. The library,
+# and protobuf for the payload; the ledger is SQLite, from Python's standard
+# library, and the test runs on the library's harness.
+mx-multiplexer
+protobuf

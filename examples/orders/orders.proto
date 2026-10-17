@@ -1,0 +1,15 @@
+// The payload of the orders example. Compiled once with `protoc
+// --python_out=. --pyi_out=. orders.proto`; the generated orders_pb2.py
+// and its stub are committed next to it.
+syntax = "proto3";
+
+package orders;
+
+// ORDER_PLACED: one order, under the id the shop gave it when it was
+// placed, which the ledger records it by.
+message Order {
+  string id = 1;
+  string customer = 2;
+  string item = 3;
+  uint32 quantity = 4;
+}

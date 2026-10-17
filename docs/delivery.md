@@ -388,6 +388,13 @@ numbers it, for the least latency: its confirmation comes back as soon
 as its receiver is done with it, gathered with those of the other events
 one read of the receiver's connection brought.
 
+[examples/orders](../examples/orders/README.md) is a complete program on
+confirmed sends: a shop whose orders workers record in a ledger, each
+order's callback hearing 1 once it is there; a worker that dies holding
+orders, what it held sent again and the ledger skipping the orders that
+came twice; orders given up on, `FAILED` and `NOT_CONFIRMED`; and a
+confirmation's latency in batches and one by one.
+
 In what follows, the producer is the client that sends the messages, the
 consumer the one whose program processes them; any class may be either.
 
@@ -677,6 +684,18 @@ the others.
   `SyncClient`, a `ThreadedClient`, one that confirms itself,
   an `AsyncClient`'s handlers and both server classes confirming; and a
   producer and a consumer of the library together.
+- **[examples/orders](../examples/orders/walkthrough.md):** a complete
+  program, a shop's orders confirmed in batches and recorded by workers
+  on `BaseMultiplexerServer` in a ledger: each order's callback hearing 1
+  once its row is there, and `flush_all()` returning with every order in
+  the ledger, where unconfirmed it returned before the ledger had them;
+  a worker that dies at its fourth order, what it held sent again after
+  `retry_after` and the three it recorded skipped by the ledger as
+  repeats; an order a worker raises on given up on as `FAILED`, and with
+  no worker every order as `NOT_CONFIRMED` at its batch's deadline; a
+  confirmation's latency in batches and one by one; and its test on the
+  harness, a raw peer seeing orders sent one by one each in a batch of
+  one.
 - **The drains**, a server that drains with its multiplexer down waiting
   for what waits in a batch:
   [multiplexer/backend/acknowledged_test.cc](../multiplexer/backend/acknowledged_test.cc),
