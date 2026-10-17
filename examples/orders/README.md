@@ -15,8 +15,8 @@ at least once, so the ledger is idempotent, a row per order under the
 order's id, and skips an order that comes twice. An order no worker
 confirms by its batch's deadline is given up on, and the shop is told.
 
-Confirmed sends are new: the example needs `mx-multiplexer` newer than
-3.0.0. It is installed with pip: `mx-multiplexer` from PyPI, which
+Confirmed sends are new in 4.0.0: the example needs `mx-multiplexer`
+4.0.0 or newer. It is installed with pip: `mx-multiplexer` from PyPI, which
 brings the multiplexer, `mxcontrol`, with it.
 [walkthrough.md](walkthrough.md) builds it from nothing, every line of
 the rules file, the shop, the ledger, the worker and the command line

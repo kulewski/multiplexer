@@ -24,7 +24,7 @@ Add it to `Cargo.toml`, from crates.io, or from this repository:
 
 ```toml
 [dependencies]
-mx-multiplexer = "3.0"
+mx-multiplexer = "4.0"
 # or: mx-multiplexer = { git = "https://github.com/kulewski/multiplexer" }
 ```
 

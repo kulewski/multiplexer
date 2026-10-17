@@ -2,6 +2,6 @@
 hand in its version commit together with the Makefile, lib/release.cc and
 the crate (docs/packaging.md)."""
 
-version = "3.0.0"
-version_hash = "v3.0.0"
-version_short_hash = "3.0"
+version = "4.0.0"
+version_hash = "v4.0.0"
+version_short_hash = "4.0"

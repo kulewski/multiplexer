@@ -26,7 +26,7 @@ that should cost the multiplexer less. What it gives up, each below:
   ([on the way](#on-the-way-a-batch-is-one-message));
 - a batch nobody took comes back whole in its `DELIVERY_ERROR`
   ([what changes](#what-changes-for-a-program));
-- every receiver of the type must run a library newer than 3.0.0
+- every receiver of the type must run a library of 4.0.0 or newer
   ([what the receiver sees](#what-the-receiver-sees)).
 
 **Confirmed sends.** The sender keeps each event until its receiver's
@@ -333,7 +333,7 @@ past its limit by one batch at most. A call's look at what arrived counts
 each message of a batch toward the queue's worth it reads at most.
 
 **Every receiver must split.** Every receiver of a batched type, whatever
-its class, must run a library newer than 3.0.0. One of 3.0.0 or older
+its class, must run a library of 4.0.0 or newer. One of 3.0.0 or older
 hands its program the batch as one message of the type with an empty
 payload, and the events in it never reach the program.
 

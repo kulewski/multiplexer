@@ -16,7 +16,7 @@ handler returned from it, and sends again until then; the worker records
 the order in the ledger before its handler returns, and the ledger holds
 one row per order id, so an order that comes twice is recorded once.
 [Confirmed sends](../../docs/delivery.md#confirmed-sends) describes them
-in general. They are new: the example needs a library newer than 3.0.0.
+in general. They are new in 4.0.0: the example needs that library or a newer one.
 
 ## 1. The rules file
 

@@ -15,7 +15,7 @@ rust_library(
     aliases = aliases(),
     proc_macro_deps = all_crate_deps(proc_macro = True),
     tags = ["rust"],
-    version = "3.0.0",
+    version = "4.0.0",
     visibility = ["//visibility:public"],
     deps = all_crate_deps(normal = True),
 )

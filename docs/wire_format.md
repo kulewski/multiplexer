@@ -32,7 +32,7 @@ with Python's `xxhash` package, `xxh3.Hash(body)` with Go's
 processor has: a kilobyte in about 16 ns, a megabyte in about 8 µs
 (lib/xxh3.cc has the measurements). It is not a CRC: zlib's CRC-32, which
 the frames carried up to 3.0.0, takes twenty times as long for a kilobyte,
-and a peer of 3.0.0 or earlier and one newer cannot talk to each other.
+and a peer of 3.0.0 or earlier and one of 4.0.0 or later cannot talk to each other.
 In the Python package `multiplexer._native.xxh3_64(data)` computes it,
 which RawPeer uses.
 

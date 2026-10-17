@@ -169,7 +169,7 @@ in 100 within 5.1 to 5.3 ms, whichever carries them.
 
 | | Multiplexer | Kafka |
 |---|---|---|
-| Broker | one multiplexer, newer than 3.0.0, on one event loop, its default | one broker, Kafka 4.3.1 from the official image, in KRaft mode with its default configuration |
+| Broker | one multiplexer, 4.0.0, on one event loop, its default | one broker, Kafka 4.3.1 from the official image, in KRaft mode with its default configuration |
 | Clients | the C++ library through `make install` and pkg-config, each producer and each consumer a thread with a connection of its own: a `ThreadedClient` for a producer tuned for throughput, a `SyncClient` for one tuned for latency and for each consumer ([mx_bench.cc](../tests/kafka/mx_bench.cc)) | librdkafka 2.8.0, the C library Kafka's clients in most languages but Java are built on, with its defaults ([kafka_bench.cc](../tests/kafka/kafka_bench.cc)) |
 | Where a record goes | an event routed by a rule with `whom: ANY` to one consumer in turn ([bench.rules](../tests/kafka/bench.rules)) | a topic with one partition for each consumer, one copy of each record, each consumer reading one partition from its start |
 | Tuned for throughput | `set_delivery()` with `batch`: up to 1,000 records in one message, a record waiting 5 ms at most; `send()` returns at once, and the producer flushes every 100,000 records, so that what waits in it stays bounded | the client's defaults: records gathered into batches for up to 5 ms, the producer taking no more while its own queue is full |

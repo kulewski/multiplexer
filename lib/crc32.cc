@@ -3,7 +3,7 @@
 // so that one step folds eight bytes into the CRC; the same CRC as one table
 // lookup per byte, about five times faster. See crc32.h for what is computed.
 //
-// The frames carried this CRC up to 3.0.0 and carry XXH3 now (lib/xxh3.h);
+// The frames carried this CRC up to 3.0.0 and carry XXH3 since 4.0.0 (lib/xxh3.h);
 // this one makes the fingerprint of a rules file (lib/fingerprint.h), which
 // Python computes alike with zlib.crc32. One lookup per byte made each step
 // wait for the one before: measured on 2026-10-10, 230 bytes took about

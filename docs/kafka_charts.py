@@ -30,7 +30,7 @@ ASSETS = os.path.join(ROOT, "docs", "assets", "kafka")
 PAGE = os.path.join(ROOT, "docs", "kafka.md")
 
 # What every chart says it measured, under its title.
-SETUP = "the multiplexer newer than 3.0.0 · Kafka 4.3.1, librdkafka 2.8.0 · AMD Ryzen Threadripper PRO 9965WX"
+SETUP = "the multiplexer 4.0.0 · Kafka 4.3.1, librdkafka 2.8.0 · AMD Ryzen Threadripper PRO 9965WX"
 NAMES = {"mx": "multiplexer", "kafka": "Kafka"}
 FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
 # GitHub's own colors for the page, text and lines, light and dark; the
