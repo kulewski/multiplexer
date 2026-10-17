@@ -6,6 +6,12 @@
 //! pushes with. The io thread takes the whole queue at once, swapped out
 //! under the lock, at each pass of its driver and after each step.
 //!
+//! A confirmation the program gives on any thread (`ThreadedClient::confirm`)
+//! comes as three values in a list of its own beside the queue
+//! (`HandedConfirmation`), which the io thread gathers into what its client
+//! owes as it takes them (`Core::confirm_handed`): nothing allocated per
+//! message. Mirrors C++'s confirmations in ThreadedClientInbox.
+//!
 //! A sender wakes the io thread, a system call, only when it sleeps, about
 //! to wait for its sockets (`asleep`), and only the first sender after it
 //! fell asleep: a running io thread takes what was queued at its next
@@ -22,8 +28,18 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use crate::core::bodies::Bodies;
+use crate::core::confirming::Confirmed;
 use crate::core::plain::Plain;
 use crate::core::Posted;
+
+/// A confirmation handed over: the producer, the message's number, and
+/// what became of the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandedConfirmation {
+    pub(crate) sender: u64,
+    pub(crate) number: u64,
+    pub(crate) outcome: Confirmed,
+}
 
 /// The inbox; see the module comment. On cache lines of its own: every
 /// sender and the io thread touch it.
@@ -41,6 +57,7 @@ pub(crate) struct Inbox {
 #[derive(Default)]
 struct InboxState {
     posted: VecDeque<Posted>,
+    confirmations: Vec<HandedConfirmation>,
     returned: Bodies,
 }
 
@@ -76,6 +93,17 @@ impl Inbox {
         (spare, self.wake_needed())
     }
 
+    /// Queues `confirmation` beside the posted work, as `push` does: true
+    /// when the caller wakes the io thread.
+    pub(crate) fn push_confirmation(&self, confirmation: HandedConfirmation) -> bool {
+        {
+            let mut state = self.lock();
+            state.confirmations.push(confirmation);
+            self.pending.store(true, Ordering::SeqCst);
+        }
+        self.wake_needed()
+    }
+
     /// Whether the io thread sleeps, which the caller then wakes: true for
     /// one caller. Read after `pending` was set, both SeqCst, as the io
     /// thread sets `asleep` before it reads `pending` (`fall_asleep`): one
@@ -84,18 +112,34 @@ impl Inbox {
         self.asleep.load(Ordering::SeqCst) && self.asleep.swap(false, Ordering::SeqCst)
     }
 
-    /// Swaps what was queued out into `taken`, empty, its order kept, and
-    /// hands back `spent`'s bodies for the senders, as many as are kept
-    /// (`Bodies`); nothing locked when nothing was queued and no body is
-    /// spent.
-    pub(crate) fn take(&self, taken: &mut VecDeque<Posted>, spent: &mut Bodies) {
+    /// Swaps what was queued out into `taken` and `confirmations`, both
+    /// empty, their order kept, and hands back `spent`'s bodies for the
+    /// senders, as many as are kept (`Bodies`); nothing locked when nothing
+    /// was queued and no body is spent.
+    pub(crate) fn take(
+        &self,
+        taken: &mut VecDeque<Posted>,
+        confirmations: &mut Vec<HandedConfirmation>,
+        spent: &mut Bodies,
+    ) {
         if !self.pending.load(Ordering::SeqCst) && spent.is_empty() {
             return;
         }
         let mut state = self.lock();
         self.pending.store(false, Ordering::SeqCst);
         std::mem::swap(&mut state.posted, taken);
+        std::mem::swap(&mut state.confirmations, confirmations);
         state.returned.take_all(spent);
+    }
+
+    /// The confirmations alone, swapped out into `confirmations`, empty,
+    /// what else was queued left for the next take: what the io thread's
+    /// callbacks confirmed, gathered at once (`Core::take_io_confirmations`).
+    pub(crate) fn take_confirmations(&self, confirmations: &mut Vec<HandedConfirmation>) {
+        if !self.pending.load(Ordering::SeqCst) {
+            return;
+        }
+        std::mem::swap(&mut self.lock().confirmations, confirmations);
     }
 
     /// The io thread is about to wait for its sockets: false, and it must
@@ -131,10 +175,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::Inbox;
-    use crate::core::batching::Batching;
+    use super::{HandedConfirmation, Inbox};
+    use crate::core::batching::Delivery;
     use crate::core::bodies::Bodies;
     use crate::core::client::IncomingMode;
+    use crate::core::confirming::Confirmed;
     use crate::core::plain::Plain;
     use crate::core::{Core, Posted};
     use crate::driver::{Driver, Step, TURN};
@@ -148,10 +193,10 @@ mod tests {
     #[test]
     fn a_sender_wakes_the_io_thread_only_when_it_sleeps_and_only_once() {
         let inbox = Inbox::default();
-        let (mut taken, mut spent) = (VecDeque::new(), Bodies::default());
+        let (mut taken, mut confirmations, mut spent) = (VecDeque::new(), Vec::new(), Bodies::default());
         assert!(!inbox.push(Posted::Fill), "awake: it takes what was queued at its next look");
         assert!(!inbox.fall_asleep(), "something queued: it must not sleep");
-        inbox.take(&mut taken, &mut spent);
+        inbox.take(&mut taken, &mut confirmations, &mut spent);
         assert_eq!(1, taken.len());
         taken.clear();
         assert!(inbox.fall_asleep(), "nothing queued: it may");
@@ -172,8 +217,8 @@ mod tests {
         let (spare, _) = inbox.push_plain(plain(1), None);
         assert_eq!(0, spare.capacity(), "none handed back yet: an empty one");
         inbox.push(Posted::ProcessCallbacks);
-        let mut taken = VecDeque::new();
-        inbox.take(&mut taken, &mut spent);
+        let (mut taken, mut confirmations) = (VecDeque::new(), Vec::new());
+        inbox.take(&mut taken, &mut confirmations, &mut spent);
         assert_eq!(3, taken.len());
         assert!(matches!(taken[0], Posted::Fill));
         assert!(matches!(&taken[1], Posted::Plain(plain, None) if plain.id == 1));
@@ -186,14 +231,54 @@ mod tests {
     }
 
     #[test]
+    fn confirmations_come_out_beside_the_queue_and_wake_as_it_does() {
+        // As C++'s inbox test of the same name: plain values in a list of
+        // their own, the first push after a take waking a sleeping io
+        // thread, a take of the confirmations alone leaving the rest.
+        let inbox = Inbox::default();
+        let confirmation = |number, outcome| HandedConfirmation { sender: 7, number, outcome };
+        assert!(inbox.fall_asleep());
+        assert!(inbox.push_confirmation(confirmation(1, Confirmed::Processed)), "asleep: the first wakes it");
+        assert!(!inbox.push(Posted::Fill));
+        assert!(!inbox.push_confirmation(confirmation(2, Confirmed::Failed)));
+        let mut confirmations = Vec::new();
+        inbox.take_confirmations(&mut confirmations);
+        assert_eq!(vec![confirmation(1, Confirmed::Processed), confirmation(2, Confirmed::Failed)], confirmations);
+        confirmations.clear();
+        let (mut taken, mut spent) = (VecDeque::new(), Bodies::default());
+        inbox.take(&mut taken, &mut confirmations, &mut spent);
+        assert_eq!(1, taken.len(), "the queue left for the next take");
+        assert!(confirmations.is_empty());
+        inbox.push_confirmation(confirmation(3, Confirmed::Refused));
+        inbox.take(&mut taken, &mut confirmations, &mut spent);
+        assert_eq!(vec![confirmation(3, Confirmed::Refused)], confirmations);
+    }
+
+    #[test]
+    fn a_confirmation_a_pass_takes_is_sent_before_the_io_thread_sleeps() {
+        // The send of what is owed, posted as the confirmation is taken,
+        // joins the queue at once: left with the core's posted work, which a
+        // pass does not move, the step slept, until the next timer, a
+        // heartbeat's three seconds. Here a step whose deadline has come
+        // runs it rather than end there.
+        let inbox = Arc::new(Inbox::default());
+        let mut driver = Driver::new(Some(Arc::clone(&inbox))).expect("a driver");
+        let mut core = Core::new(205, Arc::new(Ids::seeded(7)), IncomingMode::Dispatch, Instant::now());
+        inbox.push_confirmation(HandedConfirmation { sender: 7, number: 1, outcome: Confirmed::Processed });
+        assert_eq!(Step::Ran, driver.step(&mut core, Some(Instant::now()), true));
+        assert_eq!(0, core.confirmations_owed(), "sent");
+    }
+
+    #[test]
     fn a_step_runs_the_plain_sends_at_the_front_of_the_queue_turn_at_most() {
         // One step, one clock read, for a run of plain sends; the rest at
         // the next step, after a pass, as after any TURN entries.
         let inbox = Arc::new(Inbox::default());
         let mut driver = Driver::new(Some(Arc::clone(&inbox))).expect("a driver");
         let mut core = Core::new(200, Arc::new(Ids::seeded(7)), IncomingMode::Dispatch, Instant::now());
-        let batching = Batching { max_delay: Duration::from_secs(3600), ..Batching::default() };
-        core.set_batching(300, None, batching).expect("set");
+        let delivery =
+            Delivery { batch: true, max_delay: Duration::from_secs(3600), timeout: None, ..Delivery::default() };
+        core.set_delivery(300, None, delivery).expect("set");
         let sends = TURN as u64 + 36;
         for id in 1..=sends {
             inbox.push_plain(plain(id), None);

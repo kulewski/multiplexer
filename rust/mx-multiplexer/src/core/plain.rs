@@ -1,22 +1,24 @@
 //! A plain send as bytes: a send nobody follows (no `on_end`, no wait),
 //! through no lane and not to ALL, of a plain event (`plain_event`), made
-//! while the client batches, reaches the batching as the bytes it was
+//! while a delivery is set, reaches the batching as the bytes it was
 //! serialized into on the sender's thread, with its id, type and key, and
 //! with no frame or boxed command of its own (`Plain`). The batching puts
 //! the bytes in their batch as they are (`Core::send_plain`); a frame is
-//! made of them only when the message goes alone: its type not batched, a
-//! batch of one, too big, no delay and a connection free, no time to wait,
-//! or cut from a batch, a big one's own buffer then the frame's body, its
-//! header kept apart (`Core::alone_frame`). Once a batch's frame is made,
-//! its bodies are handed back for the next plain sends (`bodies`). Mirrors
-//! C++ BasicClient::send_plain.
+//! made of them only when the message goes alone: its type with no
+//! delivery, or one that does not batch, a batch of one, too big, no delay
+//! and a connection free, or cut from a batch, a big one's own buffer then
+//! the frame's body, its header kept apart (`Core::alone_frame`). Once a
+//! batch's frame is made, its bodies are handed back for the next plain
+//! sends (`bodies`). Mirrors C++ BasicClient::send_plain, a delivery's
+//! timeout used over the send's as there.
 //!
 //! A `ThreadedClient` posts a plain send to its io thread as data, the
-//! deadline counted from the send (`Posted::Plain`, `Core::place_plain`);
-//! a `SyncClient` hands it over in its own call. Either way the sender
-//! serializes into a body the batching handed back, so that in a steady
-//! stream nothing is allocated for a message on either side, and nothing
-//! one thread allocated is freed on another.
+//! deadline counted from the send, which a delivery's own takes the place
+//! of (`Posted::Plain`, `Core::place_plain`); a `SyncClient` hands it over
+//! in its own call. Either way the sender serializes into a body the
+//! batching handed back, so that in a steady stream nothing is allocated
+//! for a message on either side, and nothing one thread allocated is freed
+//! on another.
 
 use std::time::{Duration, Instant};
 
@@ -56,23 +58,24 @@ impl Plain {
 }
 
 impl Core {
-    /// How every client sends a plain send: into the open batch of its type
-    /// and key, or one it opens, when its type or key is batched and it has
-    /// time to wait; otherwise alone, as a frame made of its bytes, after
-    /// every batch, numbered `number`, 0 for a fresh one. False, its body
-    /// kept, when the client is shutting down. Its body goes back to the
-    /// bodies kept once a frame holds it.
-    pub(crate) fn send_plain(&mut self, plain: Plain, timeout: Option<Duration>, number: u64) -> bool {
+    /// How every client sends a plain send: by the delivery set for its
+    /// type or key, into the open batch of its type and key, or one it
+    /// opens, or kept until confirmed, when the delivery batches or
+    /// confirms, `timeout` not used; otherwise alone, as a frame made of its
+    /// bytes, after every batch, by a delivery's timeout, else `timeout`,
+    /// numbered `number`, 0 for a fresh one. False, its body kept, when the
+    /// client is shutting down. Its body goes back to the bodies kept once
+    /// a frame holds it.
+    pub(crate) fn send_plain(&mut self, plain: Plain, mut timeout: Option<Duration>, number: u64) -> bool {
         if self.client.shuts_down {
             self.batcher.bodies.give(plain.body);
             return false;
         }
-        // One with no time to wait goes alone: in a batch it would leave the
-        // batch no time either.
-        if timeout != Some(Duration::ZERO) {
-            if let Some(batching) = self.batching_of(plain.r#type, plain.key()) {
-                return self.batch(Joining::Plain(plain), batching, timeout, None, None);
+        if let Some(delivery) = self.delivery_of(plain.r#type, plain.key()) {
+            if delivery.batch || delivery.confirm {
+                return self.batch(Joining::Plain(plain), delivery, None, None);
             }
+            timeout = delivery.timeout; // a delivery that sends it as it is, by its own timeout
         }
         self.close_batches();
         let deadline = deadline_after(self.now, timeout);
@@ -82,8 +85,8 @@ impl Core {
 
     /// Whether a synchronous client's plain send must run the loop first,
     /// as `send_needs_loop` says for a frame.
-    pub(crate) fn plain_needs_loop(&self, plain: &Plain, timeout: Option<Duration>, now: Instant) -> bool {
-        self.needs_loop_for(plain.r#type, plain.key(), plain.length, false, false, timeout, now)
+    pub(crate) fn plain_needs_loop(&self, plain: &Plain, now: Instant) -> bool {
+        self.needs_loop_for(plain.r#type, plain.key(), plain.length, false, false, now)
     }
 
     /// The frame a plain send goes alone as, made of its bytes
@@ -97,8 +100,9 @@ impl Core {
     /// A threaded client's plain send on its io thread: numbered and handed
     /// to the batching (`send_plain`), what it has left of the time until
     /// `deadline`, counted from the send, reckoned at the time the driver
-    /// read for the commands it runs. After the shutdown's end nothing is
-    /// placed: the message is reported dropped, as `place_send` does.
+    /// read for the commands it runs, its timeout unless a delivery's takes
+    /// its place. After the shutdown's end nothing is placed: the message is
+    /// reported dropped, as `place_send` does.
     pub(crate) fn place_plain(&mut self, plain: Plain, deadline: Option<Instant>) {
         let number = self.next_number();
         // What a drop report reads (`place_send`'s).
@@ -113,6 +117,7 @@ impl Core {
             number,
             deadline: None,
             batch: None,
+            confirmed: false,
         };
         if self.threaded.torn_down {
             self.report_drop(&report, DropReason::ShutDown);

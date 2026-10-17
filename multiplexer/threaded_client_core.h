@@ -51,8 +51,8 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   void set_resolver(BasicClient::Resolver resolver);
   void set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged);
   void set_key_filters(const BasicClient::KeyFilters& filters, BasicClient::AcknowledgedCallback acknowledged);
-  void set_batching(std::uint32_t type, const std::string* key, const BasicClient::Batching& batching);
-  void clear_batching(std::uint32_t type, const std::string* key);
+  void set_delivery(std::uint32_t type, const std::string* key, const BasicClient::Delivery& delivery);
+  void clear_delivery(std::uint32_t type, const std::string* key);
   bool routing_acknowledged();
   std::size_t held_for_a_connection();
   bool flush_all(float timeout);
@@ -70,6 +70,12 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   std::uint64_t retries();
   std::size_t waiting_queries();
   std::size_t waiting_messages();
+  // Confirmed sends; see ThreadedClient::confirm.
+  void confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome);
+  void confirm_after_on_message(bool confirm) { confirm_after_on_message_.store(confirm, std::memory_order_relaxed); }
+  std::size_t unconfirmed();
+  std::uint64_t sent_again();
+  std::size_t confirmations_owed();
   void send(const MultiplexerMessage& msg);
   void send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done);
   void send_all(const MultiplexerMessage& msg, SendCallback done);
@@ -162,6 +168,7 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   void _wake();
   struct WakeHandler;
   void _drain() MX_RUN_ON(io_thread_);
+  void _post_confirmations() MX_RUN_ON(io_thread_);
   void _run_plain(PlainSend* plain, std::chrono::steady_clock::time_point now) MX_RUN_ON(io_thread_);
   template <typename F>
   auto _call(F function) -> decltype(function());
@@ -258,10 +265,13 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
 
   mx::Mutex random_mutex_;
   mx::Random64 random_ MX_GUARDED_BY(random_mutex_);
-  // Whether set_batching() was ever called: the callers' threads then mark
+  // Whether set_delivery() was ever called: the callers' threads then mark
   // the frames they make for it (_stamped); a hint, a frame made unmarked
   // read on the io thread instead.
-  std::atomic<bool> batching_{false};
+  std::atomic<bool> delivery_set_{false};
+  // Whether a message of a confirmed batch is confirmed once on_message
+  // returned from it; see ThreadedClient::confirm_after_on_message.
+  std::atomic<bool> confirm_after_on_message_{true};
 
   // A cache line on x86-64 and most ARM cores: what alignas keeps apart.
   // Not std::hardware_destructive_interference_size, which GCC warns may
@@ -288,7 +298,15 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   // its next turn.
   alignas(CACHE_LINE_BYTES) std::vector<ThreadedClientInbox::Entry> taken_ MX_GUARDED_BY(io_thread_);
   std::shared_ptr<SpentBodies> spent_ MX_GUARDED_BY(io_thread_) = std::make_shared<SpentBodies>();
-  std::string plain_key_ MX_GUARDED_BY(io_thread_);        // a plain send's key, split off its body (_run_plain)
+  std::string plain_key_ MX_GUARDED_BY(io_thread_);  // a plain send's key, split off its body (_run_plain)
+  std::vector<HandedConfirmation> confirmations_taken_ MX_GUARDED_BY(io_thread_);  // see _drain()
+  bool confirmations_posted_ MX_GUARDED_BY(io_thread_) = false;                    // see _post_confirmations()
+  // The message of a confirmed batch on_message has in hand, by its sender
+  // and number, and whether on_message confirmed it itself, which the
+  // confirmation after its return then leaves alone (_on_unmatched).
+  std::uint64_t handling_sender_ MX_GUARDED_BY(io_thread_) = 0;
+  std::uint64_t handling_number_ MX_GUARDED_BY(io_thread_) = 0;
+  bool handled_confirmed_ MX_GUARDED_BY(io_thread_) = false;
   static constexpr std::size_t CLOCK_EVERY_PLAIN = 64;     // see _drain()
   static constexpr std::size_t TAKEN_ENTRIES_KEPT = 4096;  // see _drain()
   alignas(CACHE_LINE_BYTES) mx::Mutex lifecycle_mutex_;

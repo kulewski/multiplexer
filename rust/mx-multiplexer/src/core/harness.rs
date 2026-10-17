@@ -227,8 +227,29 @@ impl Harness {
         self.settle();
     }
 
-    /// A frame from the multiplexer on `conn`.
+    /// A frame from the multiplexer on `conn`, all a read brought: the
+    /// connection's read drained after it.
     pub(crate) fn deliver(&mut self, conn: ConnId, message: &MultiplexerMessage) {
+        self.deliver_read(conn, std::slice::from_ref(message));
+    }
+
+    /// The frames from the multiplexer on `conn` that one read brought, in
+    /// turn, each a step of its own, as the driver hands them over, the
+    /// connection's read drained after the last, in its step.
+    pub(crate) fn deliver_read(&mut self, conn: ConnId, messages: &[MultiplexerMessage]) {
+        for (index, message) in messages.iter().enumerate() {
+            let bytes = frame::encode(message).expect("a frame");
+            self.core.on_frame(conn, bytes.slice(HEADER_LENGTH..));
+            if index + 1 == messages.len() {
+                self.core.on_read_drained(conn);
+            }
+            self.settle();
+        }
+    }
+
+    /// A frame from the multiplexer on `conn` that a read brought with more
+    /// behind it, whose drain is still to come.
+    pub(crate) fn deliver_part(&mut self, conn: ConnId, message: &MultiplexerMessage) {
         let bytes = frame::encode(message).expect("a frame");
         self.core.on_frame(conn, bytes.slice(HEADER_LENGTH..));
         self.settle();
@@ -261,7 +282,7 @@ impl Harness {
 
     /// An event's frame from this client: its id, type and payload, made
     /// unsealed, as `message::frame_of` makes a plain event's for a client
-    /// that batches.
+    /// with a delivery set.
     pub(crate) fn event(&self, id: u64, r#type: u32, payload: &[u8]) -> super::outbox::Frame {
         let message = MultiplexerMessage {
             id: Some(id),

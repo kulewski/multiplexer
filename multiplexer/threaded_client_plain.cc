@@ -155,10 +155,19 @@ void ThreadedClient::Core::_wake() { io_service_.post(WakeHandler{this}); }
 // exception is (_io_thread_main), and the rest runs. The clock is read at
 // the first plain send, again after a call, which may have run the
 // program's callback for long, and every CLOCK_EVERY_PLAIN plain sends, so
-// that a send's time left is never counted from long before.
+// that a send's time left is never counted from long before. The
+// confirmations handed over are gathered first, and what the client owes
+// goes at the turn's end, the handlers' word on their messages in hand.
 void ThreadedClient::Core::_drain() {
-  inbox_.take(&taken_, spent_.get());
+  inbox_.take(&taken_, &confirmations_taken_, spent_.get());
   spent_->clear();  // those the inbox did not keep, freed here, outside its lock
+  const bool confirmed = !confirmations_taken_.empty();
+  if (confirmed && !torn_down_) {
+    for (const HandedConfirmation& confirmation : confirmations_taken_) {
+      basic_client_->confirm(confirmation.sender, confirmation.number, static_cast<Confirmed>(confirmation.outcome));
+    }
+  }
+  confirmations_taken_.clear();
   std::chrono::steady_clock::time_point now;
   std::size_t since_clock = CLOCK_EVERY_PLAIN;  // read at the first plain send
   for (ThreadedClientInbox::Entry& entry : taken_) {
@@ -183,11 +192,67 @@ void ThreadedClient::Core::_drain() {
   }
   const std::size_t ran = taken_.size();
   taken_.clear();
+  if (confirmed && !torn_down_) {
+    basic_client_->send_confirmations();
+  }
   // The room a backlog grew goes once it is over, the inbox's two lists
   // taking turns here: kept while it is no more than TAKEN_ENTRIES_KEPT or
   // a few turns' worth.
   if (taken_.capacity() > TAKEN_ENTRIES_KEPT && taken_.capacity() > 4 * ran) {
     std::vector<ThreadedClientInbox::Entry>().swap(taken_);
+  }
+}
+
+// A confirmation given on the io thread, by a callback rather than by
+// on_message's return: what the client owes goes once the loop's turn
+// is over, posted once however many come meanwhile.
+void ThreadedClient::Core::_post_confirmations() {
+  if (confirmations_posted_) {
+    return;
+  }
+  confirmations_posted_ = true;
+  std::weak_ptr<Core> self = shared_from_this();
+  io_service_.post([self] {
+    if (std::shared_ptr<Core> core = self.lock()) {
+      MX_DCHECK_RUN_ON(&core->io_thread_);
+      core->confirmations_posted_ = false;
+      if (!core->torn_down_) {
+        core->basic_client_->send_confirmations();
+      }
+    }
+  });
+}
+
+void ThreadedClient::Core::confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome) {
+  if (!number || basic_client_->orphaned()) {
+    return;  // nothing to confirm, or a forked child's, whose io thread is the parent's
+  }
+  if (io_thread_.is_current()) {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    if (number == handling_number_ && sender == handling_sender_) {
+      handled_confirmed_ = true;  // on_message's own word on the message it has in hand
+    }
+    if (!torn_down_) {
+      basic_client_->confirm(sender, number, outcome);
+      _post_confirmations();
+    }
+    return;
+  }
+  // Counted in posting_ as _post_unless_stopped() counts a post: after
+  // shutdown(), nothing, its producer sending the message again in time.
+  if (stopped_.load()) {
+    return;
+  }
+  posting_.fetch_add(1);
+  struct Posting {
+    Core* core;
+    ~Posting() { core->_end_posting(); }
+  } posting{this};
+  if (stopped_.load()) {
+    return;
+  }
+  if (inbox_.push_confirmation(HandedConfirmation{sender, number, static_cast<std::uint8_t>(outcome)})) {
+    _wake();
   }
 }
 

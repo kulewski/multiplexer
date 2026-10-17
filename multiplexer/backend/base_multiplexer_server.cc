@@ -305,8 +305,12 @@ void BaseMultiplexerServer::notify_start() {
 // subclass. A handler that throws is reported to the requester, then
 // on_handler_exception() decides whether the loop goes on (the default) or
 // the exception propagates.
+//
+// A message of a confirmed batch is confirmed to its producer once the
+// handler returned from it, FAILED when it threw (basic_client_confirm.cc).
 void BaseMultiplexerServer::__handle_message() {
   _has_sent_response = false;
+  bool threw = false;
   try {
     if (last_mxmsg->type() <= types::MAX_MULTIPLEXER_META_PACKET) {
       __handle_internal_message();
@@ -339,9 +343,14 @@ void BaseMultiplexerServer::__handle_message() {
                TEXT(std::string("could not report the exception to the requester: ") + reporting.what()));
       }
     }
+    threw = true;
+    conn->confirm(*last_mxmsg, Confirmed::FAILED);
     if (!on_handler_exception(error)) {
       throw;
     }
+  }
+  if (!threw) {
+    conn->processed(*last_mxmsg);
   }
 }
 

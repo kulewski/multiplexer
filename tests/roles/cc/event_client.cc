@@ -18,10 +18,14 @@ using multiplexer::MultiplexerMessage;
 // --to ID addresses one peer directly; --all sends through every connection;
 // --no-flush returns before the write; --interval pauses between sends;
 // --linger keeps the process alive after the last one. --batch-records N
-// batches every type sent (set_batching), N messages a batch, --batch-delay
-// S their max_delay: each send then returns at once, queue() putting the
-// message in its type's batch, and flush_all() after the last lets the last
-// batch go. Events: sent, error, flushed, done.
+// batches every type sent (set_delivery's batch), N messages a batch,
+// --batch-delay S their max_delay: each send then returns at once, queue()
+// putting the message in its type's batch, and flush_all() after the last
+// lets the last batch go. With --confirm every type sent is confirmed
+// sends, in those batches or one by one, --retry-after S their
+// retry_after, and the flush waits for every confirmation. --batch-timeout
+// S is the delivery's timeout, a batch's. Events: sent, error, flushed,
+// done.
 class EventClientRole : public mxcontrol::Task {
  public:
   virtual std::string short_description() const { return "send events as a passive peer, never run a loop"; }
@@ -29,16 +33,23 @@ class EventClientRole : public mxcontrol::Task {
     std::unique_ptr<Client> client = common_.connect();
     emit(common_.connected_event(*client));
     std::vector<std::pair<std::uint32_t, std::string>> sends = typed_payloads(send_);
-    if (batch_records_ > 0) {
-      Client::Batching batching;
-      batching.max_records = batch_records_;
-      batching.max_delay = static_cast<float>(batch_delay_);
+    const bool delivered = batch_records_ > 0 || confirm_;
+    if (delivered) {
+      Client::Delivery delivery;
+      delivery.batch = batch_records_ > 0;
+      if (delivery.batch) {
+        delivery.max_records = batch_records_;
+        delivery.max_delay = static_cast<float>(batch_delay_);
+      }
+      delivery.confirm = confirm_;
+      delivery.retry_after = static_cast<float>(retry_after_);
+      delivery.timeout = static_cast<float>(batch_timeout_);
       std::set<std::uint32_t> types;
       for (const std::pair<std::uint32_t, std::string>& send : sends) {
         types.insert(send.first);
       }
       for (std::uint32_t type : types) {
-        client->set_batching(type, batching);
+        client->set_delivery(type, delivery);
       }
     }
     int sent_count = 0;
@@ -64,9 +75,10 @@ class EventClientRole : public mxcontrol::Task {
       try {
         if (all_) {
           sent.set_connections(client->schedule_all(message));
-        } else if (batch_records_ > 0) {
+        } else if (delivered) {
           // Returns at once, the message in its type's batch, which goes
-          // once full; the flush after the last lets the last go.
+          // once full, or on its way alone; the flush after the last lets
+          // the last go.
           if (!client->queue(message)) {
             throw Client::NotConnected();  // nothing may take it, as Python's and Rust's sends say
           }
@@ -94,7 +106,7 @@ class EventClientRole : public mxcontrol::Task {
         std::this_thread::sleep_for(std::chrono::milliseconds(int(interval_ * 1000)));
       }
     }
-    if (batch_records_ > 0) {
+    if (delivered) {
       Event flushed = event("flushed");
       flushed.set_is_sent(client->flush_all(10.0f));  // the waiting send's 10 s
       emit(flushed);
@@ -122,6 +134,10 @@ class EventClientRole : public mxcontrol::Task {
     options.add("key", &key_, "", "the key every message carries");
     options.add("batch-records", &batch_records_, 0u, "batch every type sent, N messages a batch, flushed at the end");
     options.add("batch-delay", &batch_delay_, 0.0, "the batches' max_delay, in seconds");
+    options.add_switch("confirm", &confirm_, "confirmed sends, in the batches of --batch-records or one by one");
+    options.add("retry-after", &retry_after_, 5.0, "the confirmed sends' retry_after, in seconds");
+    options.add("batch-timeout", &batch_timeout_, double(multiplexer::DEFAULT_TIMEOUT),
+                "the delivery's timeout, a batch's, in seconds; negative for none");
   }
 
  private:
@@ -135,6 +151,9 @@ class EventClientRole : public mxcontrol::Task {
   std::string key_;
   unsigned int batch_records_;
   double batch_delay_;
+  bool confirm_;
+  double retry_after_;
+  double batch_timeout_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_client, EventClientRole);

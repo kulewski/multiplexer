@@ -147,6 +147,7 @@ that was not a query among them.
 | `RULES_STATUS` | 10 | the multiplexer's answer |
 | `PEER_CONTROL` | 11 | a peer tells a multiplexer which rule-routed paths reach it from now on, what a draining backend uses |
 | `PEER_STATUS` | 12 | the multiplexer's answer, once in effect |
+| `CONFIRMATION` | 13 | a consumer's library tells a producer which messages of its confirmed batches were processed, addressed with `to`, so it needs no rule ([confirmed sends](delivery.md#confirmed-sends)) |
 | `MAX_MULTIPLEXER_META_PACKET` | 99 | end of the reserved range |
 
 The recording, rules and peer-control message types are defined in

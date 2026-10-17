@@ -523,9 +523,11 @@ TEST(Acknowledged, APlainDrainWaitsForWhatItHoldsForAConnection) {
 class HeldBatch : public BaseMultiplexerServer {
  public:
   explicit HeldBatch(Client* client) : BaseMultiplexerServer(client, multiplexer::peers::PYTHON_TEST_SERVER) {
-    Client::Batching batching;
+    Client::Delivery batching;
+    batching.batch = true;
     batching.max_delay = 3600;
-    client->set_batching(multiplexer::types::TEST_EVENT, batching);
+    batching.timeout = -1;
+    client->set_delivery(multiplexer::types::TEST_EVENT, batching);
   }
   std::promise<void> holding;
   std::promise<void> release;

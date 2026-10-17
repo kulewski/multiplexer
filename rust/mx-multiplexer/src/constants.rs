@@ -4,7 +4,7 @@
 
 /// CRC-32 of the rules file these constants were generated from; a recording's header carries the same.
 #[allow(dead_code)]
-pub const RULES_FINGERPRINT: &str = "7a09285f";
+pub const RULES_FINGERPRINT: &str = "3ef31c73";
 
 /// The message types of the rules file, by name.
 #[allow(dead_code, non_upper_case_globals)]
@@ -21,6 +21,7 @@ pub mod types {
     pub const RULES_STATUS: u32 = 10;
     pub const PEER_CONTROL: u32 = 11;
     pub const PEER_STATUS: u32 = 12;
+    pub const CONFIRMATION: u32 = 13;
     pub const MAX_MULTIPLEXER_META_PACKET: u32 = 99;
     pub const PICKLE_RESPONSE: u32 = 112;
     pub const REQUEST_RECEIVED: u32 = 113;
@@ -42,6 +43,7 @@ pub mod types {
             RULES_STATUS => "RULES_STATUS",
             PEER_CONTROL => "PEER_CONTROL",
             PEER_STATUS => "PEER_STATUS",
+            CONFIRMATION => "CONFIRMATION",
             MAX_MULTIPLEXER_META_PACKET => "MAX_MULTIPLEXER_META_PACKET",
             PICKLE_RESPONSE => "PICKLE_RESPONSE",
             REQUEST_RECEIVED => "REQUEST_RECEIVED",

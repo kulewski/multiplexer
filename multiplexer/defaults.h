@@ -43,7 +43,7 @@ static const unsigned int MAX_MESSAGE_SIZE = 128 * 1024 * 1024;
 // (KeyPatterns in multiplexer/key_filters.h says what they cost).
 static const unsigned int MAX_KEY_SIZE = 256;
 static const unsigned int MAX_KEY_PATTERN_SIZE = 1024;
-// A client's batching (BasicClient::set_batching), what a batch holds at
+// A client's batching (BasicClient::Delivery::batch), what a batch holds at
 // most unless told otherwise before it goes: messages, and bytes of the
 // batch's own message, its envelope and every message inside included, as
 // it goes on the wire.
@@ -54,6 +54,15 @@ static const unsigned int DEFAULT_BATCH_MAX_BYTES = 1024 * 1024;
 // batch that holds more, whole, so that what one frame becomes in a
 // receiver stays a queue's worth (DEFAULT_INCOMING_QUEUE_MAX_SIZE) at most.
 static const unsigned int MAX_BATCH_RECORDS = 1024;
+// A client's confirmed sends (BasicClient::Delivery::confirm): seconds a batch
+// waits, from its write or from the last confirmation of one of its
+// messages, before those of its messages that nothing confirmed go again.
+static const float DEFAULT_RETRY_AFTER = 5.0;
+// How many confirmations a consumer's library gathers for one producer at
+// most before it sends them, though the program still has messages in
+// hand: a consumer that never runs out of messages tells its producers of
+// its progress every this many.
+static const unsigned int CONFIRMATIONS_GATHERED_MAX = 256;
 
 // Seconds of silence before a side sends a HEARTBIT.
 static const float HEARTBIT_INTERVAL = 3.0;

@@ -2,10 +2,11 @@
 //! handshake, the outgoing queue with one write in flight, the heartbeats
 //! and the silence that ends a connection, and the three ways it ends.
 //! Mirrors multiplexer/io/connection.h as a client's connection uses it;
-//! the socket is the driver's, which reads frames and writes them when
-//! told (`Action`). A client's connections never have a passive peer, so
-//! the passive-peer exemption, which only the multiplexer applies, is not
-//! here.
+//! the socket is the driver's, which reads frames, saying when it handed
+//! over every whole frame a read brought (`on_read_drained`), and writes
+//! them when told (`Action`). A client's connections never have a passive
+//! peer, so the passive-peer exemption, which only the multiplexer applies,
+//! is not here.
 //!
 //! The lifecycle: `start` once the TCP connect is done, sending the welcome
 //! and arming the heartbeats; registered at the multiplexer's welcome; then
@@ -118,6 +119,9 @@ pub(crate) struct Conn {
     /// The next write that leaves the queue empty tells the client
     /// (`Core::outgoing_queue_idle`), once.
     notify_when_idle: bool,
+    /// The next time every whole frame read is handed over the client hears
+    /// of it (`Core::read_drained`), once.
+    notify_when_read_drained: bool,
     set_aside: VecDeque<QueueEntry>,
     heartbit: Arc<OutFrame>,
 }
@@ -158,6 +162,7 @@ impl Conn {
             out: Channel::Free,
             write_in_flight: false,
             notify_when_idle: false,
+            notify_when_read_drained: false,
             set_aside: VecDeque::new(),
             heartbit,
         }
@@ -183,6 +188,15 @@ impl Conn {
     /// for a connection with nothing left to write.
     pub(crate) fn notify_when_idle(&mut self) {
         self.notify_when_idle = true;
+    }
+
+    /// The next time the connection handed over every whole frame its
+    /// last read brought and reads its socket again, the client hears of it
+    /// (`Core::read_drained`), once: a client that gathers the
+    /// confirmations it owes over what one read brought. Whether it was not
+    /// asked already, which the client counts.
+    pub(crate) fn notify_when_read_drained(&mut self) -> bool {
+        !std::mem::replace(&mut self.notify_when_read_drained, true)
     }
 
     /// The entry queued last but the connection's own frames, which
@@ -230,6 +244,7 @@ pub(crate) fn heartbit_frame(instance_id: u64) -> Arc<OutFrame> {
         number: 0,
         deadline: None,
         batch: None,
+        confirmed: false,
     })
 }
 
@@ -544,6 +559,23 @@ impl Core {
         self.handle_message(conn, message);
     }
 
+    /// The driver's word that the connection handed over every whole frame
+    /// its last read brought and reads its socket again: a client that
+    /// asked hears of it (`notify_when_read_drained`), once. Nothing for a
+    /// connection that stopped reading meanwhile, as C++'s broken one says
+    /// nothing; and no look-up while no connection asked.
+    pub(crate) fn on_read_drained(&mut self, conn: ConnId) {
+        if self.client.read_drains_wanted == 0 {
+            return;
+        }
+        let Some(state) = self.conns.get_mut(&conn) else { return };
+        if !state.reading || state.shuts_down || !std::mem::take(&mut state.notify_when_read_drained) {
+            return;
+        }
+        self.client.read_drains_wanted -= 1;
+        self.read_drained();
+    }
+
     /// The two message types a connection handles itself: the welcome,
     /// which registers the multiplexer, exactly once and first, and
     /// heartbeats, which have no content.
@@ -622,6 +654,9 @@ impl Core {
         }
         state.shuts_down = true;
         state.set_living(false);
+        if std::mem::take(&mut state.notify_when_read_drained) {
+            self.client.read_drains_wanted -= 1; // its read will not be drained now
+        }
         self.tell_client_gone(conn);
         let Some(state) = self.conns.get_mut(&conn) else { return };
         state.registered = false;

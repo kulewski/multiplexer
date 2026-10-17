@@ -56,9 +56,11 @@ TEST(PlainSendAtExit, APlainSendFromAThreadLocalsDestructorGoesOut) {
   ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, BOUND));
   ThreadedClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  multiplexer::BasicClient::Batching batching;
+  multiplexer::BasicClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 3600;  // the flush lets the batch go
-  sender.set_batching(types::TEST_EVENT, batching);
+  batching.timeout = -1;
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::future<void> sent;
   std::thread thread([&sender, &sent] {
     flushed_at_exit.client = &sender;  // made before the spare body

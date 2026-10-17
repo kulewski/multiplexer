@@ -1,6 +1,6 @@
-// BasicClient's batching: what the program batches, and the batches open.
+// BasicClient's batching: the deliveries set, and the batches open.
 // Internal to basic_client.cc and basic_client_batching.cc, which describes
-// the design; the rules are at BasicClient::set_batching.
+// the design; the rules are at BasicClient::Delivery.
 #ifndef MX_MULTIPLEXER_BATCHING_H_
 #define MX_MULTIPLEXER_BATCHING_H_
 
@@ -30,17 +30,16 @@ struct BatchGroup {
 // One message in a batch: the frame it would have gone as, or, sent as
 // its bytes alone (send_plain, send_bytes), those bytes and its id, with no
 // frame until one is needed (_record_frame); the tracker the program holds
-// when it asked for one, its `done`, its timeout, and, in a batch that
-// waits for a connection with nothing left to write, its deadline from its
-// send (see Batch::waits_for_idle).
+// when it asked for one, and its `done`. Its time is its batch's.
 struct BasicClient::BatchRecord {
   std::shared_ptr<const RawMessage> raw;  // null for bytes alone
   std::string body;                       // the bytes, when `raw` is null
   std::uint64_t id = 0;                   // their message's id
   std::shared_ptr<SendState> state;
   SendCallback done;
-  float timeout = 0;
-  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+  // Its number, for a confirmed send (Delivery::confirm), from when its
+  // first batch became a frame, kept when it goes again; 0 before.
+  std::uint64_t number = 0;
 };
 
 // The buffers of batch frames that were written, for the next batches'
@@ -57,34 +56,39 @@ struct BatchFramePool {
   std::vector<std::string> spare MX_GUARDED_BY(mutex);
 };
 
-// One batch open: its group, what it may hold, and its messages so far.
+// One batch open: its group, how it goes, and its messages so far.
 struct BasicClient::Batch {
   typedef BatchRecord Record;
   std::uint64_t began = 0;  // its place in the order batches began
   BatchGroup group;
-  Batching batching;
+  Delivery delivery;
   std::vector<Record> records;
   std::size_t bytes = 0;  // the messages' serialized forms together: the least the batch's message holds
+  // When what is not written of it, or with `confirm` not confirmed, is
+  // given up on: its timeout (Delivery::timeout) from its first message,
+  // which a batch sent again keeps; max() for none.
+  std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
   // With no delay a batch waits for a connection with nothing left to
-  // write, a wait for room, which its messages' timeouts bound from their
-  // sends: `due` is the earliest of their deadlines, and the batch goes by
-  // it at the latest. With a delay `due` is when the delay is over, and a
-  // message's time in the batch is the batching's, its timeout counting
-  // from when the batch goes. max() for no time at all.
+  // write, a wait for room, which its deadline bounds: `due` is the
+  // deadline, and the batch goes by it at the latest. With a delay `due` is
+  // when the delay is over. max() for no time at all.
   bool waits_for_idle = false;
   std::chrono::steady_clock::time_point due = std::chrono::steady_clock::time_point::max();
   bool closed = false;
+  // A confirmed batch's messages sent again: the back-off their batch had
+  // reached after DELIVERY_ERRORs (Confirming::backoff), which goes on.
+  float backoff = 0;
 };
 
 struct BasicClient::Batcher {
   explicit Batcher(asio::io_service& io_service) : timer(io_service) {}
 
-  // What set_batching() set: per type, and per key of a type, a message's
+  // What set_delivery() set: per type, and per key of a type, a message's
   // key looked up as it is, never copied for the look-up.
-  std::unordered_map<std::uint32_t, Batching> by_type;
-  std::unordered_map<std::uint32_t, std::map<std::string, Batching>> by_key;
+  std::unordered_map<std::uint32_t, Delivery> by_type;
+  std::unordered_map<std::uint32_t, std::map<std::string, Delivery>> by_key;
   bool configured() const { return !by_type.empty() || !by_key.empty(); }
-  // Where a frame made of bytes is read (_batching_for): one message,
+  // Where a frame made of bytes is read (_delivery_for): one message,
   // reused, keeps its strings' room from one read to the next, which a new
   // one would allocate each time, a third of the read.
   MultiplexerMessage scratch;

@@ -50,7 +50,7 @@ pub const MAX_KEY_SIZE: usize = 256;
 /// See [`MAX_KEY_SIZE`].
 pub const MAX_KEY_PATTERN_SIZE: usize = 1024;
 
-/// A client's batching (BasicClient::set_batching), what a batch holds at
+/// A client's batching (BasicClient::Delivery::batch), what a batch holds at
 /// most unless told otherwise before it goes: messages, and bytes of the
 /// batch's own message, its envelope and every message inside included, as
 /// it goes on the wire.
@@ -64,6 +64,17 @@ pub const DEFAULT_BATCH_MAX_BYTES: usize = 1024 * 1024;
 /// batch that holds more, whole, so that what one frame becomes in a
 /// receiver stays a queue's worth (DEFAULT_INCOMING_QUEUE_MAX_SIZE) at most.
 pub const MAX_BATCH_RECORDS: usize = 1024;
+
+/// A client's confirmed sends (BasicClient::Delivery::confirm): seconds a batch
+/// waits, from its write or from the last confirmation of one of its
+/// messages, before those of its messages that nothing confirmed go again.
+pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// How many confirmations a consumer's library gathers for one producer at
+/// most before it sends them, though the program still has messages in
+/// hand: a consumer that never runs out of messages tells its producers of
+/// its progress every this many.
+pub const CONFIRMATIONS_GATHERED_MAX: usize = 256;
 
 /// Seconds of silence before a side sends a HEARTBIT.
 pub const HEARTBIT_INTERVAL: Duration = Duration::from_secs(3);

@@ -86,14 +86,26 @@ void ThreadedClient::forget_finished_ids() { core_->forget_finished_ids(); }
 std::uint64_t ThreadedClient::retries() { return core_->retries(); }
 std::size_t ThreadedClient::waiting_queries() { return core_->waiting_queries(); }
 std::size_t ThreadedClient::waiting_messages() { return core_->waiting_messages(); }
-void ThreadedClient::set_batching(std::uint32_t type, const Batching& batching) {
-  core_->set_batching(type, nullptr, batching);
+void ThreadedClient::confirm_after_on_message(bool confirm) { core_->confirm_after_on_message(confirm); }
+void ThreadedClient::confirm(const MultiplexerMessage& message, Confirmed outcome) {
+  if (message.has_confirmation()) {
+    core_->confirm(message.sender(), message.confirmation(), outcome);
+  }
 }
-void ThreadedClient::set_batching(std::uint32_t type, const std::string& key, const Batching& batching) {
-  core_->set_batching(type, &key, batching);
+void ThreadedClient::confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome) {
+  core_->confirm(sender, number, outcome);
 }
-void ThreadedClient::clear_batching(std::uint32_t type) { core_->clear_batching(type, nullptr); }
-void ThreadedClient::clear_batching(std::uint32_t type, const std::string& key) { core_->clear_batching(type, &key); }
+std::size_t ThreadedClient::unconfirmed() { return core_->unconfirmed(); }
+std::uint64_t ThreadedClient::sent_again() { return core_->sent_again(); }
+std::size_t ThreadedClient::confirmations_owed() { return core_->confirmations_owed(); }
+void ThreadedClient::set_delivery(std::uint32_t type, const Delivery& delivery) {
+  core_->set_delivery(type, nullptr, delivery);
+}
+void ThreadedClient::set_delivery(std::uint32_t type, const std::string& key, const Delivery& delivery) {
+  core_->set_delivery(type, &key, delivery);
+}
+void ThreadedClient::clear_delivery(std::uint32_t type) { core_->clear_delivery(type, nullptr); }
+void ThreadedClient::clear_delivery(std::uint32_t type, const std::string& key) { core_->clear_delivery(type, &key); }
 void ThreadedClient::send(const MultiplexerMessage& msg) { core_->send(msg); }
 void ThreadedClient::send(const MultiplexerMessage& msg, LanePtr lane, SendCallback done) {
   core_->send(msg, lane, done);
@@ -456,6 +468,27 @@ std::size_t ThreadedClient::Core::waiting_messages() {
   });
 }
 
+std::size_t ThreadedClient::Core::unconfirmed() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->unconfirmed();
+  });
+}
+
+std::uint64_t ThreadedClient::Core::sent_again() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->sent_again();
+  });
+}
+
+std::size_t ThreadedClient::Core::confirmations_owed() {
+  return _call([&] {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return basic_client_->confirmations_owed();
+  });
+}
+
 std::uint64_t ThreadedClient::Core::retries() {
   return _call([&] {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -475,27 +508,27 @@ void ThreadedClient::Core::set_key_filters(const BasicClient::KeyFilters& filter
   });
 }
 
-void ThreadedClient::Core::set_batching(std::uint32_t type, const std::string* key,
-                                        const BasicClient::Batching& batching) {
+void ThreadedClient::Core::set_delivery(std::uint32_t type, const std::string* key,
+                                        const BasicClient::Delivery& delivery) {
   basic_client_->check_not_orphaned();
-  BasicClient::check_batching(type, key, batching);  // here, where the caller hears of a refusal
-  batching_.store(true, std::memory_order_relaxed);  // frames are marked for it from now on (_stamped)
+  BasicClient::check_delivery(type, key, delivery);      // here, where the caller hears of a refusal
+  delivery_set_.store(true, std::memory_order_relaxed);  // frames are marked for it from now on (_stamped)
   const bool keyed = key != nullptr;
   const std::string one = keyed ? *key : std::string();
-  _post_unless_stopped([this, type, keyed, one, batching] {  // after shutdown(), nothing
+  _post_unless_stopped([this, type, keyed, one, delivery] {  // after shutdown(), nothing
     MX_DCHECK_RUN_ON(&io_thread_);
     if (shut_down_) {
       return;
     }
     if (keyed) {
-      basic_client_->set_batching(type, one, batching);
+      basic_client_->set_delivery(type, one, delivery);
     } else {
-      basic_client_->set_batching(type, batching);
+      basic_client_->set_delivery(type, delivery);
     }
   });
 }
 
-void ThreadedClient::Core::clear_batching(std::uint32_t type, const std::string* key) {
+void ThreadedClient::Core::clear_delivery(std::uint32_t type, const std::string* key) {
   basic_client_->check_not_orphaned();
   const bool keyed = key != nullptr;
   const std::string one = keyed ? *key : std::string();
@@ -505,9 +538,9 @@ void ThreadedClient::Core::clear_batching(std::uint32_t type, const std::string*
       return;
     }
     if (keyed) {
-      basic_client_->clear_batching(type, one);
+      basic_client_->clear_delivery(type, one);
     } else {
-      basic_client_->clear_batching(type);
+      basic_client_->clear_delivery(type);
     }
   });
 }

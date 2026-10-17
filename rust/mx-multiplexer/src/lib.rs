@@ -43,8 +43,9 @@ mod test_log;
 mod threaded_client;
 mod xxh3;
 
-pub use crate::core::batching::Batching;
+pub use crate::core::batching::Delivery;
 pub use crate::core::client::DropReason;
+pub use crate::core::confirming::Confirmed;
 /// The type of a payload, `Message::payload`: reference-counted bytes, a
 /// received payload a slice of its frame. Re-exported so that a program
 /// names it without depending on the crate `bytes` itself.

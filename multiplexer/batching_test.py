@@ -1,6 +1,6 @@
 """Batching from Python, against a real multiplexer: the events SyncClient,
 ThreadedClient and AsyncClient send without flush, of a type or key given
-to set_batching(), go several in one message, and a receiver of each class
+to set_delivery() with batch=True, go several in one message, and a receiver of each class
 gets them back one at a time, in order, with the ids and payloads they were
 sent with. A raw peer (RawPeer) reads what went on the wire: a batch is one
 message of the events' type and key, their serialized forms in
@@ -85,7 +85,7 @@ class BatchingTest(unittest.TestCase):
         payloads = [b"%d" % number for number in range(5)]
         written: list[int] = []
         with SyncClient(self.cluster.endpoints, type=peers.TEST_EVENT_CLIENT) as client:
-            client.set_batching(EVENT, max_delay=HOUR)
+            client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
             ids = [client.send_message(payload, type=EVENT, callback=written.append) for payload in payloads]
             self.assertEqual([], written, "nothing went before the flush")
             self.assertTrue(client.flush_all(timeout=BOUND))
@@ -97,21 +97,21 @@ class BatchingTest(unittest.TestCase):
         hands it, and flush_all() lets the batch go."""
         payloads = [b"%d" % number for number in range(5)]
         with ThreadedClient(self.cluster.endpoints, peers.TEST_EVENT_CLIENT) as client:
-            client.set_batching(EVENT, max_delay=HOUR)
+            client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
             ids = [client.send_message(payload, type=EVENT) for payload in payloads]
             self.assertTrue(client.flush_all(BOUND))
         self.assert_batch(ids, payloads)
 
     def test_an_async_clients_batch_goes_at_a_flush(self) -> None:
         """As a ThreadedClient's, through the AsyncClient's calls, whose
-        set_batching() checks its settings as the others do."""
+        set_delivery() checks its settings as the others do."""
         payloads = [b"%d" % number for number in range(5)]
 
         async def send() -> list[int]:
             async with await AsyncClient.create(self.cluster.endpoints, peers.TEST_EVENT_CLIENT) as client:
                 with self.assertRaises(ValueError):
-                    client.set_batching(EVENT, max_records=0)
-                client.set_batching(EVENT, max_delay=HOUR)
+                    client.set_delivery(EVENT, batch=True, max_records=0)
+                client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
                 ids = [await client.send_message(payload, type=EVENT) for payload in payloads]
                 self.assertTrue(await client.flush_all(BOUND))
                 return ids
@@ -123,7 +123,7 @@ class BatchingTest(unittest.TestCase):
         before the "b" sent after it, and a flushing send of "a" goes on its
         own, after."""
         with SyncClient(self.cluster.endpoints, type=peers.TEST_EVENT_CLIENT) as client:
-            client.set_batching(EVENT, "a", max_delay=HOUR)
+            client.set_delivery(EVENT, "a", batch=True, max_delay=HOUR, timeout=-1)
             batched = [client.send_message(b"a%d" % number, type=EVENT, key="a") for number in range(3)]
             other = client.send_message(b"b", type=EVENT, key="b")
             flushed = client.send_message(b"a-flushed", type=EVENT, key="a", flush=True)
@@ -149,7 +149,7 @@ class BatchingTest(unittest.TestCase):
                     stream = async_receiver.messages()
                     self.cluster.wait_for_peer(peers.TEST_EVENT_BACKEND, count=4)  # the raw peer and these
                     with SyncClient(endpoints, type=peers.TEST_EVENT_CLIENT) as sender:
-                        sender.set_batching(EVENT, max_delay=HOUR)
+                        sender.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
                         ids = [sender.send_message(payload, type=EVENT) for payload in payloads]
                         self.assertTrue(sender.flush_all(timeout=BOUND))
                         sender_id = sender.instance_id
@@ -178,7 +178,7 @@ class BatchingTest(unittest.TestCase):
         client = SyncClient(
             [], type=peers.TEST_EVENT_CLIENT, on_drop=lambda message_id, reason: told.append((message_id, reason))
         )
-        client.set_batching(EVENT, max_delay=HOUR)
+        client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
         ids = [client.send_message(b"%d" % number, type=EVENT, callback=written.append) for number in range(3)]
         self.assertFalse(client.flush_all(timeout=0))
         self.assertEqual(1, client.held_for_a_connection(), "one batch, held")
@@ -188,18 +188,16 @@ class BatchingTest(unittest.TestCase):
         self.assertEqual([0, 0, 0], written)
         self.assertEqual(3, client.dropped)
 
-    def test_a_send_with_no_time_to_wait_goes_alone(self) -> None:
-        """timeout=0 waits for nothing: such a send goes alone, the batch
-        before it first, where in the batch it left the batch no time."""
+    def test_a_sends_own_timeout_is_not_used(self) -> None:
+        """The time is the batch's: a send with timeout=0 joins the batch
+        as any other does."""
         with SyncClient(self.cluster.endpoints, type=peers.TEST_EVENT_CLIENT) as client:
-            client.set_batching(EVENT, max_delay=HOUR)
+            client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
             first = client.send_message(b"first", type=EVENT)
             now = client.send_message(b"now", type=EVENT, timeout=0)
             last = client.send_message(b"last", type=EVENT)
             self.assertTrue(client.flush_all(timeout=BOUND))
-        self.assert_alone(first)
-        self.assert_alone(now)
-        self.assert_alone(last)
+        self.assert_batch([first, now, last], [b"first", b"now", b"last"])
 
     def test_no_callback_runs_while_a_collected_client_goes(self) -> None:
         """A client collected with a batch open lets its batch go, as its
@@ -208,7 +206,7 @@ class BatchingTest(unittest.TestCase):
         client is being destroyed."""
         heard: list[int] = []
         client = SyncClient(self.cluster.endpoints, type=peers.TEST_EVENT_CLIENT)
-        client.set_batching(EVENT, max_delay=HOUR)
+        client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
         sent = client.send_message(b"collected", type=EVENT, callback=heard.append)
         del client
         gc.collect()
@@ -224,13 +222,13 @@ class BatchingTest(unittest.TestCase):
         arrived: queue.Queue[MultiplexerMessage] = queue.Queue()
         with Cluster(1, rules=RULES) as cluster:  # no event backend: nobody takes TEST_EVENT
             with SyncClient(cluster.endpoints, type=peers.TEST_EVENT_CLIENT) as client:
-                client.set_batching(EVENT, max_records=3, max_delay=HOUR)
+                client.set_delivery(EVENT, batch=True, max_records=3, max_delay=HOUR, timeout=-1)
                 sync_ids = [
                     client.send_message(b"%d" % number, type=EVENT, workflow="flow %d" % number) for number in range(3)
                 ]
                 sync_errors = [client.read_message(timeout=BOUND) for _ in sync_ids]
             with ThreadedClient(cluster.endpoints, peers.TEST_EVENT_CLIENT, on_message=arrived.put) as threaded:
-                threaded.set_batching(EVENT, max_records=3, max_delay=HOUR)
+                threaded.set_delivery(EVENT, batch=True, max_records=3, max_delay=HOUR, timeout=-1)
                 threaded_ids = [
                     threaded.send_message(b"%d" % number, type=EVENT, workflow="flow %d" % number)
                     for number in range(3)
@@ -260,7 +258,7 @@ class BatchingTest(unittest.TestCase):
             self.addCleanup(wire.close)
             wire.handshake()
             with SyncClient(cluster.endpoints, type=peers.TEST_EVENT_CLIENT) as client:
-                client.set_batching(EVENT, max_delay=HOUR)
+                client.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
                 ids = [client.send_message(b"%d" % number, type=EVENT, key="k") for number in range(3)]
                 self.assertTrue(client.flush_all(timeout=BOUND))
             envelope = wire.receive_type(EVENT)
@@ -287,9 +285,10 @@ class BatchingTest(unittest.TestCase):
 
     def test_the_settings_are_checked(self) -> None:
         """A protocol type, a key over MAX_KEY_SIZE, no record or byte in a
-        batch, more than MAX_MESSAGE_SIZE, and a delay negative, over
-        MAX_SECONDS or not finite are a ValueError, in each class, where
-        they are given."""
+        batch, more than MAX_MESSAGE_SIZE, a delay negative, over
+        MAX_SECONDS or not finite, and a timeout NaN or 0 or more but not
+        over the delay are a ValueError, in each class, where they are
+        given."""
         refused: list[tuple[int, str | None, dict[str, float]]] = [
             (types.DELIVERY_ERROR, None, {}),
             (EVENT, "k" * (MAX_KEY_SIZE + 1), {}),
@@ -302,6 +301,10 @@ class BatchingTest(unittest.TestCase):
             (EVENT, None, {"max_delay": MAX_SECONDS * 2}),
             (EVENT, None, {"max_delay": math.inf}),
             (EVENT, None, {"max_delay": math.nan}),
+            (EVENT, None, {"timeout": math.nan}),
+            (EVENT, None, {"timeout": 0.0}),
+            (EVENT, None, {"max_delay": 1.0, "timeout": 0.5}),
+            (EVENT, None, {"max_delay": 1.0, "timeout": 1.0}),
         ]
         with (
             SyncClient([], type=peers.TEST_EVENT_CLIENT) as sync_client,
@@ -311,9 +314,9 @@ class BatchingTest(unittest.TestCase):
                 for type_, key, settings in refused:
                     with self.subTest(client=type(client).__name__, type=type_, key=key, **settings):
                         with self.assertRaises(ValueError):
-                            client.set_batching(type_, key, **settings)  # type: ignore[arg-type]
-                client.set_batching(EVENT, "k" * MAX_KEY_SIZE, max_bytes=MAX_MESSAGE_SIZE)
-                client.clear_batching(EVENT)
+                            client.set_delivery(type_, key, batch=True, **settings)  # type: ignore[arg-type]
+                client.set_delivery(EVENT, "k" * MAX_KEY_SIZE, batch=True, max_bytes=MAX_MESSAGE_SIZE)
+                client.clear_delivery(EVENT)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ LIB_SRCS := \
   multiplexer/backend/base_threaded_multiplexer_server.cc \
   multiplexer/basic_client.cc \
   multiplexer/basic_client_batching.cc \
+  multiplexer/basic_client_confirm.cc \
   multiplexer/basic_client_connect.cc \
   multiplexer/basic_client_plain.cc \
   multiplexer/basic_client_routing.cc \
@@ -123,6 +124,7 @@ HEADERS := \
   multiplexer/batching.h \
   multiplexer/client.h \
   multiplexer/config.h \
+  multiplexer/confirming.h \
   multiplexer/connections_manager.h \
   multiplexer/constants_writer.h \
   multiplexer/defaults.h \
@@ -209,6 +211,7 @@ CC_TEST_SRCS := \
   multiplexer/client_moves_test.cc \
   multiplexer/client_names_test.cc \
   multiplexer/close_on_exec_test.cc \
+  multiplexer/confirmed_sends_test.cc \
   multiplexer/connect_again_test.cc \
   multiplexer/connect_by_name_test.cc \
   multiplexer/connect_deadline_test.cc \
@@ -262,6 +265,7 @@ PY_TEST_FILES := \
   multiplexer/batching_test.py \
   multiplexer/callback_errors_test.py \
   multiplexer/client_names_test.py \
+  multiplexer/confirmed_sends_test.py \
   multiplexer/connect_again_test.py \
   multiplexer/connect_by_name_test.py \
   multiplexer/direct_request_test.py \

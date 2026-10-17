@@ -49,6 +49,11 @@ struct DefaultConnectionsManagerTraits {
   // manager, through outgoing_queue_idle(), that it has nothing left to
   // write: for a client whose batches wait for that.
   static constexpr bool REPORTS_IDLE = false;
+  // Whether a connection asked to (Connection::notify_when_read_drained)
+  // tells its manager, through read_drained(), that it handed over every
+  // whole frame it had read and reads its socket again: for a client that
+  // gathers the confirmations it owes over what one read brought.
+  static constexpr bool REPORTS_READ_DRAINED = false;
   // Whether the manager counts and logs the messages a connection that
   // ends leaves to it and it cannot place (the client, which reports every
   // drop in one place), so that the connection does not log them as well.

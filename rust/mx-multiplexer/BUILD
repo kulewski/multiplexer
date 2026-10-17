@@ -58,6 +58,7 @@ rust_test(
     )
     for test in [
         "allocations",
+        "confirmed_sends",
         "fork",
         "servers",
         "soak",

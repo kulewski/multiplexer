@@ -288,6 +288,30 @@ impl FrameReader {
         next
     }
 
+    /// Whether `next` gives a frame without a read: the buffer holds the
+    /// next frame whole, one too big for it, which reads go into its own,
+    /// or a header that ends the connection (C++
+    /// Connection::_next_frame_held). False when it holds nothing whole: a
+    /// read is made for more, every whole frame of the last one handed
+    /// over.
+    pub(crate) fn holds_next(&self) -> bool {
+        if self.broken {
+            return false;
+        }
+        if let Some(large) = &self.large {
+            return large.filled == large.body.len();
+        }
+        let available = self.end - self.start;
+        if available < HEADER_LENGTH {
+            return false;
+        }
+        let mut length = [0u8; 4]; // the header's first half, all a look needs
+        length.copy_from_slice(&self.buffer[self.start..self.start + 4]);
+        let length = u32::from_le_bytes(length) as usize;
+        let whole = HEADER_LENGTH + length;
+        length == 0 || available >= whole || whole > self.buffer.len()
+    }
+
     /// `next`, before an error breaks the reader.
     fn take(&mut self) -> Next {
         if let Some(large) = &self.large {

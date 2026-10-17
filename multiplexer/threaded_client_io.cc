@@ -92,10 +92,10 @@ ThreadedClient::SendCallback settle(std::shared_ptr<std::promise<unsigned int>> 
 }  // namespace
 
 // A caller's whole message framed, its empty id and sender filled
-// (frame_stamped), marked for batching once anything was batched: a frame
-// made before a set_batching() reached the io thread is read there.
+// (frame_stamped), marked for a delivery once one was set: a frame made
+// before a set_delivery() reached the io thread is read there.
 std::shared_ptr<const RawMessage> ThreadedClient::Core::_stamped(const MultiplexerMessage& msg) {
-  return frame_stamped(msg, instance_id_, [this] { return random64(); }, batching_.load(std::memory_order_relaxed));
+  return frame_stamped(msg, instance_id_, [this] { return random64(); }, delivery_set_.load(std::memory_order_relaxed));
 }
 
 void ThreadedClient::Core::send(const MultiplexerMessage& msg) { send(msg, LanePtr(), SendCallback()); }
@@ -104,9 +104,9 @@ void ThreadedClient::Core::send(const MultiplexerMessage& msg, LanePtr lane, Sen
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // a pinned lane whose connection is gone; the Python client raises it too
   }
-  // A plain event nobody follows, while something is batched, goes as its
+  // A plain event nobody follows, while a delivery is set, goes as its
   // bytes (threaded_client_inbox.cc); after shutdown() as any send does.
-  if (!lane && !done && batching_.load(std::memory_order_relaxed) && RawMessage::plain_event(msg) &&
+  if (!lane && !done && delivery_set_.load(std::memory_order_relaxed) && RawMessage::plain_event(msg) &&
       _send_plain(msg, DEFAULT_TIMEOUT)) {
     return;
   }
@@ -157,15 +157,15 @@ void ThreadedClient::Core::send_serialized(std::string serialized, std::uint64_t
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // as send() does
   }
-  // Bytes nobody follows, while something is batched, go as they are,
-  // read on the io thread (threaded_client_inbox.cc).
-  if (!lane && !done && batching_.load(std::memory_order_relaxed) &&
+  // Bytes nobody follows, while a delivery is set, go as they are, read on
+  // the io thread (threaded_client_inbox.cc).
+  if (!lane && !done && delivery_set_.load(std::memory_order_relaxed) &&
       _send_plain_bytes(&serialized, id, type, timeout)) {
     return;
   }
-  // Once anything is batched, a frame that may go in a batch is made
+  // Once a delivery is set, a frame that may go in a batch is made
   // unsealed, its checksum computed on the io thread only if it goes alone.
-  RawMessage* raw = !lane && batching_.load(std::memory_order_relaxed)
+  RawMessage* raw = !lane && delivery_set_.load(std::memory_order_relaxed)
                         ? new RawMessage(RawMessage::Unsealed(), &serialized, id, type)
                         : new RawMessage(&serialized, id, type);
   _submit_send(std::shared_ptr<const RawMessage>(raw), false, false, timeout, done, lane);
@@ -298,7 +298,7 @@ void ThreadedClient::Core::_place(const PendingSendPtr& pending) {
     };
   }
   const float timeout = left_until(pending->deadline) + (pending->wait ? ROOM_GRACE_SECONDS : 0.0f);
-  // A send nobody waits for may go in a batch (BasicClient::set_batching).
+  // A send nobody waits for goes by its type's delivery (BasicClient::set_delivery).
   const bool may_batch = !pending->wait && !pending->flushed;
   if (!basic_client_->send(pending->raw, pending->all, pending->lane, timeout, pending->number, NULL, NULL, followed,
                            may_batch)) {
@@ -559,14 +559,36 @@ void ThreadedClient::Core::_on_unmatched(const IncomingMessage& incoming) {
     }
     return;
   }
+  // A message of a confirmed batch is confirmed once on_message returned
+  // from it, FAILED when it threw or when there is none to take it, unless
+  // the program confirms its messages itself (confirm_after_on_message) or
+  // on_message confirmed this one; what the client owes goes once the
+  // batch was handed out (BasicClient::_split_batch).
+  const bool confirm = msg.has_confirmation() && confirm_after_on_message_.load(std::memory_order_relaxed);
   if (on_message_) {
+    bool threw = true;
+    if (confirm) {
+      handling_sender_ = msg.sender();
+      handling_number_ = msg.confirmation();
+      handled_confirmed_ = false;
+    }
     _guarded(
         [&] {
           MX_DCHECK_RUN_ON(&io_thread_);
           on_message_(incoming);
+          threw = false;
         },
         [&] { return "on_message, for " + describe(msg); });
+    if (confirm) {
+      handling_number_ = 0;
+      if (!handled_confirmed_) {
+        basic_client_->confirm(msg.sender(), msg.confirmation(), threw ? Confirmed::FAILED : Confirmed::PROCESSED);
+      }
+    }
     return;
+  }
+  if (confirm) {
+    basic_client_->confirm(msg.sender(), msg.confirmation(), Confirmed::FAILED);
   }
   if (basic_client_->drop_lines().first({BasicClient::NO_ON_MESSAGE, WARNING, msg.type(), 0}, [&] {
         return "messages of type " + repr(msg.type()) + " dropped: this client has no on_message callback";

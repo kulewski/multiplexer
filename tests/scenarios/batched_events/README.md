@@ -20,7 +20,7 @@ sequenceDiagram
     participant M as multiplexer
     participant W as raw peer
     participant B as event backend
-    Note over C: set_batching(TEST_EVENT), four a batch, a delay of an hour
+    Note over C: set_delivery(TEST_EVENT, batch), four a batch, a delay of an hour
     C->>M: event0 to event3 in one message, its batch holding four
     M->>W: the batch, as it went
     M->>B: the batch

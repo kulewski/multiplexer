@@ -699,6 +699,7 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     case RECORDING_RECORD:
     case RULES_STATUS:
     case PEER_STATUS:
+    case types::CONFIRMATION:
       // Only meaningful with a `to` field, which was handled before this:
       // without one nobody could receive it, which its sender is told, as
       // for a type of the rules file with no rule.

@@ -15,9 +15,16 @@
 //! runs the loop when their time comes.
 //!
 //! A send nobody follows, `queue()` without `on_end`, a lane or `all()`, of
-//! a plain event of a type or key it batches goes to the batching as bytes
-//! (`core::plain`), serialized into a body an earlier batch handed back,
-//! with no frame of its own.
+//! a plain event of a type or key with a delivery set goes to the batching
+//! as bytes (`core::plain`), serialized into a body an earlier batch handed
+//! back, with no frame of its own.
+//!
+//! Confirmed sends (docs/delivery.md): a message received from a confirmed
+//! batch carries its number, and the program confirms it, `processed()`,
+//! once it is done with it; what the client owes goes once it has no
+//! message left for the program, as a receive or a query waits, and at a
+//! flush and the shutdown. As a producer it hears confirmations, and sends
+//! again, inside its calls.
 //!
 //! A `SyncClient` belongs to one thread at a time: it is `Send`, not
 //! `Sync`. One this process inherited across a fork fails every call with
@@ -30,8 +37,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
-use crate::core::batching::{plain_event, Batching};
+use crate::core::batching::{plain_event, Delivery};
 use crate::core::client::{target_of, DropReason, IncomingMode};
+use crate::core::confirming::Confirmed;
 use crate::core::outbox::{Frame, SendDone};
 use crate::core::query::{check_size_sent_again, Outcome, QueryId};
 use crate::core::{deadline_after, SendState, Tracker};
@@ -424,6 +432,7 @@ impl SyncClient {
             if end_on_acknowledgement && self.engine().core.take_acknowledged_wake() {
                 return Ok(Waited::Nothing);
             }
+            self.send_confirmations(); // the program has nothing more in hand
             if passed(until) {
                 break;
             }
@@ -442,10 +451,19 @@ impl SyncClient {
         }
     }
 
+    /// What this client owes its producers, sent now, when it owes any.
+    fn send_confirmations(&mut self) {
+        if self.engine_ref().core.confirmations_owed() != 0 {
+            self.engine().call(|core| core.send_confirmations());
+        }
+    }
+
     /// Runs the loop until everything sent before the call is written or
-    /// given up on, its sends' callbacks run, or `timeout` passes: true when
-    /// every one was written. False at once when something waits and no
-    /// connection is live or coming.
+    /// given up on, a confirmed send confirmed (`Delivery::confirm`), its
+    /// sends' callbacks run, or `timeout` passes: true when every one was
+    /// written, or confirmed. False at once when something waits and no
+    /// connection is live or coming. What this client owes its producers
+    /// goes first.
     pub fn flush_all(&mut self, timeout: Option<Duration>) -> Result<bool> {
         self.check()?;
         Ok(self.flush_all_unchecked(timeout))
@@ -511,33 +529,84 @@ impl SyncClient {
         self.engine().call(|core| core.set_key_filters(filters, Some(Box::new(on_acknowledged))))
     }
 
-    /// Batching (docs/batching.md): the events of `r#type`, each key
-    /// apart, or, given `key`, of that key, ahead of what is set for its
-    /// type, that `queue()` sends through no lane and not to ALL, go several
-    /// in one message, which the receiving library splits back into one
-    /// message each. A batch goes once it holds `max_records` messages,
-    /// once one more would take it past `max_bytes` on the wire, or
-    /// `max_delay` after its first message; with no delay, once a
-    /// connection has nothing left to write. This client writes only inside
-    /// its calls, so give it a delay: without one, messages gather only
-    /// while the socket is full. A flush, a send that does not batch,
-    /// another change of what is batched and the shutdown first let every
-    /// batch go. `InvalidArgument` for a protocol message type, a key over
-    /// MAX_KEY_SIZE, no message in a batch or more than MAX_BATCH_RECORDS,
-    /// no byte or more than MAX_MESSAGE_SIZE, or a delay over MAX_SECONDS.
-    pub fn set_batching(&mut self, r#type: u32, key: Option<&str>, batching: Batching) -> Result<()> {
+    /// How the events of `r#type`, each key apart, or, given `key`, of that
+    /// key, ahead of what is set for its type, that `queue()` sends through
+    /// no lane and not to ALL go (`Delivery`, docs/delivery.md): with
+    /// `batch` several in one message, which the receiving library splits
+    /// back into one message each; with `confirm` each kept until its
+    /// consumer confirms it, its `on_end` and a flush waiting for that; with
+    /// neither as any send. `timeout` is a batch's, a message alone being a
+    /// batch of one, from its first message, the sends' own not used. A
+    /// batch goes once it holds `max_records` messages, once one more would
+    /// take it past `max_bytes` on the wire, or `max_delay` after its first
+    /// message; with no delay, once a connection has nothing left to write.
+    /// This client writes only inside its calls, so give it a delay:
+    /// without one, messages gather only while the socket is full. A flush,
+    /// a send that does not batch, another change of what is set and the
+    /// shutdown first let every batch go. This client hears confirmations,
+    /// and sends again, inside its calls. `InvalidArgument` for a protocol
+    /// message type, a key over MAX_KEY_SIZE, no message in a batch or more
+    /// than MAX_BATCH_RECORDS, no byte or more than MAX_MESSAGE_SIZE, a
+    /// delay over MAX_SECONDS, with `confirm` a retry_after of zero or over
+    /// MAX_SECONDS, or a timeout not longer than the delay with `batch`, or
+    /// zero without it.
+    pub fn set_delivery(&mut self, r#type: u32, key: Option<&str>, delivery: Delivery) -> Result<()> {
         self.check()?;
         self.poll_before_batches_go();
-        self.engine().call(|core| core.set_batching(r#type, key, batching))
+        self.engine().call(|core| core.set_delivery(r#type, key, delivery))
     }
 
-    /// No batching from now on for `r#type`, its keys' settings included,
-    /// or, given `key`, for that key, which then batches as its type says;
-    /// every batch goes first.
-    pub fn clear_batching(&mut self, r#type: u32, key: Option<&str>) -> Result<()> {
+    /// Tells the producer of `message`, a message of a confirmed batch
+    /// (`Message::confirmation`), what became of it: `Processed` once the
+    /// program is done with it, `Failed` when it can never process it, its
+    /// producer giving up on it, `Refused` to have its producer send it
+    /// again. What this client owes goes in one message per producer once
+    /// it has no message left for the program, as a receive or a query
+    /// waits, at a flush, at CONFIRMATIONS_GATHERED_MAX owed and at the
+    /// shutdown. Nothing for a message with no number, nor in a forked
+    /// child, its producer sending it again in time.
+    pub fn confirm(&mut self, message: &Message, outcome: Confirmed) {
+        if let Some(number) = message.confirmation {
+            self.confirm_number(message.sender, number, outcome);
+        }
+    }
+
+    /// `confirm(message, Confirmed::Processed)`.
+    pub fn processed(&mut self, message: &Message) {
+        self.confirm(message, Confirmed::Processed);
+    }
+
+    /// `confirm()` by the message's sender and number: what the plain
+    /// server confirms its messages with.
+    pub(crate) fn confirm_number(&mut self, sender: u64, number: u64, outcome: Confirmed) {
+        if !self.orphaned() {
+            self.engine().core.confirm(sender, number, outcome);
+        }
+    }
+
+    /// How many messages this client sent wait for their confirmation; for
+    /// tests.
+    pub fn unconfirmed(&self) -> usize {
+        self.engine_ref().core.unconfirmed()
+    }
+
+    /// How many messages this client sent again, unconfirmed; for tests.
+    pub fn sent_again(&self) -> u64 {
+        self.engine_ref().core.sent_again()
+    }
+
+    /// How many confirmations this client owes producers; for tests.
+    pub fn confirmations_owed(&self) -> usize {
+        self.engine_ref().core.confirmations_owed()
+    }
+
+    /// No delivery set from now on for `r#type`, its keys' settings
+    /// included, its messages going as any send does, or, given `key`, for
+    /// that key, which then goes as its type says; every batch goes first.
+    pub fn clear_delivery(&mut self, r#type: u32, key: Option<&str>) -> Result<()> {
         self.check()?;
         self.poll_before_batches_go();
-        self.engine().call(|core| core.clear_batching(r#type, key));
+        self.engine().call(|core| core.clear_delivery(r#type, key));
         Ok(())
     }
 
@@ -669,7 +738,7 @@ impl SyncClient {
             }
         };
         drop(encoded);
-        if self.engine_ref().core.plain_needs_loop(&plain, timeout, Instant::now()) {
+        if self.engine_ref().core.plain_needs_loop(&plain, Instant::now()) {
             self.engine().poll();
         }
         if !self.engine().call(|core| core.send_plain(plain, timeout, 0)) {
@@ -786,6 +855,7 @@ impl SyncQuery<'_> {
                 return Ok(reply);
             }
             client.drop_unexpected(query);
+            client.send_confirmations(); // the program has nothing more in hand
             let core = &client.engine_ref().core;
             // Nothing could write a stage's message: NotConnected now, where a
             // wait with nothing coming would last the whole stage.
@@ -857,7 +927,8 @@ impl SyncSend<'_> {
     }
 
     /// How long the message may wait for room or for a connection; for a
-    /// flushing send, how long the call waits.
+    /// flushing send, how long the call waits. Not used by a send that goes
+    /// by a delivery (`SyncClient::set_delivery`), which has its own.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -870,8 +941,9 @@ impl SyncSend<'_> {
     }
 
     /// `on_end` hears how the message ended, once, inside a later call that
-    /// runs the loop: true once it was written, the first copy for ALL,
-    /// false once it was given up on or the client shut down first.
+    /// runs the loop: true once it was written, the first copy for ALL, or,
+    /// a confirmed send's (`Delivery::confirm`), once its consumer confirmed
+    /// it; false once it was given up on or the client shut down first.
     pub fn on_end(mut self, on_end: impl FnOnce(bool) + Send + 'static) -> Self {
         self.on_end = Some(Box::new(on_end));
         self
@@ -879,7 +951,9 @@ impl SyncSend<'_> {
 
     /// Sends the message and returns its id at once: it is queued on a
     /// connection, waits for room, or, with none live, is held until one
-    /// comes up, the timeout at most, and is written as the loop runs.
+    /// comes up, the timeout at most, and is written as the loop runs; a
+    /// plain event through no lane and not to ALL goes by the delivery set
+    /// for its type or key, if any (`SyncClient::set_delivery`).
     /// `NotConnected` for a pinned lane whose connection is gone, or after
     /// `shutdown()`; `TooLarge` before anything is queued.
     pub fn queue(self) -> Result<u64> {
@@ -891,26 +965,26 @@ impl SyncSend<'_> {
         }
         let core = &client.engine_ref().core;
         let encoded = stamped(message, || core.random64(), core.instance_id);
-        let batching = core.batcher.configured();
+        let delivery = core.batcher.configured();
         if on_end.is_none()
             && !all
             && lane.is_none()
-            && batching
+            && delivery
             && plain_event(&encoded)
-            && core.batching_of(encoded.r#type, encoded.key.as_deref()).is_some()
+            && core.delivery_of(encoded.r#type, encoded.key.as_deref()).is_some()
         {
             return client.queue_plain(encoded, timeout);
         }
-        let frame = framed(encoded, batching)?;
+        let frame = framed(encoded, delivery)?;
         let id = frame.id;
         // The loop runs first unless the message only joins a batch.
         let lane = lane.map(|lane| lane.0);
         let now = Instant::now();
-        if client.engine().call(|core| core.send_needs_loop(&frame, all, lane.is_some(), timeout, now)) {
+        if client.engine().call(|core| core.send_needs_loop(&frame, all, lane.is_some(), now)) {
             client.engine().poll();
         }
         let done = on_end.map(|on_end| SendDone::Callback(Box::new(move |written| on_end(written > 0))));
-        // A send nobody waits for, which may go in a batch (`set_batching()`).
+        // A send nobody waits for, which goes by its type's delivery (`set_delivery()`).
         let taken =
             client.engine().call(|core| core.send(frame, all, lane.as_ref(), timeout, 0, None, None, done, true));
         if !taken {

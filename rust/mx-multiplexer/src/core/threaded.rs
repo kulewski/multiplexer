@@ -4,9 +4,16 @@
 //! connect() and flush_all() calls waiting, the sends a caller waits for
 //! or wants told of with their deadlines, and the shutdown's write-out.
 //! Mirrors multiplexer/threaded_client_io.cc.
+//!
+//! A message of a confirmed batch is confirmed once on_message returned
+//! from it, Failed when it panicked or when nothing took it, unless the
+//! program confirms its messages itself (`confirms_itself`) or on_message
+//! confirmed this one (`InHand`); one a stream took, with no on_message, is
+//! its reader's to confirm.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -14,6 +21,7 @@ use prost::Message as _;
 
 use super::batching::BatchMark;
 use super::client::{guarded, DropLine, DropReason, Incoming, Wrapper};
+use super::confirming::Confirmed;
 use super::lane::Lane;
 use super::outbox::{FlushDone, FlushId, Frame, SendDone};
 use super::timers::TimerKey;
@@ -59,6 +67,51 @@ struct FlushWait {
     timer: Option<TimerKey>,
 }
 
+/// The message of a confirmed batch on_message has in hand, which the
+/// client's handles reach from the io thread (`ThreadedClient::confirm` in
+/// a callback): its sender and number, 0 for none; whether on_message
+/// confirmed it itself, which the confirmation after its return then leaves
+/// alone; and whether a callback confirmed anything on the io thread, which
+/// the core then takes from the inbox at once, so that it goes with the
+/// rest of the batch. Atomics only so that it is shared: only the io thread
+/// reads and writes them.
+#[derive(Debug, Default)]
+pub(crate) struct InHand {
+    sender: AtomicU64,
+    number: AtomicU64,
+    confirmed: AtomicBool,
+    made: AtomicBool,
+}
+
+impl InHand {
+    /// A confirmation a callback gave on the io thread: noted, and whether
+    /// it is on_message's own word on the message in hand.
+    pub(crate) fn note(&self, sender: u64, number: u64) {
+        self.made.store(true, Ordering::Relaxed);
+        if number == self.number.load(Ordering::Relaxed) && sender == self.sender.load(Ordering::Relaxed) {
+            self.confirmed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// on_message takes the message `number` of `sender` in hand.
+    fn hold(&self, sender: u64, number: u64) {
+        self.sender.store(sender, Ordering::Relaxed);
+        self.number.store(number, Ordering::Relaxed);
+        self.confirmed.store(false, Ordering::Relaxed);
+    }
+
+    /// on_message returned: whether it confirmed the message itself.
+    fn release(&self) -> bool {
+        self.number.store(0, Ordering::Relaxed);
+        self.confirmed.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether a callback confirmed anything since the last call.
+    fn take_made(&self) -> bool {
+        self.made.load(Ordering::Relaxed) && self.made.swap(false, Ordering::Relaxed)
+    }
+}
+
 /// A send its caller waits for, or wants told of; a flushing one (`wait`)
 /// also ends at its deadline.
 struct PendingSend {
@@ -71,6 +124,15 @@ struct PendingSend {
 pub(crate) struct Threaded {
     pub(crate) on_message: Option<OnMessage>,
     pub(crate) search_policy: Option<SearchPolicy>,
+    /// The program confirms the messages of confirmed batches itself, as
+    /// the server classes do: none is confirmed at on_message's return
+    /// (`ThreadedClientBuilder::confirm_after_on_message`).
+    pub(crate) confirms_itself: bool,
+    /// The message on_message has in hand, shared with the handles.
+    pub(crate) in_hand: Arc<InHand>,
+    /// The io thread's inbox, which the confirmations a callback gives go
+    /// through (`take_io_confirmations`).
+    pub(crate) io_inbox: Option<Arc<crate::inbox::Inbox>>,
     /// The client's inbox, `messages()`, once asked for.
     pub(crate) inbox: Option<Arc<Queue>>,
     /// The subscriptions, by type, None for every type; a dropped one goes.
@@ -127,6 +189,7 @@ impl Core {
     fn on_unmatched(&mut self, incoming: Incoming) {
         let message = &incoming.message;
         let (id, r#type, sender) = (message.id.unwrap_or(0), message.r#type, message.sender.unwrap_or(0));
+        let number = message.confirmation.unwrap_or(0); // a confirmed batch's message's
         if r#type == types::REQUEST_RECEIVED {
             return;
         }
@@ -164,12 +227,39 @@ impl Core {
             inbox.push(public.clone());
             delivered = true;
         }
-        if let Some(on_message) = self.threaded.on_message.as_mut() {
-            guarded(|| format!("on_message, for message #{id} of type {type} from {sender}"), || on_message(public));
+        if self.threaded.on_message.is_some() {
+            if number == 0 {
+                if let Some(on_message) = self.threaded.on_message.as_mut() {
+                    guarded(
+                        || format!("on_message, for message #{id} of type {type} from {sender}"),
+                        || on_message(public),
+                    );
+                }
+                return;
+            }
+            self.threaded.in_hand.hold(sender, number);
+            let mut returned = false;
+            if let Some(on_message) = self.threaded.on_message.as_mut() {
+                guarded(
+                    || format!("on_message, for message #{id} of type {type} from {sender}"),
+                    || {
+                        on_message(public);
+                        returned = true;
+                    },
+                );
+            }
+            let confirmed = self.threaded.in_hand.release();
+            self.take_io_confirmations();
+            if !self.threaded.confirms_itself && !confirmed {
+                self.confirm(sender, number, if returned { Confirmed::Processed } else { Confirmed::Failed });
+            }
             return;
         }
         if delivered {
-            return;
+            return; // a stream's: its reader confirms it
+        }
+        if !self.threaded.confirms_itself {
+            self.confirm(sender, number, Confirmed::Failed); // nothing will ever process it
         }
         let kind = Kind { reason: DropLine::NoOnMessage as u32, level: log::Level::Warn, r#type, peer: 0 };
         if self.drop_line_first(kind, || {
@@ -177,6 +267,21 @@ impl Core {
         }) {
             log::warn!("message #{id} of type {type} dropped: this client has no on_message callback");
         }
+    }
+
+    /// The confirmations the io thread's callbacks gave since the last look,
+    /// taken from the inbox and gathered at once, where the driver would
+    /// take them after this step: what on_message confirmed of the batch it
+    /// is in goes with the rest of it.
+    fn take_io_confirmations(&mut self) {
+        if !self.threaded.in_hand.take_made() {
+            return;
+        }
+        let mut handed = Vec::new();
+        if let Some(inbox) = &self.threaded.io_inbox {
+            inbox.take_confirmations(&mut handed);
+        }
+        self.confirm_handed(&mut handed);
     }
 
     /// The echo of a PING, or the answer to a search, through the
@@ -334,6 +439,7 @@ impl Core {
             number,
             deadline: None,
             batch: None,
+            confirmed: false,
         };
         if self.threaded.torn_down {
             self.report_drop(&report, DropReason::ShutDown);
@@ -356,7 +462,7 @@ impl Core {
         }
         let left = deadline.map(|deadline| deadline.saturating_duration_since(self.now));
         let timeout = if wait { left.map(|left| left + ROOM_GRACE_SECONDS) } else { left };
-        // A send nobody waits for may go in a batch (`batching`).
+        // A send nobody waits for goes by its type's delivery (`batching`).
         if !self.send(frame, all, lane.as_ref(), timeout, number, None, None, follow, !wait) {
             self.report_drop(&report, DropReason::ConnectionLost);
             if let Some(id) = send_id {

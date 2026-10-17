@@ -1,8 +1,10 @@
 //! The frame tests: the golden frames the Python package's protobuf wrote
 //! (testdata/golden.py), encoded byte for byte and decoded back; the limits
 //! a frame is refused at, where the message is built; the header's refusals
-//! and the checksum check a received body goes through; a header kept apart
-//! from its body, the header a whole frame carries.
+//! and the checksum check a received body goes through; a reader's frames
+//! however the stream is cut, and whether it holds its next one without a
+//! read; a header kept apart from its body, the header a whole frame
+//! carries.
 
 use bytes::Bytes;
 use prost::Message as _;
@@ -15,8 +17,8 @@ use crate::error::{Error, Limit};
 use crate::proto::multiplexer::multiplexer_message_description::routing_rule::Whom;
 use crate::proto::multiplexer::multiplexer_message_description::RoutingRule;
 use crate::proto::multiplexer::{
-    compression, logging_method, BackendForPacketSearch, BatchEnvelope, DeliveryError, KeyFilter, MessageBatch,
-    MultiplexerMessage, PeerControl, PeerStatus, Routing, WelcomeMessage,
+    compression, logging_method, BackendForPacketSearch, BatchEnvelope, Confirmation, DeliveryError, KeyFilter,
+    MessageBatch, MultiplexerMessage, PeerControl, PeerStatus, Routing, WelcomeMessage,
 };
 
 const MAX_U64: u64 = u64::MAX;
@@ -72,7 +74,9 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
         ],
         logging_method: Some(logging_method::Values::Console as i32),
         key: Some("ключ-κλειδί".into()),
-        batch: None, // golden.py's every_field has none either
+        batch: None,         // golden.py's every_field has none either
+        confirm: Vec::new(), // nor numbers: an envelope's, "confirmed_batch"
+        confirmation: Some(MAX_U64),
     };
     let welcome = WelcomeMessage {
         r#type: 65,
@@ -106,6 +110,7 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
     };
     let mut search = message(21, 22, 3, BackendForPacketSearch { packet_type: 300 }.encode_to_vec());
     search.key = Some("a".into());
+    let confirmation = Confirmation { processed: vec![1, 3, 9, 1], refused: vec![4, 2], failed: vec![MAX_U64, 1] };
     vec![
         ("minimal", MultiplexerMessage { r#type: 0, ..Default::default() }),
         ("ping", MultiplexerMessage { id: Some(1), sender: Some(2), r#type: 1, ..Default::default() }),
@@ -127,6 +132,26 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
                 key: Some("shard.1".into()),
                 batch: Some(golden_batch().encode_to_vec().into()),
                 ..Default::default()
+            },
+        ),
+        (
+            "confirmed_batch",
+            MultiplexerMessage {
+                id: Some(30),
+                sender: Some(27),
+                r#type: 300,
+                key: Some("shard.1".into()),
+                batch: Some(golden_batch().encode_to_vec().into()),
+                confirm: vec![5, 1, MAX_U64 - 1, 1],
+                ..Default::default()
+            },
+        ),
+        (
+            "confirmation",
+            MultiplexerMessage {
+                to: Some(33),
+                report_delivery_error: Some(false),
+                ..message(31, 32, 13, confirmation.encode_to_vec())
             },
         ),
     ]
@@ -180,21 +205,31 @@ fn every_golden_frame_is_encoded_byte_for_byte() {
 #[test]
 fn a_batch_envelope_is_the_frame_of_its_message() {
     use crate::core::bodies::{BodiesBatch, BodiesEnvelope};
-    let (_, golden) = golden_frames().into_iter().find(|(name, _)| name == "batch").expect("golden.py's batch");
-    let key = Some("shard.1".to_string());
-    let envelope =
-        BatchEnvelope { id: Some(26), sender: Some(27), r#type: 300, key: key.clone(), batch: Some(golden_batch()) };
-    assert_eq!(&encode_into(&envelope, key.as_deref(), Vec::new()).unwrap()[..], &golden[..]);
-    let bodies = golden_batch().message.iter().map(|body| body.to_vec()).collect();
-    let kept = BodiesEnvelope {
-        id: Some(26),
-        sender: Some(27),
-        r#type: 300,
-        key: key.clone(),
-        batch: Some(BodiesBatch { message: bodies }),
-    };
-    let used = vec![0xEE; golden.len() * 2]; // what an earlier frame left in it is overwritten
-    assert_eq!(&encode_into(&kept, key.as_deref(), used).unwrap()[..], &golden[..]);
+    // A batch, and a confirmed one, whose envelope numbers its messages.
+    for (name, id, confirm) in [("batch", 26, vec![]), ("confirmed_batch", 30, vec![5, 1, MAX_U64 - 1, 1])] {
+        let (_, golden) = golden_frames().into_iter().find(|(each, _)| each == name).expect("golden.py's case");
+        let key = Some("shard.1".to_string());
+        let envelope = BatchEnvelope {
+            id: Some(id),
+            sender: Some(27),
+            r#type: 300,
+            key: key.clone(),
+            batch: Some(golden_batch()),
+            confirm: confirm.clone(),
+        };
+        assert_eq!(&encode_into(&envelope, key.as_deref(), Vec::new()).unwrap()[..], &golden[..], "{name}");
+        let bodies = golden_batch().message.iter().map(|body| body.to_vec()).collect();
+        let kept = BodiesEnvelope {
+            id: Some(id),
+            sender: Some(27),
+            r#type: 300,
+            key: key.clone(),
+            batch: Some(BodiesBatch { message: bodies }),
+            confirm,
+        };
+        let used = vec![0xEE; golden.len() * 2]; // what an earlier frame left in it is overwritten
+        assert_eq!(&encode_into(&kept, key.as_deref(), used).unwrap()[..], &golden[..], "{name}");
+    }
 }
 
 #[test]
@@ -367,6 +402,49 @@ fn a_reader_gives_nothing_after_an_error() {
     reader.read_from(&mut source).unwrap();
     assert_eq!(super::Next::BadHeader, reader.next());
     assert_eq!(super::Next::Nothing, reader.next(), "the frame behind a bad header is not read");
+}
+
+#[test]
+fn a_reader_says_whether_it_holds_its_next_frame_without_a_read() {
+    // What the driver asks after each frame (C++ Connection::_next_frame_held):
+    // after the last whole one, the socket is read again, every whole frame
+    // the read brought handed over.
+    let first = encode(&message(1, 2, 100, b"first".to_vec())).unwrap();
+    let second = encode(&message(2, 2, 100, b"second".to_vec())).unwrap();
+    let mut reader = super::FrameReader::default();
+    assert!(!reader.holds_next(), "nothing read");
+    let mut stream = first.to_vec();
+    stream.extend_from_slice(&second);
+    stream.extend_from_slice(&second[..HEADER_LENGTH + 1]); // a third begun
+    let mut source = &stream[..];
+    reader.read_from(&mut source).unwrap();
+    assert!(reader.holds_next(), "the first, whole");
+    assert_eq!(super::Next::Frame(first.slice(HEADER_LENGTH..)), reader.next());
+    assert!(reader.holds_next(), "the second, whole");
+    assert_eq!(super::Next::Frame(second.slice(HEADER_LENGTH..)), reader.next());
+    assert!(!reader.holds_next(), "a frame begun: a read for the rest");
+    // A frame too big for the buffer starts without a read, its body read
+    // into its own; once whole it is given, and nothing is held after it.
+    let big = encode(&message(3, 2, 100, vec![9; super::READ_BUFFER * 2])).unwrap();
+    let mut reader = super::FrameReader::default();
+    let mut source = &big[..];
+    reader.read_from(&mut source).unwrap();
+    assert!(reader.holds_next(), "too big for the buffer");
+    assert_eq!(super::Next::Started, reader.next());
+    assert!(!reader.holds_next(), "its body still on its way");
+    while !source.is_empty() {
+        assert!(reader.read_from(&mut source).unwrap() > 0, "a read took nothing");
+    }
+    assert!(reader.holds_next(), "its body whole");
+    assert_eq!(super::Next::Frame(big.slice(HEADER_LENGTH..)), reader.next());
+    assert!(!reader.holds_next());
+    // A header that ends the connection is given without a read.
+    let mut reader = super::FrameReader::default();
+    let mut source = &[0u8; HEADER_LENGTH][..];
+    reader.read_from(&mut source).unwrap();
+    assert!(reader.holds_next(), "a header of length 0");
+    assert_eq!(super::Next::BadHeader, reader.next());
+    assert!(!reader.holds_next(), "nothing after an error");
 }
 
 #[test]

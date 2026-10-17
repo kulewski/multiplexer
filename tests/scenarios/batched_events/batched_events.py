@@ -69,6 +69,7 @@ class BatchedEvents(unittest.TestCase):
                 key=KEY,
                 batch_records=PER_BATCH,
                 batch_delay=HOUR,
+                batch_timeout=2 * HOUR,  # longer than the delay: given up on never here
             )
             self.assertEqual(0, event_client.wait())
             self.assertEqual([], event_client.events_of("error"))

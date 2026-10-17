@@ -1,14 +1,14 @@
 //! Plain sends as bytes (core/plain.rs): their bytes go in their batches as
 //! they came, beside frames' bodies, by type and key, in the order sent;
-//! one goes alone, as a frame made of its bytes, when its type is not
-//! batched, it has no time to wait, it is too big, a connection is free
-//! with no delay, or it is a batch of one, a big one's own buffer then the
-//! frame's body, its header kept apart; a batch hands its bodies back,
+//! one goes alone, as a frame made of its bytes, when its type has no
+//! delivery set or one that does not batch, it is too big, a connection is
+//! free with no delay, or it is a batch of one, a big one's own buffer then
+//! the frame's body, its header kept apart; a batch hands its bodies back,
 //! keeps its envelope and is serialized into a frame buffer an earlier
 //! batch frame left; a threaded client's plain send counts its deadline
-//! from its send and is reported dropped after the shutdown's end.
-//! What C++'s BasicClient::send_plain does, which its batching and send
-//! allocation tests cover.
+//! from its send where no delivery's takes its place, and is reported
+//! dropped after the shutdown's end. What C++'s BasicClient::send_plain
+//! does, which its batching and send allocation tests cover.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +16,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::batching::{by_count, event, inside, message, queue, wrote, Wrote, EVENT, TEN};
-use crate::core::batching::Batching;
+use crate::core::batching::Delivery;
 use crate::core::bodies::BODY_KEPT_MAX;
 use crate::core::client::{DropReason, IncomingMode};
 use crate::core::deadline_after;
@@ -44,7 +44,7 @@ fn plain_sends_batch_with_frames_by_type_and_key_in_the_order_sent() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     send(&mut h, 1, Some("a"), b"one");
     queue(&mut h, 2, Some("a"), b"two"); // a frame, which a followed send makes
     send(&mut h, 3, None, b"three");
@@ -75,19 +75,18 @@ fn a_plain_send_goes_alone_as_a_frame_of_its_bytes() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, Some("batched"), by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, Some("batched"), by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, Some("as it is"), Delivery::default()).expect("set");
     send(&mut h, 1, None, b"its type not batched, its key none");
-    let now = plain(&mut h, 2, Some("batched"), b"no time to wait");
-    assert!(h.core.send_plain(now, Some(Duration::ZERO), 0));
-    h.settle();
-    h.core.set_batching(EVENT, None, Batching { max_bytes: 40, ..by_count(100) }).expect("set");
+    send(&mut h, 2, Some("as it is"), b"its key's delivery neither batches nor confirms");
+    h.core.set_delivery(EVENT, None, Delivery { max_bytes: 40, ..by_count(100) }).expect("set");
     send(&mut h, 3, None, &[b'b'; 100]);
-    h.core.set_batching(EVENT, None, Batching { max_delay: Duration::ZERO, ..by_count(100) }).expect("set");
+    h.core.set_delivery(EVENT, None, Delivery { max_delay: Duration::ZERO, ..by_count(100) }).expect("set");
     send(&mut h, 4, None, b"no delay, the connection free");
     assert_eq!(
         vec![
             Wrote::Alone(None, 1),
-            Wrote::Alone(Some("batched".to_string()), 2),
+            Wrote::Alone(Some("as it is".to_string()), 2),
             Wrote::Alone(None, 3),
             Wrote::Alone(None, 4)
         ],
@@ -106,7 +105,7 @@ fn a_big_body_that_goes_alone_is_written_from_its_own_buffer_behind_its_header()
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, Some("batched"), by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, Some("batched"), by_count(100)).expect("set");
     let big = plain(&mut h, 1, None, &vec![b'b'; BODY_KEPT_MAX]);
     let buffer = big.body.as_ptr();
     assert!(h.core.send_plain(big, TEN, 0));
@@ -134,7 +133,7 @@ fn a_big_batch_of_one_is_written_from_its_own_buffer_behind_its_header() {
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     let big = plain(&mut h, 1, None, &vec![b'b'; BODY_KEPT_MAX]);
     let buffer = big.body.as_ptr();
     assert!(h.core.send_plain(big, TEN, 0));
@@ -155,7 +154,7 @@ fn a_batch_hands_its_bodies_back_keeps_its_envelope_and_recycles_its_frames_buff
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(3)).expect("set");
     for id in 1..=3 {
         send(&mut h, id, None, b"a longer event"); // the third fills the batch: it goes
     }
@@ -188,10 +187,11 @@ fn a_batch_hands_its_bodies_back_keeps_its_envelope_and_recycles_its_frames_buff
 #[test]
 fn a_batch_given_up_on_is_told_for_each_plain_send_and_followed_frame_inside() {
     // Nothing connected: the full batch is held, then given up on at its
-    // messages' deadline, told for each, the followed one's `done` hearing.
+    // deadline, told for each, the followed one's `done` hearing.
     let mut h = Harness::new(200, IncomingMode::Queue);
     let drops = h.observe_drops();
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    let delivery = Delivery { max_delay: Duration::from_secs(5), timeout: TEN, ..by_count(3) };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
     send(&mut h, 1, None, b"plain");
     let heard = Arc::new(Mutex::new(Vec::new()));
     let hearing = Arc::clone(&heard);
@@ -210,25 +210,31 @@ fn a_batch_given_up_on_is_told_for_each_plain_send_and_followed_frame_inside() {
 
 #[test]
 fn a_threaded_clients_plain_send_counts_its_deadline_from_its_send() {
-    // Its time ran out while it waited for the io thread: it goes alone with
-    // no time to wait for a connection, and none is live, so it is given up
-    // on at once; one with time left joins its batch.
+    // One of a type with no delivery set whose time ran out while it waited
+    // for the io thread goes alone with no time to wait for a connection,
+    // and none is live, so it is given up on at once; one with time left is
+    // held. One of a batched key joins its batch whatever its own time, the
+    // batch's own counting from its first message.
     let mut h = Harness::new(200, IncomingMode::Dispatch);
     let drops = h.observe_drops();
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, Some("batched"), by_count(100)).expect("set");
     let sent_at = h.core.now;
     h.advance(Duration::from_secs(10));
     let late = plain(&mut h, 1, None, b"late");
     h.core.place_plain(late, deadline_after(sent_at, TEN));
     h.settle();
     assert_eq!(vec![(1, DropReason::NoConnection)], *drops.lock().unwrap());
-    assert_eq!(0, h.core.batched_messages());
     let sent_at = h.core.now;
     h.advance(Duration::from_secs(9));
     let early = plain(&mut h, 2, None, b"early");
     h.core.place_plain(early, deadline_after(sent_at, TEN));
     h.settle();
-    assert_eq!(1, h.core.batched_messages(), "a second left: in its batch");
+    assert_eq!(1, h.core.held_for_a_connection(), "a second left: held for a connection");
+    let batched = plain(&mut h, 3, Some("batched"), b"late, batched");
+    h.core.place_plain(batched, deadline_after(h.start, TEN)); // its ten seconds over long ago
+    h.settle();
+    assert_eq!(1, h.core.batched_messages(), "its own time over: in its batch all the same");
+    assert_eq!(1, drops.lock().unwrap().len());
 }
 
 #[test]

@@ -456,7 +456,7 @@ class AcknowledgedTest(unittest.TestCase):
 
             def __init__(self, addresses) -> None:
                 super().__init__(addresses)
-                self.conn.set_batching(EVENT, max_delay=HOUR)
+                self.conn.set_delivery(EVENT, batch=True, max_delay=HOUR, timeout=-1)
                 self.holding = threading.Event()
                 self.release = threading.Event()
 

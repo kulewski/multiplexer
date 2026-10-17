@@ -645,6 +645,24 @@ cc_test(
 )
 
 cc_test(
+    name = "confirmed_sends_test",
+    size = "small",
+    srcs = ["confirmed_sends_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":multiplexer_cc_proto",
+        ":threaded_client",
+        "//multiplexer/backend:base_multiplexer_server",
+        "//multiplexer/backend:base_threaded_multiplexer_server",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "read_syscalls_test",
     size = "small",
     srcs = ["read_syscalls_test.cc"],
@@ -1029,10 +1047,12 @@ cc_library(
     srcs = [
         "basic_client.cc",
         "basic_client_batching.cc",
+        "basic_client_confirm.cc",
         "basic_client_connect.cc",
         "basic_client_plain.cc",
         "basic_client_routing.cc",
         "batching.h",
+        "confirming.h",
         "outbox.cc",
         "outbox.h",
         "outbox_expiry.cc",
@@ -1609,6 +1629,24 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "confirmed_sends_py_test",
+    size = "small",
+    srcs = ["confirmed_sends_test.py"],
+    main = "confirmed_sends_test.py",
+    deps = [
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":mxclient",
+        ":servers",
+        ":threaded_client_py",
+        ":threaded_server",
         "//multiplexer/testing",
     ],
 )

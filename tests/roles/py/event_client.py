@@ -1,10 +1,14 @@
 """Event client role: a client that sends events and never waits for answers.
 
 With --batch-records N it batches every type of its --send list
-(set_batching), N messages a batch, --batch-delay S their max_delay: each
-send then returns at once, the message in its type's batch, which goes
-once full, and flush_all() after the last lets the last one go and is
-reported as `flushed`.
+(set_delivery's batch), N messages a batch, --batch-delay S their
+max_delay: each send then returns at once, the message in its type's
+batch, which goes once full, and flush_all() after the last lets the last
+one go and is reported as `flushed`. With --confirm every type sent is
+confirmed sends, in those batches or one by one, --retry-after S their
+retry_after: the flush then waits for every confirmation, and `flushed`
+says whether every message was confirmed. --batch-timeout S is the
+delivery's timeout, a batch's.
 """
 
 import time
@@ -27,14 +31,34 @@ def main() -> None:
         "--batch-records", type=int, default=0, help="batch every type sent, N messages a batch, flushed at the end"
     )
     p.add_argument("--batch-delay", type=float, default=0.0, help="the batches' max_delay, in seconds")
+    p.add_argument(
+        "--confirm", action="store_true", help="confirmed sends, in the batches of --batch-records or one by one"
+    )
+    p.add_argument("--retry-after", type=float, default=5.0, help="the confirmed sends' retry_after, in seconds")
+    p.add_argument(
+        "--batch-timeout",
+        type=float,
+        default=clients.Client.DEFAULT_TIMEOUT,
+        help="the delivery's timeout, a batch's, in seconds; negative for none",
+    )
     args = p.parse_args()
+    delivered = bool(args.batch_records or args.confirm)
 
     client = clients.Client(common.endpoints(args), type=args.type)
     emit("connected", instance_id=client.instance_id, connections=client.connections_count(), name=args.name)
     sends = common.typed_payloads(args.send)
-    if args.batch_records:
+    if delivered:
+        batch = args.batch_records > 0
         for type_ in sorted({type_ for type_, _ in sends}):
-            client.set_batching(type_, max_records=args.batch_records, max_delay=args.batch_delay)
+            client.set_delivery(
+                type_,
+                batch=batch,
+                max_records=max(args.batch_records, 1),
+                max_delay=args.batch_delay,
+                confirm=args.confirm,
+                retry_after=args.retry_after,
+                timeout=args.batch_timeout,
+            )
     sent = 0
     for type_, payload in sends:
         fields = dict(type=type_)
@@ -45,9 +69,10 @@ def main() -> None:
         mxmsg = client.new_message(message=payload, **fields)
         state = {}
         try:
-            if args.batch_records and not args.all:
+            if delivered and not args.all:
                 # Returns at once, the message in its type's batch, which
-                # goes once full; the flush after the last lets the last go.
+                # goes once full, or on its way alone; the flush after the
+                # last lets the last go.
                 client.send_message(mxmsg)
             elif args.no_flush:
                 # Queue only, and report where the message stands right after,
@@ -72,7 +97,7 @@ def main() -> None:
         emit("sent", type=type_, id=mxmsg.id, **state)
         if args.interval:
             time.sleep(args.interval)
-    if args.batch_records:
+    if delivered:
         emit("flushed", is_sent=client.flush_all())
     if args.linger:
         time.sleep(args.linger)

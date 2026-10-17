@@ -25,7 +25,14 @@ from multiplexer.mxlog import *
 from multiplexer.multiplexer_constants import types
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer import mxclient
-from multiplexer.mxclient import CLOSE_FLUSH_SECONDS, ConnectionWrapper, OperationTimedOut, as_reply, parse_message
+from multiplexer.mxclient import (
+    CLOSE_FLUSH_SECONDS,
+    Confirmed,
+    ConnectionWrapper,
+    OperationTimedOut,
+    as_reply,
+    parse_message,
+)
 
 
 def format_exception(exc, trace=None):
@@ -450,6 +457,7 @@ class BaseMultiplexerServer(MultiplexerPeer):
                         LOWVERBOSITY,
                         text="handle_message() " "finished w/o exception and w/o any response",
                     )
+                self.conn.processed(mxmsg)  # a message of a confirmed batch: done with
 
         except Exception as e:
             # Same as the C++ BaseMultiplexerServer: tell the requester instead
@@ -472,6 +480,8 @@ class BaseMultiplexerServer(MultiplexerPeer):
                         text=lambda reporting=reporting: "could not report the exception to the requester: %r"
                         % reporting,
                     )
+            if mxmsg is not None and mxmsg.type > types.MAX_MULTIPLEXER_META_PACKET:
+                self.conn.confirm(mxmsg, Confirmed.FAILED)  # a message of a confirmed batch: its producer gives up
             if not self.on_handler_exception(e):
                 raise
 

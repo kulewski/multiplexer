@@ -29,7 +29,7 @@
 //! the shutdown, and no caller waits on an io thread that has ended.
 //!
 //! A send nobody follows, `queue()` without `on_end`, a lane or `all()`, of
-//! a plain event, once the client batches, goes to the io thread as data,
+//! a plain event, once a delivery is set, goes to the io thread as data,
 //! not as a command (`core::plain`): serialized on the caller's thread into
 //! a body the io thread handed back, taken from the inbox under the lock
 //! it is pushed with and kept by the thread till its next such send
@@ -37,6 +37,16 @@
 //! allocates nothing on either thread, and nothing one thread allocated is
 //! freed on the other, which with glibc's malloc made each thread wait on
 //! the other's arena lock.
+//!
+//! Confirmed sends (docs/delivery.md): a message of a confirmed batch is
+//! confirmed to its producer once on_message returned from it, Failed when
+//! it panicked, unless the builder's `confirm_after_on_message(false)` says
+//! the program confirms its messages itself, with `confirm()`, from any
+//! thread: as plain values through the inbox, posted as a send is, dropped
+//! after `shutdown()` and in a forked child, its producer sending the
+//! message again in time. A confirmation on the io thread, a callback's,
+//! goes the same way, noting whether it is on_message's own word on the
+//! message in hand (`core::threaded::InHand`).
 
 use std::cell::Cell;
 use std::future::IntoFuture;
@@ -48,11 +58,13 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
-use crate::core::batching::{check_batching, plain_event, Batching};
+use crate::core::batching::{check_delivery, plain_event, Delivery};
 use crate::core::bodies::BODY_KEPT_MAX;
 use crate::core::client::{check_key_filters, DropReason, IncomingMode};
+use crate::core::confirming::Confirmed;
 use crate::core::plain::Plain;
 use crate::core::query::{check_size_sent_again, Outcome};
+use crate::core::threaded::InHand;
 use crate::core::{deadline_after, Core, Posted};
 use crate::defaults::{CLOSE_FLUSH_SECONDS, DEFAULT_INCOMING_QUEUE_MAX_SIZE, DEFAULT_TIMEOUT};
 use crate::endpoint::{format_endpoint, parse_endpoint};
@@ -61,7 +73,7 @@ use crate::error::{Error, Result};
 use crate::fork::DescriptorTable;
 use crate::handles::{Incoming, Lane};
 use crate::ids::Ids;
-use crate::inbox::Inbox;
+use crate::inbox::{HandedConfirmation, Inbox};
 use crate::message::{frame_of, framed, plain_of, stamped, KeyFilters, Message, Routing};
 use crate::pending::{pending, ready, Completer, Messages, Pending, Queue};
 use crate::proto::multiplexer as proto;
@@ -108,6 +120,7 @@ pub struct ThreadedClientBuilder {
     search_policy: Option<Box<dyn FnMut() -> bool + Send>>,
     key_filters: Option<KeyFilters>,
     routing: Option<Routing>,
+    confirm_after_on_message: bool,
 }
 
 impl ThreadedClientBuilder {
@@ -148,6 +161,20 @@ impl ThreadedClientBuilder {
         self
     }
 
+    /// Whether a message of a confirmed batch (`Delivery::confirm`) is
+    /// confirmed to its producer once on_message returned from it, Failed
+    /// when it panicked: true, the default. A program that hands its
+    /// messages on to be processed elsewhere, as the server classes do,
+    /// says false and confirms each itself, `confirm()` or `processed()`,
+    /// once it is done with it. A message on_message confirmed itself is
+    /// not confirmed again at its return; one a stream, `messages()` or
+    /// `subscribe()`, took with no on_message to take it is its reader's to
+    /// confirm, and one nothing took is confirmed Failed.
+    pub fn confirm_after_on_message(mut self, confirm: bool) -> Self {
+        self.confirm_after_on_message = confirm;
+        self
+    }
+
     /// The client and its io thread, connected to nothing yet.
     pub fn build(self) -> Result<ThreadedClient> {
         if let Some(filters) = &self.key_filters {
@@ -157,6 +184,9 @@ impl ThreadedClientBuilder {
         let mut engine = Engine::new(self.peer_type, IncomingMode::Dispatch, Some(Arc::clone(&inbox)))?;
         engine.core.threaded.on_message = self.on_message;
         engine.core.threaded.search_policy = self.search_policy;
+        engine.core.threaded.confirms_itself = !self.confirm_after_on_message;
+        engine.core.threaded.io_inbox = Some(Arc::clone(&inbox));
+        let in_hand = Arc::clone(&engine.core.threaded.in_hand);
         if let Some(observer) = self.on_drop {
             engine.core.set_drop_observer(Some(observer));
         }
@@ -185,7 +215,8 @@ impl ThreadedClientBuilder {
             generation: crate::fork::generation(),
             dropped: Arc::clone(&core.client.dropped),
             descriptors: Arc::clone(&core.client.descriptors),
-            batching: AtomicBool::new(false),
+            delivery_set: AtomicBool::new(false),
+            in_hand,
         });
         let io_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -232,10 +263,13 @@ struct Shared {
     generation: u32,
     dropped: Arc<AtomicU64>,
     descriptors: Arc<DescriptorTable>,
-    /// Whether `set_batching()` was ever called: the callers' threads then
+    /// Whether `set_delivery()` was ever called: the callers' threads then
     /// mark the frames they make for it (`frame_of`); a hint, a frame made
     /// unmarked going alone.
-    batching: AtomicBool,
+    delivery_set: AtomicBool,
+    /// The message of a confirmed batch on_message has in hand, which a
+    /// confirmation on the io thread notes.
+    in_hand: Arc<InHand>,
 }
 
 /// Ends a post's count, telling a shutdown that waits for the last one.
@@ -351,6 +385,36 @@ impl Shared {
                 keep_spare(plain.body);
                 Err(Error::NotConnected)
             }
+        }
+    }
+
+    /// A confirmation, posted as a command is (`post`), as plain values:
+    /// nothing for number 0, in a forked child, whose io thread is the
+    /// parent's, or after the shutdown, its producer sending the message
+    /// again in time. On the io thread, a callback's, it is noted for the
+    /// message on_message has in hand, and goes in until the teardown.
+    fn confirm(&self, sender: u64, number: u64, outcome: Confirmed) {
+        if number == 0 || self.orphaned() {
+            return;
+        }
+        let confirmation = HandedConfirmation { sender, number, outcome };
+        if self.on_io_thread() {
+            self.in_hand.note(sender, number);
+            if !self.torn_down.load(Ordering::Acquire) {
+                self.inbox.push_confirmation(confirmation); // taken after the io thread's step: no wake
+            }
+            return;
+        }
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        self.posting.fetch_add(1, Ordering::SeqCst);
+        let _posting = Posting(self);
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.inbox.push_confirmation(confirmation) {
+            let _ = self.waker.wake();
         }
     }
 
@@ -491,6 +555,7 @@ impl ThreadedClient {
             search_policy: None,
             key_filters: None,
             routing: None,
+            confirm_after_on_message: true,
         }
     }
 
@@ -655,9 +720,11 @@ impl ThreadedClient {
     }
 
     /// Waits until everything sent before the call has been written or
-    /// given up on, the callbacks of those sends run, or `timeout`: true
-    /// when every one was written. True at once after `shutdown()`: what is
-    /// left to write is the shutdown's, whose result comes once it is over.
+    /// given up on, a confirmed send confirmed (`Delivery::confirm`), the
+    /// callbacks of those sends run, or `timeout`: true when every one was
+    /// written, or confirmed. What the client owes its producers goes
+    /// first. True at once after `shutdown()`: what is left to write is the
+    /// shutdown's, whose result comes once it is over.
     pub fn flush_all(&self, timeout: Option<Duration>) -> Pending<bool> {
         let shared = self.shared();
         if let Err(error) = shared.check() {
@@ -712,43 +779,87 @@ impl ThreadedClient {
         Ok(())
     }
 
-    /// Batching (docs/batching.md): the events of `r#type`, each key
-    /// apart, or, given `key`, of that key, ahead of what is set for its
-    /// type, that `queue()` sends through no lane and not to ALL, go several
-    /// in one message, which the receiving library splits back into one
-    /// message each. A batch goes once it holds `max_records` messages,
-    /// once one more would take it past `max_bytes` on the wire, or
-    /// `max_delay` after its first message; with no delay, once a
-    /// connection has nothing left to write, so that a message sent while
-    /// one is free goes at once, and those sent while every one is busy go
-    /// together. A flush, a send that does not batch, another change of
-    /// what is batched and the shutdown first let every batch go.
-    /// `InvalidArgument`, here, for a protocol message type, a key over
-    /// MAX_KEY_SIZE, no message in a batch or more than MAX_BATCH_RECORDS,
-    /// no byte or more than MAX_MESSAGE_SIZE, or a delay over MAX_SECONDS;
-    /// in effect for every send made after the call.
-    pub fn set_batching(&self, r#type: u32, key: Option<&str>, batching: Batching) -> Result<()> {
+    /// How the events of `r#type`, each key apart, or, given `key`, of that
+    /// key, ahead of what is set for its type, that `queue()` sends through
+    /// no lane and not to ALL go (`Delivery`, docs/delivery.md): with
+    /// `batch` several in one message, which the receiving library splits
+    /// back into one message each; with `confirm` each kept until its
+    /// consumer confirms it, its `on_end` and a flush waiting for that; with
+    /// neither as any send. `timeout` is a batch's, a message alone being a
+    /// batch of one, from its first message, the sends' own not used. A
+    /// batch goes once it holds `max_records` messages, once one more would
+    /// take it past `max_bytes` on the wire, or `max_delay` after its first
+    /// message; with no delay, once a connection has nothing left to write,
+    /// so that a message sent while one is free goes at once, and those sent
+    /// while every one is busy go together. A flush, a send that does not
+    /// batch, another change of what is set and the shutdown first let
+    /// every batch go. This client hears confirmations and sends again on
+    /// its io thread. `InvalidArgument`, here, for a protocol message type,
+    /// a key over MAX_KEY_SIZE, no message in a batch or more than
+    /// MAX_BATCH_RECORDS, no byte or more than MAX_MESSAGE_SIZE, a delay over
+    /// MAX_SECONDS, with `confirm` a retry_after of zero or over MAX_SECONDS,
+    /// or a timeout not longer than the delay with `batch`, or zero without
+    /// it; in effect for every send made after the call.
+    pub fn set_delivery(&self, r#type: u32, key: Option<&str>, delivery: Delivery) -> Result<()> {
         self.shared().check()?;
-        check_batching(r#type, key, &batching)?;
-        self.shared().batching.store(true, Ordering::Relaxed); // frames are marked for it from now on
+        check_delivery(r#type, key, &delivery)?;
+        self.shared().delivery_set.store(true, Ordering::Relaxed); // frames are marked for it from now on
         let key = key.map(str::to_string);
         self.shared().post(move |core| {
             if !core.threaded.shut_down {
-                let _ = core.set_batching(r#type, key.as_deref(), batching);
+                let _ = core.set_delivery(r#type, key.as_deref(), delivery);
             }
         });
         Ok(())
     }
 
-    /// No batching from now on for `r#type`, its keys' settings included,
-    /// or, given `key`, for that key, which then batches as its type says;
-    /// every batch goes first.
-    pub fn clear_batching(&self, r#type: u32, key: Option<&str>) -> Result<()> {
+    /// Tells the producer of `message`, a message of a confirmed batch
+    /// (`Message::confirmation`), what became of it, from any thread:
+    /// `Processed` once the program is done with it, `Failed` when it can
+    /// never process it, its producer giving up on it, `Refused` to have its
+    /// producer send it again. What the client owes goes from the io thread
+    /// at the end of its turn, gathered into one message per producer.
+    /// Nothing for a message with no number, nor after `shutdown()` or in a
+    /// forked child, its producer sending it again in time. See the
+    /// builder's `confirm_after_on_message`.
+    pub fn confirm(&self, message: &Message, outcome: Confirmed) {
+        if let Some(number) = message.confirmation {
+            self.shared().confirm(message.sender, number, outcome);
+        }
+    }
+
+    /// `confirm(message, Confirmed::Processed)`.
+    pub fn processed(&self, message: &Message) {
+        self.confirm(message, Confirmed::Processed);
+    }
+
+    /// How many messages this client sent wait for their confirmation; for
+    /// tests. Not from the io thread.
+    pub fn unconfirmed(&self) -> Result<usize> {
+        self.shared().call(|core| core.unconfirmed())
+    }
+
+    /// How many messages this client sent again, unconfirmed; for tests.
+    /// Not from the io thread.
+    pub fn sent_again(&self) -> Result<u64> {
+        self.shared().call(|core| core.sent_again())
+    }
+
+    /// How many confirmations this client owes producers; for tests. Not
+    /// from the io thread.
+    pub fn confirmations_owed(&self) -> Result<usize> {
+        self.shared().call(|core| core.confirmations_owed())
+    }
+
+    /// No delivery set from now on for `r#type`, its keys' settings
+    /// included, its messages going as any send does, or, given `key`, for
+    /// that key, which then goes as its type says; every batch goes first.
+    pub fn clear_delivery(&self, r#type: u32, key: Option<&str>) -> Result<()> {
         self.shared().check()?;
         let key = key.map(str::to_string);
         self.shared().post(move |core| {
             if !core.threaded.shut_down {
-                core.clear_batching(r#type, key.as_deref());
+                core.clear_delivery(r#type, key.as_deref());
             }
         });
         Ok(())
@@ -1083,7 +1194,8 @@ impl ThreadedSend<'_> {
     }
 
     /// How long the message may wait for room or for a connection; for a
-    /// flushing send, how long the call waits.
+    /// flushing send, how long the call waits. Not used by a send that goes
+    /// by a delivery (`ThreadedClient::set_delivery`), which has its own.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -1096,8 +1208,9 @@ impl ThreadedSend<'_> {
     }
 
     /// `on_end` hears how the message ended, once, on the io thread: true
-    /// once it was written, the first copy for ALL, false once it was given
-    /// up on or the client shut down first.
+    /// once it was written, the first copy for ALL, or, a confirmed send's
+    /// (`Delivery::confirm`), once its consumer confirmed it; false once it
+    /// was given up on or the client shut down first.
     pub fn on_end(mut self, on_end: impl FnOnce(bool) + Send + 'static) -> Self {
         self.on_end = Some(Box::new(on_end));
         self
@@ -1113,29 +1226,31 @@ impl ThreadedSend<'_> {
         if self.lane.as_ref().is_some_and(Lane::closed) {
             return Err(Error::NotConnected); // a pinned lane whose connection is gone
         }
-        let batching = shared.batching.load(Ordering::Relaxed);
-        frame_of(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id, batching)
+        let delivery = shared.delivery_set.load(Ordering::Relaxed);
+        frame_of(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id, delivery)
     }
 
     /// Sends the message and returns its id at once: the io thread queues
     /// it on a connection, has it wait for room, or holds it until one
-    /// comes up, the timeout at most, and drops and reports it after that.
+    /// comes up, the timeout at most, and drops and reports it after that;
+    /// a plain event through no lane and not to ALL goes by the delivery set
+    /// for its type or key, if any (`ThreadedClient::set_delivery`).
     /// `NotConnected` after `shutdown()` and for a pinned lane whose
     /// connection is gone; `TooLarge` before anything is queued.
     pub fn queue(mut self) -> Result<u64> {
         let shared = self.client.shared();
-        let frame =
-            if self.on_end.is_none() && self.lane.is_none() && !self.all && shared.batching.load(Ordering::Relaxed) {
-                // Nobody follows it: a plain event goes as data (`core::plain`).
-                shared.check()?;
-                let encoded = stamped(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id);
-                if plain_event(&encoded) {
-                    return shared.queue_plain(encoded, self.timeout);
-                }
-                framed(encoded, true)?
-            } else {
-                self.frame()?
-            };
+        let delivery_set = shared.delivery_set.load(Ordering::Relaxed);
+        let frame = if self.on_end.is_none() && self.lane.is_none() && !self.all && delivery_set {
+            // Nobody follows it: a plain event goes as data (`core::plain`).
+            shared.check()?;
+            let encoded = stamped(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id);
+            if plain_event(&encoded) {
+                return shared.queue_plain(encoded, self.timeout);
+            }
+            framed(encoded, true)?
+        } else {
+            self.frame()?
+        };
         let id = frame.id;
         let ThreadedSend { client, all, lane, timeout, on_end, .. } = self;
         let deadline = deadline_after(Instant::now(), timeout);

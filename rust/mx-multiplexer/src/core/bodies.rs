@@ -2,15 +2,18 @@
 //! the next, so that a batch costs no allocation for each of its messages.
 //! A batch goes as frames (`Core::send_batch`): as many of its messages as
 //! fit in its max_bytes in one envelope, then the next, a message alone as
-//! itself. What is kept: the bodies, the byte vectors plain sends were
-//! serialized into, handed back once their batch's frame is made, for the
-//! senders' next plain sends (`Bodies`); the envelope every batch is built
-//! in, kept with its list of bodies (`BodiesEnvelope`); and the buffers of
-//! the batch frames written, which the next batch frames are serialized
-//! into (`FramePool`). Mirrors the C++ library's SpentBodies, the kept
-//! BatchEnvelope of its batching and its BatchFramePool, with C++'s caps:
-//! bodies of 64 KiB at most are kept, 16 MiB of them, and 4 frame buffers
-//! of 4 MiB at most; what is over is freed.
+//! itself, every frame by the batch's deadline; a confirmed batch's in
+//! envelopes that number them, one of one included, each frame then
+//! waiting for its messages' confirmation (`confirming`). What is kept: the
+//! bodies, the byte vectors plain sends were serialized into, handed back
+//! once their batch's frame is made, for the senders' next plain sends
+//! (`Bodies`); the envelope every batch is built in, kept with its list of
+//! bodies (`BodiesEnvelope`); and the buffers of the batch frames written,
+//! which the next batch frames are serialized into (`FramePool`). Mirrors
+//! the C++ library's SpentBodies, the kept BatchEnvelope of its batching
+//! and its BatchFramePool, with C++'s caps: bodies of 64 KiB at most are
+//! kept, 16 MiB of them, and 4 frame buffers of 4 MiB at most; what is over
+//! is freed.
 //!
 //! A frame's buffer goes back to its pool when the last holder of the frame
 //! lets go of it, wherever that is, hence the pool's lock: a batch frame is
@@ -24,7 +27,7 @@ use prost::Message as _;
 use super::batching::{Batch, BatchMark, Record};
 use super::lane::Lane;
 use super::outbox::{Frame, SendDone};
-use super::{deadline_after, ConnId, Core, SendState, Tracker};
+use super::{ConnId, Core, SendState, Tracker};
 use crate::frame::{self, frame_of_body, Head};
 
 /// The largest body kept for another send: bigger ones are freed.
@@ -127,6 +130,8 @@ pub(crate) struct BodiesEnvelope {
     pub(crate) key: Option<String>,
     #[prost(message, optional, tag = "10")]
     pub(crate) batch: Option<BodiesBatch>,
+    #[prost(uint64, repeated, tag = "11")]
+    pub(crate) confirm: Vec<u64>,
 }
 
 /// The generated `MessageBatch` with its messages as vectors; see
@@ -198,63 +203,83 @@ impl Core {
     /// A batch as frames: an envelope of its type and key holding as many
     /// of its messages as fit in max_bytes, measured as it goes on the
     /// wire, then the next, a message alone going as itself. Each frame
-    /// waits for room and for a connection until the earliest of its
-    /// messages' deadlines: from their sends in a batch that waited for a
-    /// connection with nothing left to write, from now in one that waited
-    /// for its delay. On `idle`, when given and live, rather than where the
-    /// round robin points, which may be a connection still writing.
-    pub(super) fn send_batch(&mut self, batch: Batch, idle: Option<ConnId>) {
-        let Batch { r#type, mut key, batching, mut records, waits_for_idle, .. } = batch;
+    /// waits for room and for a connection until the batch's deadline, on
+    /// `idle`, when given and live, rather than where the round robin
+    /// points, which may be a connection still writing. Its end is each
+    /// message's that someone follows, in the order they were sent; the
+    /// rest keep nothing. A confirmed batch always goes as envelopes, which
+    /// number its messages, a batch of one too, each kept until its
+    /// messages are confirmed (`wait_for_confirmation`), the batch's
+    /// deadline at the latest; one no envelope could hold is given up on,
+    /// none sent unnumbered. The records stay in the batch, each left as
+    /// its frame took it, and go with it.
+    pub(super) fn send_batch(&mut self, mut batch: Batch, idle: Option<ConnId>) {
         let lane = idle.filter(|conn| self.conn_living(*conn)).map(|conn| Lane::seeded(&self.wrap(conn), false));
-        let now = self.now;
-        while !records.is_empty() {
-            let mut end = records.len();
+        let (r#type, confirm, max_bytes) = (batch.r#type, batch.delivery.confirm, batch.delivery.max_bytes);
+        let count = batch.records.len();
+        let mut begin = 0;
+        while begin < count {
+            let mut end = count;
             let mut envelope_frame = None;
-            if end > 1 {
+            if end - begin > 1 || confirm {
                 let id = self.random64();
-                let (fit, bytes) = self.batch_frame(id, r#type, &mut key, &mut records, batching.max_bytes);
-                end = fit;
+                let records = &mut batch.records[begin..];
+                let (fit, bytes) = self.batch_frame(id, r#type, &mut batch.key, records, max_bytes, confirm);
+                end = begin + fit;
                 if let Some(bytes) = bytes {
-                    let ids: Arc<[u64]> = records[..end].iter().map(|record| record.id).collect();
-                    envelope_frame = Some(Frame { bytes, head: None, id, r#type, batch: BatchMark::Batch(ids) });
+                    // A confirmed batch's drop is told by the confirmed sends.
+                    let mark = match confirm {
+                        true => BatchMark::Confirmed,
+                        false => BatchMark::Batch(batch.records[begin..end].iter().map(|record| record.id).collect()),
+                    };
+                    envelope_frame = Some(Frame { bytes, head: None, id, r#type, batch: mark });
                 }
             }
-            let taken: Vec<Record> = match envelope_frame {
-                Some(_) => records.drain(..end).collect(),
-                None => records.drain(..1).collect(), // a batch of one goes as the message itself
-            };
-            let deadline = taken
-                .iter()
-                .filter_map(|record| if waits_for_idle { record.deadline } else { deadline_after(now, record.timeout) })
-                .min();
+            if confirm {
+                match envelope_frame {
+                    Some(frame) => self.wait_for_confirmation(frame, &mut batch, begin, end, lane.as_ref()),
+                    None => self.cannot_confirm(&mut batch, begin, end),
+                }
+                begin = end;
+                continue;
+            }
             let (frame, done) = match envelope_frame {
                 Some(frame) => {
-                    let ends: Vec<(Option<SendDone>, Option<Arc<Tracker>>)> =
-                        taken.into_iter().map(|record| (record.done, record.tracker)).collect();
-                    let followed = ends.iter().any(|(done, tracker)| done.is_some() || tracker.is_some());
-                    (frame, followed.then_some(SendDone::Batch(ends)))
+                    // Kept only for those someone follows: none, mostly.
+                    let mut ends: Vec<(Option<SendDone>, Option<Arc<Tracker>>)> = Vec::new();
+                    for record in &mut batch.records[begin..end] {
+                        if record.done.is_some() || record.tracker.is_some() {
+                            ends.push((record.done.take(), record.tracker.take()));
+                        }
+                    }
+                    (frame, (!ends.is_empty()).then_some(SendDone::Batch(ends)))
                 }
                 None => {
-                    let record = taken.into_iter().next().expect("one message");
-                    let done = match record.tracker {
-                        None => record.done,
-                        Some(tracker) => Some(SendDone::Batch(vec![(record.done, Some(tracker))])),
+                    end = begin + 1; // a batch of one goes as the message itself
+                    let record = &mut batch.records[begin];
+                    let done = match record.tracker.take() {
+                        None => record.done.take(),
+                        Some(tracker) => Some(SendDone::Batch(vec![(record.done.take(), Some(tracker))])),
                     };
-                    let (head, bytes) = self.alone_frame(record.body);
-                    (Frame { bytes, head, id: record.id, r#type, batch: BatchMark::None }, done)
+                    let id = record.id;
+                    let (head, bytes) = self.alone_frame(std::mem::take(&mut record.body));
+                    (Frame { bytes, head, id, r#type, batch: BatchMark::None }, done)
                 }
             };
-            self.send_at(frame, false, lane.as_ref(), deadline, 0, None, None, done);
+            self.send_at(frame, false, lane.as_ref(), batch.deadline, 0, None, None, done);
+            begin = end;
         }
     }
 
     /// The frame of a batch of `records`, in an envelope of id `id`,
     /// `r#type` and `key` holding the first of them that fit in `max_bytes`
     /// on the wire: how many, and the frame, made in a buffer of the frame
-    /// pool, or None when it would hold fewer than two or could not be
-    /// made. The kept envelope takes the records' bodies without a copy;
-    /// those the frame holds go back to the bodies kept, the others to
-    /// their records.
+    /// pool, or None when it would hold fewer than two, unless `confirm`,
+    /// or could not be made. The kept envelope takes the records' bodies
+    /// without a copy; those the frame holds go back to the bodies kept, the
+    /// others to their records. With `confirm` the envelope numbers its
+    /// messages, measured with the rest, the numbers given before the first
+    /// measure and those cut keeping theirs, to go next.
     fn batch_frame(
         &mut self,
         id: u64,
@@ -262,6 +287,7 @@ impl Core {
         key: &mut Option<String>,
         records: &mut [Record],
         max_bytes: usize,
+        confirm: bool,
     ) -> (usize, Option<bytes::Bytes>) {
         let mut envelope = std::mem::take(&mut self.batcher.envelope);
         envelope.id = Some(id);
@@ -270,6 +296,9 @@ impl Core {
         envelope.key = key.take();
         let inside = envelope.batch.get_or_insert_with(BodiesBatch::default);
         inside.message.extend(records.iter_mut().map(|record| std::mem::take(&mut record.body)));
+        if confirm {
+            self.numbered(records, &mut envelope.confirm);
+        }
         // Where the message would be over max_bytes, measured as it goes on
         // the wire, its last messages are cut, to go next: at once as many
         // as their own sizes cover the excess with, which each adds at least
@@ -287,9 +316,12 @@ impl Core {
                 records[end - 1].body = body;
                 end -= 1;
             }
+            if confirm {
+                self.numbered(&mut records[..end], &mut envelope.confirm);
+            }
             size = envelope.encoded_len();
         }
-        let frame = if end > 1 {
+        let frame = if end > 1 || confirm {
             frame::encode_into(&envelope, envelope.key.as_deref(), self.batcher.frames.take())
                 .ok()
                 .map(|buffer| self.batcher.frames.frame(buffer))
@@ -310,6 +342,7 @@ impl Core {
                 }
             }
         }
+        envelope.confirm.clear();
         *key = envelope.key.take();
         self.batcher.envelope = envelope;
         (end, frame)
@@ -418,6 +451,7 @@ mod tests {
             r#type: 300,
             key: Some("key".to_string()),
             batch: Some(BodiesBatch { message: bodies.clone() }),
+            confirm: vec![7, 2, u64::MAX, 1],
         };
         let generated = BatchEnvelope {
             id: Some(1),
@@ -425,6 +459,7 @@ mod tests {
             r#type: 300,
             key: Some("key".to_string()),
             batch: Some(MessageBatch { message: bodies.into_iter().map(Bytes::from).collect() }),
+            confirm: vec![7, 2, u64::MAX, 1],
         };
         assert_eq!(generated.encode_to_vec(), ours.encode_to_vec());
         assert_eq!(generated.encoded_len(), ours.encoded_len());

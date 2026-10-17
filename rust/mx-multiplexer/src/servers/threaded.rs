@@ -11,7 +11,11 @@
 //! multiplexer drops, and logged at the drop lines' rate. A request that
 //! arrives while the server leaves is refused with the DELIVERY_ERROR a
 //! multiplexer sends for a peer that is gone, so that its requester retries
-//! elsewhere at once; a reply is dropped. `serve_forever()` only polls,
+//! elsewhere at once; a reply is dropped. A message of a confirmed batch is
+//! confirmed as its request goes (`super`), the client made not to confirm
+//! at on_message's return: one refused is confirmed Refused at once, and
+//! one a full queue dropped is not, its producer sending it again in time,
+//! by when the queue may have room. `serve_forever()` only polls,
 //! waking at a stop, a drain, an acknowledgement and a drain's last request:
 //! a change's `on_acknowledged` runs there once the requests the queue took
 //! before it are done.
@@ -27,6 +31,7 @@ use super::{
 };
 use crate::constants::types;
 use crate::core::client::{check_key_filters, DropLine, DropReason};
+use crate::core::confirming::Confirmed;
 use crate::defaults::{CLOSE_FLUSH_SECONDS, DEFAULT_TIMEOUT};
 use crate::endpoint::parse_endpoint;
 use crate::error::{Error, Result};
@@ -187,6 +192,7 @@ impl<H: Handler> Shared<H> {
         if accepting {
             self.say_full(&request);
             request.no_response(); // said here, not by the request
+            request.unconfirmed(); // its producer sends it again in time
             return;
         }
         self.refuse(&request);
@@ -208,10 +214,18 @@ impl<H: Handler> Shared<H> {
 
     /// A request this server will not serve, as it leaves: refused with the
     /// DELIVERY_ERROR a multiplexer sends for a peer that is gone, or
-    /// dropped when it answers another message.
+    /// dropped when it answers another message; a message of a confirmed
+    /// batch confirmed Refused instead, now, not as the request goes, which
+    /// `close()` reaches after the client's shutdown: its producer sends it
+    /// again at once.
     fn refuse(&self, request: &Request) {
         request.no_response(); // said here, not by the request
         let message = request.message();
+        if message.confirmation.is_some() {
+            request.unconfirmed();
+            self.client.confirm(message, Confirmed::Refused);
+            return;
+        }
         if message.references != 0 {
             log::debug!("reply #{} of type {} dropped: leaving", message.id, message.r#type);
             return;
@@ -246,7 +260,7 @@ impl<H: Handler> Shared<H> {
                     state.idle -= 1;
                 }
             };
-            let failure = handle(&self.handler, request, "BaseThreadedMultiplexerServer");
+            let failure = handle(&self.handler, request, "BaseThreadedMultiplexerServer").end;
             let (wake, failed) = {
                 let mut state = lock(&self.state);
                 state.busy -= 1;
@@ -592,6 +606,7 @@ impl BaseThreadedMultiplexerServerBuilder {
         let cell: Arc<OnceLock<Weak<Shared<H>>>> = Arc::default();
         let (on_message, on_search) = (Arc::clone(&cell), Arc::clone(&cell));
         let mut builder = ThreadedClient::builder(self.peer_type)
+            .confirm_after_on_message(false) // a request confirms its message as it goes
             .on_message(move |incoming| {
                 if let Some(shared) = on_message.get().and_then(Weak::upgrade) {
                     shared.on_message(incoming);

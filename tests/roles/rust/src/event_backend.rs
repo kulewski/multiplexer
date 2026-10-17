@@ -1,9 +1,12 @@
 //! The `event_backend` role: a backend that receives events in a loop of
 //! its own, `BaseMultiplexerServer::loop_iter()`, reports each one and
-//! never answers, until SIGTERM, --until N messages or --for S seconds.
-//! With --drain-file it starts draining when the file appears, the
-//! --drain-routing flags kept on, and keeps looping. Events: connected,
-//! received, draining, acked, done (tests/README.md).
+//! never answers, until SIGTERM, --until N messages or --for S seconds;
+//! --crash-at N exits with status 3 at the N-th message, before handling
+//! it, reporting `crash`: what it holds of a confirmed batch goes
+//! unconfirmed, as with a consumer that dies. With --drain-file it starts
+//! draining when the file appears, the --drain-routing flags kept on, and
+//! keeps looping. Events: connected, received, crash, draining, acked, done
+//! (tests/README.md).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -15,15 +18,22 @@ use crate::args::Args;
 use crate::common::{self, Common, Failure, Outcome, STOP};
 use crate::event::{emit, Event};
 
-/// Receives events, reports each one and never answers.
+/// Receives events, reports each one and never answers; with `crash_at`,
+/// exits with 3 at that message, before handling it.
 #[derive(Default)]
 struct EventBackend {
     received: AtomicI64,
+    crash_at: i64,
 }
 
 impl Handler for EventBackend {
     /// Reports one received event.
     fn handle_message(&self, request: Request) -> HandlerResult {
+        let before = self.received.load(Ordering::SeqCst);
+        if self.crash_at > 0 && before + 1 >= self.crash_at {
+            emit(&Event::new("crash").with("received", before));
+            std::process::exit(3);
+        }
         self.received.fetch_add(1, Ordering::SeqCst);
         let message = request.message();
         let mut received = Event::new("received");
@@ -41,7 +51,7 @@ impl Handler for EventBackend {
 
 /// Runs the role with the arguments after its name.
 pub fn run(argv: &[String]) -> Outcome {
-    let args = Args::parse(argv, &["until", "for", "drain-file", "drain-routing", "key-filter"], &[])
+    let args = Args::parse(argv, &["until", "for", "crash-at", "drain-file", "drain-routing", "key-filter"], &[])
         .map_err(Failure::Usage)?;
     let common = Common::from(&args)?;
     let until: i64 = args.get("until", 0).map_err(Failure::Usage)?;
@@ -54,7 +64,8 @@ pub fn run(argv: &[String]) -> Outcome {
         builder = builder.key_filters(key_filters);
     }
     common::install_signal_handlers();
-    let mut server = builder.build(EventBackend::default())?;
+    let crash_at: i64 = args.get("crash-at", 0).map_err(Failure::Usage)?;
+    let mut server = builder.build(EventBackend { crash_at, ..EventBackend::default() })?;
     server.connect()?; // the loop below is its own; connect() is what serve_forever() would do first
     let handle = server.handle();
     emit(&common.connected_event(server.instance_id(), handle.connections_count()?));

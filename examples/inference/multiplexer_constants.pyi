@@ -22,6 +22,7 @@ class types(_constants_base):
     RULES_STATUS: int
     PEER_CONTROL: int
     PEER_STATUS: int
+    CONFIRMATION: int
     MAX_MULTIPLEXER_META_PACKET: int
     PICKLE_RESPONSE: int
     REQUEST_RECEIVED: int

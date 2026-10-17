@@ -1,18 +1,19 @@
 // BasicClient's sends of a message given as its bytes alone (send_plain,
-// send_bytes): what a client that batches hands over without making a
-// frame of it. A message for a batch joins it as the bytes it is, a record
-// with no frame (BatchRecord), and the batch's frame is made of them as of
-// any message's body (basic_client_batching.cc); one that goes alone, its
-// type not batched, too big for a batch, a batch of one or with no time to
-// wait, is framed here, unsealed, and sent as send() sends a frame, which
-// seals it (_send). So a ThreadedClient's io thread, which these serve,
-// makes no frame per message, and a SyncClient's queue() none for a
-// message that joins a batch.
+// send_bytes): what a client with a delivery set hands over without making
+// a frame of it. A message for a batch joins it as the bytes it is, a
+// record with no frame (BatchRecord), and the batch's frame is made of them
+// as of any message's body (basic_client_batching.cc); one that goes
+// alone, its type not batched, too big for a batch or a batch of one, is
+// framed here, unsealed, and sent as send() sends a frame, which seals it
+// (_send). So a ThreadedClient's io thread, which these serve, makes no
+// frame per message, and a SyncClient's queue() none for a message that
+// joins a batch.
 //
 // What send() decides for a frame that may batch is decided here the same
-// way and in the same order: the batching for the message's type and key,
+// way and in the same order: the delivery for the message's type and key,
 // the loop run first for a synchronous client (poll_first,
-// _batch_needs_loop), every batch let go before a message that goes alone.
+// _batch_needs_loop), every batch let go before a message that goes alone,
+// and a delivery's timeout over the send's.
 #include <memory>
 #include <string>
 #include <utility>
@@ -40,19 +41,21 @@ bool BasicClient::send_plain(std::string* body, std::uint64_t id, std::uint32_t 
   record.body.swap(*body);
   record.id = id;
   const std::size_t bytes = record.body.size();
-  // One with no time to wait, 0 or NaN, goes alone, as send() has it.
-  if ((timeout > 0 || timeout < 0) && batcher_->configured()) {
-    const Batching* batching = _batching_for(type, keyed, key);
-    if (batching && poll_first && _batch_needs_loop(type, keyed, key, bytes, *batching)) {
+  if (batcher_->configured()) {
+    const Delivery* delivery = _delivery_for(type, keyed, key);
+    if (delivery && poll_first && _batch_needs_loop(type, keyed, key, bytes, *delivery)) {
       poll();
       poll_first = false;
       if (shuts_down_) {
         return false;
       }
-      batching = _batching_for(type, keyed, key);  // what the loop ran may have changed it
+      delivery = _delivery_for(type, keyed, key);  // what the loop ran may have changed it
     }
-    if (batching) {
-      return _batch_record(&record, type, keyed, key, bytes, *batching, timeout, trackers, done);
+    if (delivery && (delivery->batch || delivery->confirm)) {
+      return _batch_record(&record, type, keyed, key, bytes, *delivery, trackers, done);
+    }
+    if (delivery) {
+      timeout = delivery->timeout;  // a delivery that sends it as it is, by its own timeout
     }
   }
   if (poll_first) {
@@ -82,7 +85,8 @@ bool BasicClient::send_bytes(std::string* body, std::uint64_t id, std::uint32_t 
       return send_plain(body, id, type, keyed, key, timeout, trackers, done, poll_first);
     }
   }
-  // Not a plain event of a batched type: alone, as send() sends its frame.
+  // Not a plain event of a type with a delivery set: alone, as send() sends
+  // its frame.
   if (shuts_down_) {
     return false;
   }

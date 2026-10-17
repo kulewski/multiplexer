@@ -867,8 +867,21 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         return;
       }
     }
-    // More is needed, for a frame or the rest of one begun: what the buffer
-    // holds moves to its front, and the rest of it is read into.
+    // More is needed, for a frame or the rest of one begun: every whole
+    // frame read is handed over, which a manager that asked hears of
+    // (notify_when_read_drained), once; what the buffer holds moves to its
+    // front, and the rest of it is read into.
+    if constexpr (ConnectionsManagerTraits::REPORTS_READ_DRAINED) {
+      if (notify_when_read_drained_) {
+        notify_when_read_drained_ = false;
+        if (ManagerPointer manager = manager_.lock()) {
+          manager->read_drained(this);
+        }
+        if (incoming_channel_state_ == ChannelState::BROKEN) {
+          return;  // what the manager did ended the connection
+        }
+      }
+    }
     if (read_begin_) {
       std::memmove(read_buffer_.get(), read_buffer_.get() + read_begin_, held);
       read_begin_ = 0;
@@ -1207,6 +1220,13 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     MX_DCHECK_RUN_ON(&io_thread_);
     notify_when_idle_ = true;
   }
+  // The next time every whole frame read is handed over and the socket is
+  // read again, the manager hears of it (read_drained), once: a client that
+  // gathers the confirmations it owes over what one read brought.
+  void notify_when_read_drained() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    notify_when_read_drained_ = true;
+  }
 
   /* Shared between loops: a multiplexer on several event loops
    * (Server::set_threads) routes to a connection from every loop, whose
@@ -1537,7 +1557,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // shutdown meanwhile, the frame it writes is set aside, with the manager
   // to tell, for that handler to settle (see _orphan_outgoing_messages).
   bool write_in_flight_ MX_GUARDED_BY(io_thread_) = false;
-  bool notify_when_idle_ MX_GUARDED_BY(io_thread_) = false;  // see notify_when_idle()
+  bool notify_when_idle_ MX_GUARDED_BY(io_thread_) = false;          // see notify_when_idle()
+  bool notify_when_read_drained_ MX_GUARDED_BY(io_thread_) = false;  // see notify_when_read_drained()
   MessagesBuffer set_aside_ MX_GUARDED_BY(io_thread_);
   std::weak_ptr<ConnectionsManagerImplementation> set_aside_manager_ MX_GUARDED_BY(io_thread_);
   // The outgoing side when the connection is shared between loops, in

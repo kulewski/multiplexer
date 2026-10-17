@@ -118,11 +118,13 @@ struct Batches {
       : receiver(io_service, multiplexer::peers::TEST_EVENT_BACKEND), sender(multiplexer::peers::TEST_EVENT_CLIENT) {
     EXPECT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
     EXPECT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
-    multiplexer::SyncClient::Batching batching;
+    multiplexer::SyncClient::Delivery batching;
+    batching.batch = true;
     batching.max_records = 2 * BATCH;
     batching.max_bytes = 2 * multiplexer::BasicClient::KEPT_SPLIT_BYTES;
     batching.max_delay = 3600;  // never, here
-    sender.set_batching(multiplexer::types::TEST_EVENT, batching);
+    batching.timeout = -1;
+    sender.set_delivery(multiplexer::types::TEST_EVENT, batching);
   }
   // The allocations of the loop that reads a batch of `count` events of
   // `size` bytes, but the one at `big_at`, of `big_size`, sent before; its

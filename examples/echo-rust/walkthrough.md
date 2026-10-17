@@ -305,7 +305,7 @@ mxcontrol run_multiplexer --address 127.0.0.1:1980 --rules $PWD/echo.rules
 ```
 
 ```
-[INFO]  ts=…  pid=101436  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo-rust/echo.rules: cf6eea04, 19 message types, 7 peer types"  from=multiplexer/server.cc:1086
+[INFO]  ts=…  pid=101436  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo-rust/echo.rules: d0c6f537, 20 message types, 7 peer types"  from=multiplexer/server.cc:1086
 [INFO]  ts=…  pid=101436  ctx=….mxcontrol.run_multiplexer  flw=""  txt="starting MX server on 127.0.0.1:1980"  from=mxcontrol/start_multiplexer_server.cc:178
 ```
 
@@ -357,7 +357,7 @@ carry:
 
 ```
 $ mxcontrol rules status -M 127.0.0.1:1980
-multiplexer 17639160489000666773: rules cf6eea04 (19 message types, 7 peer types) from …/examples/echo-rust/echo.rules, loaded …
+multiplexer 17639160489000666773: rules d0c6f537 (20 message types, 7 peer types) from …/examples/echo-rust/echo.rules, loaded …
 ```
 
 ## 7. What just happened

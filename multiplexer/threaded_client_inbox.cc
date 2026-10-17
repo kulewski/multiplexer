@@ -33,9 +33,17 @@ bool ThreadedClientInbox::push_plain(PlainSend* plain, std::string* body) {
   return _wake();
 }
 
-void ThreadedClientInbox::take(std::vector<Entry>* taken, SpentBodies* spent) {
+bool ThreadedClientInbox::push_confirmation(const HandedConfirmation& confirmation) {
+  mx::MutexLock lock(mutex_);
+  confirmations_.push_back(confirmation);
+  return _wake();
+}
+
+void ThreadedClientInbox::take(std::vector<Entry>* taken, std::vector<HandedConfirmation>* confirmations,
+                               SpentBodies* spent) {
   mx::MutexLock lock(mutex_);
   taken->swap(entries_);
+  confirmations->swap(confirmations_);
   wake_pending_ = false;
   returned_.keep_all(spent);
 }

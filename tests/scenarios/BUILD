@@ -205,6 +205,26 @@ LANGS = [
     for event_client in LANGS
 ]
 
+# Confirmed sends: a client's batches confirmed by a backend of every
+# language, the sender's own and the others, one backend dying with what
+# it held.
+[
+    mx_integration_test(
+        name = "confirmed_events_%s_%s" % (event_backend, event_client),
+        extra_deps = [
+            "//multiplexer:recording",
+            "//multiplexer:recording_py_proto",
+        ],
+        roles = {
+            "event_backend": event_backend,
+            "event_client": event_client,
+        },
+        scenario = "confirmed_events/confirmed_events.py",
+    )
+    for event_backend in LANGS
+    for event_client in LANGS
+]
+
 # Multi-mx and failure scenarios.
 [
     mx_integration_test(

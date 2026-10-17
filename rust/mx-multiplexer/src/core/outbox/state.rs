@@ -55,7 +55,9 @@ pub(super) struct Backlog {
     pub(super) live: usize,
 }
 
-/// A flush_all() in progress, or ended and not forgotten yet.
+/// A flush_all() in progress, or ended and not forgotten yet; `confirm_mark`
+/// is the last number a confirmed send was given before it, every one up to
+/// which it waits for until confirmed or given up on.
 pub(super) struct Flush {
     pub(super) last_number: u64,
     pub(super) waiting: usize,
@@ -63,6 +65,7 @@ pub(super) struct Flush {
     pub(super) done: Option<FlushDone>,
     pub(super) flushed: bool,
     pub(super) lost: bool,
+    pub(super) confirm_mark: u64,
 }
 
 /// A send followed to its end for its `done`.

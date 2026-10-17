@@ -57,6 +57,8 @@ from multiplexer.mxclient import (
     CLOSE_FLUSH_SECONDS,
     DEFAULT_BATCH_MAX_BYTES,
     DEFAULT_BATCH_MAX_RECORDS,
+    DEFAULT_RETRY_AFTER,
+    Confirmed,
     ConnectionWrapper,
     DropReason,
     Lane,
@@ -102,6 +104,32 @@ def _in_order(subscription: _Subscription) -> int:
     """Where `subscription` comes among the subscriptions, for the merge of
     a type's with every type's."""
     return subscription.order
+
+
+class _Handled:
+    """A message of a confirmed batch the subscriptions' handlers have in
+    hand, on the loop: whether a handler ran on it, how many of the calls
+    and coroutine tasks are not done, whether one raised, or a task was
+    cancelled. Once the last is done it is confirmed, PROCESSED or FAILED,
+    through the ThreadedClient, unless no handler ran or a task was
+    cancelled: then its producer sends it again in time."""
+
+    __slots__ = ("threaded", "mxmsg", "ran", "pending", "failed", "cancelled")
+
+    def __init__(self, threaded: ThreadedClient, mxmsg: MultiplexerMessage):
+        self.threaded = threaded
+        self.mxmsg = mxmsg
+        self.ran = False
+        self.pending = 1  # the handlers' calls, finished once they are all made
+        self.failed = False
+        self.cancelled = False
+
+    def finished(self, failed: bool) -> None:
+        """One call or task is done, `failed` when it raised."""
+        self.failed = self.failed or failed
+        self.pending -= 1
+        if not self.pending and self.ran and not self.cancelled:
+            self.threaded.confirm(self.mxmsg, Confirmed.FAILED if self.failed else Confirmed.PROCESSED)
 
 
 class AsyncClient:
@@ -171,6 +199,7 @@ class AsyncClient:
             on_message=self._on_message,
             on_drop=self._on_drop_reported if on_drop is not None else None,
             key_filters=key_filters,
+            confirm_after_on_message=False,  # confirmed once the loop's handlers are done with it (_deliver)
         )
         self.type = type
 
@@ -268,25 +297,54 @@ class AsyncClient:
         `on_acknowledged` as for set_routing()."""
         self._threaded.set_key_filters(filters, self._on_loop(on_acknowledged))
 
-    def set_batching(
+    def set_delivery(
         self,
         type: int,
         key: str | None = None,
         *,
+        batch: bool = False,
         max_records: int = DEFAULT_BATCH_MAX_RECORDS,
         max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
         max_delay: float = 0.0,
+        confirm: bool = False,
+        retry_after: float = DEFAULT_RETRY_AFTER,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        """Send the events of message `type`, or of one `key` of it,
-        several in one message, which the receiving library splits back
-        into one message each; see ThreadedClient.set_batching. Does not
+        """How the events of message `type`, or of one `key` of it, go:
+        with `batch` several in one message, which the receiving library
+        splits back into one message each, with `confirm` kept until their
+        consumers confirm them, a batch given up on `timeout` seconds after
+        its first message; see ThreadedClient.set_delivery. Does not
         block."""
-        self._threaded.set_batching(type, key, max_records=max_records, max_bytes=max_bytes, max_delay=max_delay)
+        self._threaded.set_delivery(
+            type,
+            key,
+            batch=batch,
+            max_records=max_records,
+            max_bytes=max_bytes,
+            max_delay=max_delay,
+            confirm=confirm,
+            retry_after=retry_after,
+            timeout=timeout,
+        )
 
-    def clear_batching(self, type: int, key: str | None = None) -> None:
-        """No batching from now on for message `type`, or for one `key` of
-        it; see ThreadedClient.clear_batching. Does not block."""
-        self._threaded.clear_batching(type, key)
+    def confirm(self, mxmsg: MultiplexerMessage, outcome: Confirmed) -> None:
+        """Tell the producer of `mxmsg`, a message of a confirmed batch,
+        what became of it, from any thread; see ThreadedClient.confirm. A
+        message the subscriptions' handlers take is confirmed once each of
+        them, and each coroutine handler's task, is done with it, FAILED
+        when one raised; one read from messages() is the reader's to
+        confirm. Does not block."""
+        self._threaded.confirm(mxmsg, outcome)
+
+    def processed(self, mxmsg: MultiplexerMessage) -> None:
+        """confirm(mxmsg, Confirmed.PROCESSED)."""
+        self._threaded.confirm(mxmsg, Confirmed.PROCESSED)
+
+    def clear_delivery(self, type: int, key: str | None = None) -> None:
+        """No delivery set from now on for message `type`, or for one
+        `key` of it; see ThreadedClient.clear_delivery. Does not block."""
+        self._threaded.clear_delivery(type, key)
 
     def _on_loop(self, callback: Callable[[], None] | None) -> Callable[[], None] | None:
         """`callback` as the io thread calls it, run on the loop instead,
@@ -598,22 +656,39 @@ class AsyncClient:
         """On the loop: run the handlers of the subscriptions that still
         hold, unless the client is closing, and feed the queue. A handler
         that raises, now or later as a coroutine, is logged with the
-        message's type and sender, and the other handlers still run."""
+        message's type and sender, and the other handlers still run. A
+        message of a confirmed batch that no reader of messages() takes is
+        confirmed once the handlers that ran are done with it (_Handled);
+        one no handler ran on, or whose task was cancelled, is not, and its
+        producer sends it again in time."""
+        handled = _Handled(self._threaded, mxmsg) if self._queue is None and mxmsg.HasField("confirmation") else None
         for subscription in subscriptions:
             if self._closing:
                 break  # close() came since the message was handed over
             if not subscription.active:
                 continue  # unsubscribed since the message was handed over
             handler = subscription.handler
+            if handled is not None:
+                handled.ran = True
             try:
                 result = handler(mxmsg)
             except Exception as error:  # one handler's failure is not the others'
                 self._subscription_failed("handler", handler, mxmsg, error)
+                if handled is not None:
+                    handled.failed = True
                 continue
             if inspect.isawaitable(result):
                 task = asyncio.ensure_future(result, loop=self._loop)
                 self._tasks.add(task)
-                task.add_done_callback(lambda done, handler=handler, mxmsg=mxmsg: self._task_done(done, handler, mxmsg))
+                if handled is not None:
+                    handled.pending += 1
+                task.add_done_callback(
+                    lambda done, handler=handler, mxmsg=mxmsg, handled=handled: self._task_done(
+                        done, handler, mxmsg, handled
+                    )
+                )
+        if handled is not None:
+            handled.finished(False)  # the handlers' calls; their tasks finish on their own
         if self._queue is not None:
             if self._queue.qsize() >= self._queue_size:
                 self._queue.get_nowait()  # the oldest goes; the io thread must never wait for the loop
@@ -624,14 +699,21 @@ class AsyncClient:
                 self._dropped_since_warning = 0
             self._queue.put_nowait(mxmsg)
 
-    def _task_done(self, task: asyncio.Task, handler: Handler, mxmsg: MultiplexerMessage) -> None:
+    def _task_done(
+        self, task: asyncio.Task, handler: Handler, mxmsg: MultiplexerMessage, handled: "_Handled | None"
+    ) -> None:
         """A coroutine handler finished: its exception, if any, is ours to report."""
         self._tasks.discard(task)
         if task.cancelled():
+            if handled is not None:
+                handled.cancelled = True
+                handled.finished(False)
             return
         error = task.exception()
         if error is not None:
             self._subscription_failed("handler", handler, mxmsg, error)
+        if handled is not None:
+            handled.finished(error is not None)
 
     @staticmethod
     def _subscription_failed(

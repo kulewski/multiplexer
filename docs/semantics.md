@@ -15,7 +15,11 @@ that changes.
 - **At most once per multiplexer.** A message is written to the receiving
   connections the multiplexer has at that moment, or it is dropped. Nothing
   is retried, stored or replayed. A backend that connects a second later
-  gets nothing that happened before.
+  gets nothing that happened before. A confirmed send is the one
+  exception, made by the libraries, not by the multiplexer: the sender's
+  library keeps each event until the receiver's library says it was
+  processed, and sends it again until then, so it arrives at least once
+  ([confirmed sends](delivery.md#confirmed-sends)).
 - **Copies come from you.** Sending an event through every connection means
   every multiplexer delivers it, so each backend gets one copy per
   multiplexer. The receiving library remembers the ids of the last 2048
@@ -43,7 +47,7 @@ that changes.
   type and key, and against what it sends unbatched, but not between two
   types or keys: a batch that goes on its own, full, at its delay or when
   a connection is free, may go ahead of an older one of another type or
-  key ([batching](batching.md#order)).
+  key ([batching](delivery.md#order)).
 - **A key narrows.** A keyed message reaches, of the peers its rule names,
   those with no key filter for its type and those whose filter takes the
   key, and among them a last resort is a last resort for that key: a
@@ -89,7 +93,7 @@ that changes.
   a query's first stage's time starts when the io thread takes the query
   up. A client's queue to a multiplexer and a multiplexer's queue to a
   peer count a batch, many events in one message
-  ([batching](batching.md#on-the-way-a-batch-is-one-message)), as one
+  ([batching](delivery.md#on-the-way-a-batch-is-one-message)), as one
   message; the receiving library holds its events one by one, taking a
   batch whole, past its 1024 by one batch at most, or dropping it whole.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
@@ -134,7 +138,11 @@ that changes.
   work: an answer's tokens addressed to the requester, each carrying the
   answer's number and its own, and one reply after the last.
 - **Events give no feedback** unless the rule reports delivery errors, and
-  even then only that nobody was there, not that anybody processed it. A
+  even then only that nobody was there, not that anybody processed it;
+  or unless they are confirmed sends, whose end each sender hears once a
+  receiver processed them, and which go again until then: at least once,
+  a message processed whose confirmation was lost processed again
+  ([confirmed sends](delivery.md#confirmed-sends)). A
   flushing send (`flush=True`, `SyncClient::send`) does guarantee the event was
   written to a live connection, re-sending across a dead one. The report
   comes from each multiplexer that got a copy and found nobody: an event
@@ -144,7 +152,7 @@ that changes.
   A multiplexer that is down says nothing. A batch is one message to the
   multiplexer, which sends it back whole in its `DELIVERY_ERROR`, and the
   library tells each event of its own, as for one sent alone
-  ([batching](batching.md#what-changes-for-a-program)).
+  ([batching](delivery.md#what-changes-for-a-program)).
 
 ## Failure modes
 
@@ -348,7 +356,7 @@ that changes.
   [Rust](api_rust.md#messages-the-library-gives-up-on)). Each is logged too.
   A batch given up on is counted and told once for each message in it,
   and each message's callback hears it
-  ([batching](batching.md#on-the-way-a-batch-is-one-message)).
+  ([batching](delivery.md#on-the-way-a-batch-is-one-message)).
 - **A written message is lost.** Written means handed to the kernel on a
   live connection, which is what a flushing send waits for and all a
   library can know: a multiplexer that dies before reading what its socket
@@ -403,13 +411,14 @@ rows that say where they are set, compiled into the multiplexer and the C++
 library, exported to Python as attributes of `multiplexer._native`,
 `DEFAULT_READ_TIMEOUT` and `DEFAULT_REMOTE_RECORDING_MAX_BYTES` apart, with
 `DEFAULT_TIMEOUT`, `CLOSE_FLUSH_SECONDS`, `MAX_KEY_SIZE`, `MAX_SECONDS`,
-`DEFAULT_BATCH_MAX_RECORDS` and `DEFAULT_BATCH_MAX_BYTES` also on
-`multiplexer.mxclient`, and to Rust as constants at the crate's root,
+`DEFAULT_BATCH_MAX_RECORDS`, `DEFAULT_BATCH_MAX_BYTES` and
+`DEFAULT_RETRY_AFTER` also on `multiplexer.mxclient`, and to Rust as
+constants at the crate's root,
 generated from the header.
 
 | Constant | Value | Where it applies |
 |---|---|---|
-| `DEFAULT_TIMEOUT` | 10 s | connect, each stage of a query, flush |
+| `DEFAULT_TIMEOUT` | 10 s | connect, each stage of a query, flush; a delivery's `timeout`, a batch's from its first message ([delivery](delivery.md#the-timeout-is-the-batchs)) |
 | `ROOM_GRACE_SECONDS` | 0.01 s | how much longer than its synchronous flushing send a message waits for room or for a connection, so that the send times out before its message is dropped |
 | `DEFAULT_READ_TIMEOUT` | none | `receive_message` waits forever by default |
 | `AUTO_RECONNECT_TIME` | 3 s | between a connection dropping and the library reconnecting |
@@ -424,9 +433,11 @@ generated from the header.
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
 | `MAX_KEY_SIZE` | 256 bytes | the longest key a message may carry; a library refuses a longer one where the message is built, a multiplexer drops and reports it ([keys](keys.md)) |
 | `MAX_KEY_PATTERN_SIZE` | 1024 bytes | the longest pattern of a key filter |
-| `DEFAULT_BATCH_MAX_RECORDS` | 1000 messages | the most messages in a client's batch, unless `set_batching()` says otherwise ([batching](batching.md)) |
-| `DEFAULT_BATCH_MAX_BYTES` | 1 MiB | the most bytes of a batch's message, the envelope with every message inside, unless `set_batching()` says otherwise |
+| `DEFAULT_BATCH_MAX_RECORDS` | 1000 messages | the most messages in a client's batch, unless `set_delivery()` says otherwise ([delivery](delivery.md)) |
+| `DEFAULT_BATCH_MAX_BYTES` | 1 MiB | the most bytes of a batch's message, the envelope with every message inside, unless `set_delivery()` says otherwise |
 | `MAX_BATCH_RECORDS` | 1024 messages | the most messages one batch holds: a client refuses a larger `max_records`, a receiving library drops a larger batch whole |
+| `DEFAULT_RETRY_AFTER` | 5 s | a confirmed send's `retry_after`: how long a batch goes without any of its messages confirmed before the rest go again ([confirmed sends](delivery.md#confirmed-sends)) |
+| `CONFIRMATIONS_GATHERED_MAX` | 256 | the confirmations a consumer's library owes one producer before it sends them, though its program still has messages in hand |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client holds; a `ThreadedClient` with no `on_message` drops what arrives on its own, with a warning |
 | `queue_size`, in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |

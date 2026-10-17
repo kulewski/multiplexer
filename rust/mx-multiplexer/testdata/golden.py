@@ -17,6 +17,7 @@ import sys
 from multiplexer.Multiplexer_pb2 import (
     BackendForPacketSearch,
     Compression,
+    Confirmation,
     DeliveryError,
     KeyFilter,
     LoggingMethod,
@@ -66,6 +67,7 @@ def messages() -> list[tuple[str, MultiplexerMessage]]:
         workflow="\x00\xffworkflow",
         logging_method=LoggingMethod.CONSOLE,
         key="ключ-κλειδί",
+        confirmation=MAX_U64,
     )
     every_field.override_rrules.add(
         peer="backend",
@@ -88,6 +90,7 @@ def messages() -> list[tuple[str, MultiplexerMessage]]:
         original_message=original,
         original_message_omitted=False,
     )
+    confirmation = Confirmation(processed=[1, 3, 9, 1], refused=[4, 2], failed=[MAX_U64, 1])
     return [
         ("minimal", MultiplexerMessage(type=0)),
         ("ping", MultiplexerMessage(id=1, sender=2, type=1)),
@@ -132,6 +135,29 @@ def messages() -> list[tuple[str, MultiplexerMessage]]:
         # A client's batch: what the crate writes from a BatchEnvelope, the
         # MessageBatch inside it, must be what this writes, its bytes.
         ("batch", MultiplexerMessage(id=26, sender=27, type=300, key="shard.1", batch=batch.SerializeToString())),
+        # A confirmed batch, its numbers as (first, count) pairs, packed.
+        (
+            "confirmed_batch",
+            MultiplexerMessage(
+                id=30,
+                sender=27,
+                type=300,
+                key="shard.1",
+                batch=batch.SerializeToString(),
+                confirm=[5, 1, MAX_U64 - 1, 1],
+            ),
+        ),
+        (
+            "confirmation",
+            MultiplexerMessage(
+                id=31,
+                sender=32,
+                to=33,
+                type=13,
+                report_delivery_error=False,
+                message=confirmation.SerializeToString(),
+            ),
+        ),
     ]
 
 

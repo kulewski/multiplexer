@@ -79,7 +79,10 @@ over `MAX_KEY_SIZE`, 256 bytes.
 Every timeout is an `Option<Duration>`, in every class: `None` sets no
 deadline, and `Some(Duration::ZERO)` means "don't wait". The builders of
 a query and a send take `.timeout(duration)` and `.no_deadline()`, and
-default to `DEFAULT_TIMEOUT`, 10 s. No deadline means the call waits as
+default to `DEFAULT_TIMEOUT`, 10 s; so does `Delivery::timeout`
+([delivery](#delivery)). Every other length of time is a `Duration`,
+`Delivery`'s `max_delay` and `retry_after` among them. No deadline means
+the call waits as
 long as it takes, and a message sent with it waits for a connection or
 for room as long as that takes: `shutdown(None)` writes everything sent
 before it first, however long that takes, and a drain capped with `None`
@@ -407,8 +410,8 @@ type serves on the threaded class unchanged.
   `start_draining()` and `draining()`; `working()`; `instance_id()`;
   `send(type, payload)` and `send_message(message)` for a message that is
   no reply, routed by its type, as every client sends; `set_key_filters()`
-  and `set_key_filters_then()`; `set_batching()` and `clear_batching()`
-  ([batching](#batching)); `connections_count()`,
+  and `set_key_filters_then()`; `set_delivery()` and `clear_delivery()`
+  ([delivery](#delivery)); `connections_count()`,
   `routing_acknowledged()` and `held_for_a_connection()`; `dropped()`, the
   requests dropped, here those the client's full receive queue dropped.
   From another thread than the server's own, a call that needs the client
@@ -660,46 +663,54 @@ server classes send through their client:
 Written means handed to the kernel on a live connection: only a reply says
 a message arrived ([semantics](semantics.md#failure-modes)).
 
-## Batching
+## Delivery
 
-`set_batching(type, key, batching)` on `SyncClient`, `ThreadedClient` and
-the servers' `ServerHandle` sends the events of a message type, or of one
-key of it, several in one message, which the receiving library splits
-back into one message each, as if each had come alone;
-[batching](batching.md) says what goes in a batch, when it goes and what
-it changes.
+`set_delivery(type, key, delivery)` on `SyncClient`, `ThreadedClient` and
+the servers' `ServerHandle` sets how the events of a message type, or of
+one key of it, go: several in one message, which the receiving library
+splits back into one message each, as if each had come alone (`batch`);
+kept until their consumer's library confirms them (`confirm`); or both;
+and how long a batch has (`timeout`). [Delivery](delivery.md) says what
+goes in a batch, when it goes, what it changes and what a confirmed send
+does.
 
 ```rust
-use mx_multiplexer::Batching;
+use mx_multiplexer::Delivery;
 
-let batching = Batching { max_delay: Duration::from_millis(5), ..Batching::default() };
-client.set_batching(types::METRIC_SAMPLE, None, batching)?;
+let delivery = Delivery { batch: true, max_delay: Duration::from_millis(5), ..Delivery::default() };
+client.set_delivery(types::METRIC_SAMPLE, None, delivery)?;
 client.send(types::METRIC_SAMPLE, payload).queue()?;  // in a batch, which goes once full or 5 ms on
 ```
 
-- `Batching`, at the crate's root, has `max_records`
-  (`DEFAULT_BATCH_MAX_RECORDS`, 1000), `max_bytes`
+- `Delivery`, at the crate's root, has `batch`, false by default;
+  `max_records` (`DEFAULT_BATCH_MAX_RECORDS`, 1000), `max_bytes`
   (`DEFAULT_BATCH_MAX_BYTES`, 1 MiB, measured as `MAX_MESSAGE_SIZE` is)
   and `max_delay`, a `Duration`, zero for no delay, a batch going as soon
-  as a connection has nothing left to write; `Batching::default()` is
-  those defaults. With `key` `None`, every key of the type batches, each
-  apart, and its messages without a key apart again; `Some(key)` sets one
-  key, ahead of what is set for its type. `clear_batching(type, key)`
-  ends what was set for the type, its keys' settings included, or for
-  one key, which then batches as its type says. Each lets every batch go
-  first.
+  as a connection has nothing left to write; `confirm`, false, and
+  `retry_after` (`DEFAULT_RETRY_AFTER`, 5 s); and `timeout`, an
+  `Option<Duration>`, `Some(DEFAULT_TIMEOUT)` by default, a batch's from
+  its first message, its sends' own not used, `None` for no deadline
+  ([the timeout](delivery.md#the-timeout-is-the-batchs)); with neither
+  `batch` nor `confirm` the messages go as any send does, by that timeout.
+  `Delivery::default()` is those defaults. With `key` `None`, the setting
+  is every key's of the type, each apart, and its messages without a key
+  apart again; `Some(key)` sets one key, ahead of what is set for its
+  type. `clear_delivery(type, key)` ends what was set for the type, its
+  keys' settings included, or for one key, which then goes as its type
+  says. Each lets every batch go first.
 - `InvalidArgument`, at the call, for a protocol message type, a key over
   `MAX_KEY_SIZE`, a `max_records` or `max_bytes` of 0, a `max_records`
-  over `MAX_BATCH_RECORDS`, a `max_bytes` over `MAX_MESSAGE_SIZE`, or a
-  delay over 10⁹ s; on `ThreadedClient` the
-  change is made on the io thread right after, ahead of every send made
-  after the call.
-- What batches is a plain event, no `to`, no `references`, no delivery
-  report asked for, no `override_rrules`, sent by a send's `queue()`
-  without `lane()`, `connection()` or `all()`, or by a server handle's
-  `send()` and `send_message()`. What goes by `wait()` or `written()`, to
-  `all()`, through a lane or a connection, with a timeout of zero, a reply
-  and a query's request go alone, after every batch.
+  over `MAX_BATCH_RECORDS`, a `max_bytes` over `MAX_MESSAGE_SIZE`, a delay
+  over 10⁹ s, with `confirm` a `retry_after` of zero or over 10⁹ s, and a
+  timeout `Some` that is not longer than the delay with `batch`, or zero
+  without; on `ThreadedClient` the change is made on the io thread right
+  after, ahead of every send made after the call.
+- What goes by a setting is a plain event, no `to`, no `references`, no
+  delivery report asked for, no `override_rrules`, sent by a send's
+  `queue()` without `lane()`, `connection()` or `all()`, or by a server
+  handle's `send()` and `send_message()`, whatever its own timeout. What
+  goes by `wait()` or `written()`, to `all()`, through a lane or a
+  connection, a reply and a query's request go alone, after every batch.
 - `SyncClient` runs its loop only inside its calls: with no delay its
   messages gather only while the socket is full, so give it one. A batch
   then goes when it fills or at the first call after its delay, and
@@ -717,6 +728,64 @@ client.send(types::METRIC_SAMPLE, payload).queue()?;  // in a batch, which goes 
   counted in `dropped()` and told to the drop observer once for each
   message in it.
 
+### Confirmed sends
+
+`Delivery { confirm: true, .. }` makes a type's messages confirmed sends,
+in batches with `batch` and one by one without: each message kept until
+its consumer's library confirms it was processed, sent again until then,
+at least once ([confirmed sends](delivery.md#confirmed-sends)).
+
+```rust
+use mx_multiplexer::{Confirmed, Delivery};
+
+let delivery = Delivery {
+    batch: true,
+    max_delay: Duration::from_millis(5),
+    confirm: true,
+    timeout: Some(Duration::from_secs(60)),
+    ..Delivery::default()
+};
+producer.set_delivery(types::ORDER_PLACED, None, delivery)?;
+producer.send(types::ORDER_PLACED, order).on_end(|processed| { /* true once a consumer processed it */ }).queue()?;
+
+let (inbox, taken) = std::sync::mpsc::channel();
+let consumer = ThreadedClient::builder(peers::ORDERS)
+    .confirm_after_on_message(false)  // its program confirms each message itself
+    .on_message(move |incoming| inbox.send(incoming.message).unwrap())
+    .connect(addresses)?;
+let message = taken.recv()?;
+// ... processed
+consumer.processed(&message);  // or consumer.confirm(&message, Confirmed::Failed), from any thread
+```
+
+- The producer: a message's `on_end` hears `true` once its consumer
+  confirmed it, `false` once given up on, the drop observer hearing
+  `NotConfirmed` at its batch's deadline or `Failed`; `flush_all()` waits
+  for the confirmations and returns `false` when one was given up on.
+  `Delivery::retry_after`, `DEFAULT_RETRY_AFTER` (5 s) by default, more
+  than zero, is how long a batch goes without any of its messages
+  confirmed before what is left goes again. A `SyncClient` hears
+  confirmations, and sends again, inside its calls.
+- The consumer: a message of a confirmed batch carries its number,
+  `Message::confirmation`, `Some`, with `sender` the producer.
+  `confirm(&message, outcome)`, a `Confirmed`, `Processed`, `Failed` or
+  `Refused`, and `processed(&message)` tell its producer; nothing for a
+  message with no number. A `ThreadedClient` confirms what `on_message`
+  returned from, `Failed` what it panicked on, unless `on_message`
+  confirmed it itself or the builder's `confirm_after_on_message(false)`
+  was given, for a program that confirms its messages itself, from any
+  thread; a message a stream, `messages()` or `subscribe()`, took with no
+  `on_message` is its reader's to confirm, and one nothing took is
+  confirmed `Failed`. `BaseMultiplexerServer` confirms as its handler
+  returns, `Failed` when it returned an error or panicked;
+  `BaseThreadedMultiplexerServer` as a `Request` is let go of, `Failed`
+  when its handler failed, and `Refused` what it will not handle as it
+  leaves. A `SyncClient` confirms only what its program says.
+- `unconfirmed()`, `sent_again()` and `confirmations_owed()` say how many
+  messages a client keeps unconfirmed, how many it sent again and how many
+  confirmations it owes: for tests; on `ThreadedClient` they return a
+  `Result`.
+
 ## Messages the library gives up on
 
 Both clients count the messages the program sent that they gave up on,
@@ -731,6 +800,10 @@ reasons, `DropReason`:
 - `ConnectionLost`: its connection ended and nothing else could take it: a
   pinned lane's, or a copy sent to ALL.
 - `ShutDown`: the client shut down before it went.
+- `NotConfirmed`: a confirmed send ([delivery](delivery.md#confirmed-sends))
+  no consumer confirmed by its batch's deadline, the setting's timeout
+  from the batch's first message.
+- `Failed`: a confirmed send its consumer's handler failed on.
 
 The drop is counted at once, in `dropped()`, and the observer hears of it
 in the pass that runs the sends' callbacks, ahead of them, once the handler

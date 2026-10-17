@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use mx_multiplexer::{Batching, Error, Message, Messages, SyncClient, ThreadedClient, MAX_MESSAGE_SIZE};
+use mx_multiplexer::{Delivery, Error, Message, Messages, SyncClient, ThreadedClient, MAX_MESSAGE_SIZE};
 use support::testing_constants::{peers, types};
 use support::{arrived_by_key, beside, block_on, Multiplexer};
 
@@ -307,8 +307,8 @@ fn plain_sends_arrive_in_their_batches_in_order_beside_sends_followed() {
     let mx = Multiplexer::start();
     let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
-    let batching = Batching { max_records: 7, max_delay: HOUR, ..Batching::default() };
-    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let batching = Delivery { batch: true, max_records: 7, max_delay: HOUR, timeout: None, ..Delivery::default() };
+    client.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let senders: Vec<_> = ["even", "odd"]
         .into_iter()
@@ -352,8 +352,9 @@ fn big_plain_sends_that_go_alone_arrive_whole_in_order() {
     let mx = Multiplexer::start();
     let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
-    let batching = Batching { max_bytes: 64 * 1024, max_delay: HOUR, ..Batching::default() };
-    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let batching =
+        Delivery { batch: true, max_bytes: 64 * 1024, max_delay: HOUR, timeout: None, ..Delivery::default() };
+    client.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let payloads: Vec<Vec<u8>> = (0..4u8)
         .map(|number| (0..3 * 1024 * 1024).map(|index: usize| (index as u8).wrapping_add(number)).collect())
         .collect();
@@ -371,7 +372,8 @@ fn the_shutdown_writes_out_the_plain_sends_made_before_it() {
     let mx = Multiplexer::start();
     let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
-    client.set_batching(types::TEST_EVENT, None, Batching { max_delay: HOUR, ..Batching::default() }).unwrap();
+    let batching = Delivery { batch: true, max_delay: HOUR, timeout: None, ..Delivery::default() };
+    client.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let sent: Vec<u64> =
         (0..10).map(|number| client.send(types::TEST_EVENT, number.to_string()).queue().unwrap()).collect();
     client.shutdown(None).wait().unwrap();
@@ -405,7 +407,7 @@ fn a_plain_send_from_a_thread_locals_destructor_goes_out() {
     let mx = Multiplexer::start();
     let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
-    client.set_batching(types::TEST_EVENT, None, Batching::default()).unwrap();
+    client.set_delivery(types::TEST_EVENT, None, Delivery { batch: true, ..Delivery::default() }).unwrap();
     let (sent, results) = mpsc::channel();
     let theirs = client.clone();
     std::thread::spawn(move || {

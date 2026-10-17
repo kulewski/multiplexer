@@ -303,7 +303,14 @@ Bazel build.
   whenever a connection has nothing left to write, and events gather only
   while the program sends faster than its connections write; a
   `SyncClient` batching for 5 ms moved more than five times as many
-  100-byte events a second through one multiplexer ([batching](docs/batching.md)).
+  100-byte events a second through one multiplexer ([batching](docs/delivery.md)).
+- **Knowing each event was processed.** A type may be confirmed, its
+  events in batches or one by one: the sender's library keeps each event
+  until the receiver's library says its program processed it, sends it
+  again when the receiver refused it, died with it or nobody took it, and
+  gives up at its batch's deadline; the confirmations travel batched too,
+  one small message for many events
+  ([confirmed sends](docs/delivery.md#confirmed-sends)).
 - **Stateless and lightweight.** No external coordination service, no
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with
@@ -344,6 +351,9 @@ Bazel build.
 - **RabbitMQ, Kafka:** those persist and queue; the multiplexer does neither.
   A message goes to whoever is connected right now or is dropped, at most
   once per multiplexer, which is what makes it stateless and simple to run.
+  Where a sender must know each event was processed, confirmed sends keep
+  it in the sender's memory, not on a disk, until the receiver says so:
+  at least once while the sender lives.
 - **ZeroMQ:** a library without a broker, so peers need each other's
   addresses; here every peer knows only the multiplexers, and routing is
   configuration.

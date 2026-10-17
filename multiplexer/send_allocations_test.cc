@@ -115,11 +115,13 @@ const int BATCH = 100;     // the messages of a batch
 const int PAYLOAD = 100;   // a message's payload, in bytes
 
 // Batching by count alone: BATCH messages a batch, never by time.
-multiplexer::BasicClient::Batching by_count() {
-  multiplexer::BasicClient::Batching batching;
+multiplexer::BasicClient::Delivery by_count() {
+  multiplexer::BasicClient::Delivery batching;
+  batching.batch = true;
   batching.max_records = BATCH;
   batching.max_bytes = 16 * 1024 * 1024;
   batching.max_delay = 3600;
+  batching.timeout = -1;
   return batching;
 }
 
@@ -164,7 +166,7 @@ TEST(SendAllocations, AThreadedClientsPlainSendsAllocateNothingAnotherThreadFree
   ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
   multiplexer::ThreadedClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
-  sender.set_batching(types::TEST_EVENT, by_count());
+  sender.set_delivery(types::TEST_EVENT, by_count());
   const std::vector<MultiplexerMessage> round = events(/*keyed=*/true);  // a key goes in its message's body
   // A round first, whose bodies come back to be serialized into again.
   for (const MultiplexerMessage& msg : round) {
@@ -213,7 +215,7 @@ TEST(SendAllocations, TheRoomABacklogGrewGoesOnceItIsOver) {
   ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
   multiplexer::ThreadedClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
-  sender.set_batching(types::TEST_EVENT, by_count());
+  sender.set_delivery(types::TEST_EVENT, by_count());
   std::promise<void> held;
   std::promise<void> release;
   std::shared_future<void> released = release.get_future().share();
@@ -258,7 +260,7 @@ TEST(SendAllocations, ASyncClientsQueuedEventInABatchCostsItsBodyAndItsTracker) 
   ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, 5));
   multiplexer::SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, 5));
-  sender.set_batching(types::TEST_EVENT, by_count());
+  sender.set_delivery(types::TEST_EVENT, by_count());
   const std::vector<MultiplexerMessage> round = events();
   for (const MultiplexerMessage& msg : round) {
     ASSERT_TRUE(sender.queue(msg));

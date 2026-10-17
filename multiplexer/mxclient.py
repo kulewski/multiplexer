@@ -25,9 +25,11 @@ from multiplexer._native import (
     CLOSE_FLUSH_SECONDS,
     DEFAULT_BATCH_MAX_BYTES,
     DEFAULT_BATCH_MAX_RECORDS,
+    DEFAULT_RETRY_AFTER,
     DEFAULT_TIMEOUT,
     MAX_KEY_SIZE,
     MAX_SECONDS,
+    Confirmed,
     ConnectionWrapper,
     DropReason,
     Lane,
@@ -47,6 +49,7 @@ import multiplexer.protocolbuffers  # the read-only aliases of the sender's form
 # what was sent before it, and how big a batch goes by default.
 __all__ = [
     "Client",
+    "Confirmed",
     "ConnectionWrapper",
     "DropReason",
     "Lane",
@@ -59,6 +62,7 @@ __all__ = [
     "CLOSE_FLUSH_SECONDS",
     "DEFAULT_BATCH_MAX_RECORDS",
     "DEFAULT_BATCH_MAX_BYTES",
+    "DEFAULT_RETRY_AFTER",
     "TimeoutTicker",
     "initialize_message",
     "make_message",
@@ -461,40 +465,99 @@ class Client(_mxclient.Client):
         super(Client, self).set_key_filters(key_filters_argument(filters), on_acknowledged)
 
     # The settings keyword-only, which the native method takes by position.
-    def set_batching(  # pyright: ignore[reportIncompatibleMethodOverride]
+    def set_delivery(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         type: int,
         key: str | None = None,
         *,
+        batch: bool = False,
         max_records: int = DEFAULT_BATCH_MAX_RECORDS,
         max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
         max_delay: float = 0.0,
+        confirm: bool = False,
+        retry_after: float = DEFAULT_RETRY_AFTER,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        """Send the events of message `type`, each key apart, or, given
-        `key`, of that key, ahead of what is set for its type, several in
-        one message, which the receiving library splits back into one
-        message each: those send_message() sends without waiting for them,
-        without flush or with a callback, through no lane and not to ALL. A batch goes once it holds `max_records`
-        messages, once one more would take it past `max_bytes` on the wire,
-        or `max_delay` seconds after its first message; with no delay, once
-        a connection has nothing left to write. This client writes only
-        inside its calls, so give it a delay: without one, messages gather
-        only while the socket is full. A flush, a send that does not batch,
-        another set_batching() or clear_batching() and shutdown() first let
-        every batch go. Raises ValueError for a protocol message type, a key
-        over MAX_KEY_SIZE bytes, a count below 1, max_records over
-        MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, or a delay
-        negative, over MAX_SECONDS or not finite. See docs/batching.md."""
-        super(Client, self).set_batching(type, key, max_records, max_bytes, max_delay)
+        """How the events of message `type` go, each key apart, or, given
+        `key`, those of that key, ahead of what is set for its type: those
+        send_message() sends without waiting for them, without flush or
+        with a callback, through no lane and not to ALL. See
+        docs/delivery.md.
+
+        With `batch`, several go in one message, which the receiving
+        library splits back into one message each. A batch goes once it
+        holds `max_records` messages, once one more would take it past
+        `max_bytes` on the wire, or `max_delay` seconds after its first
+        message; with no delay, once a connection has nothing left to
+        write. This client writes only inside its calls, so give it a
+        delay: without one, messages gather only while the socket is full.
+        A flush, a send that does not batch, another set_delivery() or
+        clear_delivery() and shutdown() first let every batch go.
+
+        With `confirm`, every message is kept until its consumer's library
+        says the consumer processed it, its send's callback hearing True
+        and a flush ending only then; without `batch` each goes at once, in
+        a message of its own. It goes again, its id and number kept, when
+        the consumer refused it, when nobody took its batch, when the
+        connection it went on ended, and when nothing confirmed any message
+        of its batch for `retry_after` seconds, which must be longer than a
+        message waits in its consumer's queue and handler; it is given up
+        on, its callback hearing False and on_drop NOT_CONFIRMED, at its
+        batch's timeout, or FAILED when the consumer's handler raised on
+        it. At least once: a message whose confirmation was lost is
+        processed again. Kept without a cap: while every consumer stalls,
+        the messages pile up in this process until their timeout. This
+        client hears confirmations, and sends again, inside its calls.
+
+        `timeout`, in seconds, is a batch's, the send's own not used: a
+        batch has that long from its first message to be written, and with
+        `confirm` to be confirmed, and what of it is not by then is given
+        up on together; a message that goes alone is a batch of one. A
+        negative one sets no deadline. With neither `batch` nor `confirm`
+        the messages go as any send does, by this timeout: a key sent so
+        while its type is batched.
+
+        Raises ValueError for a protocol message type, a key over
+        MAX_KEY_SIZE bytes, a count below 1, max_records over
+        MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, a delay
+        negative, over MAX_SECONDS or not finite, with `confirm` a
+        retry_after not over 0, and a timeout NaN, or 0 or more and not
+        over the delay (over 0 without `batch`), which would leave a batch
+        no time."""
+        super(Client, self).set_delivery(
+            type, key, batch, max_records, max_bytes, max_delay, confirm, retry_after, timeout
+        )
+
+    # A message, where the native method takes its sender and number.
+    def confirm(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, mxmsg: MultiplexerMessage, outcome: Confirmed
+    ) -> None:
+        """Tell the producer of `mxmsg`, a message of a confirmed batch
+        (set_delivery's `confirm`), what became of it: PROCESSED once the
+        program is done with it, FAILED when it can never process it, its
+        producer giving up on it, REFUSED to have its producer send it again.
+        What this client owes goes in one message once it has no message
+        left for the program, as a receive waits, at a flush, at
+        CONFIRMATIONS_GATHERED_MAX owed and at shutdown. Nothing for a
+        message with no number, `mxmsg.HasField("confirmation")` false.
+        The server classes confirm what their handlers return or raise
+        from; a program that reads messages itself confirms each."""
+        if mxmsg.HasField("confirmation"):
+            super(Client, self).confirm(mxmsg.sender, mxmsg.confirmation, outcome)
+
+    def processed(self, mxmsg: MultiplexerMessage) -> None:
+        """confirm(mxmsg, Confirmed.PROCESSED)."""
+        self.confirm(mxmsg, Confirmed.PROCESSED)
 
     # Narrower than the native method, whose type is anything int() takes.
-    def clear_batching(  # pyright: ignore[reportIncompatibleMethodOverride]
+    def clear_delivery(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, type: int, key: str | None = None
     ) -> None:
-        """No batching from now on for message `type`, its keys' settings
-        included, or, given `key`, for that key, which then batches as its
-        type says; every batch goes first."""
-        super(Client, self).clear_batching(type, key)
+        """No delivery set from now on for message `type`, its keys'
+        settings included, its messages going as any send does, or, given
+        `key`, for that key, which then goes as its type says; every batch
+        goes first."""
+        super(Client, self).clear_delivery(type, key)
 
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to

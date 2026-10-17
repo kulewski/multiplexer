@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mx_multiplexer::{
-    Batching, DeliveryError, Error, Message, Routing, SyncClient, ThreadedClient, AUTO_RECONNECT_TIME,
+    Delivery, DeliveryError, Error, Message, Routing, SyncClient, ThreadedClient, AUTO_RECONNECT_TIME,
     CONNECT_ATTEMPT_SECONDS, MAX_MESSAGE_SIZE,
 };
 use support::testing_constants::{peers, types};
@@ -247,9 +247,15 @@ fn a_delivery_error_for_a_batch_is_told_for_each_message() {
     // message, naming it, with its workflow and the message as the original,
     // as without batching, on a SyncClient and on a ThreadedClient.
     let mx = Multiplexer::start();
-    let batching = Batching { max_records: 3, max_delay: Duration::from_secs(3600), ..Batching::default() };
+    let batching = Delivery {
+        batch: true,
+        max_records: 3,
+        max_delay: Duration::from_secs(3600),
+        timeout: None,
+        ..Delivery::default()
+    };
     let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
-    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    client.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let sent: Vec<u64> = (0..3)
         .map(|number| client.send(types::TEST_EVENT, format!("{number}")).workflow(format!("flow {number}")).queue())
         .collect::<Result<_, _>>()
@@ -257,7 +263,7 @@ fn a_delivery_error_for_a_batch_is_told_for_each_message() {
     let told: Vec<Message> = sent.iter().map(|_| client.receive(TEN).unwrap().message).collect();
     let threaded = ThreadedClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
     let errors = threaded.messages();
-    threaded.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    threaded.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let threaded_sent: Vec<u64> = (0..3)
         .map(|number| threaded.send(types::TEST_EVENT, format!("{number}")).workflow(format!("flow {number}")).queue())
         .collect::<Result<_, _>>()
@@ -289,8 +295,14 @@ fn plain_sends_arrive_in_their_batches_in_order_beside_sends_followed() {
     let mx = Multiplexer::start();
     let mut receiver = SyncClient::builder(peers::TEST_EVENT_BACKEND).connect([mx.address()]).unwrap();
     let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
-    let batching = Batching { max_records: 7, max_delay: Duration::from_secs(3600), ..Batching::default() };
-    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let batching = Delivery {
+        batch: true,
+        max_records: 7,
+        max_delay: Duration::from_secs(3600),
+        timeout: None,
+        ..Delivery::default()
+    };
+    client.set_delivery(types::TEST_EVENT, None, batching).unwrap();
     let written = Arc::new(AtomicUsize::new(0));
     let mut sent: std::collections::BTreeMap<Option<String>, Vec<(u64, Vec<u8>)>> = Default::default();
     for number in 0..100 {

@@ -13,6 +13,7 @@
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
 #include "multiplexer/batching.h"
+#include "multiplexer/confirming.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/outbox.h"
 
@@ -29,7 +30,8 @@ BasicClient::BasicClient(asio::io_service& io_service, std::uint32_t client_type
       fork_generation_at_creation_(mx::fork_generation()),
       resolver_(io_service),
       outbox_(new Outbox(io_service)),
-      batcher_(new Batcher(io_service)) {}
+      batcher_(new Batcher(io_service)),
+      confirmer_(new Confirmer(io_service)) {}
 
 BasicClient::~BasicClient() {}
 
@@ -70,6 +72,13 @@ void BasicClient::handle_message(const Connection::pointer& conn, const std::sha
     return;
   }
 
+  // A consumer's word on this client's confirmed sends, which the program
+  // never sees (basic_client_confirm.cc).
+  if (mxmsg->type() == types::CONFIRMATION) {
+    _on_confirmation(*mxmsg);
+    return;
+  }
+
   // A copy of a message already seen, from another multiplexer: drop it.
   if (!last_seen_message_ids_.insert(mxmsg->id())) {
     return;
@@ -79,8 +88,18 @@ void BasicClient::handle_message(const Connection::pointer& conn, const std::sha
     _split_batch(conn, *mxmsg);
     return;
   }
-  if (mxmsg->type() == types::DELIVERY_ERROR && _split_delivery_error(conn, *mxmsg)) {
-    return;
+  if (mxmsg->type() == types::DELIVERY_ERROR) {
+    // Nobody took a confirmed batch: it goes again, which the program
+    // hears nothing of until its messages are confirmed or given up on.
+    if (mxmsg->references() && _confirmed_batch_not_taken(mxmsg->references())) {
+      return;
+    }
+    if (_split_delivery_error(conn, *mxmsg)) {
+      return;
+    }
+  }
+  if (mxmsg->has_confirmation()) {
+    mxmsg->clear_confirmation();  // a number only a confirmed batch's split gives
   }
 
   IncomingMessagesBuffer::value_type incoming = mx::make_triple(raw, _wrap(conn), mxmsg);
@@ -137,19 +156,43 @@ void BasicClient::_enqueue(IncomingMessagesBuffer::value_type incoming) {
 // readers never ask for, receive_message() among them, and which
 // with_raw_frame() makes for those that do; one handed to a sink goes
 // with it, as a sink's reader may read it.
+//
+// A confirmed batch's messages (basic_client_confirm.cc) are handed out
+// each with its number, the envelope's `confirm` read in step, and are not
+// checked against the ids seen: one sent again, its confirmation lost, is
+// handed out again. One that does not belong is confirmed FAILED, as
+// nothing will ever process it; a full queue drops them unconfirmed, sent
+// again in time. A sink that took the batch has had it in hand: what it
+// confirmed goes once the connection handed over every frame its last
+// read brought (read_drained), so that the batches of one read, of one
+// message each when the producer does not batch, are confirmed together.
 void BasicClient::_split_batch(const Connection::pointer& conn, const MultiplexerMessage& envelope) {
   MessageBatch& batch = split_scratch_;
   const bool split = envelope.type() > types::MAX_MULTIPLEXER_META_PACKET && batch.ParseFromString(envelope.batch()) &&
                      batch.message_size() <= static_cast<int>(MAX_BATCH_RECORDS);
   const bool full = split && !incoming_sink_ && incoming_queue_full();
   const int count = batch.message_size();
+  const google::protobuf::RepeatedField<std::uint64_t>& numbers = envelope.confirm();
+  const bool confirmed = numbers.size() >= 2;
   // Every message parsed first, then each checked against the ids seen and
   // handed on: the check's table stays in the cache for the batch, where
   // parsing a message between two checks pushed it out.
   std::vector<std::shared_ptr<MultiplexerMessage>> parsed;
   if (split && !full) {
     parsed.reserve(static_cast<std::size_t>(count));
+    int pair = 0;            // in `numbers`, the pair the next message's number is in
+    std::uint64_t past = 0;  // how many of that pair's numbers were given
     for (const std::string& body : batch.message()) {
+      std::uint64_t number = 0;
+      if (confirmed) {
+        while (pair + 1 < numbers.size() && past >= numbers.Get(pair + 1)) {
+          pair += 2;
+          past = 0;
+        }
+        if (pair + 1 < numbers.size()) {
+          number = numbers.Get(pair) + past++;
+        }
+      }
       std::shared_ptr<MultiplexerMessage> mxmsg = std::make_shared<MultiplexerMessage>();
       if (!mxmsg->ParseFromString(body) || !mxmsg->id() || !RawMessage::plain_event(*mxmsg) ||
           mxmsg->type() != envelope.type() || mxmsg->has_key() != envelope.has_key() ||
@@ -161,7 +204,15 @@ void BasicClient::_split_batch(const Connection::pointer& conn, const Multiplexe
                  CTX("BasicClient")
                      TEXT(*line + "; batch id " + repr(envelope.id()) + ", type " + repr(envelope.type())));
         }
+        if (number) {
+          confirm(envelope.sender(), number, Confirmed::FAILED);
+        }
         continue;
+      }
+      if (number) {
+        mxmsg->set_confirmation(number);
+      } else if (mxmsg->has_confirmation()) {
+        mxmsg->clear_confirmation();
       }
       parsed.push_back(std::move(mxmsg));
     }
@@ -195,8 +246,11 @@ void BasicClient::_split_batch(const Connection::pointer& conn, const Multiplexe
     frames_handled_ += count - 1;  // poll() reads a queue's worth of messages at most
   }
   const ConnectionWrapper wrapper = _wrap(conn);
+  if (confirmed) {
+    _confirmed_batch_from(conn, envelope.sender());
+  }
   for (std::shared_ptr<MultiplexerMessage>& mxmsg : parsed) {
-    if (!last_seen_message_ids_.insert(mxmsg->id())) {
+    if (!mxmsg->has_confirmation() && !last_seen_message_ids_.insert(mxmsg->id())) {
       continue;  // seen before, as a message that came alone would be
     }
     IncomingMessagesBuffer::value_type incoming =
@@ -207,6 +261,16 @@ void BasicClient::_split_batch(const Connection::pointer& conn, const Multiplexe
     } else {
       _enqueue(std::move(incoming));
     }
+  }
+  if (confirmed && incoming_sink_) {
+    conn->notify_when_read_drained();  // what the handlers confirm goes once the read is handed over
+  }
+}
+
+void BasicClient::read_drained(Connection*) {
+  MX_DCHECK_RUN_ON(&owner_thread());
+  if (incoming_sink_ && !shuts_down_) {
+    send_confirmations();
   }
 }
 
@@ -294,6 +358,7 @@ bool BasicClient::wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledg
     if (end_on_acknowledgement && take_acknowledged_wake()) {
       return false;
     }
+    send_confirmations();  // the program has nothing more in hand
     if (timer.expired()) {
       break;
     }
@@ -315,8 +380,10 @@ void BasicClient::shutdown() {
   }
   MX_DCHECK_RUN_ON(&owner_thread());
   // What waits in a batch goes where every message goes now: written if
-  // the connections still take it, else dropped and told with the rest.
+  // the connections still take it, else dropped and told with the rest;
+  // so do the confirmations this client owes.
   close_batches();
+  send_confirmations();
   asio::error_code cancelled;
   batcher_->timer.cancel(cancelled);
   shuts_down_ = true;
@@ -341,8 +408,9 @@ void BasicClient::shutdown() {
       conn->close_gracefully(CLOSE_READ_SECONDS);  // among those closing then, see connection_destroyed
     }
   }
-  _drop_outbox();                   // what still waits goes nowhere now
-  acknowledged_callbacks_.clear();  // never called now
+  _drop_outbox();                                 // what still waits goes nowhere now
+  _give_up_confirmations(DropReason::SHUT_DOWN);  // nothing will hear a confirmation now
+  acknowledged_callbacks_.clear();                // never called now
   drop_lines_.flush();
 }
 
@@ -377,6 +445,7 @@ bool BasicClient::closing() {
 void BasicClient::connection_closed(Connection* conn) {
   MX_DCHECK_RUN_ON(&owner_thread());
   _close_socket(*conn);
+  _confirmations_on_closed(conn);  // what was written on it and not confirmed goes again
   const std::uint64_t dropped = conn->dropped_while_closing();
   if (!dropped) {
     return;

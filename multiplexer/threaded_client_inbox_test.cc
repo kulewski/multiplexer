@@ -1,7 +1,7 @@
 // ThreadedClientInbox on its own: only the hand-over that finds no wake-up
 // pending asks for one, what was handed over comes out in its order, calls
-// and plain sends alike, and a plain send's body is swapped out for one
-// handed back. SpentBodies' own limits are spent_bodies_test.cc's.
+// and plain sends alike, confirmations beside them, and a plain send's body
+// is swapped out for one handed back. SpentBodies' own limits are spent_bodies_test.cc's.
 #include "multiplexer/threaded_client_inbox.h"
 
 #include <gtest/gtest.h>
@@ -11,6 +11,7 @@
 
 namespace {
 
+using multiplexer::HandedConfirmation;
 using multiplexer::PlainSend;
 using multiplexer::SpentBodies;
 using multiplexer::ThreadedClientInbox;
@@ -30,8 +31,9 @@ TEST(ThreadedClientInbox, OnlyTheFirstHandOverAfterATakeWakesTheIoThread) {
   EXPECT_FALSE(inbox.push([] {}));
   EXPECT_FALSE(push_plain(&inbox, 7, &body));
   std::vector<ThreadedClientInbox::Entry> taken;
+  std::vector<HandedConfirmation> confirmations;
   SpentBodies spent;
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   EXPECT_EQ(3u, taken.size());
   taken.clear();
   body = "b";
@@ -50,8 +52,9 @@ TEST(ThreadedClientInbox, WhatWasHandedOverComesOutInItsOrder) {
   body = "fourth";
   push_plain(&inbox, 4, &body);
   std::vector<ThreadedClientInbox::Entry> taken;
+  std::vector<HandedConfirmation> confirmations;
   SpentBodies spent;
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   ASSERT_EQ(4u, taken.size());
   taken[0].call();
   EXPECT_FALSE(taken[1].call);
@@ -63,21 +66,40 @@ TEST(ThreadedClientInbox, WhatWasHandedOverComesOutInItsOrder) {
   EXPECT_EQ((std::vector<int>{1, 3}), ran);
 }
 
+TEST(ThreadedClientInbox, ConfirmationsComeOutBesideTheCallsAndWakeAsTheyDo) {
+  ThreadedClientInbox inbox;
+  EXPECT_TRUE(inbox.push_confirmation(HandedConfirmation{7, 1, 0}));
+  EXPECT_FALSE(inbox.push([] {}));
+  EXPECT_FALSE(inbox.push_confirmation(HandedConfirmation{7, 2, 2}));
+  std::vector<ThreadedClientInbox::Entry> taken;
+  std::vector<HandedConfirmation> confirmations;
+  SpentBodies spent;
+  inbox.take(&taken, &confirmations, &spent);
+  EXPECT_EQ(1u, taken.size());
+  ASSERT_EQ(2u, confirmations.size());
+  EXPECT_EQ(1u, confirmations[0].number);
+  EXPECT_EQ(2u, confirmations[1].number);
+  EXPECT_EQ(2u, confirmations[1].outcome);
+  confirmations.clear();
+  EXPECT_TRUE(inbox.push_confirmation(HandedConfirmation{7, 3, 0})) << "a take lets the next hand-over wake";
+}
+
 TEST(ThreadedClientInbox, APlainSendTakesABodyHandedBack) {
   ThreadedClientInbox inbox;
   std::vector<ThreadedClientInbox::Entry> taken;
+  std::vector<HandedConfirmation> confirmations;
   SpentBodies spent;
   std::string spent_body(1000, 's');
   const char* handed_back = spent_body.data();
   ASSERT_TRUE(spent.keep(&spent_body));
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   EXPECT_EQ(1u, inbox.returned_count());
   std::string body(200, 'm');
   push_plain(&inbox, 5, &body);
   EXPECT_EQ(handed_back, body.data());  // the same room, not a copy
   EXPECT_EQ(0u, inbox.returned_count());
   EXPECT_EQ(0u, inbox.returned_bytes());
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   ASSERT_EQ(1u, taken.size());
   EXPECT_EQ(std::string(200, 'm'), taken[0].plain.body);
 }
@@ -85,6 +107,7 @@ TEST(ThreadedClientInbox, APlainSendTakesABodyHandedBack) {
 TEST(ThreadedClientInbox, BodiesPastTheLimitAreLeftForTheIoThreadToFree) {
   ThreadedClientInbox inbox;
   std::vector<ThreadedClientInbox::Entry> taken;
+  std::vector<HandedConfirmation> confirmations;
   SpentBodies spent;
   std::string room;
   room.reserve(SpentBodies::BODY_BYTES_KEPT / 2);  // within the limit, whatever the library rounds to
@@ -95,7 +118,7 @@ TEST(ThreadedClientInbox, BodiesPastTheLimitAreLeftForTheIoThreadToFree) {
     body.reserve(each);
     ASSERT_TRUE(spent.keep(&body));
   }
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   spent.clear();  // as the io thread does after each take
   EXPECT_EQ(held, inbox.returned_count());
   for (std::size_t index = 0; index < 3; ++index) {
@@ -103,7 +126,7 @@ TEST(ThreadedClientInbox, BodiesPastTheLimitAreLeftForTheIoThreadToFree) {
     body.reserve(each);
     ASSERT_TRUE(spent.keep(&body));
   }
-  inbox.take(&taken, &spent);
+  inbox.take(&taken, &confirmations, &spent);
   EXPECT_EQ(held, inbox.returned_count());
   EXPECT_EQ(3 * each, spent.bytes());  // left for the caller to free
   spent.clear();

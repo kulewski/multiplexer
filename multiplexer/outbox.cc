@@ -81,6 +81,10 @@ BasicClient::DropLine drop_line(DropReason reason) {
       return BasicClient::SENT_NO_CONNECTION;
     case DropReason::CONNECTION_LOST:
       return BasicClient::SENT_CONNECTION_LOST;
+    case DropReason::NOT_CONFIRMED:
+      return BasicClient::SENT_NOT_CONFIRMED;
+    case DropReason::FAILED:
+      return BasicClient::SENT_FAILED;
     case DropReason::SHUT_DOWN:
       break;
   }
@@ -94,6 +98,10 @@ const char* drop_text(DropReason reason) {
       return "message dropped: it waited for a connection past its timeout";
     case DropReason::CONNECTION_LOST:
       return "message dropped: its connection ended and nothing else could take it";
+    case DropReason::NOT_CONFIRMED:
+      return "confirmed message given up on: no consumer confirmed it by its deadline";
+    case DropReason::FAILED:
+      return "confirmed message given up on: its consumer's handler failed on it";
     case DropReason::SHUT_DOWN:
       break;
   }
@@ -102,9 +110,15 @@ const char* drop_text(DropReason reason) {
 }  // namespace
 
 // A batch's frame (RawMessage::batch_ids) is told and counted for each
-// message inside, its one line naming the batch.
+// message inside, its one line naming the batch; a confirmed batch's
+// (RawMessage::confirmed) by the confirmed sends, for each message not
+// resolved yet, so that none is told twice.
 void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, DropReason reason) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  if (raw->confirmed()) {
+    _confirmed_frame_dropped(raw->id(), reason);
+    return;
+  }
   const std::shared_ptr<const std::vector<std::uint64_t>>& batch = raw->batch_ids();
   dropped_.fetch_add(batch ? batch->size() : 1, std::memory_order_relaxed);
   if (const std::string* text =
@@ -130,6 +144,21 @@ void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, Drop
     } else {
       outbox_->drop_events.emplace_back(raw->id(), reason);
     }
+    _post_callbacks();
+  }
+}
+
+// One message of a confirmed batch given up on (basic_client_confirm.cc):
+// told and counted as a drop is.
+void BasicClient::_report_record_drop(std::uint64_t id, std::uint32_t type, DropReason reason) {
+  dropped_.fetch_add(1, std::memory_order_relaxed);
+  if (const std::string* text =
+          drop_lines_.first({drop_line(reason), WARNING, type, 0}, [reason] { return drop_text(reason); })) {
+    MX_LOG(WARNING, LogSummary::VERBOSITY,
+           CTX("BasicClient") TEXT(*text + "; id " + repr(id) + ", type " + repr(type)));
+  }
+  if (drop_observer_) {
+    outbox_->drop_events.emplace_back(id, reason);
     _post_callbacks();
   }
 }
@@ -241,26 +270,30 @@ bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const La
   if (shuts_down_) {
     return false;
   }
-  // A message for a batch goes there (basic_client_batching.cc), as it is:
-  // only its body is read there, so a frame made unsealed for it stays so.
-  // Any other lets every batch go first, so that nothing overtakes a message
-  // sent before it, and is made writable as it goes (_send). One with no
-  // time to wait, 0 or NaN, goes alone: in a batch it would leave the batch
-  // no time either. The loop runs first where `poll_first` says (above);
-  // what it ran may have changed what is batched, so that is asked again.
-  if (may_batch && !all && !lane && (timeout > 0 || timeout < 0)) {
-    const Batching* batching = _batching_for(raw);
-    if (batching && poll_first &&
-        _batch_needs_loop(raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), *batching)) {
+  // A message whose delivery batches or confirms it goes by it
+  // (basic_client_batching.cc), as it is: only its body is read there, so a
+  // frame made unsealed for it stays so; one whose delivery does neither
+  // goes as any other, by the delivery's timeout. Any other lets every
+  // batch go first, so that nothing overtakes a message sent before it, and
+  // is made writable as it goes (_send). The loop runs first where
+  // `poll_first` says (above); what it ran may have changed what is set, so
+  // that is asked again.
+  if (may_batch && !all && !lane) {
+    const Delivery* delivery = _delivery_for(raw);
+    if (delivery && poll_first &&
+        _batch_needs_loop(raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), *delivery)) {
       poll();
       poll_first = false;
       if (shuts_down_) {
         return false;
       }
-      batching = _batching_for(raw);
+      delivery = _delivery_for(raw);
     }
-    if (batching) {
-      return _batch(raw, *batching, timeout, trackers, done);
+    if (delivery && (delivery->batch || delivery->confirm)) {
+      return _batch(raw, *delivery, trackers, done);
+    }
+    if (delivery) {
+      timeout = delivery->timeout;
     }
   }
   if (poll_first) {

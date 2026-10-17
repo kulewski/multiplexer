@@ -48,11 +48,15 @@ touch:
 
 ## Timeouts
 
-Every timeout is seconds as a float, in every client and server class:
-`timeout=` on a connect, a read, a query, a send, `flush_all()`,
-`shutdown()` and `close()`, and `serve_forever()`'s `poll`,
-`drain_seconds` and `stall_seconds`; the recording calls' `timeout=` too.
-A negative one sets no deadline, exactly as `math.inf` does: the call
+Every timeout, and every other length of time a call takes, is seconds
+as a float, in every client and server class: `timeout=` on a connect, a
+read, a query, a send, `flush_all()`, `shutdown()` and `close()`,
+`serve_forever()`'s `poll`, `drain_seconds` and `stall_seconds`, and
+`set_delivery()`'s `max_delay`, `retry_after` and `timeout`
+([delivery](#delivery)); the recording calls' `timeout=` too, while a
+recording session's `max_seconds` is whole seconds, as the protocol
+carries it. A negative timeout sets no deadline, exactly as `math.inf`
+does: the call
 waits as long as it takes, and a message sent with it waits for a
 connection or for room as long as that takes. So `shutdown(timeout=-1)`
 and `close(timeout=-1)` write everything sent before them first, however
@@ -110,8 +114,8 @@ its loop, which for a client means inside calls. A call that waits, the
 connect in the constructor or `connect_to()`, a read, a query, a flush,
 `flush_all()`, a send waiting for a connection, `shutdown()`, runs the loop
 without the GIL, so the program's other threads go on meanwhile. `on_drop=` and `dropped` are under [Messages the
-library gives up on](#messages-the-library-gives-up-on), `set_batching()`
-and `clear_batching()` under [Batching](#batching).
+library gives up on](#messages-the-library-gives-up-on), `set_delivery()`
+and `clear_delivery()` under [Delivery](#delivery).
 The peer type must be marked `is_passive` in the rules file: this is the
 one class that needs the mark, since nothing heartbeats between its calls;
 `ThreadedClient`, `AsyncClient` and both server classes run the loop all
@@ -839,8 +843,8 @@ run before the constructor returns, once the first multiplexer welcomed
 the client: a handler that needs the client passes no addresses and calls
 `connect_all(addresses)` once it is assigned.
 `on_drop=` and `dropped` are under [Messages the library gives up
-on](#messages-the-library-gives-up-on), `set_batching()` and
-`clear_batching()` under [Batching](#batching). The constructor connects, so a
+on](#messages-the-library-gives-up-on), `set_delivery()` and
+`clear_delivery()` under [Delivery](#delivery). The constructor connects, so a
 client whose key filters must be in effect from its first message passes
 them as `key_filters=`; `set_key_filters()` changes them later, as on
 `SyncClient` ([keys](keys.md)). `set_routing()` and `set_key_filters()`
@@ -1168,44 +1172,51 @@ addressed queries](#lanes-pinning-and-addressed-queries)). `flush=True`
 makes no send faster: the message goes out as soon either way, and the
 call returns later.
 
-## Batching
+## Delivery
 
-`set_batching()` on `SyncClient`, `ThreadedClient` and `AsyncClient` sends
-the events of a message type, or of one key of it, several in one
+`set_delivery()` on `SyncClient`, `ThreadedClient` and `AsyncClient` sets
+how the events of a message type, or of one key of it, go: several in one
 message, which the receiving library splits back into one message each,
-as if each had come alone; [batching](batching.md) says what goes in a
-batch, when it goes and what it changes.
+as if each had come alone (`batch`); kept until their consumer's library
+confirms them (`confirm`); or both; and how long a batch has
+(`timeout`). [Delivery](delivery.md) says what goes in a batch, when it
+goes, what it changes and what a confirmed send does.
 
 ```python
 client = ThreadedClient(addresses, peers.METRICS_AGENT)
-client.set_batching(types.METRIC_SAMPLE, max_delay=0.005)      # every key, each apart, 5 ms at most
-client.set_batching(types.LOG_LINE, "audit", max_records=100)  # one key, with settings of its own, no delay
+client.set_delivery(types.METRIC_SAMPLE, batch=True, max_delay=0.005)      # every key, each apart, 5 ms at most
+client.set_delivery(types.LOG_LINE, "audit", batch=True, max_records=100)  # one key, settings of its own, no delay
 client.send_message(sample.SerializeToString(), type=types.METRIC_SAMPLE)  # returns at once, the batch within 5 ms
 ```
 
-- `set_batching(type, key=None, *, max_records=DEFAULT_BATCH_MAX_RECORDS,
-  max_bytes=DEFAULT_BATCH_MAX_BYTES, max_delay=0.0)`: without `key`, every
-  key of the type, each apart, and its messages without a key apart
-  again; with `key`, that key, ahead of what is set for its type. The two
-  constants, on `multiplexer.mxclient`, are 1000 messages and 1 MiB,
-  measured as `MAX_MESSAGE_SIZE` is; `max_delay` is seconds, 0 for no
-  delay, a batch going as soon as a connection has nothing left to write.
-  `clear_batching(type, key=None)` ends what was set for the type, its
-  keys' settings included, or for one key, which then batches as its type
-  says. Each lets every batch go first.
+- `set_delivery(type, key=None, *, batch=False,
+  max_records=DEFAULT_BATCH_MAX_RECORDS, max_bytes=DEFAULT_BATCH_MAX_BYTES,
+  max_delay=0.0, confirm=False, retry_after=DEFAULT_RETRY_AFTER,
+  timeout=DEFAULT_TIMEOUT)`: without `key`, every key of the type, each
+  apart, and its messages without a key apart again; with `key`, that
+  key, ahead of what is set for its type. The constants, on
+  `multiplexer.mxclient`, are 1000 messages, 1 MiB, measured as
+  `MAX_MESSAGE_SIZE` is, 5 s and 10 s. `max_delay` 0 is no delay, a batch
+  going as soon as a connection has nothing left to write. `timeout` is a
+  batch's, from its first message, its send's own not used, negative for
+  no deadline ([the timeout](delivery.md#the-timeout-is-the-batchs));
+  with neither `batch` nor `confirm` the messages go as any send does, by
+  this timeout. `clear_delivery(type, key=None)` ends what was set for
+  the type, its keys' settings included, or for one key, which then goes
+  as its type says. Each lets every batch go first.
 - `ValueError`, at the call, for a protocol message type, a key over
   `MAX_KEY_SIZE`, a `max_records` below 1 or over `MAX_BATCH_RECORDS`, a
-  `max_bytes` below 1 or over
-  `MAX_MESSAGE_SIZE`, or a delay negative, over `MAX_SECONDS` or not
-  finite. On
-  `ThreadedClient` and `AsyncClient` the change is in effect for every
-  send made after the call.
-- What batches is a `send_message()` that returns at once, without
-  `flush` or with a `callback`, through `multiplexer=ONE`, the default, of
-  a plain event: no `to`, no `references`, no delivery report asked for,
-  no `override_rrules`. What goes by `event()` or `multiplexer=ALL`,
-  through a lane or a connection, by a flushing send, with `timeout=0`,
-  and a query's request go alone, after every batch.
+  `max_bytes` below 1 or over `MAX_MESSAGE_SIZE`, a delay negative, over
+  `MAX_SECONDS` or not finite, with `confirm` a `retry_after` not over 0,
+  and a `timeout` NaN, or 0 or more but not over the delay (over 0
+  without `batch`). On `ThreadedClient` and `AsyncClient` the change is in
+  effect for every send made after the call.
+- What goes by a setting is a `send_message()` that returns at once,
+  without `flush` or with a `callback`, through `multiplexer=ONE`, the
+  default, of a plain event: no `to`, no `references`, no delivery report
+  asked for, no `override_rrules`, whatever its own `timeout`. What goes
+  by `event()` or `multiplexer=ALL`, through a lane or a connection, by a
+  flushing send, and a query's request go alone, after every batch.
 - A `SyncClient` runs its loop only inside its calls: with no delay its
   messages gather only while the socket is full, so give it one. A batch
   then goes when it fills or at the first call after its delay, and
@@ -1216,12 +1227,58 @@ client.send_message(sample.SerializeToString(), type=types.METRIC_SAMPLE)  # ret
   messages gather only while the program sends faster than the io thread
   writes them, which a Python program seldom does, or the multiplexer is
   behind, so a delay of a few milliseconds batches for sure.
-- The server classes batch through their client, `self.conn` on
+- The server classes set it through their client, `self.conn` on
   `BaseMultiplexerServer` and `self.client` on
   `BaseThreadedMultiplexerServer`: their `send_message()` of a message
-  that is no reply batches as the client's does.
+  that is no reply goes by it as the client's does.
 - Each message's `callback` hears its batch's end; a batch given up on is
   counted in `dropped` and told to `on_drop` once for each message in it.
+
+### Confirmed sends
+
+`set_delivery(type, ..., confirm=True)` makes a type's messages confirmed
+sends, in batches with `batch=True` and one by one without: each message
+kept until its consumer's library confirms it was processed, sent again
+until then, at least once ([confirmed sends](delivery.md#confirmed-sends)).
+
+```python
+producer.set_delivery(types.ORDER_PLACED, batch=True, max_delay=0.005, confirm=True, timeout=60)
+producer.send_message(order, type=types.ORDER_PLACED, callback=lambda processed: ...)
+
+consumer = ThreadedClient(addresses, peers.ORDERS, on_message=inbox.put, confirm_after_on_message=False)
+mxmsg = inbox.get()
+...                          # processed
+consumer.processed(mxmsg)    # or consumer.confirm(mxmsg, Confirmed.FAILED), from any thread
+```
+
+- The producer: a message's `callback` hears 1 once its consumer
+  confirmed it, 0 once given up on, `on_drop` hearing `NOT_CONFIRMED` at
+  its batch's deadline, `timeout` from the batch's first message, or
+  `FAILED`; `flush_all()` waits for the confirmations and returns False
+  when one was given up on. `retry_after`, seconds, more than 0, is how
+  long a batch goes without any of its messages confirmed before what is
+  left goes again. A `SyncClient` hears confirmations, and sends again,
+  inside its calls.
+- The consumer: a message of a confirmed batch carries its number,
+  `mxmsg.confirmation`, `mxmsg.HasField("confirmation")` true.
+  `confirm(mxmsg, outcome)`, a `Confirmed` from `multiplexer.mxclient`,
+  `PROCESSED`, `FAILED` or `REFUSED`, and `processed(mxmsg)` tell its
+  producer; nothing for a message with no number. A `ThreadedClient`
+  confirms what `on_message` returned from, `FAILED` what it raised on,
+  unless `on_message` confirmed it itself or the client was made with
+  `confirm_after_on_message=False`, for a program that confirms its
+  messages itself, from any thread. An `AsyncClient` confirms a message
+  once its subscriptions' handlers and their tasks are done with it,
+  `FAILED` when one raised; one read from `messages()` the reader
+  confirms, `client.processed(mxmsg)`. `BaseMultiplexerServer` confirms
+  as `handle_message()` returns or raises, `BaseThreadedMultiplexerServer`
+  as its `Request` is let go of, `FAILED` when the handler raised, and
+  `REFUSED` what it will not handle as it leaves. A `SyncClient` confirms
+  only what its program says, `client.processed(mxmsg)`.
+- `ThreadedClient`'s and `SyncClient`'s `unconfirmed()`, `sent_again()`
+  and `confirmations_owed()` say how many messages the client keeps
+  unconfirmed, how many it sent again and how many confirmations it
+  owes: for tests.
 
 ## Messages the library gives up on
 
@@ -1240,6 +1297,10 @@ so far. `reason` is a `DropReason`, from `multiplexer.mxclient`:
   pinned lane's, or a copy sent to `ALL`.
 - `SHUT_DOWN`: the client shut down before it went: `shutdown()` or
   `close()` could not write it within its timeout.
+- `NOT_CONFIRMED`: a confirmed send ([delivery](delivery.md#confirmed-sends))
+  no consumer confirmed by its batch's deadline, the setting's `timeout`
+  from the batch's first message.
+- `FAILED`: a confirmed send its consumer's handler raised on.
 
 The drop is counted at once, in `dropped`, and `f` hears of it in the
 pass that runs the sends' callbacks, ahead of them, once the handler the

@@ -21,8 +21,13 @@
 //
 // The handler is handle_message(request): a Request carries the message
 // and everything needed to answer it, held by shared_ptr so that a handler
-// may keep it and answer later from another thread. A request dropped
-// without a reply or no_response() is logged. The Python mirror is
+// may keep it and answer later from another thread, while the server
+// lives. A request dropped without a reply or no_response() is logged. A
+// message of a confirmed batch (docs/delivery.md) is confirmed to its
+// producer when its Request is let go of: processed, FAILED when the
+// handler threw, REFUSED when the server leaves without handling it; one
+// dropped for a full queue is not, and its producer sends it again in
+// time. The Python mirror is
 // multiplexer/threaded_server.py; docs/api_cpp.md has the user's view.
 #ifndef MX_MULTIPLEXER_BACKEND_BASE_THREADED_MULTIPLEXER_SERVER_H_
 #define MX_MULTIPLEXER_BACKEND_BASE_THREADED_MULTIPLEXER_SERVER_H_
@@ -105,6 +110,10 @@ class Request {
   IncomingMessage incoming_;
   std::atomic<bool> answered_{false};
   bool dropped_ = false;  // the server said why; no warning from the destructor
+  // What the destructor confirms of a message of a confirmed batch, when
+  // `confirms`: written before the last reference goes, which orders it.
+  Confirmed confirmed_ = Confirmed::PROCESSED;
+  bool confirms_ = true;
   std::uint64_t accepted_ =
       0;  // its place among the requests the queue took, which a change's acknowledgement waits for
 };

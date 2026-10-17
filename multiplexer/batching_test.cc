@@ -1,4 +1,4 @@
-// A client's batching (BasicClient::set_batching): the events queued of a
+// A client's batching (BasicClient::Delivery::batch): the events queued of a
 // batched type go several in one message, full batches as they fill and
 // the rest at a flush; the receiving library hands each out as it was
 // sent, a reader of raw frames getting the bytes it went in the batch as,
@@ -298,11 +298,14 @@ std::vector<Frame> frames_until(RawPeer& receiver, std::size_t count) {
   return frames;
 }
 
-// The batching that closes by count or by flush, never by time here.
-SyncClient::Batching by_count(unsigned int records) {
-  SyncClient::Batching batching;
+// The batching that closes by count or by flush, never by time here, its
+// batches given up on never.
+SyncClient::Delivery by_count(unsigned int records) {
+  SyncClient::Delivery batching;
+  batching.batch = true;
   batching.max_records = records;
   batching.max_delay = NEVER;
+  batching.timeout = -1;
   return batching;
 }
 
@@ -311,7 +314,7 @@ TEST(Batching, QueuedEventsGoInBatchesAndAFlushSendsTheRest) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(10));
+  sender.set_delivery(types::TEST_EVENT, by_count(10));
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 25; ++number) {
     MultiplexerMessage msg = event(sender, number);
@@ -344,7 +347,7 @@ TEST(Batching, AReceiverGetsEachMessageAsItWasSent) {
   ASSERT_TRUE(receiver.connect("127.0.0.1", mx.port, BOUND));
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(7));
+  sender.set_delivery(types::TEST_EVENT, by_count(7));
   std::vector<MultiplexerMessage> sent;
   for (int number = 0; number < 20; ++number) {
     sent.push_back(event(sender, number));
@@ -387,7 +390,7 @@ TEST(Batching, AMessageFromABatchIsReadRawAsItWentInTheBatch) {
   ASSERT_TRUE(threaded.connect("127.0.0.1", mx.port, BOUND));
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(3));
+  sender.set_delivery(types::TEST_EVENT, by_count(3));
   for (int number = 0; number < 3; ++number) {
     ASSERT_TRUE(sender.queue(event(sender, number)));
   }
@@ -412,7 +415,7 @@ TEST(Batching, TheKeysOfATypeBatchApart) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(5));
+  sender.set_delivery(types::TEST_EVENT, by_count(5));
   const std::string a = "a", b = "b";
   std::vector<std::uint64_t> sent_a, sent_b;
   for (int number = 0; number < 10; ++number) {
@@ -443,7 +446,7 @@ TEST(Batching, AKeysOwnSettingGoesAheadOfItsTypesAndOtherKeysGoAlone) {
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
   const std::string a = "a", b = "b";
-  sender.set_batching(types::TEST_EVENT, a, by_count(2));
+  sender.set_delivery(types::TEST_EVENT, a, by_count(2));
   // a0 and a1 fill a batch; a2 waits until b0, which does not batch, lets it go first.
   std::vector<std::uint64_t> sent;
   for (const std::pair<const std::string*, int>& each :
@@ -474,7 +477,7 @@ TEST(Batching, ASendThatDoesNotBatchLetsTheBatchGoFirst) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(100));
+  sender.set_delivery(types::TEST_EVENT, by_count(100));
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
     MultiplexerMessage msg = event(sender, number);
@@ -505,7 +508,7 @@ TEST(Batching, AMessageInABatchGetsNoChecksumOfItsOwn) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(100));
+  sender.set_delivery(types::TEST_EVENT, by_count(100));
   const auto frame_of = [&sender](int number) {
     return multiplexer::frame_stamped(
         event(sender, number), sender.instance_id(), [&sender] { return sender.random64(); }, /*batching=*/true);
@@ -552,7 +555,7 @@ TEST(Batching, AQueuedMessageThatOnlyJoinsABatchRunsNoLoop) {
   const std::shared_ptr<asio::io_service> loop = std::make_shared<asio::io_service>();
   SyncClient sender(loop, peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(3));
+  sender.set_delivery(types::TEST_EVENT, by_count(3));
   int ran = 0;
   const auto post = [&] { asio::post(*loop, [&ran] { ++ran; }); };
   post();
@@ -572,9 +575,10 @@ TEST(Batching, AQueuedMessageThatOnlyJoinsABatchRunsNoLoop) {
 
   // A delay over: the next queue() runs the loop, whose timer lets the
   // batch go. The wait only needs to be longer than the delay.
-  SyncClient::Batching timed;
+  SyncClient::Delivery timed;
+  timed.batch = true;
   timed.max_delay = 0.001f;
-  sender.set_batching(types::TEST_EVENT, timed);
+  sender.set_delivery(types::TEST_EVENT, timed);
   post();
   ASSERT_TRUE(sender.queue(event(sender, 4)));
   EXPECT_EQ(2, ran);
@@ -668,9 +672,9 @@ TEST(Batching, ABatchsMessageStaysWithinMaxBytes) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  SyncClient::Batching batching = by_count(1000);
+  SyncClient::Delivery batching = by_count(1000);
   batching.max_bytes = 1000;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 50; ++number) {
     MultiplexerMessage msg = event(sender, number);
@@ -702,9 +706,9 @@ TEST(Batching, AMessageCutFromABatchGoesOnWhole) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  SyncClient::Batching batching = by_count(1000);
+  SyncClient::Delivery batching = by_count(1000);
   batching.max_bytes = 1000;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<MultiplexerMessage> sent;
   for (int number = 0; number < 12; ++number) {
     MultiplexerMessage msg = event(sender, number);
@@ -750,10 +754,11 @@ TEST(Batching, WithNoDelayMessagesSentWhileTheConnectionIsBusyGoTogether) {
     }
   });
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_records = 100;
   batching.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   SyncClient poke(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(poke.connect("127.0.0.1", mx.port, BOUND));
   MultiplexerMessage hold = event(poke, 0);
@@ -797,9 +802,10 @@ TEST(Batching, WithNoDelayABatchGoesWhenTheBusyConnectionDies) {
   });
   ASSERT_TRUE(sender.connect("127.0.0.1", silent.port, BOUND));
   fill(sender);
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   for (int number = 0; number < 3; ++number) {
     sender.send(sender.new_message(types::TEST_EVENT, "event " + std::to_string(number)));
   }
@@ -823,9 +829,10 @@ TEST(Batching, ABatchAConnectionLetGoGoesOnThatConnection) {
   for (int frame = 0; frame < 2 * multiplexer::testing::FILL_FRAMES; ++frame) {
     sender.send(sender.new_message(types::TEST_UNROUTED, large));  // each connection in turn: both full
   }
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
     MultiplexerMessage msg = sender.new_message(types::TEST_EVENT, "event " + std::to_string(number));
@@ -857,9 +864,10 @@ TEST(Batching, WithNoDelayABatchGoesWhenAConnectionComesUp) {
   ThreadedClient sender(peers::TEST_ACTIVE_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", silent.port, BOUND));
   fill(sender);
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
     MultiplexerMessage msg = sender.new_message(types::TEST_EVENT, "event " + std::to_string(number));
@@ -899,10 +907,11 @@ TEST(Batching, ABatchThatGoesLetsTheBatchesWaitingForAConnectionGoFirst) {
     }
   });
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  ThreadedClient::Batching no_delay;
+  ThreadedClient::Delivery no_delay;
+  no_delay.batch = true;
   no_delay.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, "a", no_delay);
-  sender.set_batching(types::TEST_EVENT, "b", by_count(3));
+  sender.set_delivery(types::TEST_EVENT, "a", no_delay);
+  sender.set_delivery(types::TEST_EVENT, "b", by_count(3));
   SyncClient poke(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(poke.connect("127.0.0.1", mx.port, BOUND));
   MultiplexerMessage hold = event(poke, 0);
@@ -934,13 +943,14 @@ TEST(Batching, ABatchThatGoesLetsTheBatchesWaitingForAConnectionGoFirst) {
   sender.shutdown();
 }
 
-TEST(Batching, WithNoDelayABatchGoesAtItsFirstDeadline) {
-  // A batch with no delay waits for room: its messages' timeouts run, and
-  // it goes when the first is up, at the latest, as a message that waited
-  // for room on a full connection would. The connection's far end reads
-  // nothing and its queue is full, so the batch is given up on then, and
-  // said, where it waited for a connection that never had nothing left to
-  // write.
+TEST(Batching, WithNoDelayABatchGoesAtItsDeadline) {
+  // A batch with no delay waits for room: its timeout runs from its first
+  // message, and it goes when it is up, at the latest, as a message that
+  // waited for room on a full connection would. The connection's far end
+  // reads nothing and its queue is full, so the batch is given up on then,
+  // and said, where it waited for a connection that never had nothing left
+  // to write. The sends' own timeouts, none, are not used: by them the
+  // batch would wait forever.
   SilentMultiplexer silent;
   std::promise<void> told;
   std::vector<std::uint64_t> drops;
@@ -948,14 +958,16 @@ TEST(Batching, WithNoDelayABatchGoesAtItsFirstDeadline) {
   ThreadedClient sender(peers::TEST_ACTIVE_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", silent.port, BOUND));
   fill(sender);
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 0;
-  sender.set_batching(types::TEST_EVENT, batching);
+  batching.timeout = 0.2f;
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 2; ++number) {
     MultiplexerMessage msg = sender.new_message(types::TEST_EVENT, "event " + std::to_string(number));
     sent.push_back(msg.id());
-    sender.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), multiplexer::LanePtr(), 0.2f,
+    sender.send_serialized(msg.SerializeAsString(), msg.id(), msg.type(), multiplexer::LanePtr(), -1,
                            [&](unsigned int written) {
                              std::lock_guard<std::mutex> lock(mutex);
                              drops.push_back(written);
@@ -977,9 +989,10 @@ TEST(Batching, ABatchGoesAtItsDelay) {
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   ThreadedClient sender(peers::TEST_ACTIVE_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  ThreadedClient::Batching batching;
+  ThreadedClient::Delivery batching;
+  batching.batch = true;
   batching.max_delay = 0.05f;
-  sender.set_batching(types::TEST_EVENT, batching);
+  sender.set_delivery(types::TEST_EVENT, batching);
   std::vector<std::uint64_t> sent;
   for (int number = 0; number < 3; ++number) {
     MultiplexerMessage msg = sender.new_message(types::TEST_EVENT, "event " + std::to_string(number));
@@ -997,17 +1010,40 @@ TEST(Batching, ABatchGoesAtItsDelay) {
   sender.shutdown();
 }
 
-TEST(Batching, ASendWithNoTimeToWaitGoesAlone) {
-  // A timeout of 0 is a send that waits for nothing: in a batch it would
-  // leave the whole batch no time, so it goes alone, the batch first.
+TEST(Batching, ASendsOwnTimeoutIsNotUsed) {
+  // The time is the batch's: a message queued with no time to wait joins
+  // the batch as any other does, where it went alone before.
   InProcessMultiplexer mx;
   RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(100));
+  sender.set_delivery(types::TEST_EVENT, by_count(100));
   MultiplexerMessage first = event(sender, 1), now = event(sender, 2), last = event(sender, 3);
   sender.queue(first);
   sender.queue(now, 0);
+  sender.queue(last);
+  ASSERT_TRUE(sender.flush_all(BOUND));
+  std::vector<Frame> frames = frames_until(receiver, 3);
+  ASSERT_EQ(1u, frames.size());
+  EXPECT_TRUE(frames[0].batch);
+  ASSERT_EQ(3u, frames[0].messages.size());
+  EXPECT_EQ(now.id(), frames[0].messages[1].id());
+}
+
+TEST(Batching, AKeySetToGoAsItIsGoesAloneWhileItsTypeIsBatched) {
+  // A key's setting that neither batches nor confirms sends its messages
+  // as any send, the type's batch let go first, its other keys batched.
+  InProcessMultiplexer mx;
+  RawPeer receiver(mx.port, peers::TEST_EVENT_BACKEND, PEER);
+  SyncClient sender(peers::TEST_EVENT_CLIENT);
+  ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
+  sender.set_delivery(types::TEST_EVENT, by_count(100));
+  const std::string urgent = "urgent", other = "other";
+  SyncClient::Delivery as_it_is;
+  sender.set_delivery(types::TEST_EVENT, urgent, as_it_is);
+  MultiplexerMessage first = event(sender, 1, &other), now = event(sender, 2, &urgent), last = event(sender, 3, &other);
+  sender.queue(first);
+  sender.queue(now);
   sender.queue(last);
   ASSERT_TRUE(sender.flush_all(BOUND));
   std::vector<Frame> frames = frames_until(receiver, 3);
@@ -1025,7 +1061,7 @@ TEST(Batching, BytesOfAnotherTypeOrWithTooLongAKeyGoAlone) {
   // made the batch's own message fail and lost the first.
   asio::io_service io_service;
   SyncClient sender(io_service, peers::TEST_EVENT_CLIENT);
-  sender.set_batching(types::TEST_EVENT, by_count(100));
+  sender.set_delivery(types::TEST_EVENT, by_count(100));
   const std::string long_key(multiplexer::MAX_KEY_SIZE + 1, 'k');
   for (int number = 0; number < 2; ++number) {
     MultiplexerMessage keyed = event(sender, number, &long_key);
@@ -1050,7 +1086,7 @@ TEST(Batching, ABatchGivenUpOnIsToldForEachMessage) {
   std::vector<std::pair<std::uint64_t, multiplexer::DropReason>> told;
   sender.set_drop_observer(
       [&told](std::uint64_t id, multiplexer::DropReason reason) { told.emplace_back(id, reason); });
-  sender.set_batching(types::TEST_EVENT, by_count(3));
+  sender.set_delivery(types::TEST_EVENT, by_count(3));
   std::vector<std::uint64_t> sent;
   std::vector<SyncClient::ScheduledMessageTracker> trackers;
   std::vector<unsigned int> heard;
@@ -1076,20 +1112,23 @@ TEST(Batching, ABatchGivenUpOnIsToldForEachMessage) {
   EXPECT_EQ((std::vector<unsigned int>{0, 0, 0}), heard);
 }
 
-TEST(Batching, AMessagesTimeoutCountsFromWhenItsBatchGoes) {
-  // A message's time in its batch is the batching's, not a wait for room
-  // or for a connection: its timeout, a millisecond here, counts from when
-  // the batch goes, so that a batch that goes after it, nothing connected,
-  // is held for a connection rather than given up on at once.
+TEST(Batching, ABatchsTimeoutCountsFromItsFirstMessage) {
+  // A batch's time is its timeout from its first message, its delay
+  // included: one that goes past it, nothing connected, is given up on at
+  // once, every message of it told, the sends' own timeouts not used.
   asio::io_service io_service;
   SyncClient client(io_service, peers::TEST_EVENT_CLIENT);
-  client.set_batching(types::TEST_EVENT, by_count(100));
-  client.queue(event(client, 0), 0.001f);
-  client.queue(event(client, 1), 0.001f);
+  SyncClient::Delivery batching = by_count(100);
+  batching.max_delay = 0.001f;
+  batching.timeout = 0.002f;
+  client.set_delivery(types::TEST_EVENT, batching);
+  client.queue(event(client, 0), BOUND);
+  client.queue(event(client, 1), BOUND);
   std::this_thread::sleep_for(std::chrono::milliseconds(10));  // past the timeout: however late it wakes, still past
-  client.flush_all(0);  // lets the batch go; with nothing connected, it ends at once
-  EXPECT_EQ(0u, client.dropped());
-  EXPECT_EQ(1u, client.held_for_a_connection()) << "the batch, held";
+  client.flush_all(0);                                         // lets the batch go; with nothing connected, given up on
+  io_service.poll();                                           // whatever pass is left to tell drops
+  EXPECT_EQ(2u, client.dropped());
+  EXPECT_EQ(0u, client.held_for_a_connection());
 }
 
 TEST(Batching, ABatchThatWentBeforeItsDelayLeavesNoTimer) {
@@ -1098,7 +1137,7 @@ TEST(Batching, ABatchThatWentBeforeItsDelayLeavesNoTimer) {
   // over, an hour here.
   asio::io_service io_service;
   SyncClient client(io_service, peers::TEST_EVENT_CLIENT);
-  client.set_batching(types::TEST_EVENT, by_count(2));
+  client.set_delivery(types::TEST_EVENT, by_count(2));
   client.queue(event(client, 0), BOUND);
   EXPECT_TRUE(client.batch_timer_armed()) << "armed for the delay";
   client.queue(event(client, 1), BOUND);  // full: gone, held for a connection
@@ -1117,7 +1156,7 @@ TEST(Batching, ADeliveryErrorForABatchIsToldForEachMessage) {
   InProcessMultiplexer mx;
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(3));
+  sender.set_delivery(types::TEST_EVENT, by_count(3));
   std::vector<MultiplexerMessage> sent;
   for (int number = 0; number < 3; ++number) {
     sent.push_back(event(sender, number));
@@ -1158,32 +1197,60 @@ TEST(Batching, ADeliveryErrorForABatchIsToldForEachMessage) {
 TEST(Batching, TheSettingsAreChecked) {
   asio::io_service io_service;
   SyncClient client(io_service, peers::TEST_EVENT_CLIENT);
-  SyncClient::Batching batching;
-  EXPECT_THROW(client.set_batching(types::PING, batching), std::invalid_argument);
-  EXPECT_THROW(client.set_batching(types::TEST_EVENT, std::string(multiplexer::MAX_KEY_SIZE + 1, 'k'), batching),
+  SyncClient::Delivery batching;
+  batching.batch = true;
+  EXPECT_THROW(client.set_delivery(types::PING, batching), std::invalid_argument);
+  EXPECT_THROW(client.set_delivery(types::TEST_EVENT, std::string(multiplexer::MAX_KEY_SIZE + 1, 'k'), batching),
                std::invalid_argument);
   for (unsigned int records : {0u, multiplexer::MAX_BATCH_RECORDS + 1}) {
-    SyncClient::Batching wrong;
+    SyncClient::Delivery wrong;
+    wrong.batch = true;
     wrong.max_records = records;
-    EXPECT_THROW(client.set_batching(types::TEST_EVENT, wrong), std::invalid_argument);
+    EXPECT_THROW(client.set_delivery(types::TEST_EVENT, wrong), std::invalid_argument);
   }
   for (std::size_t bytes : {std::size_t(0), std::size_t(multiplexer::MAX_MESSAGE_SIZE) + 1}) {
-    SyncClient::Batching wrong;
+    SyncClient::Delivery wrong;
+    wrong.batch = true;
     wrong.max_bytes = bytes;
-    EXPECT_THROW(client.set_batching(types::TEST_EVENT, wrong), std::invalid_argument);
+    EXPECT_THROW(client.set_delivery(types::TEST_EVENT, wrong), std::invalid_argument);
   }
   for (float delay :
        {-1.0f, static_cast<float>(2 * mx::MAX_SECONDS), std::numeric_limits<float>::infinity(), std::nanf("")}) {
-    SyncClient::Batching wrong;
+    SyncClient::Delivery wrong;
+    wrong.batch = true;
     wrong.max_delay = delay;
-    EXPECT_THROW(client.set_batching(types::TEST_EVENT, wrong), std::invalid_argument);
+    EXPECT_THROW(client.set_delivery(types::TEST_EVENT, wrong), std::invalid_argument);
   }
-  SyncClient::Batching longest;
+  // A timeout no longer than the delay would give a batch up as it goes,
+  // and 0 a message alone at once; NaN is no time at all.
+  for (float timeout : {0.0f, 0.5f, 1.0f, std::nanf("")}) {
+    SyncClient::Delivery wrong;
+    wrong.batch = true;
+    wrong.max_delay = 1.0f;
+    wrong.timeout = timeout;
+    EXPECT_THROW(client.set_delivery(types::TEST_EVENT, wrong), std::invalid_argument) << timeout;
+  }
+  for (bool confirm : {false, true}) {
+    SyncClient::Delivery wrong;
+    wrong.confirm = confirm;
+    wrong.timeout = 0;
+    EXPECT_THROW(client.set_delivery(types::TEST_EVENT, wrong), std::invalid_argument) << confirm;
+  }
+  SyncClient::Delivery longest;
+  longest.batch = true;
   longest.max_records = multiplexer::MAX_BATCH_RECORDS;
   longest.max_delay = static_cast<float>(mx::MAX_SECONDS);
-  EXPECT_NO_THROW(client.set_batching(types::TEST_EVENT, longest));
-  EXPECT_NO_THROW(client.set_batching(types::TEST_EVENT, batching));
-  EXPECT_NO_THROW(client.clear_batching(types::TEST_EVENT));
+  longest.timeout = std::numeric_limits<float>::infinity();
+  EXPECT_NO_THROW(client.set_delivery(types::TEST_EVENT, longest));
+  for (float timeout : {1.5f, -1.0f, std::numeric_limits<float>::infinity()}) {
+    SyncClient::Delivery right;
+    right.batch = true;
+    right.max_delay = 1.0f;
+    right.timeout = timeout;
+    EXPECT_NO_THROW(client.set_delivery(types::TEST_EVENT, right)) << timeout;
+  }
+  EXPECT_NO_THROW(client.set_delivery(types::TEST_EVENT, batching));
+  EXPECT_NO_THROW(client.clear_delivery(types::TEST_EVENT));
 }
 
 // A batch from a peer that is no library: the receiver takes the plain
@@ -1258,7 +1325,7 @@ TEST(Batching, AMessageOutOfABatchCanBeSentOn) {
   ASSERT_TRUE(relay.connect("127.0.0.1", mx.port, BOUND));
   SyncClient sender(peers::TEST_EVENT_CLIENT);
   ASSERT_TRUE(sender.connect("127.0.0.1", mx.port, BOUND));
-  sender.set_batching(types::TEST_EVENT, by_count(2));
+  sender.set_delivery(types::TEST_EVENT, by_count(2));
   MultiplexerMessage first = event(sender, 1), second = event(sender, 2);
   sender.queue(first);
   sender.queue(second);

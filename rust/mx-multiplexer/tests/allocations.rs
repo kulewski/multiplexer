@@ -19,7 +19,7 @@ use std::sync::{mpsc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use mx_multiplexer::{Batching, Bytes, SyncClient, ThreadedClient};
+use mx_multiplexer::{Bytes, Delivery, SyncClient, ThreadedClient};
 use support::testing_constants::{peers, types};
 use support::{beside, Multiplexer};
 
@@ -131,9 +131,15 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// Batches of a round each, closed by their count.
-fn batching() -> Batching {
-    Batching { max_records: ROUND, max_delay: Duration::from_secs(3600), ..Batching::default() }
+/// Batches of a round each, closed by their count, given up on never.
+fn batching() -> Delivery {
+    Delivery {
+        batch: true,
+        max_records: ROUND,
+        max_delay: Duration::from_secs(3600),
+        timeout: None,
+        ..Delivery::default()
+    }
 }
 
 /// A receiver of `count` events, on a thread of its own, so that nothing
@@ -174,7 +180,7 @@ fn a_threaded_clients_plain_sends_allocate_nothing_each_and_free_nothing_across_
     let received = receiver(mx.address(), 1 + (WARM_UP + ROUNDS) * ROUND);
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
     name_io_thread(&client);
-    client.set_batching(types::TEST_EVENT, None, batching()).unwrap();
+    client.set_delivery(types::TEST_EVENT, None, batching()).unwrap();
     ROLE.with(|role| role.set(SENDER));
     let payload = Bytes::from_static(&[b'r'; 100]);
     let round = || {
@@ -211,7 +217,7 @@ fn a_sync_clients_plain_sends_allocate_nothing_each() {
     let mx = Multiplexer::start();
     let received = receiver(mx.address(), (WARM_UP + ROUNDS) * ROUND);
     let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
-    client.set_batching(types::TEST_EVENT, None, batching()).unwrap();
+    client.set_delivery(types::TEST_EVENT, None, batching()).unwrap();
     ROLE.with(|role| role.set(SENDER));
     let payload = Bytes::from_static(&[b'r'; 100]);
     let mut round = || {
@@ -248,7 +254,7 @@ fn a_big_plain_send_that_goes_alone_is_not_copied_on_the_io_thread() {
     let client = ThreadedClient::builder(peers::TEST_ACTIVE_CLIENT).connect([mx.address()]).unwrap();
     name_io_thread(&client);
     // Batched up to 64 KiB: each of these is too big for a batch.
-    client.set_batching(types::TEST_EVENT, None, Batching { max_bytes: 64 * 1024, ..batching() }).unwrap();
+    client.set_delivery(types::TEST_EVENT, None, Delivery { max_bytes: 64 * 1024, ..batching() }).unwrap();
     ROLE.with(|role| role.set(SENDER));
     let payload = Bytes::from(vec![b'r'; BIG]);
     let before = counts();

@@ -70,6 +70,7 @@ void BasicClient::_post_callbacks() {
 // here, so a callback may send, or shut the client down.
 void BasicClient::_process_callbacks() {
   _tell_drops();
+  _run_confirmed_ends();
   _process_follows();
 }
 
@@ -142,12 +143,14 @@ void BasicClient::release_follows() {
   MX_DCHECK_RUN_ON(&owner_thread());
   outbox_->follows.clear();
   outbox_->follow_events.clear();
+  _release_confirmed_ends();
   _check_flushes();
 }
 
 void BasicClient::end_follows() {
   MX_DCHECK_RUN_ON(&owner_thread());
   _tell_drops();
+  _run_confirmed_ends();
   std::vector<FollowPtr> left;
   for (const std::pair<const SendState* const, FollowPtr>& entry : outbox_->follows) {
     if (!entry.second->over) {
@@ -165,14 +168,18 @@ BasicClient::FlushPtr BasicClient::begin_flush(std::function<void(bool all_writt
   MX_DCHECK_RUN_ON(&owner_thread());
   // What waits in a batch goes now, and the flush waits for it; a batch
   // given up on at once, with no connection to wait for, is lost to it.
+  // The confirmations this client owes go too. A confirmed send numbered
+  // before it is waited for until confirmed or given up on.
   const std::uint64_t dropped = dropped_.load(std::memory_order_relaxed);
   close_batches();
+  send_confirmations();
   const bool lost = dropped_.load(std::memory_order_relaxed) != dropped;
-  if (!outbox_->follow_events.empty() || !outbox_->drop_events.empty()) {
+  if (!outbox_->follow_events.empty() || !outbox_->drop_events.empty() || _confirmed_ends_due()) {
     _process_callbacks();  // what ended before the flush began is heard before it ends
   }
   FlushPtr flush(new Flush());
   flush->last_number = outbox_->last_number;
+  flush->confirm_mark = _confirm_mark();
   flush->waiting = outbox_->waiting;
   flush->done = done;
   flush->lost = lost;
@@ -214,12 +221,14 @@ void BasicClient::_wait_flushes(std::uint64_t number, int copies) {
 }
 
 // A flush is done once the messages it counts no longer wait and every
-// frame it marked is out, written or lost, and the callbacks of the sends
-// that ended meanwhile and of the drops have run: a pass of them due
+// frame it marked is out, written or lost, every confirmed send numbered
+// up to its mark is resolved, and the callbacks of the sends that ended
+// meanwhile and of the drops have run: a pass of them due
 // (_process_callbacks) checks again. `done` is told after the flush left
 // the list.
 void BasicClient::_check_flushes() {
-  if (outbox_->flushes.empty() || !outbox_->follow_events.empty() || !outbox_->drop_events.empty()) {
+  if (outbox_->flushes.empty() || !outbox_->follow_events.empty() || !outbox_->drop_events.empty() ||
+      _confirmed_ends_due()) {
     return;
   }
   std::vector<FlushPtr> finished;
@@ -230,7 +239,7 @@ void BasicClient::_check_flushes() {
                                        return *mark.second != SendState::QUEUED;
                                      }),
                       flush.marks.end());
-    if (flush.waiting || !flush.marks.empty()) {
+    if (flush.waiting || !flush.marks.empty() || (flush.confirm_mark && _confirming_up_to(flush.confirm_mark))) {
       ++each;
       continue;
     }

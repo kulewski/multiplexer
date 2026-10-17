@@ -18,9 +18,14 @@ namespace {
 // Client::refuse_arrivals): DELIVERY_ERROR for a request whose sender wants
 // delivery errors, queued as a reply is; nothing for a reply or for the
 // protocol's own messages. Queued, never written here: this runs inside
-// the client's loop.
+// the client's loop. A message of a confirmed batch is confirmed REFUSED
+// instead, and its producer sends it again at once.
 void refuse(BasicClient& client, const IncomingMessage& incoming) {
   const MultiplexerMessage& msg = *incoming.third;
+  if (msg.has_confirmation()) {
+    client.confirm(msg, Confirmed::REFUSED);
+    return;
+  }
   if (msg.references()) {
     MX_LOG(DEBUG, LOWVERBOSITY,
            CTX("SyncClient") TEXT("reply #" + repr(msg.id()) + " of type " + repr(msg.type()) + " dropped: leaving"));

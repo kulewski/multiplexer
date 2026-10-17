@@ -1,9 +1,9 @@
 """A message of a number the protocol keeps, sent without `to`, is told to
 its sender with a DELIVERY_ERROR and recorded, as one of a type the rules
-file names with no rule, or does not name, is: type 0 and 13 to 99, which
+file names with no rule, or does not name, is: type 0 and 14 to 99, which
 the protocol does not use, as a type of no entry, is_known_type false and
-UNKNOWN_TYPE; a PING or a status, which go somewhere only with `to`, as a
-type with no rule, is_known_type true and NO_RULE. They were dropped with
+UNKNOWN_TYPE; a PING, a status or a CONFIRMATION, which go somewhere only
+with `to`, as a type with no rule, is_known_type true and NO_RULE. They were dropped with
 a log line alone, their senders left to their timeouts. A DELIVERY_ERROR
 without `to` gets nothing back, never answered with another. Counted, not
 timed: the sender's marker to itself comes back after everything it sent
@@ -30,8 +30,11 @@ class ReservedTypesTest(unittest.TestCase):
         with Cluster(1, rules=RULES, record=True, record_payload_bytes=1) as cluster:
             sender = RawPeer(cluster.endpoints[0], peers.TEST_EVENT_CLIENT)
             sender.handshake()
-            unknown = [sender.send(b"u", number) for number in (0, 13, types.MAX_MULTIPLEXER_META_PACKET)]
-            no_rule = [sender.send(b"n", number) for number in (types.PING, types.PEER_STATUS, types.RULES_STATUS)]
+            unknown = [sender.send(b"u", number) for number in (0, 14, types.MAX_MULTIPLEXER_META_PACKET)]
+            no_rule = [
+                sender.send(b"n", number)
+                for number in (types.PING, types.PEER_STATUS, types.RULES_STATUS, types.CONFIRMATION)
+            ]
             silent = sender.send(b"d", types.DELIVERY_ERROR)
             marker = random.randint(1, 2**62)
             sender.send(str(marker).encode(), types.TEST_EVENT, to=sender.instance_id)

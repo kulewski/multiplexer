@@ -54,6 +54,9 @@ struct BasicClient::Flush {
   std::function<void(bool all_written)> done;
   bool flushed = false;
   bool lost = false;  // one of those was given up on (report_drop): not all written
+  // The last message numbered for confirmation before it: the flush waits
+  // until every one numbered up to it is confirmed or given up on.
+  std::uint64_t confirm_mark = 0;
 };
 
 // A send followed to its end for its `done` (BasicClient::send): the

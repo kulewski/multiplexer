@@ -31,14 +31,20 @@
 //! The commands of other threads wait in an inbox (`inbox`), which a pass
 //! takes whole, handing back the bodies of plain sends the core is done
 //! with; the driver tells it when it is about to wait for its sockets, so
-//! that a sender wakes it only then.
+//! that a sender wakes it only then. The confirmations the program gave
+//! come beside the commands and go to the core as they are taken, what is
+//! owed going at the end of the turn (`Core::confirm_handed`).
 //!
 //! Readiness is edge-triggered, so a socket's flags are kept here and a
 //! socket is read and written until it would block. A frame is pulled from
 //! a socket one per pass, a read made only when the socket's buffer holds
 //! no whole frame, so that a multiplexer that writes faster than the client
 //! reads is slowed down by TCP, as in C++, and the sockets and the timers
-//! take turns. A write starts at once, inside the step that asked for it,
+//! take turns. The last whole frame the buffer holds goes to the core with
+//! the word that the read is drained (`Core::on_read_drained`), in the same
+//! step, as C++'s connection says so before it reads again: what a client
+//! whose handlers run as messages arrive owes then goes, gathered over the
+//! read. A write starts at once, inside the step that asked for it,
 //! and its end reaches the core in a later step, as asio posts a write's
 //! handler. What counts as work, for a synchronous wait that must not wait
 //! for nothing, is what asio counts: a socket open, a name being resolved,
@@ -59,7 +65,7 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use crate::core::connection::ReadEnd;
 use crate::core::{Action, ConnId, Core, Posted};
 use crate::frame::{FrameReader, Head, Next, HEADER_LENGTH};
-use crate::inbox::Inbox;
+use crate::inbox::{HandedConfirmation, Inbox};
 
 /// The waker's token; sockets get the ones after it.
 const WAKER: Token = Token(0);
@@ -80,10 +86,12 @@ enum Ready {
     Timers,
 }
 
-/// What a socket gave next.
+/// What a socket gave next: a frame's body, and whether it is the last
+/// whole frame its buffer holds, after which the socket is read again; the
+/// start of a frame whose body is on its way; or the end of its reading.
 #[derive(Debug)]
 enum Pulled {
-    Frame(Bytes),
+    Frame(Bytes, bool),
     Started,
     End(ReadEnd),
 }
@@ -177,8 +185,10 @@ pub(crate) struct Driver {
     resolving: HashSet<ConnId>,
     resolver: Option<ResolverThread>,
     inbox: Option<Arc<Inbox>>,
-    /// What the inbox's queue is swapped with, empty between two takes.
+    /// What the inbox's queue and confirmations are swapped with, empty
+    /// between two takes.
     taken: VecDeque<Posted>,
+    confirmations: Vec<HandedConfirmation>,
     /// Entries run since the last pass, and since the last poll.
     since_pass: usize,
     since_poll: usize,
@@ -212,6 +222,7 @@ impl Driver {
             resolver: None,
             inbox,
             taken: VecDeque::new(),
+            confirmations: Vec::new(),
             since_pass: 0,
             since_poll: 0,
             woken: false,
@@ -295,11 +306,18 @@ impl Driver {
     }
 
     /// Takes what other threads posted into the queue, in order, handing
-    /// back the bodies the core is done with.
+    /// back the bodies the core is done with; the confirmations given go to
+    /// the core at once, and the send of what is owed it posts joins the
+    /// queue behind the rest, where a pass, which moves none of the core's
+    /// posted work, would leave it while the driver sleeps.
     fn take_inbox(&mut self, core: &mut Core) {
         let Some(inbox) = &self.inbox else { return };
-        inbox.take(&mut self.taken, &mut core.batcher.bodies);
+        inbox.take(&mut self.taken, &mut self.confirmations, &mut core.batcher.bodies);
         self.ready.extend(self.taken.drain(..).map(Ready::Posted));
+        if !self.confirmations.is_empty() {
+            core.confirm_handed(&mut self.confirmations);
+            self.ready.extend(core.posted.drain(..).map(Ready::Posted));
+        }
     }
 
     /// A pass; see the module comment. Its work joins the back of the
@@ -337,7 +355,12 @@ impl Driver {
             Ready::Connected(conn, result) => core.connected(conn, result),
             Ready::WriteDone(conn, written, failed) => core.on_write_done(conn, written, failed),
             Ready::Resolved(conn, result) => core.on_resolved(conn, result),
-            Ready::Pulled(conn, Pulled::Frame(body)) => core.on_frame(conn, body),
+            Ready::Pulled(conn, Pulled::Frame(body, drained)) => {
+                core.on_frame(conn, body);
+                if drained {
+                    core.on_read_drained(conn); // every whole frame the read brought handed over
+                }
+            }
             Ready::Pulled(conn, Pulled::Started) => core.on_frame_started(conn),
             Ready::Pulled(conn, Pulled::End(end)) => core.on_read_end(conn, end),
             Ready::Timers => {
@@ -480,7 +503,8 @@ impl Driver {
     }
 
     /// What `conn`'s socket gives next, a read made only when its buffer
-    /// holds nothing whole; None when it has nothing now.
+    /// holds nothing whole, a frame saying whether it was the last whole
+    /// one; None when it has nothing now.
     fn pull_from(&mut self, conn: ConnId) -> Option<Pulled> {
         let socket = self.sockets.get_mut(&conn)?;
         if !socket.reading || socket.read_ended {
@@ -490,7 +514,7 @@ impl Driver {
         // what the socket holds.
         loop {
             match socket.reader.next() {
-                Next::Frame(body) => return Some(Pulled::Frame(body)),
+                Next::Frame(body) => return Some(Pulled::Frame(body, !socket.reader.holds_next())),
                 Next::Started => return Some(Pulled::Started),
                 Next::BadHeader => {
                     socket.read_ended = true;

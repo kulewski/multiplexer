@@ -20,7 +20,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use mx_multiplexer::{
-    BaseMultiplexerServer, BaseThreadedMultiplexerServer, Batching, Error, Handler, HandlerResult, Message, Request,
+    BaseMultiplexerServer, BaseThreadedMultiplexerServer, Delivery, Error, Handler, HandlerResult, Message, Request,
     Routing, ServeError, ServerHandle, SyncClient, ThreadedClient,
 };
 use support::testing_constants::{peers, types};
@@ -807,8 +807,8 @@ fn a_drain_waits_for_what_waits_in_a_batch() {
             let handle = server.handle();
             (handle, beside(move || server.serve_forever(HOUR, Some(HOUR)).map(|()| server.dropped())))
         };
-        let batching = Batching { max_delay: HOUR, ..Batching::default() };
-        handle.set_batching(types::TEST_EVENT, None, batching).unwrap();
+        let batching = Delivery { batch: true, max_delay: HOUR, timeout: None, ..Delivery::default() };
+        handle.set_delivery(types::TEST_EVENT, None, batching).unwrap();
         mx.stop(); // every connection to it ends
         if threaded {
             assert!(eventually(|| handle.connections_count().is_ok_and(|count| count == 0)));

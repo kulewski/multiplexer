@@ -114,6 +114,12 @@ type {
 }
 
 type {
+    type: 13
+    name: "CONFIRMATION"
+    comment: "a consumer's library tells a producer which of its confirmed records were processed, refused or failed; payload is Confirmation"
+}
+
+type {
     type: 99
     name: "MAX_MULTIPLEXER_META_PACKET"
     comment: "this only defines a constant"

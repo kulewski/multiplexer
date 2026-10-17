@@ -339,8 +339,8 @@ class Client : public ExceptionDefinitions {
   // loop runs; a message the client gives up on is reported
   // (set_drop_observer). queue_all() gives every live connection a copy,
   // and a multiplexer whose first connection is still in its handshake one
-  // at its welcome. A message queue() sends through no lane goes in a
-  // batch when its type or key is batched (set_batching); queue() runs the
+  // at its welcome. A message queue() sends through no lane goes by the
+  // delivery set for its type or key (set_delivery); queue() runs the
   // loop first unless the message only joins a batch with a delay
   // (BasicClient::send's poll_first).
   // `done`, when given, hears how the message ended, once, inside a later
@@ -356,7 +356,7 @@ class Client : public ExceptionDefinitions {
                                 SendCallback done = SendCallback()) {
     basic_client_->check_not_orphaned();
     if constexpr (std::is_base_of<MultiplexerMessage, T>::value) {
-      if (!lane && RawMessage::plain_event(msg) && basic_client_->batching()) {
+      if (!lane && RawMessage::plain_event(msg) && basic_client_->has_delivery()) {
         return _queue_plain(msg, timeout, done);
       }
     }
@@ -450,34 +450,35 @@ class Client : public ExceptionDefinitions {
 
   mx::Random64::result_type random64() const { return basic_client_->random64(); }  // a message id
 
-  // Batching, docs/api_cpp.md "Batching": the events of `type`, each key
-  // apart, or of one key of it, that queue() sends go several in one
-  // message, which the receiving library splits back into one message
-  // each. Throws std::invalid_argument as BasicClient::check_batching says.
-  // A batch goes full, after `max_delay`, or, with no delay, as soon as a
+  // Delivery, docs/delivery.md: how the events of `type`, each key apart,
+  // or of one key of it, that queue() sends go: several in one message,
+  // which the receiving library splits back into one message each
+  // (`batch`), kept until their consumer confirms them (`confirm`), or
+  // both, and how long a batch has (`timeout`); see BasicClient::Delivery.
+  // Throws std::invalid_argument as BasicClient::check_delivery says. A
+  // batch goes full, after `max_delay`, or, with no delay, as soon as a
   // connection has nothing left to write; on this client, whose loop runs
   // inside its calls, inside a later call, as a queued message is written.
-  // See BasicClient::set_batching.
-  typedef BasicClient::Batching Batching;
-  void set_batching(std::uint32_t type, const Batching& batching = Batching()) {
+  typedef BasicClient::Delivery Delivery;
+  void set_delivery(std::uint32_t type, const Delivery& delivery) {
     basic_client_->check_not_orphaned();
     _poll_before_batches_go();
-    basic_client_->set_batching(type, batching);
+    basic_client_->set_delivery(type, delivery);
   }
-  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching = Batching()) {
+  void set_delivery(std::uint32_t type, const std::string& key, const Delivery& delivery) {
     basic_client_->check_not_orphaned();
     _poll_before_batches_go();
-    basic_client_->set_batching(type, key, batching);
+    basic_client_->set_delivery(type, key, delivery);
   }
-  void clear_batching(std::uint32_t type) {
+  void clear_delivery(std::uint32_t type) {
     basic_client_->check_not_orphaned();
     _poll_before_batches_go();
-    basic_client_->clear_batching(type);
+    basic_client_->clear_delivery(type);
   }
-  void clear_batching(std::uint32_t type, const std::string& key) {
+  void clear_delivery(std::uint32_t type, const std::string& key) {
     basic_client_->check_not_orphaned();
     _poll_before_batches_go();
-    basic_client_->clear_batching(type, key);
+    basic_client_->clear_delivery(type, key);
   }
   // How many messages wait in batches, and whether the batches' timer is
   // armed: for tests.
@@ -493,6 +494,26 @@ class Client : public ExceptionDefinitions {
   std::uint64_t dropped() const { return basic_client_->dropped(); }
   // See BasicClient::incoming_dropped().
   std::uint64_t incoming_dropped() const { return basic_client_->incoming_dropped(); }
+
+  // Confirmed sends (BasicClient::Delivery::confirm, docs/delivery.md): a
+  // message received from a confirmed batch carries its number
+  // (MultiplexerMessage.confirmation), and the program confirms it with
+  // processed() once it is done with it, FAILED when it cannot process it
+  // ever, REFUSED to have its producer send it again. Nothing for a message
+  // with no number. What this client owes goes once it has no message left
+  // for the program, as a receive waits, at flush_all(), at
+  // CONFIRMATIONS_GATHERED_MAX owed, and at shutdown. unconfirmed(),
+  // sent_again() and confirmations_owed() are for tests: see
+  // BasicClient's.
+  void confirm(const MultiplexerMessage& message, Confirmed outcome) { basic_client_->confirm(message, outcome); }
+  void confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome) {
+    basic_client_->confirm(sender, number, outcome);
+  }
+  void processed(const MultiplexerMessage& message) { basic_client_->processed(message); }
+  std::size_t unconfirmed() const { return basic_client_->unconfirmed(); }
+  std::uint64_t sent_again() const { return basic_client_->sent_again(); }
+  std::size_t confirmations_owed() const { return basic_client_->confirmations_owed(); }
+  bool confirm_timer_armed() const { return basic_client_->confirm_timer_armed(); }
 
  protected:
   // The query algorithm, its stages and the one reader of what comes back
@@ -698,7 +719,7 @@ class Client : public ExceptionDefinitions {
   // A send's `msg` as a frame: a whole message stamped (frame_stamped),
   // marked for batching while anything is batched, a frame as it is.
   shared_ptr<const RawMessage> _serialize(const MultiplexerMessage& msg) {
-    return frame_stamped(msg, instance_id(), [this] { return random64(); }, basic_client_->batching());
+    return frame_stamped(msg, instance_id(), [this] { return random64(); }, basic_client_->has_delivery());
   }
   shared_ptr<const RawMessage> _serialize(shared_ptr<const RawMessage> raw) { return raw; }
 

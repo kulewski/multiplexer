@@ -1,15 +1,19 @@
-//! A client's batching: the events sent nobody waits for, of a batched
-//! type, go several in one message, full batches as they fill and the rest
-//! at a flush or at their delay; the keys of a type batch apart, and one
-//! key's setting goes ahead of its type's; a send that does not batch lets
-//! the batches go first; a batch's message stays within max_bytes; with no
-//! delay, a message goes alone while a connection has nothing to write and
-//! those sent while it is busy go together once it is not; each message's
-//! tracker and `done` hear its batch's end, and a batch given up on is told
-//! for each message inside, a flush that let it go hearing it lost, a
-//! shutdown letting it go first; the settings are checked; and a batch that
-//! arrives is split into its messages, what does not belong in it dropped,
-//! a full queue dropping it whole. Mirrors multiplexer/batching_test.cc.
+//! A client's delivery, its batching (`Delivery::batch`): the events sent
+//! nobody waits for, of a batched type, go several in one message, full
+//! batches as they fill and the rest at a flush or at their delay; the keys
+//! of a type batch apart, and one key's setting goes ahead of its type's,
+//! one that neither batches nor confirms sending its messages alone, by
+//! its own timeout; a send that does not batch lets the batches go first; a
+//! batch's message stays within max_bytes; with no delay, a message goes
+//! alone while a connection has nothing to write and those sent while it is
+//! busy go together once it is not, or at their batch's deadline; a batch's
+//! timeout counts from its first message, the sends' own not used; each
+//! message's tracker and `done` hear its batch's end, and a batch given up
+//! on is told for each message inside, a flush that let it go hearing it
+//! lost, a shutdown letting it go first; the settings are checked; and a
+//! batch that arrives is split into its messages, what does not belong in
+//! it dropped, a full queue dropping it whole. Mirrors
+//! multiplexer/batching_test.cc.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -18,7 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use prost::Message as _;
 
-use crate::core::batching::{BatchMark, Batching};
+use crate::core::batching::{BatchMark, Delivery};
 use crate::core::client::{DropReason, IncomingMode};
 use crate::core::harness::{decode, Harness};
 use crate::core::outbox::{Frame, SendDone};
@@ -33,9 +37,16 @@ pub(super) const TEN: Option<Duration> = Some(Duration::from_secs(10));
 /// A delay no test lasts: its batches close by count, a flush or a write.
 pub(super) const HOUR: Duration = Duration::from_secs(3600);
 
-/// Batching by `max_records`, its delay an hour.
-pub(super) fn by_count(max_records: usize) -> Batching {
-    Batching { max_records, max_delay: HOUR, ..Batching::default() }
+/// Batching by `max_records`, its delay an hour, its batches given up on
+/// never.
+pub(super) fn by_count(max_records: usize) -> Delivery {
+    Delivery { batch: true, max_records, max_delay: HOUR, timeout: None, ..Delivery::default() }
+}
+
+/// Batching with no delay, a batch going as soon as a connection has
+/// nothing left to write, its timeout the default's.
+pub(super) fn no_delay() -> Delivery {
+    Delivery { batch: true, ..Delivery::default() }
 }
 
 /// An event of type EVENT from the client of `h`, with `key` when given.
@@ -132,7 +143,7 @@ fn queued_events_go_in_batches_and_a_flush_sends_the_rest() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(3)).expect("set");
     for id in 1..=7 {
         queue(&mut h, id, None, b"event");
     }
@@ -149,8 +160,8 @@ fn a_batch_goes_at_its_first_messages_delay() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    let batching = Batching { max_delay: Duration::from_secs(2), ..Batching::default() };
-    h.core.set_batching(EVENT, None, batching).expect("set");
+    let delivery = Delivery { batch: true, max_delay: Duration::from_secs(2), ..Delivery::default() };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
     queue(&mut h, 1, None, b"event");
     h.advance(Duration::from_secs(1));
     queue(&mut h, 2, None, b"event");
@@ -167,7 +178,7 @@ fn a_batch_that_went_before_its_delay_leaves_no_timer() {
     // armed for a batch already gone kept a receive with nothing connected
     // waiting for the whole delay.
     let mut h = Harness::new(200, IncomingMode::Queue);
-    h.core.set_batching(EVENT, None, by_count(2)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(2)).expect("set");
     queue(&mut h, 1, None, b"event");
     assert!(h.core.batcher_armed().is_some(), "armed for the delay");
     queue(&mut h, 2, None, b"event"); // full: gone, and held for a connection
@@ -183,7 +194,7 @@ fn the_keys_of_a_type_batch_apart_and_go_in_the_order_they_began() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     let sent = [(1, Some("a")), (2, Some("b")), (3, None), (4, Some("a")), (5, Some("")), (6, None), (7, Some(""))];
     for (id, key) in sent {
         queue(&mut h, id, key, b"event");
@@ -207,8 +218,8 @@ fn a_keys_own_setting_goes_ahead_of_its_types_and_other_keys_go_alone() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(10)).expect("set");
-    h.core.set_batching(EVENT, Some("a"), by_count(2)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(10)).expect("set");
+    h.core.set_delivery(EVENT, Some("a"), by_count(2)).expect("set");
     for (id, key) in [(1, "a"), (2, "b"), (3, "a"), (4, "a"), (5, "b")] {
         queue(&mut h, id, Some(key), b"event");
     }
@@ -220,8 +231,8 @@ fn a_keys_own_setting_goes_ahead_of_its_types_and_other_keys_go_alone() {
         wrote(&mut h, conn)
     );
     // The type's setting gone, its keys' with it; the key's own set again.
-    h.core.clear_batching(EVENT, None);
-    h.core.set_batching(EVENT, Some("a"), by_count(2)).expect("set");
+    h.core.clear_delivery(EVENT, None);
+    h.core.set_delivery(EVENT, Some("a"), by_count(2)).expect("set");
     queue(&mut h, 6, Some("a"), b"event");
     queue(&mut h, 7, Some("b"), b"event");
     queue(&mut h, 8, None, b"event");
@@ -234,8 +245,9 @@ fn a_keys_own_setting_goes_ahead_of_its_types_and_other_keys_go_alone() {
 
 /// A synchronous client's queue() runs the loop first unless the message
 /// only joins a batch with a delay: the one that would fill its batch, one
-/// with no delay, one too big, one to ALL or through a lane, and any once a
-/// batch's delay is over, do (C++ AQueuedMessageThatOnlyJoinsABatchRunsNoLoop).
+/// with no delay, one too big, one not batched, one to ALL or through a
+/// lane, and any once a batch's delay is over, do (C++
+/// AQueuedMessageThatOnlyJoinsABatchRunsNoLoop).
 #[test]
 fn a_send_that_only_joins_a_batch_needs_no_loop() {
     let mut h = Harness::new(200, IncomingMode::Queue);
@@ -243,10 +255,10 @@ fn a_send_that_only_joins_a_batch_needs_no_loop() {
     h.written(conn);
     let now = h.core.now;
     let needs = |h: &Harness, id: u64, all: bool, lane: bool, at| {
-        h.core.send_needs_loop(&event(h, id, None, b"event"), all, lane, TEN, at)
+        h.core.send_needs_loop(&event(h, id, None, b"event"), all, lane, at)
     };
     assert!(needs(&h, 1, false, false, now), "nothing batched: as every send");
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(3)).expect("set");
     assert!(!needs(&h, 1, false, false, now), "it only opens a batch");
     queue(&mut h, 1, None, b"event");
     assert!(!needs(&h, 2, false, false, now), "it only joins one");
@@ -256,10 +268,12 @@ fn a_send_that_only_joins_a_batch_needs_no_loop() {
     queue(&mut h, 2, None, b"event");
     assert!(needs(&h, 3, false, false, now), "it fills the batch, which goes");
     let big = event(&h, 4, None, &[b'b'; 100]);
-    h.core.set_batching(EVENT, None, Batching { max_bytes: 50, ..by_count(100) }).expect("set");
-    assert!(h.core.send_needs_loop(&big, false, false, TEN, now), "too big: it goes alone");
-    h.core.set_batching(EVENT, None, Batching { max_delay: Duration::ZERO, ..by_count(100) }).expect("set");
+    h.core.set_delivery(EVENT, None, Delivery { max_bytes: 50, ..by_count(100) }).expect("set");
+    assert!(h.core.send_needs_loop(&big, false, false, now), "too big: it goes alone");
+    h.core.set_delivery(EVENT, None, Delivery { max_delay: Duration::ZERO, ..by_count(100) }).expect("set");
     assert!(needs(&h, 5, false, false, now), "no delay: whether a connection is free decides");
+    h.core.set_delivery(EVENT, None, Delivery { confirm: true, ..Delivery::default() }).expect("set");
+    assert!(needs(&h, 6, false, false, now), "not batched: it goes alone");
 }
 
 /// An event's frame, made unsealed, is sealed only if it goes alone: by a
@@ -271,7 +285,7 @@ fn an_event_in_a_batch_gets_no_checksum_of_its_own() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     let sealed_before = frame::SEALED.with(|sealed| sealed.get());
     for id in 1..=3 {
         queue(&mut h, id, None, b"event");
@@ -294,7 +308,7 @@ fn a_send_that_does_not_batch_lets_the_batches_go_first() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     queue(&mut h, 1, None, b"event");
     queue(&mut h, 2, None, b"event");
     let waited_for = event(&h, 3, None, b"event");
@@ -325,8 +339,8 @@ fn a_batchs_message_stays_within_max_bytes_on_the_wire() {
     let payload = [b'x'; 140];
     let one = message(&h, 1, None, &payload).encoded_len();
     let max_bytes = 4 * one + 2;
-    let batching = Batching { max_bytes, max_delay: HOUR, ..Batching::default() };
-    h.core.set_batching(EVENT, None, batching).expect("set");
+    let delivery = Delivery { max_bytes, ..by_count(crate::defaults::DEFAULT_BATCH_MAX_RECORDS) };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
     for id in 1..=20 {
         queue(&mut h, id, None, &payload);
     }
@@ -359,7 +373,7 @@ fn with_no_delay_messages_sent_while_the_connection_is_busy_go_together() {
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, Batching::default()).expect("set");
+    h.core.set_delivery(EVENT, None, no_delay()).expect("set");
     queue(&mut h, 1, None, b"event");
     assert_eq!(0, h.core.batched_messages(), "a connection with nothing to write takes it at once");
     for id in 2..=4 {
@@ -382,7 +396,7 @@ fn with_no_delay_a_batch_goes_when_the_busy_connection_dies() {
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, Batching::default()).expect("set");
+    h.core.set_delivery(EVENT, None, no_delay()).expect("set");
     for id in 1..=3 {
         queue(&mut h, id, None, b"event");
     }
@@ -403,7 +417,7 @@ fn with_no_delay_a_batch_goes_when_a_connection_comes_up() {
     let busy = h.up(1);
     h.written(busy);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, Batching::default()).expect("set");
+    h.core.set_delivery(EVENT, None, no_delay()).expect("set");
     for id in 1..=3 {
         queue(&mut h, id, None, b"event");
     }
@@ -424,7 +438,7 @@ fn each_messages_tracker_and_done_hear_its_batchs_end() {
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(3)).expect("set");
     let heard = Arc::new(Mutex::new(Vec::new()));
     let mut trackers: Vec<Arc<Tracker>> = Vec::new();
     for id in 1..=3 {
@@ -445,29 +459,33 @@ fn each_messages_tracker_and_done_hear_its_batchs_end() {
 #[test]
 fn a_batch_given_up_on_is_told_for_each_message_inside() {
     // Nothing connected: the full batch is held for a connection, one
-    // message that holds three, its messages' timeouts counted from when it
-    // went; none comes, and at that deadline it is given up on, told and
+    // message that holds three, until its deadline, its timeout from its
+    // first message; none comes, and then it is given up on, told and
     // counted for each message, each tracker and `done` hearing it.
     let mut h = Harness::new(200, IncomingMode::Queue);
     let drops = h.observe_drops();
-    h.core.set_batching(EVENT, None, by_count(3)).expect("set");
+    let delivery = Delivery { max_delay: Duration::from_secs(5), timeout: TEN, ..by_count(3) };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
     let heard = Arc::new(Mutex::new(Vec::new()));
     let mut trackers: Vec<Arc<Tracker>> = Vec::new();
     for id in 1..=3 {
         let hearing = Arc::clone(&heard);
         let done = SendDone::Callback(Box::new(move |written| hearing.lock().unwrap().push(written)));
         let frame = event(&h, id, None, b"event");
-        assert!(h.core.send(frame, false, None, TEN, 0, Some(&mut trackers), None, Some(done), true));
+        assert!(h.core.send(frame, false, None, None, 0, Some(&mut trackers), None, Some(done), true));
         h.settle();
-        h.advance(Duration::from_secs(1));
+        if id < 3 {
+            h.advance(Duration::from_secs(1));
+        }
     }
     assert_eq!(1, h.core.held_for_a_connection(), "one batch, held");
-    h.advance(Duration::from_millis(8_999));
-    assert!(drops.lock().unwrap().is_empty(), "ten seconds from when the batch went, not from the first send");
+    h.advance(Duration::from_millis(7_999));
+    assert!(drops.lock().unwrap().is_empty());
     h.advance(Duration::from_millis(1));
     assert_eq!(
         vec![(1, DropReason::NoConnection), (2, DropReason::NoConnection), (3, DropReason::NoConnection)],
-        *drops.lock().unwrap()
+        *drops.lock().unwrap(),
+        "ten seconds from its first message, not from when it went nor from the sends'"
     );
     assert_eq!(3, h.core.client.dropped.load(Ordering::Relaxed), "counted for each");
     assert_eq!(vec![0, 0, 0], *heard.lock().unwrap());
@@ -475,66 +493,106 @@ fn a_batch_given_up_on_is_told_for_each_message_inside() {
 }
 
 #[test]
-fn a_send_with_no_time_to_wait_goes_alone() {
-    // A timeout of 0 is a send that waits for nothing: in a batch it would
-    // leave the whole batch no time, so it goes alone, the batch first.
+fn a_sends_own_timeout_is_not_used() {
+    // The time is the batch's: a message sent with no time to wait joins
+    // the batch as any other does, where it went alone before.
     let mut h = Harness::new(200, IncomingMode::Queue);
     let conn = h.up(1);
     h.written(conn);
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     queue(&mut h, 1, None, b"event");
     let now = event(&h, 2, None, b"event");
     assert!(h.core.send(now, false, None, Some(Duration::ZERO), 0, None, None, None, true));
     queue(&mut h, 3, None, b"event");
+    assert_eq!(3, h.core.batched_messages());
     h.core.begin_flush(None);
     h.settle();
-    assert_eq!(vec![Wrote::Alone(None, 1), Wrote::Alone(None, 2), Wrote::Alone(None, 3)], wrote(&mut h, conn));
+    assert_eq!(vec![Wrote::Batch(None, vec![1, 2, 3])], wrote(&mut h, conn));
 }
 
 #[test]
-fn a_batch_with_a_delay_counts_its_messages_timeouts_from_when_it_goes() {
-    // The delay is the batching's: a batch that goes after its messages'
-    // timeouts, the connection down just then, is held for it, written
-    // once it is back, where it was given up on at once.
+fn a_key_set_to_go_as_it_is_goes_alone_while_its_type_is_batched() {
+    // A key's setting that neither batches nor confirms sends its messages
+    // as any send, the type's batch let go first, its other keys batched.
     let mut h = Harness::new(200, IncomingMode::Queue);
-    let drops = h.observe_drops();
     let conn = h.up(1);
     h.written(conn);
-    let batching = Batching { max_delay: Duration::from_secs(30), ..Batching::default() };
-    h.core.set_batching(EVENT, None, batching).expect("set");
-    for id in 1..=3 {
-        queue(&mut h, id, None, b"event"); // a timeout of ten seconds each
-    }
-    h.advance(Duration::from_secs(29));
-    h.end(conn, crate::core::connection::ReadEnd::Eof); // down when the delay is over
-    h.advance(Duration::from_secs(1));
-    assert_eq!(1, h.core.held_for_a_connection(), "the batch, held");
-    h.advance(Duration::from_secs(2));
-    let back = h.up(2);
-    assert_eq!(vec![Wrote::Batch(None, vec![1, 2, 3])], wrote(&mut h, back));
-    assert!(drops.lock().unwrap().is_empty());
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, Some("urgent"), Delivery::default()).expect("set");
+    queue(&mut h, 1, Some("other"), b"event");
+    queue(&mut h, 2, Some("urgent"), b"event");
+    queue(&mut h, 3, Some("other"), b"event");
+    assert_eq!(1, h.core.batched_messages(), "the last, in its batch");
+    h.core.begin_flush(None);
+    h.settle();
+    assert_eq!(
+        vec![
+            Wrote::Alone(Some("other".to_string()), 1),
+            Wrote::Alone(Some("urgent".to_string()), 2),
+            Wrote::Alone(Some("other".to_string()), 3)
+        ],
+        wrote(&mut h, conn)
+    );
 }
 
 #[test]
-fn with_no_delay_a_batch_goes_at_its_first_deadline() {
-    // A batch with no delay waits for room: its messages' timeouts run from
-    // their sends, and it goes when the first is up, at the latest, as a
-    // message that waited for room on a full connection would; the queue
-    // still full, it is given up on then, where it waited for a connection
-    // that never had nothing left to write.
+fn a_delivery_that_neither_batches_nor_confirms_sends_by_its_own_timeout() {
+    // Nothing connected: the message is held for a connection, given up
+    // on at the setting's timeout from its send, not at the send's own.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let drops = h.observe_drops();
+    let delivery = Delivery { timeout: Some(Duration::from_secs(2)), ..Delivery::default() };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
+    queue(&mut h, 1, None, b"event"); // its own timeout ten seconds
+    assert_eq!((0, 1), (h.core.batched_messages(), h.core.held_for_a_connection()), "alone, held");
+    h.advance(Duration::from_millis(1_999));
+    assert!(drops.lock().unwrap().is_empty());
+    h.advance(Duration::from_millis(1));
+    assert_eq!(vec![(1, DropReason::NoConnection)], *drops.lock().unwrap());
+}
+
+#[test]
+fn a_batchs_timeout_counts_from_its_first_message() {
+    // A batch's time is its timeout from its first message, its delay
+    // included: one that goes past it, nothing connected, is given up on at
+    // once, every message of it told, the sends' own timeouts not used. Its
+    // client ran no loop meanwhile, as a synchronous one between calls.
+    let mut h = Harness::new(200, IncomingMode::Queue);
+    let drops = h.observe_drops();
+    let delivery =
+        Delivery { max_delay: Duration::from_millis(1), timeout: Some(Duration::from_millis(2)), ..by_count(100) };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
+    queue(&mut h, 1, None, b"event"); // its own timeout ten seconds
+    queue(&mut h, 2, None, b"event");
+    h.core.now += Duration::from_millis(10);
+    h.core.begin_flush(None); // lets the batch go: with nothing connected, given up on
+    h.settle();
+    assert_eq!(vec![(1, DropReason::NoConnection), (2, DropReason::NoConnection)], *drops.lock().unwrap());
+    assert_eq!(2, h.core.client.dropped.load(Ordering::Relaxed));
+    assert_eq!(0, h.core.held_for_a_connection(), "not held for its sends' ten seconds");
+}
+
+#[test]
+fn with_no_delay_a_batch_goes_at_its_deadline() {
+    // A batch with no delay waits for room: its timeout runs from its
+    // first message, and it goes when it is up, at the latest, as a message
+    // that waited for room on a full connection would; the queue still
+    // full, it is given up on then, where it waited for a connection that
+    // never had nothing left to write. The sends' own timeouts, none, are
+    // not used: by them the batch would wait for good.
     let mut h = Harness::new(200, IncomingMode::Queue);
     let drops = h.observe_drops();
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
     for id in 1..=crate::core::connection::DEFAULT_OUT_QUEUE_SIZE as u64 {
-        assert!(h.send(id)); // before any batching: the queue full
+        assert!(h.send(id)); // before any delivery: the queue full
     }
-    h.core.set_batching(EVENT, None, Batching::default()).expect("set");
-    let short = Some(Duration::from_secs(2));
+    let delivery = Delivery { timeout: Some(Duration::from_secs(2)), ..no_delay() };
+    h.core.set_delivery(EVENT, None, delivery).expect("set");
     for id in 5001..=5002 {
         let frame = event(&h, id, None, b"event");
-        assert!(h.core.send(frame, false, None, short, 0, None, None, None, true));
+        assert!(h.core.send(frame, false, None, None, 0, None, None, None, true));
         h.settle();
     }
     assert_eq!(2, h.core.batched_messages());
@@ -555,8 +613,8 @@ fn a_batch_that_goes_lets_the_batches_waiting_for_a_connection_go_first() {
     let conn = h.up(1);
     h.written(conn);
     h.hold_writes = true;
-    h.core.set_batching(EVENT, Some("a"), Batching::default()).expect("set");
-    h.core.set_batching(EVENT, Some("b"), by_count(3)).expect("set");
+    h.core.set_delivery(EVENT, Some("a"), no_delay()).expect("set");
+    h.core.set_delivery(EVENT, Some("b"), by_count(3)).expect("set");
     assert!(h.send(1)); // no key, not batched: the connection busy
     queue(&mut h, 2, Some("a"), b"event");
     for id in 3..=5 {
@@ -586,7 +644,7 @@ fn a_batch_a_connection_let_go_goes_on_that_connection() {
     h.hold_writes = true;
     assert!(h.send(1));
     assert!(h.send(2));
-    h.core.set_batching(EVENT, None, Batching::default()).expect("set");
+    h.core.set_delivery(EVENT, None, no_delay()).expect("set");
     for id in 3..=4 {
         queue(&mut h, id, None, b"event");
     }
@@ -605,7 +663,7 @@ fn a_batch_a_connection_let_go_goes_on_that_connection() {
 fn a_shutdown_lets_the_batches_go_first() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let drops = h.observe_drops();
-    h.core.set_batching(EVENT, None, by_count(100)).expect("set");
+    h.core.set_delivery(EVENT, None, by_count(100)).expect("set");
     for id in 1..=2 {
         queue(&mut h, id, None, b"event");
     }
@@ -618,21 +676,45 @@ fn a_shutdown_lets_the_batches_go_first() {
 #[test]
 fn the_settings_are_checked() {
     let mut h = Harness::new(200, IncomingMode::Queue);
+    let batched = no_delay();
+    let second = Duration::from_secs(1);
     let refused = [
-        (50, None, Batching::default()),
-        (EVENT, Some("k".repeat(MAX_KEY_SIZE + 1)), Batching::default()),
-        (EVENT, None, Batching { max_records: 0, ..Batching::default() }),
-        (EVENT, None, Batching { max_records: MAX_BATCH_RECORDS + 1, ..Batching::default() }),
-        (EVENT, None, Batching { max_bytes: 0, ..Batching::default() }),
-        (EVENT, None, Batching { max_bytes: MAX_MESSAGE_SIZE + 1, ..Batching::default() }),
-        (EVENT, None, Batching { max_delay: MAX_TIMEOUT + Duration::from_secs(1), ..Batching::default() }),
+        (50, None, batched),
+        (EVENT, Some("k".repeat(MAX_KEY_SIZE + 1)), batched),
+        (EVENT, None, Delivery { max_records: 0, ..batched }),
+        (EVENT, None, Delivery { max_records: MAX_BATCH_RECORDS + 1, ..batched }),
+        (EVENT, None, Delivery { max_bytes: 0, ..batched }),
+        (EVENT, None, Delivery { max_bytes: MAX_MESSAGE_SIZE + 1, ..batched }),
+        (EVENT, None, Delivery { max_delay: MAX_TIMEOUT + second, ..batched }),
+        // A timeout no longer than the delay would give a batch up as it
+        // goes, and zero a message alone at once.
+        (EVENT, None, Delivery { max_delay: second, timeout: Some(Duration::ZERO), ..batched }),
+        (EVENT, None, Delivery { max_delay: second, timeout: Some(second / 2), ..batched }),
+        (EVENT, None, Delivery { max_delay: second, timeout: Some(second), ..batched }),
+        (EVENT, None, Delivery { timeout: Some(Duration::ZERO), ..Delivery::default() }),
+        (EVENT, None, Delivery { confirm: true, timeout: Some(Duration::ZERO), ..Delivery::default() }),
     ];
-    for (r#type, key, batching) in refused {
-        let result = h.core.set_batching(r#type, key.as_deref(), batching);
-        assert!(matches!(result, Err(Error::InvalidArgument(_))), "{type} {key:?} {batching:?}: {result:?}");
+    for (r#type, key, delivery) in refused {
+        let result = h.core.set_delivery(r#type, key.as_deref(), delivery);
+        assert!(matches!(result, Err(Error::InvalidArgument(_))), "{type} {key:?} {delivery:?}: {result:?}");
     }
-    let most = Batching { max_records: MAX_BATCH_RECORDS, max_bytes: MAX_MESSAGE_SIZE, max_delay: MAX_TIMEOUT };
-    h.core.set_batching(EVENT, Some(&"k".repeat(MAX_KEY_SIZE)), most).expect("the limits themselves");
+    let most = Delivery {
+        batch: true,
+        max_records: MAX_BATCH_RECORDS,
+        max_bytes: MAX_MESSAGE_SIZE,
+        max_delay: MAX_TIMEOUT,
+        confirm: true,
+        retry_after: MAX_TIMEOUT,
+        timeout: Some(Duration::MAX),
+    };
+    h.core.set_delivery(EVENT, Some(&"k".repeat(MAX_KEY_SIZE)), most).expect("the limits themselves");
+    for timeout in [Some(second + second / 2), None, Some(Duration::MAX)] {
+        let longer = Delivery { max_delay: second, timeout, ..batched };
+        h.core.set_delivery(EVENT, None, longer).unwrap_or_else(|error| panic!("{timeout:?}: {error}"));
+    }
+    h.core.set_delivery(EVENT, None, Delivery::default()).expect("one by one, by the default timeout");
+    h.core.clear_delivery(EVENT, None);
+    assert!(!h.core.batcher.configured());
 }
 
 #[test]

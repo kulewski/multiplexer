@@ -9,7 +9,9 @@
 //! turn (`process_callbacks`), outside the connection's handlers and the
 //! outbox's bookkeeping, after the drop observer heard of the drops
 //! reported meanwhile; a flush that waits for those callbacks ends after
-//! them.
+//! them. A flush waits too for every confirmed send numbered before it
+//! began (`confirming`) to be confirmed or given up on, and sends what the
+//! client owes its producers first.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -64,10 +66,11 @@ impl Core {
     }
 
     /// The program's callbacks of a loop turn: the drops reported, told to
-    /// the observer, then the followed sends' ends, and then the flushes
-    /// that waited for them.
+    /// the observer, then the ends of the confirmed sends resolved and of
+    /// the followed sends, and then the flushes that waited for them.
     pub(crate) fn process_callbacks(&mut self) {
         self.tell_drops();
+        self.run_confirmed_ends();
         self.process_follows();
     }
 
@@ -114,6 +117,7 @@ impl Core {
             SendDone::Callback(done) => guarded(|| "a send's callback".to_string(), || done(written)),
             SendDone::Settle(id) => self.settle_send(id, written, written == 0),
             SendDone::Batch(ends) => self.end_batch(ends, written),
+            SendDone::Confirmed(batch) => self.confirming_written(batch, written),
         }
     }
 
@@ -122,6 +126,7 @@ impl Core {
     /// whose loop will not run again.
     pub(crate) fn end_follows(&mut self) {
         self.tell_drops();
+        self.run_confirmed_ends();
         self.outbox.follow_events.clear();
         let left: Vec<u64> = self.outbox.follow_states.keys().copied().collect();
         for id in left {
@@ -131,17 +136,22 @@ impl Core {
     }
 
     /// flush_all(): waits for the messages numbered up to the last one now,
-    /// those still waiting and the last of them queued on each connection.
+    /// those still waiting and the last of them queued on each connection,
+    /// and for the confirmed sends numbered before it to be resolved.
     /// `done` is told once, when they are out, with whether every one was
-    /// written.
+    /// written, or confirmed.
     pub(crate) fn begin_flush(&mut self, done: Option<FlushDone>) -> FlushId {
         // What waits in a batch goes now, and the flush waits for it; a
         // batch given up on at once, with no connection to wait for, is
-        // lost to it.
+        // lost to it. The confirmations this client owes go too.
         let dropped = self.client.dropped.load(Ordering::Relaxed);
         self.close_batches();
+        self.send_confirmations();
         let lost = self.client.dropped.load(Ordering::Relaxed) != dropped;
-        if !self.outbox.follow_events.is_empty() || !self.outbox.drop_events.is_empty() {
+        if !self.outbox.follow_events.is_empty()
+            || !self.outbox.drop_events.is_empty()
+            || !self.confirmer.ends.is_empty()
+        {
             self.process_callbacks(); // what ended before the flush began is heard before it ends
         }
         self.outbox.next_flush += 1;
@@ -162,6 +172,7 @@ impl Core {
             done,
             flushed: false,
             lost,
+            confirm_mark: self.confirmer.last_number,
         };
         self.outbox.flush_states.insert(id, flush);
         self.outbox.flushes.push(id);
@@ -198,6 +209,23 @@ impl Core {
         self.outbox.flush_states.remove(&flush);
     }
 
+    /// Whether a flush waits.
+    pub(crate) fn flushing(&self) -> bool {
+        !self.outbox.flushes.is_empty()
+    }
+
+    /// A confirmed send numbered `number` was given up on: a flush that
+    /// waits for it ends with not all written.
+    pub(crate) fn flushes_lost_confirmed(&mut self, number: u64) {
+        for id in &self.outbox.flushes {
+            if let Some(flush) = self.outbox.flush_states.get_mut(id) {
+                if number <= flush.confirm_mark {
+                    flush.lost = true;
+                }
+            }
+        }
+    }
+
     /// A message numbered `number` was given up on: a flush that waits for
     /// it ends with not all written.
     pub(crate) fn flushes_lost(&mut self, number: u64) {
@@ -223,21 +251,25 @@ impl Core {
     }
 
     /// A flush is done once the messages it counts no longer wait, every
-    /// frame it marked is out, and the callbacks of the sends that ended
-    /// meanwhile have run; `done` is told after it left the list.
+    /// frame it marked is out, every confirmed send numbered up to its mark
+    /// is resolved, and the callbacks of the sends that ended meanwhile have
+    /// run; `done` is told after it left the list.
     pub(crate) fn check_flushes(&mut self) {
         if self.outbox.flushes.is_empty()
             || !self.outbox.follow_events.is_empty()
             || !self.outbox.drop_events.is_empty()
+            || !self.confirmer.ends.is_empty()
         {
             return;
         }
+        let unconfirmed = self.first_unconfirmed();
         let mut finished = Vec::new();
         let outbox = &mut self.outbox;
         outbox.flushes.retain(|id| {
             let Some(flush) = outbox.flush_states.get_mut(id) else { return false };
             flush.marks.retain(|(_, tracker)| tracker.get() == SendState::Queued);
-            if flush.waiting > 0 || !flush.marks.is_empty() {
+            let confirming = unconfirmed.is_some_and(|first| first <= flush.confirm_mark);
+            if flush.waiting > 0 || !flush.marks.is_empty() || confirming {
                 return true;
             }
             flush.flushed = true;

@@ -37,6 +37,7 @@ from multiplexer.mxclient import (
     parse_message,
     wait_seconds,
 )
+from multiplexer.mxclient import Confirmed
 from multiplexer.mxlog import DEBUG, ERROR, HIGHVERBOSITY, LOWVERBOSITY, WARNING, log
 from multiplexer.servers import format_exception, nothing_more_arrives
 from multiplexer.threaded_client import DEFAULT_TIMEOUT, Endpoint, ThreadedClient
@@ -51,6 +52,12 @@ class Request:
     does; report_error() answers with BACKEND_ERROR; notify_start() tells
     the requester the work began. A request dropped without a reply or
     no_response() logs a warning when it is garbage-collected.
+
+    A message of a confirmed batch (docs/delivery.md) is confirmed to its
+    producer when its Request is let go of: processed, FAILED when the
+    handler raised; one the server refuses as it leaves is confirmed
+    REFUSED at once, and one a full queue dropped is not confirmed, its
+    producer sending it again in time.
     """
 
     def __init__(
@@ -62,6 +69,9 @@ class Request:
         self.answered = False
         self.dropped = False  # the server said why; no warning from __del__
         self.accepted = 0  # its place among the requests the queue took, which a change's acknowledgement waits for
+        # What __del__ confirms of a message of a confirmed batch, when `confirms`.
+        self.confirmed = Confirmed.PROCESSED
+        self.confirms = True
 
     @property
     def client(self) -> ThreadedClient:
@@ -132,7 +142,12 @@ class Request:
         return self.reply(pickle.dumps(data), type=type, **kwargs)
 
     def __del__(self) -> None:
-        """A request nobody answered or declared answered: say so."""
+        """A message of a confirmed batch confirmed; a request nobody
+        answered or declared answered: said."""
+        if self.confirms and self.mxmsg.HasField("confirmation"):
+            client = self.server._client
+            if client is not None:  # else closed: its producer sends it again in time
+                client.confirm(self.mxmsg, self.confirmed)
         if not self.answered and not self.dropped:
             log(
                 WARNING,
@@ -242,6 +257,7 @@ class BaseThreadedMultiplexerServer:
             on_message=self._on_message,
             with_connection=True,
             search_policy=self._answers_search,
+            confirm_after_on_message=False,  # a Request confirms its message as it goes
         )
 
     start_time = property(lambda self: self._start_time, doc="Time when the instance was instantiated")
@@ -604,6 +620,7 @@ class BaseThreadedMultiplexerServer:
             return
         request.dropped = True  # said below, not by __del__
         if accepting:
+            request.confirms = False  # its producer sends it again in time, by when the queue may have room
             # Counted with the client's own drop lines: at most about two a second.
             client = self._client
             if client is not None and client._first_dropped_full():
@@ -618,6 +635,14 @@ class BaseThreadedMultiplexerServer:
         another message."""
         mxmsg = request.mxmsg
         request.dropped = True  # said here, not by __del__
+        if mxmsg.HasField("confirmation"):
+            # Told now, not by __del__, which close() may reach after the
+            # client's shutdown: its producer sends it again at once.
+            request.confirms = False
+            client = self._client
+            if client is not None:
+                client.confirm(mxmsg, Confirmed.REFUSED)
+            return
         if mxmsg.references:
             # A message that answers another is dropped: nobody retries a
             # reply, and refusing one could start a loop, a peer whose
@@ -651,6 +676,7 @@ class BaseThreadedMultiplexerServer:
             try:
                 self._handle(request)
             except BaseException as exc:
+                request.confirmed = Confirmed.FAILED
                 if self._failure is None:
                     self._failure = exc
                 self.stop()
@@ -676,6 +702,7 @@ class BaseThreadedMultiplexerServer:
         except Exception as exc:  # reported to the requester and to on_handler_exception()
             traceback.print_exc()
             log(ERROR, LOWVERBOSITY, text=lambda exc=exc: "exception in handle_message: %r" % exc)
+            request.confirmed = Confirmed.FAILED
             # A reply or a report gets no report: nobody waits for an answer to it.
             if not request.answered and not request.mxmsg.references:
                 try:

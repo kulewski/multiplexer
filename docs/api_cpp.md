@@ -41,11 +41,13 @@ goes as hex or base64.
 
 ## Timeouts
 
-Every timeout is seconds as a `float`, in every client and server class:
-on a connect, a receive, a query, a send, `flush()`, `flush_all()`,
-`shutdown()` and `close()`, `serve_forever()`'s `poll` and
-`drain_seconds`, and `ThreadedServerOptions::connect_timeout`. A negative
-one sets no deadline, exactly as an infinite one does: the call waits as
+Every timeout, and every other length of time a call takes, is seconds
+as a `float`, in every client and server class: on a connect, a receive,
+a query, a send, `flush()`, `flush_all()`, `shutdown()` and `close()`,
+`serve_forever()`'s `poll` and `drain_seconds`,
+`ThreadedServerOptions::connect_timeout`, and `Delivery`'s `max_delay`,
+`retry_after` and `timeout` ([delivery](#delivery)). A negative timeout
+sets no deadline, exactly as an infinite one does: the call waits as
 long as it takes, and a message sent with it waits for a connection or
 for room as long as that takes. So `shutdown(-1)` and `close(-1)` write
 everything sent before them first, however long that takes; with a
@@ -107,8 +109,8 @@ client.shutdown();
 ```
 
 - `set_drop_observer()` and `dropped()` are under [Messages the library
-  gives up on](#messages-the-library-gives-up-on), `set_batching()` and
-  `clear_batching()` under [Batching](#batching).
+  gives up on](#messages-the-library-gives-up-on), `set_delivery()` and
+  `clear_delivery()` under [Delivery](#delivery).
 - The constructor takes the peer type and creates its own `io_service`; the
   overloads taking an `asio::io_service` share yours. The client runs
   that service only inside its calls, so the peer type must be
@@ -697,8 +699,8 @@ connections on a thread of its own, so heartbeats and reconnects happen
 without the program calling in, the peer type need not be passive, and any
 thread may use it. Target `@mx//multiplexer:threaded_client`.
 `set_drop_observer()` and `dropped()` are under [Messages the library gives
-up on](#messages-the-library-gives-up-on), `set_batching()` and
-`clear_batching()` under [Batching](#batching).
+up on](#messages-the-library-gives-up-on), `set_delivery()` and
+`clear_delivery()` under [Delivery](#delivery).
 
 ```cpp
 multiplexer::ThreadedClient client(multiplexer::peers::MY_SERVICE,
@@ -750,8 +752,8 @@ client.shutdown();
   sends and queries in the order they were made, from a queue of its own
   that has no bound, all that waits there at once, woken once for as many
   as came while it was busy; a plain event sent with no lane or `done`
-  while something is batched goes there as its bytes alone ([what
-  batching costs](batching.md#what-it-costs)). A program that sends
+  while a delivery is set goes there as its bytes alone ([what
+  batching costs](delivery.md#what-it-costs)). A program that sends
   faster than the io thread places what it sends holds the difference in
   memory; a message's time
   counts from the call, and one the io thread reaches with its time up is
@@ -902,46 +904,56 @@ tracker, or 0, when no connection is live, nothing held. Written means
 handed to the kernel on a live connection: only a reply says a message
 arrived ([semantics](semantics.md#failure-modes)).
 
-## Batching
+## Delivery
 
-`set_batching()` on `SyncClient` and `ThreadedClient` sends the events of
-a message type, or of one key of it, several in one message, which the
-receiving library splits back into one message each, as if each had come
-alone; [batching](batching.md) says what goes in a batch, when it goes
-and what it changes.
+`set_delivery()` on `SyncClient` and `ThreadedClient` sets how the events
+of a message type, or of one key of it, go: several in one message,
+which the receiving library splits back into one message each, as if each
+had come alone (`batch`); kept until their consumer's library confirms
+them (`confirm`); or both; and how long a batch has (`timeout`).
+[Delivery](delivery.md) says what goes in a batch, when it goes, what it
+changes and what a confirmed send does.
 
 ```cpp
-multiplexer::SyncClient::Batching batching;
-batching.max_delay = 0.005;  // seconds
-client.set_batching(multiplexer::types::METRIC_SAMPLE, batching);
+multiplexer::SyncClient::Delivery delivery;
+delivery.batch = true;
+delivery.max_delay = 0.005;  // seconds
+client.set_delivery(multiplexer::types::METRIC_SAMPLE, delivery);
 client.queue(sample);  // in a batch, which goes once full or at the first call after 5 ms
 ```
 
-- `set_batching(type, batching = Batching())` batches every key of
-  `type`, each apart, and its messages without a key apart again;
-  `set_batching(type, key, batching = Batching())` one key, ahead of what
-  is set for its type. `Batching`, one struct named
-  `SyncClient::Batching` and `ThreadedClient::Batching` alike, holds
+- `set_delivery(type, delivery)` sets it for every key of `type`, each
+  apart, and its messages without a key apart again;
+  `set_delivery(type, key, delivery)` for one key, ahead of what is set
+  for its type. `Delivery`, one struct named `SyncClient::Delivery` and
+  `ThreadedClient::Delivery` alike, holds `batch`, false by default;
   `max_records` (`DEFAULT_BATCH_MAX_RECORDS`, 1000), `max_bytes`
   (`DEFAULT_BATCH_MAX_BYTES`, 1 MiB, measured as `MAX_MESSAGE_SIZE` is)
   and `max_delay`, seconds as a `float`, 0 by default: no delay, a batch
-  going as soon as a connection has nothing left to write.
-  `clear_batching(type)` ends what was set for `type`, its keys' settings
-  included, and `clear_batching(type, key)` one key's, which then batches
-  as its type says. Each lets every batch go first.
+  going as soon as a connection has nothing left to write; `confirm`,
+  false, and `retry_after` (`DEFAULT_RETRY_AFTER`, 5 s); and `timeout`
+  (`DEFAULT_TIMEOUT`, 10 s), a batch's from its first message, its sends'
+  own not used, negative for no deadline ([the
+  timeout](delivery.md#the-timeout-is-the-batchs)). With neither `batch`
+  nor `confirm` the messages go as any send does, by that timeout.
+  `clear_delivery(type)` ends what was set for `type`, its keys' settings
+  included, and `clear_delivery(type, key)` one key's, which then goes as
+  its type says. Each lets every batch go first.
 - They throw `std::invalid_argument` for a protocol message type, a key
   over `MAX_KEY_SIZE`, a `max_records` of 0 or over `MAX_BATCH_RECORDS`,
-  a `max_bytes` of 0 or over
-  `MAX_MESSAGE_SIZE`, or a delay negative, over `MAX_SECONDS`, infinite or NaN;
-  `ThreadedClient`'s on the calling thread, the change made on the io
-  thread right after, ahead of every send made after the call.
-- What batches is a plain event, no `to`, no `references`, no delivery
-  report asked for, no `override_rrules`, sent through no lane by
-  `SyncClient::queue()` or by `ThreadedClient`'s `send(msg)`,
-  `send(msg, LanePtr(), done)` and `send_serialized()`. What goes by
-  `queue_all()` or `send_all()`, a flushing send, `schedule_*()`, a lane
-  or a connection, one with a timeout of 0, and a query's request go
-  alone, after every batch.
+  a `max_bytes` of 0 or over `MAX_MESSAGE_SIZE`, a delay negative, over
+  `MAX_SECONDS`, infinite or NaN, with `confirm` a `retry_after` not over
+  0, and a `timeout` NaN, or 0 or more but not over the delay (over 0
+  without `batch`); `ThreadedClient`'s on the calling thread, the change
+  made on the io thread right after, ahead of every send made after the
+  call.
+- What goes by a setting is a plain event, no `to`, no `references`, no
+  delivery report asked for, no `override_rrules`, sent through no lane
+  by `SyncClient::queue()` or by `ThreadedClient`'s `send(msg)`,
+  `send(msg, LanePtr(), done)` and `send_serialized()`, whatever its own
+  timeout. What goes by `queue_all()` or `send_all()`, a flushing send,
+  `schedule_*()`, a lane or a connection, and a query's request go alone,
+  after every batch.
 - `SyncClient` runs its loop only inside its calls: with no delay its
   messages gather only while the socket is full, so give it one. A batch
   then goes when it fills or at the first call after its delay, and
@@ -952,7 +964,7 @@ client.queue(sample);  // in a batch, which goes once full or at the first call 
   messages gather only while the program sends faster than the io thread
   writes them or the multiplexer is behind, so a delay of a few
   milliseconds batches for sure.
-- A server class batches through its client: on `BaseMultiplexerServer`
+- A server class sets it through its client: on `BaseMultiplexerServer`
   the protected `conn`, or the `SyncClient` given to its constructor,
   whose `send_message()` of a message that is no reply queues; on
   `BaseThreadedMultiplexerServer`, `client()`.
@@ -963,7 +975,50 @@ client.queue(sample);  // in a batch, which goes once full or at the first call 
   `receive_message()` makes none, and `read_raw_message()`,
   `receive_raw_message()` and a `ThreadedClient`'s `on_message` get the
   message serialized again, the same message, not always the same bytes
-  ([what the receiver sees](batching.md#what-the-receiver-sees)).
+  ([what the receiver sees](delivery.md#what-the-receiver-sees)).
+
+### Confirmed sends
+
+`Delivery::confirm` makes a type's messages confirmed sends, in batches
+with `batch` and one by one without: each message kept until its
+consumer's library confirms it was processed, sent again until then, at
+least once ([confirmed sends](delivery.md#confirmed-sends)).
+
+```cpp
+multiplexer::ThreadedClient::Delivery delivery;
+delivery.batch = true;
+delivery.max_delay = 0.005;
+delivery.confirm = true;  // retry_after: 5 s, DEFAULT_RETRY_AFTER
+delivery.timeout = 60;    // a batch's, from its first message
+producer.set_delivery(multiplexer::types::ORDER_PLACED, delivery);
+producer.send(order, multiplexer::LanePtr(), [](unsigned int processed) {
+  // 1 once a consumer processed it; 0 once given up on, told to the drop observer
+});
+```
+
+- The producer: a message's `done` hears 1, and its tracker leaves
+  `in_queue()`, once its consumer confirmed it; `flush_all()` and
+  `flush(tracker)` wait for that, and `flush_all()` returns false when one
+  was given up on, `NOT_CONFIRMED` at its batch's deadline or `FAILED`.
+  `Delivery::retry_after`, seconds, more than 0, is how long a batch goes
+  without any of its messages confirmed before what is left goes again.
+  A `SyncClient` hears confirmations, and sends again, inside its calls.
+- The consumer: a message of a confirmed batch carries its number,
+  `MultiplexerMessage::confirmation()`, with `sender()` the producer.
+  `confirm(message, outcome)`, `multiplexer::Confirmed::PROCESSED`,
+  `FAILED` or `REFUSED`, and `processed(message)` tell its producer;
+  nothing for a message with no number. A `ThreadedClient` confirms what
+  `on_message` returned from, `FAILED` what it threw on, unless
+  `on_message` confirmed it itself or `confirm_after_on_message(false)`
+  was called before connecting, for a program that confirms its messages
+  itself, from any thread. `BaseMultiplexerServer` confirms as
+  `handle_message()` returns or throws, `BaseThreadedMultiplexerServer`
+  as a `Request` is let go of, `FAILED` when its handler threw, and
+  `REFUSED` what it will not handle as it leaves. A `SyncClient` confirms
+  only what its program says.
+- `unconfirmed()`, `sent_again()` and `confirmations_owed()` say how many
+  messages a client keeps unconfirmed, how many it sent again, and how
+  many confirmations it owes: for tests.
 
 ## Messages the library gives up on
 
@@ -980,6 +1035,10 @@ reasons, `multiplexer::DropReason` in `multiplexer/basic_client.h`:
 - `CONNECTION_LOST`: its connection ended and nothing else could take it: a
   pinned lane's, or a copy sent to `ALL`.
 - `SHUT_DOWN`: the client shut down before it went.
+- `NOT_CONFIRMED`: a confirmed send ([delivery](delivery.md#confirmed-sends))
+  no consumer confirmed by its batch's deadline, the setting's timeout
+  from the batch's first message.
+- `FAILED`: a confirmed send its consumer's handler failed on.
 
 The drop is counted at once, in `dropped()`, and the observer hears of it
 in the pass that runs the sends' callbacks, ahead of them, once the handler

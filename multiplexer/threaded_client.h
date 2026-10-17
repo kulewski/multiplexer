@@ -146,17 +146,19 @@ class ThreadedClient : public ExceptionDefinitions {
   // for set_routing().
   void set_key_filters(const BasicClient::KeyFilters& filters,
                        BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback());
-  // Batching, docs/api_cpp.md "Batching": the events of `type`, each key
-  // apart, or of one key of it, that send() sends with no timeout, through
-  // no lane and not to ALL, go several in one message, which the receiving
-  // library splits back into one message each; see
-  // BasicClient::set_batching. Checked on the calling thread, which gets
-  // std::invalid_argument; in effect on the io thread right after.
-  typedef BasicClient::Batching Batching;
-  void set_batching(std::uint32_t type, const Batching& batching = Batching());
-  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching = Batching());
-  void clear_batching(std::uint32_t type);
-  void clear_batching(std::uint32_t type, const std::string& key);
+  // Delivery, docs/delivery.md: how the events of `type`, each key apart,
+  // or of one key of it, that send() sends with no timeout, through no lane
+  // and not to ALL, go: several in one message, which the receiving library
+  // splits back into one message each (`batch`), kept until their consumer
+  // confirms them (`confirm`), or both, and how long a batch has
+  // (`timeout`); see BasicClient::Delivery. Checked on the calling thread,
+  // which gets std::invalid_argument; in effect on the io thread right
+  // after.
+  typedef BasicClient::Delivery Delivery;
+  void set_delivery(std::uint32_t type, const Delivery& delivery);
+  void set_delivery(std::uint32_t type, const std::string& key, const Delivery& delivery);
+  void clear_delivery(std::uint32_t type);
+  void clear_delivery(std::uint32_t type, const std::string& key);
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();
@@ -229,6 +231,30 @@ class ThreadedClient : public ExceptionDefinitions {
   // however long no multiplexer is up; for tests. Not from the io thread.
   std::size_t waiting_queries();
   std::size_t waiting_messages();
+
+  // Confirmed sends (BasicClient::Delivery::confirm, docs/delivery.md): a
+  // message of a confirmed batch reaches on_message with its number
+  // (MultiplexerMessage.confirmation), and the client confirms it to its
+  // producer once on_message returned from it, FAILED when it threw.
+  // A program that hands its messages on to be processed elsewhere, as the
+  // server classes do, turns that off with confirm_after_on_message(false),
+  // before connecting, and confirms each message itself, from any thread,
+  // with confirm() or processed(), once it is done with it; REFUSED sends
+  // it back to its producer, which sends it again. A message on_message
+  // confirmed itself is not confirmed again after its return. Nothing for
+  // a message with no number. What the client owes goes once on_message
+  // had what one read brought in hand, or at the end of the io thread's
+  // turn for what other threads confirmed. unconfirmed(), sent_again() and confirmations_owed()
+  // are for tests: the messages this client sent that wait for their
+  // confirmation, those it sent again, and the confirmations it owes; not
+  // from the io thread.
+  void confirm_after_on_message(bool confirm);
+  void confirm(const MultiplexerMessage& message, Confirmed outcome);
+  void confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome);
+  void processed(const MultiplexerMessage& message) { confirm(message, Confirmed::PROCESSED); }
+  std::size_t unconfirmed();
+  std::uint64_t sent_again();
+  std::size_t confirmations_owed();
 
   // Sending. The message must carry its id and sender; new_message() fills
   // those in. send() queues it on one live connection (round robin),

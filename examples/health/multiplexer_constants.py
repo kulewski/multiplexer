@@ -3,7 +3,7 @@
 #
 
 # CRC-32 of the rules file these constants were generated from; a recording's header carries the same.
-RULES_FINGERPRINT = "55eb4354"
+RULES_FINGERPRINT = "165d723a"
 
 
 class _constants_base:
@@ -28,6 +28,7 @@ class types(_constants_base):
     RULES_STATUS = 10
     PEER_CONTROL = 11
     PEER_STATUS = 12
+    CONFIRMATION = 13
     MAX_MULTIPLEXER_META_PACKET = 99
     PICKLE_RESPONSE = 112
     REQUEST_RECEIVED = 113
@@ -49,6 +50,7 @@ class types(_constants_base):
     idtoname[RULES_STATUS] = "RULES_STATUS"
     idtoname[PEER_CONTROL] = "PEER_CONTROL"
     idtoname[PEER_STATUS] = "PEER_STATUS"
+    idtoname[CONFIRMATION] = "CONFIRMATION"
     idtoname[MAX_MULTIPLEXER_META_PACKET] = "MAX_MULTIPLEXER_META_PACKET"
     idtoname[PICKLE_RESPONSE] = "PICKLE_RESPONSE"
     idtoname[REQUEST_RECEIVED] = "REQUEST_RECEIVED"

@@ -189,13 +189,13 @@ class RawMessage {
     }
   }
 
-  // What a client's batching (BasicClient::set_batching) needs of the
-  // message in a frame: whether it may go in a batch, a plain event
+  // What a client's delivery (BasicClient::set_delivery) needs of the
+  // message in a frame: whether it may go by one, a plain event
   // (plain_event()), and its key, which its batch goes by, or none, which
-  // routes otherwise than an empty one. A client that batches marks the
-  // frames it makes of whole messages (frame_stamped), which no other
+  // routes otherwise than an empty one. A client with a delivery set marks
+  // the frames it makes of whole messages (frame_stamped), which no other
   // client pays for; any other frame knows none, UNKNOWN, until a client
-  // batching its type reads them from the bytes. Kept apart (BatchMarks),
+  // with a delivery set for its type reads them from the bytes. Kept apart (BatchMarks),
   // made for a marked frame only, so that every other frame, every one a
   // multiplexer routes, carries a null pointer for them. Mutable because a
   // queued frame is shared as const.
@@ -232,6 +232,10 @@ class RawMessage {
     static const std::shared_ptr<const std::vector<std::uint64_t>> none;
     return batch_marks_ ? batch_marks_->ids : none;
   }
+  // A confirmed batch's frame (BasicClient::Delivery::confirm): its drop is
+  // the confirmed sends' to tell, for the messages not resolved yet.
+  inline void mark_confirmed() const { _batch_marks().confirmed = true; }
+  inline bool confirmed() const { return batch_marks_ && batch_marks_->confirmed; }
 
   /* accessors */
   inline Usability usability() const { return usability_; }
@@ -342,6 +346,7 @@ class RawMessage {
   struct BatchMarks {
     Batchable batchable = Batchable::UNKNOWN;
     bool keyed = false;
+    bool confirmed = false;
     std::string key;
     std::shared_ptr<const std::vector<std::uint64_t>> ids;
   };

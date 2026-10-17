@@ -13,6 +13,14 @@
 //! goes on. A request a handler drops without a reply or `no_response()`
 //! is logged; one it keeps is answered later, from any thread, and logged
 //! when it is dropped unanswered.
+//!
+//! A message of a confirmed batch (docs/delivery.md) is confirmed to its
+//! producer as it is handled: by the plain server once its handler
+//! returned, Failed when it failed; by the threaded server when its
+//! request is let go of, at the handler's return or later where the
+//! handler kept it, Failed when the handler failed, Refused at once when
+//! the server leaves without handling it; one a full queue dropped is not,
+//! its producer sending it again in time.
 
 pub(crate) mod plain;
 pub(crate) mod threaded;
@@ -23,6 +31,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::constants::types;
+use crate::core::confirming::Confirmed;
 use crate::error::{Error, Result};
 use crate::handles::{Connection, Incoming};
 use crate::message::{Message, Routing};
@@ -160,13 +169,34 @@ impl Replier {
 /// request share of its fate: whether it was answered, and whether a drop
 /// unanswered is the request's to log. One per request, held by the
 /// request and by the server that handles it, which so keeps what a
-/// failure's report needs without copying the message.
+/// failure's report needs without copying the message. A threaded server's
+/// confirms a message of a confirmed batch as it goes, the last holder
+/// letting go: processed, or Failed once a handler failed on it.
 pub(crate) struct RequestState {
     incoming: Incoming,
     replier: Replier,
     answered: AtomicBool,
     /// The handler returned and kept the request: it answers later.
     kept: AtomicBool,
+    /// A handler failed on it: confirmed Failed.
+    failed: AtomicBool,
+    /// Confirmed as it goes: a threaded server's, until the server said
+    /// otherwise, refused or dropped for a full queue.
+    confirms: AtomicBool,
+}
+
+impl Drop for RequestState {
+    /// A message of a confirmed batch confirmed to its producer, through
+    /// the threaded server's client, from whatever thread let go last.
+    fn drop(&mut self) {
+        if !*self.confirms.get_mut() || self.incoming.message.confirmation.is_none() {
+            return;
+        }
+        if let Replier::Threaded(client) = &self.replier {
+            let outcome = if *self.failed.get_mut() { Confirmed::Failed } else { Confirmed::Processed };
+            client.confirm(&self.incoming.message, outcome);
+        }
+    }
 }
 
 /// A message being handled, and what answers it; see the module comment.
@@ -197,10 +227,25 @@ pub(crate) fn as_reply(request: &Message, mut reply: Message) -> Message {
 }
 
 impl Request {
-    /// A request for `incoming`, answered through `replier`.
+    /// A request for `incoming`, answered through `replier`; one the
+    /// threaded server's client answers confirms its message as it goes.
     pub(crate) fn new(incoming: Incoming, replier: Replier) -> Request {
-        let state = RequestState { incoming, replier, answered: AtomicBool::new(false), kept: AtomicBool::new(false) };
+        let confirms = matches!(replier, Replier::Threaded(_));
+        let state = RequestState {
+            incoming,
+            replier,
+            answered: AtomicBool::new(false),
+            kept: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            confirms: AtomicBool::new(confirms),
+        };
         Request { state: Arc::new(state) }
+    }
+
+    /// Its message is not confirmed as it goes: the server said what became
+    /// of it, or leaves it to its producer to send again.
+    pub(crate) fn unconfirmed(&self) {
+        self.state.confirms.store(false, Ordering::Release);
     }
 
     /// The message.
@@ -284,15 +329,24 @@ fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "a panic".to_string())
 }
 
+/// How a handler's run ended: whether it failed, an `Err` or a panic, and
+/// the failure when the server ends for it.
+pub(crate) struct Handled {
+    pub(crate) failed: bool,
+    pub(crate) end: Option<HandlerError>,
+}
+
 /// Runs the handler on `request` and does what follows: a failure, an
 /// `Err` or a panic, is logged and gets the requester BACKEND_ERROR unless
 /// a reply went out or the message answers another; a request dropped
-/// unanswered is logged, one kept is left to log its own drop. Returns the
-/// failure when `on_handler_error()` says the server ends, or what it
-/// panicked with: as an exception out of C++'s on_handler_exception(), it
-/// ends the server, where it killed a threaded server's worker with its
-/// request counted as being handled for good.
-pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Option<HandlerError> {
+/// unanswered is logged, one kept is left to log its own drop. Returns
+/// whether it failed, and the failure when `on_handler_error()` says the
+/// server ends, or what it panicked with: as an exception out of C++'s
+/// on_handler_exception(), it ends the server, where it killed a threaded
+/// server's worker with its request counted as being handled for good. A
+/// failure is marked on the request before its last holder here lets go,
+/// so that a threaded server's request confirms its message Failed.
+pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Handled {
     let state = Arc::clone(&request.state);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.handle_message(request)));
     let failure = match outcome {
@@ -307,8 +361,9 @@ pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Opt
         } else if !state.answered.load(Ordering::Acquire) {
             log::warn!("request #{} of type {} dropped without a reply or no_response()", message.id, message.r#type);
         }
-        return None;
+        return Handled { failed: false, end: None };
     };
+    state.failed.store(true, Ordering::Release);
     log::error!("{kind}: handle_message failed: {error}");
     // As C++: a report that fails leaves the requester to its timeout; a
     // message that answers another gets none, nobody waiting for an answer
@@ -328,7 +383,7 @@ pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Opt
         }
         state.answered.store(true, Ordering::Release);
     }
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.on_handler_error(&error))) {
+    let end = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.on_handler_error(&error))) {
         Ok(true) => None,
         Ok(false) => Some(error),
         Err(panic) => {
@@ -336,7 +391,8 @@ pub(crate) fn handle(handler: &dyn Handler, request: Request, kind: &str) -> Opt
             log::error!("{kind}: on_handler_error panicked: {text}");
             Some(HandlerError::from(format!("on_handler_error panicked: {text}")))
         }
-    }
+    };
+    Handled { failed: true, end }
 }
 
 /// What a server's handle reaches: the plain server's client and flags, or
@@ -451,23 +507,23 @@ impl ServerHandle {
         }
     }
 
-    /// Batching for the events the server sends with `send()`, as
-    /// `SyncClient::set_batching()` and `ThreadedClient::set_batching()`
+    /// How the events the server sends with `send()` go, as
+    /// `SyncClient::set_delivery()` and `ThreadedClient::set_delivery()`
     /// say: the plain server writes only inside its loop's calls, so give
-    /// it a delay. Waits as `connections_count()` does.
-    pub fn set_batching(&self, r#type: u32, key: Option<&str>, batching: crate::Batching) -> Result<()> {
+    /// its batches a delay. Waits as `connections_count()` does.
+    pub fn set_delivery(&self, r#type: u32, key: Option<&str>, delivery: crate::Delivery) -> Result<()> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.client()?.set_batching(r#type, key, batching),
-            Controlled::Threaded(control) => control.client().set_batching(r#type, key, batching),
+            Controlled::Plain(shared) => shared.client()?.set_delivery(r#type, key, delivery),
+            Controlled::Threaded(control) => control.client().set_delivery(r#type, key, delivery),
         }
     }
 
-    /// No batching from now on for `r#type`, or, given `key`, for that key;
-    /// see `SyncClient::clear_batching()`.
-    pub fn clear_batching(&self, r#type: u32, key: Option<&str>) -> Result<()> {
+    /// No delivery set from now on for `r#type`, or, given `key`, for that
+    /// key; see `SyncClient::clear_delivery()`.
+    pub fn clear_delivery(&self, r#type: u32, key: Option<&str>) -> Result<()> {
         match &self.0 {
-            Controlled::Plain(shared) => shared.client()?.clear_batching(r#type, key),
-            Controlled::Threaded(control) => control.client().clear_batching(r#type, key),
+            Controlled::Plain(shared) => shared.client()?.clear_delivery(r#type, key),
+            Controlled::Threaded(control) => control.client().clear_delivery(r#type, key),
         }
     }
 

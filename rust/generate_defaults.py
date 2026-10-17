@@ -8,7 +8,9 @@ with the comment above it as its documentation; a constant with no comment
 of its own shares the one of the constant before it, as the header's
 comments read. An unsigned count or size becomes a usize, a uint64_t a u64,
 and a float, seconds, a `Duration` in whole milliseconds; a negative float,
-which means no deadline, becomes `None` of an `Option<Duration>`.
+which means no deadline, becomes `None` of an `Option<Duration>`. A float's
+name says it is seconds: it ends in one of SECONDS's words, as
+DEFAULT_RETRY_AFTER's "after" does.
 """
 
 import argparse
@@ -21,7 +23,7 @@ HEADER = os.path.join(ROOT, "multiplexer", "defaults.h")
 OUTPUT = os.path.join(ROOT, "rust", "mx-multiplexer", "src", "defaults.rs")
 
 CONSTANT = re.compile(r"static const (unsigned int|float|std::uint64_t) (\w+) = ([^;]+);")
-SECONDS = ("_SECONDS", "_TIME", "_INTERVAL", "_TIMEOUT")
+SECONDS = ("_SECONDS", "_TIME", "_INTERVAL", "_TIMEOUT", "_AFTER")
 
 PREAMBLE = """\
 //! The timeouts and limits of multiplexer/defaults.h, which the multiplexer

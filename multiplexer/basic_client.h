@@ -113,22 +113,22 @@ std::uint64_t serialize_stamped(const MultiplexerMessage& msg, std::uint64_t ins
   return msg.id() ? msg.id() : stamp.id();
 }
 
-// `msg` framed for a send (serialize_stamped). For a client that batches,
-// `batching`, the frame is marked as its batching needs it
-// (RawMessage::batchable), and the frame of a plain event, which may go in
-// a batch, is made unsealed (RawMessage::Unsealed), its checksum computed
-// only if it goes alone; a client that does not batch reads nothing more
-// of the message for it.
+// `msg` framed for a send (serialize_stamped). For a client with a
+// delivery set (BasicClient::set_delivery), `delivery`, the frame is marked
+// as its delivery needs it (RawMessage::batchable), and the frame of a
+// plain event, which may go in a batch, is made unsealed
+// (RawMessage::Unsealed), its checksum computed only if it goes alone; a
+// client with none reads nothing more of the message for it.
 template <typename FreshId>
 std::shared_ptr<const RawMessage> frame_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id,
-                                                FreshId fresh_id, bool batching = false) {
-  const bool plain = batching && RawMessage::plain_event(msg);
+                                                FreshId fresh_id, bool delivery = false) {
+  const bool plain = delivery && RawMessage::plain_event(msg);
   std::string serialized;
   const std::uint64_t id = serialize_stamped(msg, instance_id, fresh_id, &serialized);
   std::shared_ptr<const RawMessage> raw =
       plain ? std::make_shared<RawMessage>(RawMessage::Unsealed(), &serialized, id, msg.type())
             : std::make_shared<RawMessage>(&serialized, id, msg.type());
-  if (batching) {
+  if (delivery) {
     raw->mark_batchable(plain ? RawMessage::Batchable::YES : RawMessage::Batchable::NO, plain && msg.has_key(),
                         plain ? msg.key() : std::string());
   }
@@ -146,6 +146,17 @@ enum class DropReason : unsigned char {
   NO_CONNECTION,    // it waited for a connection to come up past its timeout, or had none to wait
   CONNECTION_LOST,  // its connection ended and nothing else could take it: a pinned lane's, a copy for ALL
   SHUT_DOWN,        // the client shut down before it went
+  NOT_CONFIRMED,    // a confirmed send (Delivery::confirm): no consumer confirmed it by its batch's deadline
+  FAILED,           // a confirmed send: the consumer's handler raised on it
+};
+
+// What became of a message taken from a confirmed batch, as its consumer's
+// library tells its producer (BasicClient::confirm, Confirmation in
+// Multiplexer.proto).
+enum class Confirmed : unsigned char {
+  PROCESSED,  // the program is done with it
+  REFUSED,    // not processed: the consumer is leaving or closing; its producer sends it again
+  FAILED,     // the handler raised on it; its producer gives up on it
 };
 
 // How the client's connections queue messages and report on them. Each queue
@@ -166,6 +177,9 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
   // A batch that goes as soon as a connection has nothing left to write
   // waits for the connection to say so (BasicClient::outgoing_queue_idle).
   static constexpr bool REPORTS_IDLE = true;
+  // What a client owes the producers of the confirmed batches it took goes
+  // once what one read brought is handed over (BasicClient::read_drained).
+  static constexpr bool REPORTS_READ_DRAINED = true;
   // What a connection that ends leaves and nothing can take, the client
   // reports itself (BasicClient::report_drop).
   static constexpr bool REPORTS_DROPS = true;
@@ -842,6 +856,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     SENT_NO_CONNECTION,    // DropReason::NO_CONNECTION
     SENT_CONNECTION_LOST,  // DropReason::CONNECTION_LOST
     SENT_SHUT_DOWN,        // DropReason::SHUT_DOWN
+    SENT_NOT_CONFIRMED,    // DropReason::NOT_CONFIRMED
+    SENT_FAILED,           // DropReason::FAILED
     BATCH_NOT_SPLIT,       // a batch that arrived and does not parse, or a message in one that does not belong
     OWN_LINES = 1000,      // and up: a message callback's own kinds (ThreadedClient::drop_lines)
   };
@@ -871,6 +887,36 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // ThreadedClient's io thread at its end, or a forked child's teardown.
   void release_drop_observer() { drop_observer_ = DropObserver(); }
 
+  // The consumer's side of confirmed sends (basic_client_confirm.cc): a
+  // message taken from a batch whose producer asked for confirmation
+  // carries its number (MultiplexerMessage.confirmation, with `sender`),
+  // and confirm() tells that producer what became of it, gathered with the
+  // rest this client owes it into one CONFIRMATION, which goes once this
+  // client has nothing more in hand for the program (after a batch handed
+  // to a sink, before a receive waits, at the end of a ThreadedClient's
+  // inbox turn), at CONFIRMATIONS_GATHERED_MAX owed, or at shutdown, on
+  // the connection the producer's messages came on, else another live
+  // one. Nothing for a message with no number. The server classes and a
+  // ThreadedClient confirm what their handlers returned from (PROCESSED)
+  // or raised from (FAILED); a program that reads messages itself
+  // confirms each with processed(). On the owner thread.
+  void confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome);
+  void confirm(const MultiplexerMessage& message, Confirmed outcome) {
+    if (message.has_confirmation()) {
+      confirm(message.sender(), message.confirmation(), outcome);
+    }
+  }
+  void processed(const MultiplexerMessage& message) { confirm(message, Confirmed::PROCESSED); }
+  // Every confirmation owed, sent now.
+  void send_confirmations();
+  // How many messages this client sent wait for their confirmation, how
+  // many it sent again, how many confirmations it owes, and whether the
+  // timer of what waits is armed: for tests.
+  std::size_t unconfirmed() const;
+  std::uint64_t sent_again() const;
+  std::size_t confirmations_owed() const;
+  bool confirm_timer_armed() const;
+
   // A receive's wait: runs the loop until a message is queued, true, or
   // `timer` expires, false, running the callbacks of the changes
   // acknowledged meanwhile (run_acknowledged_callbacks()), and, with
@@ -884,7 +930,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // Runs the loop until a message is queued or `timeout` seconds pass;
   // throws OperationTimedOut, or, with no deadline, NotConnected when
   // nothing could arrive.
-  void inline wait_for_incoming_message(float timeout = -1) const {
+  void inline wait_for_incoming_message(float timeout = -1) {
     if (has_incoming_messages()) {
       return;
     }
@@ -933,8 +979,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // its way (never connected, made with no addresses, or shut down), leaves
   // the loop no work at all: run_one() returns at once having done nothing,
   // and the wait throws NotConnected rather than spin.
-  void inline wait_for_incoming_message(mx::SimpleTimer& timer) const {
+  void inline wait_for_incoming_message(mx::SimpleTimer& timer) {
     MX_DCHECK_RUN_ON(&owner_thread());
+    if (!has_incoming_messages()) {
+      send_confirmations();  // the program has nothing more in hand
+    }
     while (!has_incoming_messages() && !timer.expired()) {
       if (run_one() == 0) {
         MXTHROW(NotConnected());
@@ -1028,8 +1077,9 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // the client shut down first. False, with nothing placed or reported and
   // `done` not called, when nothing may take it: the client is shutting
   // down, or a pinned lane's connection is gone; the caller says so, by an
-  // exception or a report. `may_batch`: a send nobody waits for, which may
-  // go in a batch (set_batching below). `poll_first`: a synchronous
+  // exception or a report. `may_batch`: a send nobody waits for, which goes
+  // by the delivery set for its type (set_delivery below), `timeout` not
+  // used when one is. `poll_first`: a synchronous
   // client's send, which runs the loop first (poll()) when the message is
   // to choose a connection, so that one the peer closed meanwhile is
   // retired first, or when something is due: always, but for a message
@@ -1063,65 +1113,100 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // that sent them (threaded_client_inbox.h). Null, the default: freed.
   // Shared, as this client may outlive the one that set it.
   void keep_spent_bodies(std::shared_ptr<SpentBodies> spent);
-  // Batching (basic_client_batching.cc, docs/api_cpp.md "Batching"): the
-  // events of a type, or of one key of a type, that the program sends
-  // without waiting for them go together, several in one message, which
-  // the receiving library splits back into one message each, as if each
-  // had come alone. `may_batch` above marks those sends: queue(), the
-  // Python send_message() that does not wait, without flush or with a
-  // callback, ThreadedClient's sends without a timeout, through no lane and
-  // not to ALL, with time to wait, a timeout of 0 going alone. A message
-  // goes in a batch when it is a plain event (RawMessage::plain_event) of a
-  // type or key set here; every message inside a batch has the batch's
-  // type and key, the keys of a type each batched apart. A batch goes when
-  // it holds `max_records` messages, when one more would take its message
-  // past `max_bytes`, as it goes on the wire, or `max_delay` seconds after
-  // its first message; with `max_delay` 0, when a connection has nothing
-  // left to write, on it, so that a message sent while one has goes at
-  // once, alone, and those sent while every connection is busy go together
-  // as soon as one is not, or when their first timeout is up: such a batch
-  // waits for room, its messages' timeouts counting from their sends,
-  // where with a delay they count from when the batch goes. A batch that
-  // goes on its own takes those waiting for a connection with nothing left
-  // to write with it. A send that does not batch, a flush, a shutdown and a
-  // change of what is batched first let every batch go, in the order they
-  // began: nothing overtakes a message sent before it. A batch is one
-  // message for the rest of the library, its connection, its wait for room
-  // and its deadline, the earliest of its messages', its loss told for
-  // each message inside (report_drop); each message keeps its own tracker
-  // and `done`. On the owner thread.
-  struct Batching {
+  // Delivery (basic_client_batching.cc, basic_client_confirm.cc,
+  // docs/delivery.md): how the events of a type, or of one key of a type,
+  // that the program sends without waiting for them go: one by one or, with
+  // `batch`, several in one message, which the receiving library splits
+  // back into one message each, as if each had come alone; and, with
+  // `confirm`, each kept until its consumer confirms it. `may_batch` above
+  // marks those sends: queue(), the Python send_message() that does not
+  // wait, without flush or with a callback, ThreadedClient's sends without
+  // a timeout, through no lane and not to ALL. A message goes by a setting
+  // when it is a plain event (RawMessage::plain_event) of a type or key set
+  // here, a key's setting ahead of its type's. On the owner thread.
+  //
+  // `timeout` is a batch's, its send's own not used: a batch has that many
+  // seconds from its first message to be written, and with `confirm` to be
+  // confirmed, and what of it is not by then is given up on together. A
+  // message that goes alone is a batch of one, and a batch sent again keeps
+  // its deadline. A negative one sets no deadline. Without `batch` or
+  // `confirm` the messages go as any send does, by `timeout`: a key's
+  // setting that sends it so while its type is batched.
+  //
+  // With `batch`, every message inside a batch has the batch's type and
+  // key, the keys of a type each batched apart. A batch goes when it holds
+  // `max_records` messages, when one more would take its message past
+  // `max_bytes`, as it goes on the wire, or `max_delay` seconds after its
+  // first message; with `max_delay` 0, when a connection has nothing left
+  // to write, on it, so that a message sent while one has goes at once,
+  // alone, and those sent while every connection is busy go together as
+  // soon as one is not, or at their deadline. A batch that goes on its own
+  // takes those waiting for a connection with nothing left to write with
+  // it. A send that does not batch, a flush, a shutdown and a change of
+  // what is set first let every batch go, in the order they began: nothing
+  // overtakes a message sent before it. A batch is one message for the
+  // rest of the library, its connection, its wait for room and its
+  // deadline, its loss told for each message inside (report_drop); each
+  // message keeps its own tracker and `done`.
+  //
+  // Confirmed sends (basic_client_confirm.cc, docs/delivery.md "Confirmed
+  // sends"): with `confirm`, every batch goes as an envelope that numbers
+  // its messages, a batch of one included, and without `batch` each
+  // message goes at once in one of its own; each message is kept until the
+  // consumer's library confirms it: its tracker reads SENT and its `done`
+  // hears 1 then, not when it is written, and a flush waits for it. It goes
+  // again, keeping its number, when its consumer refused it, when nobody
+  // took its batch (after a back-off from 0.1 s to 1 s), when the
+  // connection it went on ended, and when nothing confirmed any message of
+  // its batch for `retry_after` seconds; it is given up on, NOT_CONFIRMED,
+  // at its batch's deadline, and FAILED when its consumer's handler raised.
+  // Delivery is at least once: a message whose confirmation was lost is
+  // processed again. What is kept has no cap: a stall of every consumer
+  // grows this client by its messages until their deadline, and forever
+  // with a negative timeout.
+  struct Delivery {
+    bool batch = false;
     unsigned int max_records = DEFAULT_BATCH_MAX_RECORDS;
     std::size_t max_bytes = DEFAULT_BATCH_MAX_BYTES;
     float max_delay = 0;  // seconds
+    bool confirm = false;
+    float retry_after = DEFAULT_RETRY_AFTER;  // seconds, with `confirm`
+    float timeout = DEFAULT_TIMEOUT;          // seconds, a batch's
   };
   // For every key of `type`, each key's messages in batches of their own;
   // for one key, ahead of what is set for its type. Throws
   // std::invalid_argument for a protocol message type (99 and below), a
   // key over MAX_KEY_SIZE, no record or more than MAX_BATCH_RECORDS in a
-  // batch, no byte or more than MAX_MESSAGE_SIZE, or a delay negative, over
-  // MAX_SECONDS, infinite or NaN (check_batching()), as the Rust crate
-  // refuses them.
-  void set_batching(std::uint32_t type, const Batching& batching);
-  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching);
-  // What set_batching() set for `type`, its keys' included, or for one key
-  // of it: no batching for them from now on.
-  void clear_batching(std::uint32_t type);
-  void clear_batching(std::uint32_t type, const std::string& key);
-  static void check_batching(std::uint32_t type, const std::string* key, const Batching& batching);
+  // batch, no byte or more than MAX_MESSAGE_SIZE, a delay negative, over
+  // MAX_SECONDS, infinite or NaN, with `confirm` a retry_after not over 0
+  // or over MAX_SECONDS, and a timeout NaN, or 0 or more but not longer
+  // than the delay (than 0 without `batch`), which would leave a batch no
+  // time (check_delivery()), as the Rust crate refuses them.
+  void set_delivery(std::uint32_t type, const Delivery& delivery);
+  void set_delivery(std::uint32_t type, const std::string& key, const Delivery& delivery);
+  // What set_delivery() set for `type`, its keys' included, or for one key
+  // of it: their messages go as any send from now on.
+  void clear_delivery(std::uint32_t type);
+  void clear_delivery(std::uint32_t type, const std::string& key);
+  static void check_delivery(std::uint32_t type, const std::string* key, const Delivery& delivery);
   // Every batch goes now, in the order they began; what a flush and a send
   // that does not batch do first.
   void close_batches();
   // Called by a connection that was asked to (Connection::notify_when_idle)
   // when it has nothing left to write: the batches waiting for that go.
   void outgoing_queue_idle(Connection* conn);
+  // Called by a connection that handed over every whole frame it had read
+  // and reads its socket again (REPORTS_READ_DRAINED): the confirmations a
+  // client whose handlers run as messages arrive (set_incoming_sink) owes
+  // go, gathered over what one read brought rather than sent per batch.
+  void read_drained(Connection* conn);
   // How many messages wait in batches, and whether the batches' timer is
   // armed: for tests.
   std::size_t batched_messages() const;
   bool batch_timer_armed() const;
-  // Whether anything is batched: a client frames its messages for it then
-  // (frame_stamped).
-  bool batching() const;
+  // Whether a delivery is set for some type or key: a client frames its
+  // messages for it then (frame_stamped).
+  bool has_delivery() const;
 
   // Ends every send still followed, each `done` hearing 0, at once, after
   // the drop observer heard of every drop reported before: for a client
@@ -1154,8 +1239,11 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // Like wait_for_incoming_message, but also returns, with false, as soon as
   // `watch` is no longer a live connection: a caller waiting for a reply
   // through it learns at once that the reply cannot come that way.
-  bool wait_for_incoming_message_or_loss(mx::SimpleTimer& timer, const ConnectionWrapper& watch) const {
+  bool wait_for_incoming_message_or_loss(mx::SimpleTimer& timer, const ConnectionWrapper& watch) {
     MX_DCHECK_RUN_ON(&owner_thread());
+    if (!has_incoming_messages()) {
+      send_confirmations();  // the program has nothing more in hand
+    }
     while (!has_incoming_messages() && !timer.expired() && watch) {
       if (run_one() == 0) {
         return has_incoming_messages();  // no work at all: `watch` is gone, as nothing can arrive
@@ -1350,14 +1438,57 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   struct Batch;
   typedef std::shared_ptr<Batch> BatchPtr;
   struct BatchRecord;  // one message in a batch, a frame or its bytes alone; batching.h
-  const Batching* _batching_for(const std::shared_ptr<const RawMessage>& raw);
-  const Batching* _batching_for(std::uint32_t type, bool keyed, const std::string& key) const;
+  // Confirmed sends: the batches written whose messages wait for their
+  // confirmation, and the confirmations this client owes; confirming.h,
+  // basic_client_confirm.cc.
+  struct Confirmer;
+  std::unique_ptr<Confirmer> confirmer_;
+  struct Confirming;
+  typedef std::shared_ptr<Confirming> ConfirmingPtr;
+  struct OwedConfirmations;
+  struct Segment;
+  void _numbered(std::vector<BatchRecord>& records, std::size_t begin, std::size_t end, BatchEnvelope* envelope);
+  void _wait_for_confirmation(const BatchPtr& batch, std::size_t begin, std::size_t end,
+                              const std::shared_ptr<const RawMessage>& frame, const LanePtr& lane);
+  void _confirmed_end(std::uint64_t id, std::uint64_t number, std::uint32_t type, std::shared_ptr<SendState>* state,
+                      SendCallback* done, bool processed, DropReason reason, bool report);
+  void _confirming_written(const ConfirmingPtr& confirming, unsigned int written);
+  void _confirmed_frame_dropped(std::uint64_t envelope_id, DropReason reason);
+  void _cannot_confirm(const BatchPtr& batch, std::size_t begin, std::size_t end);
+  void _on_confirmation(const MultiplexerMessage& mxmsg);
+  std::vector<Segment> _segments(const google::protobuf::RepeatedField<std::uint64_t>& pairs) const;
+  bool _confirmed_batch_not_taken(std::uint64_t envelope_id);
+  bool _resolved(const ConfirmingPtr& confirming, std::size_t index, bool processed, DropReason reason,
+                 bool report = true);
+  void _resolve(const ConfirmingPtr& confirming, std::size_t index, bool processed, DropReason reason,
+                bool report = true);
+  void _rebuild_runs(const ConfirmingPtr& confirming);
+  void _forget_resolved(const ConfirmingPtr& confirming);
+  void _give_up_confirmations(DropReason reason);
+  void _send_again(const ConfirmingPtr& confirming, const std::vector<std::size_t>& indexes);
+  void _send_unresolved_again(const ConfirmingPtr& confirming);
+  void _confirming_due(const ConfirmingPtr& confirming);
+  void _arm_confirm_timer();
+  void _disarm_confirm_timer_when_idle();
+  void _confirm_timer_fired();
+  void _confirmations_on_closed(Connection* conn);
+  static std::vector<ConfirmingPtr> _in_number_order(std::vector<ConfirmingPtr> batches);
+  bool _confirming_up_to(std::uint64_t number) const;
+  std::uint64_t _confirm_mark() const;
+  bool _confirmed_ends_due() const;
+  void _report_record_drop(std::uint64_t id, std::uint32_t type, DropReason reason);
+  void _run_confirmed_ends();
+  void _release_confirmed_ends();
+  void _confirmed_batch_from(const Connection::pointer& conn, std::uint64_t producer);
+  void _send_owed(std::uint64_t producer, OwedConfirmations& owed);
+  const Delivery* _delivery_for(const std::shared_ptr<const RawMessage>& raw);
+  const Delivery* _delivery_for(std::uint32_t type, bool keyed, const std::string& key) const;
   bool _batch_needs_loop(std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
-                         const Batching& batching) const;
-  bool _batch(const std::shared_ptr<const RawMessage>& raw, const Batching& batching, float timeout,
+                         const Delivery& delivery) const;
+  bool _batch(const std::shared_ptr<const RawMessage>& raw, const Delivery& delivery,
               std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done);
   bool _batch_record(BatchRecord* record, std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
-                     const Batching& batching, float timeout, std::vector<BasicScheduledMessageTracker>* trackers,
+                     const Delivery& delivery, std::vector<BasicScheduledMessageTracker>* trackers,
                      const SendCallback& done);
   static std::shared_ptr<const RawMessage> _record_frame(BatchRecord* record, std::uint32_t type);
   static void _give_back(BatchRecord* record, std::string* body);

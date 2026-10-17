@@ -141,6 +141,7 @@ impl Core {
             number: 0,
             deadline: None,
             batch: None,
+            confirmed: false,
         });
         let Some(state) = self.conns.get_mut(&conn) else { return };
         state.routing_request_id = id;

@@ -5,7 +5,8 @@
 //! parts with the client's half of connections_manager.h (`client`),
 //! outbox.cc and its parts (`outbox`), basic_client_batching.cc
 //! (`batching`, with `plain`, a plain send's bytes, and `bodies`, what a
-//! batch hands back and keeps), the query state machine of
+//! batch hands back and keeps), basic_client_confirm.cc (`confirming`,
+//! confirmed sends, both sides), the query state machine of
 //! threaded_client_query.cc (`query`) and the io thread's other work of
 //! threaded_client_io.cc (`threaded`); this file holds what they share.
 //!
@@ -28,6 +29,7 @@ pub(crate) mod timers;
 pub(crate) mod batching;
 pub(crate) mod bodies;
 pub(crate) mod client;
+pub(crate) mod confirming;
 pub(crate) mod connection;
 pub(crate) mod lane;
 pub(crate) mod outbox;
@@ -50,6 +52,7 @@ use bytes::Bytes;
 
 use batching::Batcher;
 pub(crate) use client::{ClientState, IncomingMode};
+use confirming::Confirmer;
 pub(crate) use connection::Conn;
 pub(crate) use outbox::Outbox;
 use query::{Queries, QueryId};
@@ -123,8 +126,10 @@ pub(crate) fn followed(tracker: &Arc<Tracker>) -> bool {
 /// connection's own protocol frame, its place in the order sent, which
 /// flush_all() goes by, the deadline its first send gave it, and, for a
 /// batch's frame, the ids of the messages inside, by which a drop of it is
-/// told. Built whole where it is first placed and never changed, so that a
-/// frame a dead connection hands over keeps its place and its deadline.
+/// told; a confirmed batch's, `confirmed`, is told by the confirmed sends,
+/// each message once (`Core::confirmed_frame_dropped`). Built whole where it
+/// is first placed and never changed, so that a frame a dead connection
+/// hands over keeps its place and its deadline.
 #[derive(Debug)]
 pub(crate) struct OutFrame {
     pub(crate) bytes: Bytes,
@@ -137,6 +142,7 @@ pub(crate) struct OutFrame {
     pub(crate) number: u64,
     pub(crate) deadline: Option<Instant>,
     pub(crate) batch: Option<Arc<[u64]>>,
+    pub(crate) confirmed: bool,
 }
 
 impl OutFrame {
@@ -193,8 +199,12 @@ pub(crate) enum Due {
     SendsExpire,
     /// The shutdown's write-out ran out of time.
     Drain,
-    /// The earliest max_delay's end among the batches open.
+    /// The earliest time a batch open goes by: its delay's end, or, with no
+    /// delay, its deadline.
     Batches,
+    /// The earliest retry time or deadline among the confirmed batches
+    /// waiting for their confirmation.
+    Confirmations,
 }
 
 /// What the core wants done with a socket, for the driver to carry out in
@@ -251,6 +261,10 @@ pub(crate) enum Posted {
     /// A threaded client's plain send, as data, with its deadline from the
     /// send (`plain`).
     Plain(plain::Plain, Option<Instant>),
+    /// What a threaded client owes its producers goes, at the end of the
+    /// io thread's turn that took confirmations its program gave
+    /// (`confirming`).
+    SendConfirmations,
 }
 
 impl std::fmt::Debug for Posted {
@@ -265,6 +279,7 @@ impl std::fmt::Debug for Posted {
             Posted::WriteOutStep => write!(formatter, "WriteOutStep"),
             Posted::Command(_) => write!(formatter, "Command"),
             Posted::Plain(plain, _) => write!(formatter, "Plain(#{})", plain.id),
+            Posted::SendConfirmations => write!(formatter, "SendConfirmations"),
         }
     }
 }
@@ -292,6 +307,7 @@ pub(crate) struct Core {
     pub(crate) client: ClientState,
     pub(crate) outbox: Outbox,
     pub(crate) batcher: Batcher,
+    pub(crate) confirmer: Confirmer,
     pub(crate) queries: Queries,
     queries_fill_posted: bool,
     pub(crate) threaded: Threaded,
@@ -330,6 +346,7 @@ impl Core {
             client: ClientState::new(mode),
             outbox: Outbox::default(),
             batcher: Batcher::default(),
+            confirmer: Confirmer::default(),
             queries: Queries::default(),
             queries_fill_posted: false,
             threaded: Threaded::default(),
@@ -368,6 +385,7 @@ impl Core {
             Due::SendsExpire => self.sends_expire(),
             Due::Drain => self.drain_expired(),
             Due::Batches => self.batch_timer_fired(),
+            Due::Confirmations => self.confirm_timer_fired(),
         }
         true
     }
@@ -396,6 +414,7 @@ impl Core {
             Posted::WriteOutStep => self.write_out_step(),
             Posted::Command(command) => command(self),
             Posted::Plain(plain, deadline) => self.place_plain(plain, deadline),
+            Posted::SendConfirmations => self.send_confirmations_posted(),
         }
     }
 

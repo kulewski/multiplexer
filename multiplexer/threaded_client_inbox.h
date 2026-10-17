@@ -15,6 +15,10 @@
 // too). The bodies waiting to be taken stay within SpentBodies' limits;
 // the rest are freed by the io thread.
 //
+// A confirmation a handler on another thread gives (ThreadedClient::confirm)
+// comes as three numbers, which the io thread gathers into what its client
+// owes (BasicClient::confirm): nothing allocated per message.
+//
 // Thread-safe: every member is guarded by the inbox's own lock, held for a
 // push or a take only. Nothing here knows asio; the Core posts the wake-up,
 // in a block of its own (WakeMemory).
@@ -52,6 +56,14 @@ struct PlainSend {
   std::chrono::steady_clock::time_point deadline;
 };
 
+// A confirmation handed over: the producer, the message's number, and what
+// became of the message, a Confirmed (basic_client.h) as its value.
+struct HandedConfirmation {
+  std::uint64_t sender = 0;
+  std::uint64_t number = 0;
+  std::uint8_t outcome = 0;
+};
+
 class ThreadedClientInbox {
  public:
   // One thing handed over: a call to run on the io thread, or, with none,
@@ -68,13 +80,16 @@ class ThreadedClientInbox {
   // handed back, empty, to serialize the next message into, when one
   // waits. True as push().
   bool push_plain(PlainSend* plain, std::string* body) MX_EXCLUDES(mutex_);
-  // The io thread's: everything handed over so far, moved into `taken`,
-  // which must be empty and whose room the inbox keeps for what comes
-  // next; and `spent`, the bodies the batching is done with, handed back
-  // as far as SpentBodies keeps them, the others left in it for the caller
-  // to free (SpentBodies::clear), outside the lock. The next push wakes the
-  // io thread.
-  void take(std::vector<Entry>* taken, SpentBodies* spent) MX_EXCLUDES(mutex_);
+  // `confirmation` appended. True as push().
+  bool push_confirmation(const HandedConfirmation& confirmation) MX_EXCLUDES(mutex_);
+  // The io thread's: everything handed over so far, moved into `taken` and
+  // `confirmations`, which must be empty and whose room the inbox keeps
+  // for what comes next; and `spent`, the bodies the batching is done
+  // with, handed back as far as SpentBodies keeps them, the others left in
+  // it for the caller to free (SpentBodies::clear), outside the lock. The
+  // next push wakes the io thread.
+  void take(std::vector<Entry>* taken, std::vector<HandedConfirmation>* confirmations, SpentBodies* spent)
+      MX_EXCLUDES(mutex_);
   // How many bodies wait to be taken, and their capacity together; for
   // tests.
   std::size_t returned_count() MX_EXCLUDES(mutex_);
@@ -86,6 +101,7 @@ class ThreadedClientInbox {
 
   mx::Mutex mutex_;
   std::vector<Entry> entries_ MX_GUARDED_BY(mutex_);
+  std::vector<HandedConfirmation> confirmations_ MX_GUARDED_BY(mutex_);
   bool wake_pending_ MX_GUARDED_BY(mutex_) = false;  // woken for entries_, which it has not taken yet
   SpentBodies returned_ MX_GUARDED_BY(mutex_);       // handed back, for the callers to take
 };

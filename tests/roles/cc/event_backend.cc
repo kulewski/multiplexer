@@ -13,15 +13,24 @@ namespace mxtestroles {
 
 using multiplexer::MultiplexerMessage;
 
-// A backend that receives events, reports each one and never answers.
+// A backend that receives events, reports each one and never answers;
+// with `crash_at`, it exits with status 3 at that message, before handling
+// it, what it holds of a confirmed batch going unconfirmed.
 class EventBackendServer : public multiplexer::backend::BaseMultiplexerServer {
  public:
-  EventBackendServer(Client* client, unsigned type) : BaseMultiplexerServer(client, type), received_(0) {}
+  EventBackendServer(Client* client, unsigned type, int crash_at)
+      : BaseMultiplexerServer(client, type), received_(0), crash_at_(crash_at) {}
   int received() const { return received_; }
 
  protected:
   // Report one received event.
   virtual void handle_message(MultiplexerMessage& mxmsg) {
+    if (crash_at_ && received_ + 1 >= crash_at_) {
+      Event crash = event("crash");
+      crash.set_received(received_);
+      emit(crash);
+      std::_Exit(3);
+    }
     ++received_;
     Event received = event("received");
     received.set_type(mxmsg.type());
@@ -38,10 +47,12 @@ class EventBackendServer : public multiplexer::backend::BaseMultiplexerServer {
 
  private:
   int received_;
+  int crash_at_;
 };
 
 // The `event_backend` subcommand: runs an EventBackendServer until SIGTERM,
-// --until N messages, or --for S seconds. With --drain-file it starts
+// --until N messages, or --for S seconds; --crash-at N exits with 3 at the
+// N-th message, before handling it. With --drain-file it starts
 // draining when the file appears, the --drain-routing flags kept on, and
 // keeps looping. Events: received, draining, acked, done.
 class EventBackendRole : public mxcontrol::Task {
@@ -50,7 +61,7 @@ class EventBackendRole : public mxcontrol::Task {
   virtual int run() {
     install_signal_handlers();
     std::unique_ptr<Client> client = common_.connect(parse_key_filters(key_filters_));
-    EventBackendServer server(client.get(), common_.type);
+    EventBackendServer server(client.get(), common_.type, crash_at_);
     server.set_drain_routing(parse_drain_routing(drain_routing_));
     emit(common_.connected_event(*client));
     std::chrono::steady_clock::time_point deadline =
@@ -92,6 +103,7 @@ class EventBackendRole : public mxcontrol::Task {
     common_.add(options);
     options.add("until", &until_, 0, "exit after N messages");
     options.add("for", &duration_, 0.0, "exit after S seconds");
+    options.add("crash-at", &crash_at_, 0, "exit with 3 at the N-th message, before handling it");
     options.add("drain-file", &drain_file_, "", "a file whose appearance starts a drain");
     options.add("drain-routing", &drain_routing_, "", "Routing flags kept on while draining: any,all,last_resort");
     options.add("key-filter", &key_filters_, "TYPE:PATTERN, repeatable: the key filters, set before connecting");
@@ -100,6 +112,7 @@ class EventBackendRole : public mxcontrol::Task {
  private:
   CommonOptions common_;
   int until_;
+  int crash_at_;
   double duration_;
   std::string drain_file_;
   std::string drain_routing_;

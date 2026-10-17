@@ -296,16 +296,21 @@ static BasicClient::AcknowledgedCallback acknowledged_callback_for(pybind11::obj
   return python_callback<>(callback.cast<pybind11::function>());
 }
 
-// set_batching()'s numbers as Python passes them, any int: a count below 1
-// as 0 and one past what Batching holds as its most, for
-// BasicClient::check_batching to refuse, a ValueError, or to take.
-static BasicClient::Batching batching_from(std::int64_t max_records, std::int64_t max_bytes, double max_delay) {
-  BasicClient::Batching batching;
-  batching.max_records =
+// set_delivery()'s arguments as Python passes them, any int: a count below
+// 1 as 0 and one past what Delivery holds as its most, for
+// BasicClient::check_delivery to refuse, a ValueError, or to take.
+static BasicClient::Delivery delivery_from(bool batch, std::int64_t max_records, std::int64_t max_bytes,
+                                           double max_delay, bool confirm, double retry_after, double timeout) {
+  BasicClient::Delivery delivery;
+  delivery.batch = batch;
+  delivery.max_records =
       static_cast<unsigned int>(std::clamp<std::int64_t>(max_records, 0, std::numeric_limits<unsigned int>::max()));
-  batching.max_bytes = static_cast<std::size_t>(std::max<std::int64_t>(max_bytes, 0));
-  batching.max_delay = static_cast<float>(max_delay);
-  return batching;
+  delivery.max_bytes = static_cast<std::size_t>(std::max<std::int64_t>(max_bytes, 0));
+  delivery.max_delay = static_cast<float>(max_delay);
+  delivery.confirm = confirm;
+  delivery.retry_after = static_cast<float>(retry_after);
+  delivery.timeout = static_cast<float>(timeout);
+  return delivery;
 }
 
 // One of a query's attempts, mxclient's: the tracker of the message it
@@ -455,7 +460,7 @@ struct PythonClient : public Client {
     std::string message(serialized);
     BasicClient::SendCallback done = callback ? send_callback_for(*callback) : BasicClient::SendCallback();
     // The loop runs first unless the message only joins a batch (poll_first).
-    if (!all && !lane && basic_client_->batching()) {
+    if (!all && !lane && basic_client_->has_delivery()) {
       check_message_size(message.size());  // here, as a frame made of it would check
       return basic_client_->send_bytes(&message, id, type, timeout, NULL, done, /*poll_first=*/true);
     }
@@ -545,8 +550,13 @@ struct PythonThreadedClient {
   // into the type itself, so it stays an object and the Python wrapper
   // types it.
   PythonThreadedClient(std::uint32_t peer_type, pybind11::object on_message)
-      : client(peer_type, on_message.is_none() ? ThreadedClient::MessageSink() : sink_for(on_message)) {}
-  static ThreadedClient::MessageSink sink_for(pybind11::object callback) {
+      : client(peer_type, on_message.is_none() ? ThreadedClient::MessageSink() : sink_for(on_message, &client)) {}
+  // A callback that raises is reported as unraisable, and a message of a
+  // confirmed batch it raised on is confirmed FAILED from here, which
+  // the confirmation after its return then leaves alone: the exception
+  // never reaches the C++ side. `client` is the one under construction,
+  // whose callback this is: called only once it is built.
+  static ThreadedClient::MessageSink sink_for(pybind11::object callback, ThreadedClient* client) {
     std::shared_ptr<pybind11::object> held(new pybind11::object(callback), [](pybind11::object* object) {
       PythonCall call;
       if (!call.ok()) {
@@ -554,7 +564,7 @@ struct PythonThreadedClient {
       }
       delete object;
     });
-    return [held](const IncomingMessage& incoming) {
+    return [held, client](const IncomingMessage& incoming) {
       PythonCall call;
       if (!call.ok()) {
         return;  // the callback would need the GIL; nothing to deliver to any more
@@ -563,6 +573,7 @@ struct PythonThreadedClient {
         (*held)((pybind11::bytes)incoming.first->get_message(), incoming.second);
       } catch (pybind11::error_already_set& error) {
         error.discard_as_unraisable(*held);  // see python_callback
+        client->confirm(*incoming.third, Confirmed::FAILED);
       }
     };
   }
@@ -654,24 +665,25 @@ struct PythonThreadedClient {
     GilRelease release;
     client.set_key_filters(filters, std::move(acknowledged));
   }
-  // ThreadedClient::set_batching and clear_batching, for every key of the
+  // ThreadedClient::set_delivery and clear_delivery, for every key of the
   // type or for one.
-  void set_batching(std::uint32_t type, std::optional<std::string> key, std::int64_t max_records,
-                    std::int64_t max_bytes, double max_delay) {
-    const BasicClient::Batching batching = batching_from(max_records, max_bytes, max_delay);
+  void set_delivery(std::uint32_t type, std::optional<std::string> key, bool batch, std::int64_t max_records,
+                    std::int64_t max_bytes, double max_delay, bool confirm, double retry_after, double timeout) {
+    const BasicClient::Delivery delivery =
+        delivery_from(batch, max_records, max_bytes, max_delay, confirm, retry_after, timeout);
     GilRelease release;
     if (key) {
-      client.set_batching(type, *key, batching);
+      client.set_delivery(type, *key, delivery);
     } else {
-      client.set_batching(type, batching);
+      client.set_delivery(type, delivery);
     }
   }
-  void clear_batching(std::uint32_t type, std::optional<std::string> key) {
+  void clear_delivery(std::uint32_t type, std::optional<std::string> key) {
     GilRelease release;
     if (key) {
-      client.clear_batching(type, *key);
+      client.clear_delivery(type, *key);
     } else {
-      client.clear_batching(type);
+      client.clear_delivery(type);
     }
   }
   bool routing_acknowledged() {
@@ -681,6 +693,23 @@ struct PythonThreadedClient {
   std::size_t held_for_a_connection() {
     GilRelease release;
     return client.held_for_a_connection();
+  }
+  // Confirmed sends; see ThreadedClient::confirm. The counts wait for the
+  // io thread, which may want the GIL meanwhile.
+  void confirm(std::uint64_t sender, std::uint64_t number, Confirmed outcome) {
+    client.confirm(sender, number, outcome);
+  }
+  std::size_t unconfirmed() {
+    GilRelease release;
+    return client.unconfirmed();
+  }
+  std::uint64_t sent_again() {
+    GilRelease release;
+    return client.sent_again();
+  }
+  std::size_t confirmations_owed() {
+    GilRelease release;
+    return client.confirmations_owed();
   }
   bool flush_all(float timeout) {
     GilRelease release;
@@ -958,7 +987,18 @@ PYBIND11_MODULE(_native, module) {
              "It waited for a connection to come up past its timeout, or, sent with no time to wait, found none live.")
       .value("CONNECTION_LOST", multiplexer::DropReason::CONNECTION_LOST,
              "Its connection ended and nothing else could take it: a pinned lane's, a copy for ALL.")
-      .value("SHUT_DOWN", multiplexer::DropReason::SHUT_DOWN, "The client shut down before it went.");
+      .value("SHUT_DOWN", multiplexer::DropReason::SHUT_DOWN, "The client shut down before it went.")
+      .value("NOT_CONFIRMED", multiplexer::DropReason::NOT_CONFIRMED,
+             "A confirmed send (set_delivery's confirm): no consumer confirmed it by its batch's deadline.")
+      .value("FAILED", multiplexer::DropReason::FAILED, "A confirmed send: its consumer's handler raised on it.");
+
+  pybind11::enum_<multiplexer::Confirmed>(module, "Confirmed",
+                                          "What became of a message of a confirmed batch, as its consumer tells its "
+                                          "producer; see the clients' confirm() and docs/delivery.md.")
+      .value("PROCESSED", multiplexer::Confirmed::PROCESSED, "The program is done with it.")
+      .value("REFUSED", multiplexer::Confirmed::REFUSED,
+             "Not processed, the consumer leaving or closing: its producer sends it again.")
+      .value("FAILED", multiplexer::Confirmed::FAILED, "It cannot be processed: its producer gives up on it.");
 
   pybind11::class_<multiplexer::ConnectionWrapper>(
       module, "ConnectionWrapper", "A connection to one multiplexer, held weakly: false once it is gone.")
@@ -1052,31 +1092,42 @@ PYBIND11_MODULE(_native, module) {
           pybind11::arg("filters"), pybind11::arg("on_acknowledged") = pybind11::none(),
           "Which keys of each message type reach this peer; see multiplexer.mxclient.Client.set_key_filters.")
       .def(
-          "set_batching",
-          [](multiplexer::PythonClient& client, std::uint32_t type, std::optional<std::string> key,
-             std::int64_t max_records, std::int64_t max_bytes, double max_delay) {
-            const multiplexer::BasicClient::Batching batching =
-                multiplexer::batching_from(max_records, max_bytes, max_delay);
+          "set_delivery",
+          [](multiplexer::PythonClient& client, std::uint32_t type, std::optional<std::string> key, bool batch,
+             std::int64_t max_records, std::int64_t max_bytes, double max_delay, bool confirm, double retry_after,
+             double timeout) {
+            const multiplexer::BasicClient::Delivery delivery =
+                multiplexer::delivery_from(batch, max_records, max_bytes, max_delay, confirm, retry_after, timeout);
             if (key) {
-              client.set_batching(type, *key, batching);
+              client.set_delivery(type, *key, delivery);
             } else {
-              client.set_batching(type, batching);
+              client.set_delivery(type, delivery);
             }
           },
-          pybind11::arg("type"), pybind11::arg("key"), pybind11::arg("max_records"), pybind11::arg("max_bytes"),
-          pybind11::arg("max_delay"),
-          "Batch the events of a type or key; see multiplexer.mxclient.Client.set_batching.")
+          pybind11::arg("type"), pybind11::arg("key"), pybind11::arg("batch"), pybind11::arg("max_records"),
+          pybind11::arg("max_bytes"), pybind11::arg("max_delay"), pybind11::arg("confirm"),
+          pybind11::arg("retry_after"), pybind11::arg("timeout"),
+          "How the events of a type or key go; see multiplexer.mxclient.Client.set_delivery.")
       .def(
-          "clear_batching",
+          "confirm",
+          [](multiplexer::PythonClient& client, std::uint64_t sender, std::uint64_t number,
+             multiplexer::Confirmed outcome) { client.confirm(sender, number, outcome); },
+          pybind11::arg("sender"), pybind11::arg("number"), pybind11::arg("outcome"),
+          "Tell the producer `sender` what became of its message `number`; see multiplexer.mxclient.Client.confirm.")
+      .def("unconfirmed", &multiplexer::PythonClient::unconfirmed)
+      .def("sent_again", &multiplexer::PythonClient::sent_again)
+      .def("confirmations_owed", &multiplexer::PythonClient::confirmations_owed)
+      .def(
+          "clear_delivery",
           [](multiplexer::PythonClient& client, std::uint32_t type, std::optional<std::string> key) {
             if (key) {
-              client.clear_batching(type, *key);
+              client.clear_delivery(type, *key);
             } else {
-              client.clear_batching(type);
+              client.clear_delivery(type);
             }
           },
           pybind11::arg("type"), pybind11::arg("key"),
-          "No batching for a type or key any more; see multiplexer.mxclient.Client.clear_batching.")
+          "No delivery set for a type or key any more; see multiplexer.mxclient.Client.clear_delivery.")
       .def("routing_acknowledged", &multiplexer::PythonClient::routing_acknowledged)
       .def("held_for_a_connection", &multiplexer::PythonClient::held_for_a_connection,
            "How many messages wait for a connection to come up; see "
@@ -1168,12 +1219,28 @@ PYBIND11_MODULE(_native, module) {
            pybind11::arg("on_acknowledged") = pybind11::none(),
            "Which keys of each message type reach this peer; see "
            "multiplexer.threaded_client.ThreadedClient.set_key_filters.")
-      .def("set_batching", &multiplexer::PythonThreadedClient::set_batching, pybind11::arg("type"),
-           pybind11::arg("key"), pybind11::arg("max_records"), pybind11::arg("max_bytes"), pybind11::arg("max_delay"),
-           "Batch the events of a type or key; see multiplexer.threaded_client.ThreadedClient.set_batching.")
-      .def("clear_batching", &multiplexer::PythonThreadedClient::clear_batching, pybind11::arg("type"),
+      .def("set_delivery", &multiplexer::PythonThreadedClient::set_delivery, pybind11::arg("type"),
+           pybind11::arg("key"), pybind11::arg("batch"), pybind11::arg("max_records"), pybind11::arg("max_bytes"),
+           pybind11::arg("max_delay"), pybind11::arg("confirm"), pybind11::arg("retry_after"), pybind11::arg("timeout"),
+           "How the events of a type or key go; see multiplexer.threaded_client.ThreadedClient.set_delivery.")
+      .def("confirm", &multiplexer::PythonThreadedClient::confirm, pybind11::arg("sender"), pybind11::arg("number"),
+           pybind11::arg("outcome"),
+           "Tell the producer `sender` what became of its message `number`, from any thread; see "
+           "multiplexer.threaded_client.ThreadedClient.confirm.")
+      .def(
+          "confirm_after_on_message",
+          [](multiplexer::PythonThreadedClient& client, bool confirm) {
+            client.client.confirm_after_on_message(confirm);
+          },
+          pybind11::arg("confirm"),
+          "Whether a message of a confirmed batch is confirmed once on_message returned from it; before connecting.")
+      .def("unconfirmed", &multiplexer::PythonThreadedClient::unconfirmed)
+      .def("sent_again", &multiplexer::PythonThreadedClient::sent_again)
+      .def("confirmations_owed", &multiplexer::PythonThreadedClient::confirmations_owed)
+      .def("clear_delivery", &multiplexer::PythonThreadedClient::clear_delivery, pybind11::arg("type"),
            pybind11::arg("key"),
-           "No batching for a type or key any more; see multiplexer.threaded_client.ThreadedClient.clear_batching.")
+           "No delivery set for a type or key any more; see "
+           "multiplexer.threaded_client.ThreadedClient.clear_delivery.")
       .def("routing_acknowledged", &multiplexer::PythonThreadedClient::routing_acknowledged)
       .def("held_for_a_connection", &multiplexer::PythonThreadedClient::held_for_a_connection,
            "How many messages wait for a connection to come up; see "
@@ -1245,6 +1312,8 @@ PYBIND11_MODULE(_native, module) {
   module.attr("MAX_KEY_SIZE") = pybind11::int_(multiplexer::MAX_KEY_SIZE);
   module.attr("DEFAULT_BATCH_MAX_RECORDS") = pybind11::int_(multiplexer::DEFAULT_BATCH_MAX_RECORDS);
   module.attr("DEFAULT_BATCH_MAX_BYTES") = pybind11::int_(multiplexer::DEFAULT_BATCH_MAX_BYTES);
+  module.attr("DEFAULT_RETRY_AFTER") = pybind11::float_(multiplexer::DEFAULT_RETRY_AFTER);
+  module.attr("CONFIRMATIONS_GATHERED_MAX") = pybind11::int_(multiplexer::CONFIRMATIONS_GATHERED_MAX);
   module.attr("MAX_BATCH_RECORDS") = pybind11::int_(multiplexer::MAX_BATCH_RECORDS);
   module.attr("MAX_KEY_PATTERN_SIZE") = pybind11::int_(multiplexer::MAX_KEY_PATTERN_SIZE);
   module.attr("HEARTBIT_INTERVAL") = pybind11::float_(multiplexer::HEARTBIT_INTERVAL);

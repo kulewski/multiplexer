@@ -12,7 +12,9 @@
 //! PING, each with a PING carrying its payload back; a DELIVERY_ERROR for
 //! one of its own messages it keeps to itself, logged. After every poll,
 //! message or not, and at once when a change of the routing or the key
-//! filters is acknowledged, `periodic_task()` runs.
+//! filters is acknowledged, `periodic_task()` runs. A message of a
+//! confirmed batch is confirmed to its producer once the handler returned
+//! from it, Failed when it failed, what is owed going as the loop waits.
 //!
 //! The client lives behind a mutex, which the loop holds while it waits
 //! for a message, and a reply or a handle's call while it is queued: a
@@ -34,6 +36,7 @@ use std::time::{Duration, Instant};
 use super::{as_reply, handle, nothing_more_arrives, Controlled, Handler, Replier, Request, ServeError, ServerHandle};
 use crate::constants::types;
 use crate::core::client::{guarded, DropObserver, DropReason};
+use crate::core::confirming::Confirmed;
 use crate::defaults::{CLOSE_FLUSH_SECONDS, DEFAULT_TIMEOUT};
 use crate::endpoint::parse_endpoint;
 use crate::error::{Error, Result};
@@ -565,14 +568,22 @@ impl<H: Handler> BaseMultiplexerServer<H> {
     }
 
     /// One message: the protocol's own answered here, the rest to the
-    /// handler. The handler's failure when the server ends for it.
+    /// handler, a message of a confirmed batch confirmed once it returned,
+    /// Failed when it failed. The handler's failure when the server ends for
+    /// it.
     fn handle_received(&mut self, incoming: Incoming) -> Option<super::HandlerError> {
         if incoming.message.r#type <= types::MAX_MULTIPLEXER_META_PACKET {
             self.handle_internal(incoming);
             return None;
         }
+        let confirmation = incoming.message.confirmation.map(|number| (incoming.message.sender, number));
         let request = Request::new(incoming, Replier::Sync(Arc::clone(&self.shared)));
-        handle(&self.handler, request, "BaseMultiplexerServer")
+        let handled = handle(&self.handler, request, "BaseMultiplexerServer");
+        if let Some((sender, number)) = confirmation {
+            let outcome = if handled.failed { Confirmed::Failed } else { Confirmed::Processed };
+            self.shared.lock().confirm_number(sender, number, outcome);
+        }
+        handled.end
     }
 
     /// The protocol's messages the server answers itself: a search, when

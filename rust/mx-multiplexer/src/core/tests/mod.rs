@@ -3,6 +3,7 @@
 //! the client did, by the C++ tests and docs each case names.
 
 mod batching;
+mod confirming;
 mod connection;
 mod outbox;
 mod plain;

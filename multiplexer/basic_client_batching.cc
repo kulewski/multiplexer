@@ -1,38 +1,42 @@
-// BasicClient's batching: the events the program sends without waiting for
-// them, of the types and keys it named (set_batching), go together, several
-// in one message (MultiplexerMessage.batch), which the receiving library
-// splits back into one message each (_split_batch in basic_client.cc). The
-// rules are at BasicClient::set_batching; the structures in batching.h.
+// BasicClient's delivery: the events the program sends without waiting for
+// them, of the types and keys it set a delivery for (set_delivery), go by
+// it: with `batch` together, several in one message
+// (MultiplexerMessage.batch), which the receiving library splits back into
+// one message each (_split_batch in basic_client.cc); with `confirm` kept
+// until confirmed (basic_client_confirm.cc); with neither as any send, by
+// the setting's timeout. The rules are at BasicClient::Delivery; the
+// structures in batching.h.
 //
 // A message for a batch joins the open batch of its group, its type and
-// key, or opens one. A batch is a list of the messages' frames: nothing is
-// serialized again until it goes. It goes (_close_batch) when it is full,
-// by messages or by bytes, when its max_delay is over, one timer running to
-// the earliest, or, with max_delay 0, when a connection has nothing left to
-// write, on it: while one has, a message goes at once and alone, as without
-// batching, and only while every connection is busy do messages gather,
-// each batch going as soon as one is not (Connection::notify_when_idle), or
-// at its first message's deadline, the time it waited being a wait for
-// room. A batch that goes on its own account, full, at its delay or at its
-// deadline, takes those waiting for a connection with nothing left to write
-// with it. Anything sent that does not join a batch, a flush, a shutdown
-// and a change of what is batched first let every batch go, in the order
-// they began, so that a message overtakes no batched one sent before it; a
-// batch may go before an older one of another group. Open batches are
-// indexed by the order they began and by when they are due, so that each
-// step is a look-up however many keys are open.
+// key, or opens one, whose deadline is its timeout from then. A batch is a
+// list of the messages' frames: nothing is serialized again until it goes.
+// It goes (_close_batch) when it is full, by messages or by bytes, when its
+// max_delay is over, one timer running to the earliest, or, with max_delay
+// 0, when a connection has nothing left to write, on it: while one has, a
+// message goes at once and alone, as without batching, and only while
+// every connection is busy do messages gather, each batch going as soon as
+// one is not (Connection::notify_when_idle), or at its deadline, the time
+// it waited being a wait for room. A batch that goes on its own account,
+// full, at its delay or at its deadline, takes those waiting for a
+// connection with nothing left to write with it. Anything sent that does
+// not join a batch, a flush, a shutdown and a change of what is set first
+// let every batch go, in the order they began, so that a message overtakes
+// no batched one sent before it; a batch may go before an older one of
+// another group. Open batches are indexed by the order they began and by
+// when they are due, so that each step is a look-up however many keys are
+// open. A confirmed message of a type not batched goes at once, a batch of
+// one.
 //
 // Going, a batch becomes one frame (_send_batch): an envelope with the
 // group's type and key, a fresh id and this client as its sender, and the
 // messages' serialized forms in a MessageBatch inside it (BatchEnvelope,
 // serialized once, straight into the frame), measured as it goes on the
 // wire and cut where it would be over max_bytes, as many at once as cover
-// the excess, what is cut going next in a batch of its own; a batch of one
-// goes as the message itself. The frame then goes as any message does
-// (_send): round robin, waiting for room and for a connection until the
-// earliest deadline among its messages, counted from their sends in a batch
-// with no delay and from now in one with a delay. Its end
-// is each message's: their trackers and `done`s hear it from the frame's,
+// the excess, what is cut going next in a batch of its own with the same
+// deadline; a batch of one goes as the message itself, unless confirmed.
+// The frame then goes as any message does (_send): round robin, waiting
+// for room and for a connection until the batch's deadline. Its end is
+// each message's: their trackers and `done`s hear it from the frame's,
 // followed as any send's (outbox_flush.cc), and a drop of the frame is told
 // for each message (report_drop, RawMessage::batch_ids).
 #include <algorithm>
@@ -55,54 +59,65 @@ namespace multiplexer {
 
 using mx::repr;
 
-void BasicClient::check_batching(std::uint32_t type, const std::string* key, const Batching& batching) {
+void BasicClient::check_delivery(std::uint32_t type, const std::string* key, const Delivery& delivery) {
   if (type <= types::MAX_MULTIPLEXER_META_PACKET) {
-    throw std::invalid_argument("batching for message type " + std::to_string(type) + ", a protocol type");
+    throw std::invalid_argument("a delivery for message type " + std::to_string(type) + ", a protocol type");
   }
   if (key && key->size() > MAX_KEY_SIZE) {
-    throw std::invalid_argument("batching for a key of " + std::to_string(key->size()) + " bytes, over the limit of " +
-                                std::to_string(MAX_KEY_SIZE) + " (MAX_KEY_SIZE)");
+    throw std::invalid_argument("a delivery for a key of " + std::to_string(key->size()) +
+                                " bytes, over the limit of " + std::to_string(MAX_KEY_SIZE) + " (MAX_KEY_SIZE)");
   }
-  if (batching.max_records < 1 || batching.max_records > MAX_BATCH_RECORDS) {
-    throw std::invalid_argument("batching with max_records " + std::to_string(batching.max_records) +
+  if (delivery.max_records < 1 || delivery.max_records > MAX_BATCH_RECORDS) {
+    throw std::invalid_argument("a delivery with max_records " + std::to_string(delivery.max_records) +
                                 ": 1 to MAX_BATCH_RECORDS (" + std::to_string(MAX_BATCH_RECORDS) + ")");
   }
-  if (batching.max_bytes < 1 || batching.max_bytes > MAX_MESSAGE_SIZE) {
-    throw std::invalid_argument("batching with max_bytes " + std::to_string(batching.max_bytes) +
+  if (delivery.max_bytes < 1 || delivery.max_bytes > MAX_MESSAGE_SIZE) {
+    throw std::invalid_argument("a delivery with max_bytes " + std::to_string(delivery.max_bytes) +
                                 ": 1 to MAX_MESSAGE_SIZE (" + std::to_string(MAX_MESSAGE_SIZE) + ")");
   }
-  if (!(batching.max_delay >= 0 && batching.max_delay <= mx::MAX_SECONDS)) {  // NaN and infinity too
-    throw std::invalid_argument("batching with max_delay " + repr(batching.max_delay) +
+  if (!(delivery.max_delay >= 0 && delivery.max_delay <= mx::MAX_SECONDS)) {  // NaN and infinity too
+    throw std::invalid_argument("a delivery with max_delay " + repr(delivery.max_delay) +
                                 ": a number of seconds, 0 to MAX_SECONDS (1e9)");
+  }
+  if (delivery.confirm && !(delivery.retry_after > 0 && delivery.retry_after <= mx::MAX_SECONDS)) {
+    throw std::invalid_argument("a delivery with retry_after " + repr(delivery.retry_after) +
+                                ": a number of seconds, over 0 and up to MAX_SECONDS (1e9)");
+  }
+  // A batch's time counts from its first message: one no longer than its
+  // delay would give up on it as it goes, and 0 on a message alone at once.
+  if (std::isnan(delivery.timeout) ||
+      (delivery.timeout >= 0 && delivery.timeout <= (delivery.batch ? delivery.max_delay : 0))) {
+    throw std::invalid_argument("a delivery with timeout " + repr(delivery.timeout) + ": a number of seconds over " +
+                                (delivery.batch ? "max_delay" : "0") + ", or negative for no deadline");
   }
 }
 
-void BasicClient::set_batching(std::uint32_t type, const Batching& batching) {
+void BasicClient::set_delivery(std::uint32_t type, const Delivery& delivery) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  check_batching(type, nullptr, batching);
+  check_delivery(type, nullptr, delivery);
   close_batches();
-  batcher_->by_type[type] = batching;
+  batcher_->by_type[type] = delivery;
 }
 
-void BasicClient::set_batching(std::uint32_t type, const std::string& key, const Batching& batching) {
+void BasicClient::set_delivery(std::uint32_t type, const std::string& key, const Delivery& delivery) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  check_batching(type, &key, batching);
+  check_delivery(type, &key, delivery);
   close_batches();
-  batcher_->by_key[type].insert_or_assign(key, batching);
+  batcher_->by_key[type].insert_or_assign(key, delivery);
 }
 
-void BasicClient::clear_batching(std::uint32_t type) {
+void BasicClient::clear_delivery(std::uint32_t type) {
   MX_DCHECK_RUN_ON(&owner_thread());
   close_batches();
   batcher_->by_type.erase(type);
   batcher_->by_key.erase(type);
 }
 
-void BasicClient::clear_batching(std::uint32_t type, const std::string& key) {
+void BasicClient::clear_delivery(std::uint32_t type, const std::string& key) {
   MX_DCHECK_RUN_ON(&owner_thread());
   close_batches();
   Batcher& batcher = *batcher_;
-  std::unordered_map<std::uint32_t, std::map<std::string, Batching>>::iterator keys = batcher.by_key.find(type);
+  std::unordered_map<std::uint32_t, std::map<std::string, Delivery>>::iterator keys = batcher.by_key.find(type);
   if (keys != batcher.by_key.end() && keys->second.erase(key) && keys->second.empty()) {
     batcher.by_key.erase(keys);
   }
@@ -113,7 +128,7 @@ bool BasicClient::batch_timer_armed() const {
   return batcher_->armed != std::chrono::steady_clock::time_point::max();
 }
 
-bool BasicClient::batching() const {
+bool BasicClient::has_delivery() const {
   MX_DCHECK_RUN_ON(&owner_thread());
   return batcher_->configured();
 }
@@ -127,24 +142,24 @@ std::size_t BasicClient::batched_messages() const {
   return messages;
 }
 
-// What batching applies to `raw`, or null: the setting for its type and
+// The delivery that applies to `raw`, or null: the setting for its type and
 // key, else for its type, when it is a plain event. A frame made of
 // serialized bytes is read once, and only for a type something is set for.
-const BasicClient::Batching* BasicClient::_batching_for(const std::shared_ptr<const RawMessage>& raw) {
+const BasicClient::Delivery* BasicClient::_delivery_for(const std::shared_ptr<const RawMessage>& raw) {
   Batcher& batcher = *batcher_;
   if (!batcher.configured()) {
     return nullptr;
   }
   const std::uint32_t type = raw->type();
-  std::unordered_map<std::uint32_t, Batching>::const_iterator by_type = batcher.by_type.find(type);
-  std::unordered_map<std::uint32_t, std::map<std::string, Batching>>::const_iterator keys = batcher.by_key.find(type);
+  std::unordered_map<std::uint32_t, Delivery>::const_iterator by_type = batcher.by_type.find(type);
+  std::unordered_map<std::uint32_t, std::map<std::string, Delivery>>::const_iterator keys = batcher.by_key.find(type);
   if (by_type == batcher.by_type.end() && keys == batcher.by_key.end()) {
     return nullptr;
   }
   if (raw->batchable() == RawMessage::Batchable::UNKNOWN) {
     // Made of bytes the program gave, which nothing checked: one that is
     // not the type it was given, or whose key is too long, goes alone, as
-    // without batching.
+    // with no delivery set.
     MultiplexerMessage& parsed = batcher.scratch;
     if (parsed.ParseFromString(raw->get_message()) && parsed.type() == type && parsed.key().size() <= MAX_KEY_SIZE &&
         RawMessage::plain_event(parsed)) {
@@ -157,80 +172,102 @@ const BasicClient::Batching* BasicClient::_batching_for(const std::shared_ptr<co
   if (raw->batchable() != RawMessage::Batchable::YES) {
     return nullptr;
   }
-  return _batching_for(type, raw->batch_keyed(), raw->batch_key());
+  return _delivery_for(type, raw->batch_keyed(), raw->batch_key());
 }
 
-// What batching applies to a plain event of `type` with its key, `key`
+// The delivery that applies to a plain event of `type` with its key, `key`
 // when `keyed`, or null: the setting for its key, else for its type.
-const BasicClient::Batching* BasicClient::_batching_for(std::uint32_t type, bool keyed, const std::string& key) const {
+const BasicClient::Delivery* BasicClient::_delivery_for(std::uint32_t type, bool keyed, const std::string& key) const {
   const Batcher& batcher = *batcher_;
   if (keyed) {
-    std::unordered_map<std::uint32_t, std::map<std::string, Batching>>::const_iterator keys = batcher.by_key.find(type);
+    std::unordered_map<std::uint32_t, std::map<std::string, Delivery>>::const_iterator keys = batcher.by_key.find(type);
     if (keys != batcher.by_key.end()) {
-      std::map<std::string, Batching>::const_iterator found = keys->second.find(key);
+      std::map<std::string, Delivery>::const_iterator found = keys->second.find(key);
       if (found != keys->second.end()) {
         return &found->second;
       }
     }
   }
-  std::unordered_map<std::uint32_t, Batching>::const_iterator by_type = batcher.by_type.find(type);
+  std::unordered_map<std::uint32_t, Delivery>::const_iterator by_type = batcher.by_type.find(type);
   return by_type != batcher.by_type.end() ? &by_type->second : nullptr;
 }
 
-// Whether a synchronous client's send of `raw` for `batching` must run the
+// Whether a synchronous client's send of `raw` by `delivery` must run the
 // loop first (send's `poll_first`): the message chooses a connection in
-// this call, going alone, too big or with no delay, where a free connection
-// decides, or letting its batch go, full with it or without room for it; or
-// a batch's delay is over, which only the loop's timer lets go. Else it
-// joins its batch and nothing is written, and the call runs no loop, a
-// system call spared for each message.
+// this call, going alone, not batched, too big or with no delay, where a
+// free connection decides, or letting its batch go, full with it or
+// without room for it; or a batch's delay is over, which only the loop's
+// timer lets go. Else it joins its batch and nothing is written, and the
+// call runs no loop, a system call spared for each message.
 bool BasicClient::_batch_needs_loop(std::uint32_t type, bool keyed, const std::string& key, std::size_t bytes,
-                                    const Batching& batching) const {
+                                    const Delivery& delivery) const {
   const Batcher& batcher = *batcher_;
-  if (batching.max_delay == 0 ||
+  if (!delivery.batch || delivery.max_delay == 0 ||
       (!batcher.by_due.empty() && batcher.by_due.begin()->first <= std::chrono::steady_clock::now())) {
     return true;
   }
   const BatchPtr batch = batcher.find(type, keyed, key);
   const std::size_t records = batch ? batch->records.size() : 0;
-  return records + 1 >= batching.max_records || (batch ? batch->bytes : 0) + bytes >= batching.max_bytes;
+  return records + 1 >= delivery.max_records || (batch ? batch->bytes : 0) + bytes >= delivery.max_bytes;
 }
 
-bool BasicClient::_batch(const std::shared_ptr<const RawMessage>& raw, const Batching& batching, float timeout,
+bool BasicClient::_batch(const std::shared_ptr<const RawMessage>& raw, const Delivery& delivery,
                          std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done) {
   BatchRecord record;
   record.raw = raw;
-  return _batch_record(&record, raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), batching,
-                       timeout, trackers, done);
+  return _batch_record(&record, raw->type(), raw->batch_keyed(), raw->batch_key(), raw->get_message().size(), delivery,
+                       trackers, done);
 }
 
-// `record`, a frame or bytes alone of `bytes` bytes, moved into the open
-// batch of its group, `type` and its key, `key` when `keyed`, or one opened
-// for it; or sent alone at once, as without batching.
+// `record`, a frame or bytes alone of `bytes` bytes, by `delivery`, which
+// batches or confirms: moved into the open batch of its group, `type` and
+// its key, `key` when `keyed`, or one opened for it; or sent alone at once.
 bool BasicClient::_batch_record(BatchRecord* record, std::uint32_t type, bool keyed, const std::string& key,
-                                std::size_t bytes, const Batching& batching, float timeout,
+                                std::size_t bytes, const Delivery& delivery,
                                 std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done) {
   Batcher& batcher = *batcher_;
-  BatchPtr batch = batcher.find(type, keyed, key);
+  BatchPtr batch = delivery.batch ? batcher.find(type, keyed, key) : BatchPtr();
   // A message the batch has no room for lets it go first.
-  if (batch && (batch->records.size() >= batching.max_records || batch->bytes + bytes > batching.max_bytes)) {
+  if (batch && (batch->records.size() >= delivery.max_records || batch->bytes + bytes > delivery.max_bytes)) {
     _close_on_its_own(batch);
     batch.reset();
   }
   if (!batch) {
-    // Too big for a batch, or, with no delay, a connection free to write
-    // it now, or none to write anything: it goes alone, at once, as
-    // without batching, after every batch.
-    if (bytes >= batching.max_bytes || (batching.max_delay == 0 && _idle_or_none())) {
+    // Not batched, too big for a batch, or, with no delay, a connection
+    // free to write it now, or none to write anything: it goes alone, at
+    // once, as without batching, after every batch, by its timeout from
+    // now; a confirmed one as a batch of one, which numbers it.
+    if (!delivery.batch || bytes >= delivery.max_bytes || (delivery.max_delay == 0 && _idle_or_none())) {
       close_batches();
-      return _send(_record_frame(record, type), false, LanePtr(), _deadline_after(timeout), 0, trackers, NULL, done);
+      if (!delivery.confirm) {
+        return _send(_record_frame(record, type), false, LanePtr(), _deadline_after(delivery.timeout), 0, trackers,
+                     NULL, done);
+      }
+      BatchPtr alone = std::make_shared<Batch>();
+      alone->group.type = type;
+      alone->group.keyed = keyed;
+      alone->group.key = key;
+      alone->delivery = delivery;
+      alone->deadline = _deadline_after(delivery.timeout);
+      alone->closed = true;
+      record->done = done;
+      if (trackers) {
+        record->state = std::make_shared<SendState>(SendState::QUEUED);
+        trackers->push_back(record->state);
+      }
+      alone->bytes = bytes;
+      alone->records.push_back(std::move(*record));
+      _send_batch(alone, nullptr);
+      return true;
     }
     batch = std::make_shared<Batch>();
     batch->began = ++batcher.began;
     batch->group.type = type;
     batch->group.keyed = keyed;
     batch->group.key = key;  // once a batch: a message's is never copied
-    batch->batching = batching;
+    batch->delivery = delivery;
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    batch->deadline = _deadline_after(delivery.timeout, now);
     Batcher::OfType& of_type = batcher.by_group[type];
     if (keyed) {
       of_type.keyed.emplace(batch->group.key, batch);
@@ -238,29 +275,26 @@ bool BasicClient::_batch_record(BatchRecord* record, std::uint32_t type, bool ke
       of_type.keyless = batch;
     }
     batcher.open.emplace(batch->began, batch);
-    if (batching.max_delay > 0) {
-      _due_at(batch, std::chrono::steady_clock::now() + mx::from_seconds(batching.max_delay));
+    if (delivery.max_delay > 0) {
+      _due_at(batch, now + mx::from_seconds(delivery.max_delay));
     } else {
+      // A wait for room, which goes at the deadline at the latest.
       batch->waits_for_idle = true;
       batcher.waiting_for_idle.insert(batch->began);
+      if (batch->deadline != std::chrono::steady_clock::time_point::max()) {
+        _due_at(batch, batch->deadline);
+      }
       _wait_for_idle();
     }
   }
   record->done = done;
-  record->timeout = timeout;
-  if (batch->waits_for_idle) {
-    record->deadline = _deadline_after(timeout);  // a wait for room: from now
-    if (record->deadline < batch->due) {
-      _due_at(batch, record->deadline);
-    }
-  }
   if (trackers) {
     record->state = std::make_shared<SendState>(SendState::QUEUED);
     trackers->push_back(record->state);
   }
   batch->bytes += bytes;
   batch->records.push_back(std::move(*record));
-  if (batch->records.size() >= batching.max_records || batch->bytes >= batching.max_bytes) {
+  if (batch->records.size() >= delivery.max_records || batch->bytes >= delivery.max_bytes) {
     _close_on_its_own(batch);
   }
   return true;
@@ -353,12 +387,15 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
   if (idle && idle->living()) {
     lane = std::make_shared<Lane>(_wrap(idle->shared_from_this()), false);
   }
+  // A confirmed batch always goes as an envelope, which numbers its
+  // messages, a batch of one too (basic_client_confirm.cc).
+  const bool confirm = batch->delivery.confirm;
   std::vector<Batch::Record>& records = batch->records;
   std::size_t begin = 0;
   while (begin < records.size()) {
     std::size_t end = records.size();
     std::shared_ptr<const RawMessage> frame;
-    if (end - begin > 1) {
+    if (end - begin > 1 || confirm) {
       // The envelope holds the batch itself, so that its messages are
       // serialized once, straight into the frame (BatchEnvelope): the same
       // bytes as a MultiplexerMessage whose batch holds them serialized.
@@ -380,23 +417,29 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
         inside.mutable_message()->Add(records[index].raw ? RawMessage::TakeBody(records[index].raw)
                                                          : std::move(records[index].body));
       }
+      if (confirm) {
+        _numbered(records, begin, end, &envelope);  // measured with the rest
+      }
       // Where the message would be over max_bytes, measured as it goes on
       // the wire, its last messages are cut, to go next: at once as many as
       // their own sizes cover the excess with, which each adds at least to
       // the message, and the rest measured again, nothing serialized until
       // the frame is made.
-      for (std::size_t size = envelope.ByteSizeLong(); end - begin > 1 && size > batch->batching.max_bytes;
+      for (std::size_t size = envelope.ByteSizeLong(); end - begin > 1 && size > batch->delivery.max_bytes;
            size = envelope.ByteSizeLong()) {
         std::size_t cut = 0;
-        while (end - begin > 1 && cut < size - batch->batching.max_bytes) {
+        while (end - begin > 1 && cut < size - batch->delivery.max_bytes) {
           std::string* last = inside.mutable_message(inside.message_size() - 1);
           cut += last->size();
           _give_back(&records[end - 1], last);
           inside.mutable_message()->RemoveLast();
           --end;
         }
+        if (confirm) {
+          _numbered(records, begin, end, &envelope);  // those cut keep their numbers, next
+        }
       }
-      if (end - begin > 1) {
+      if (end - begin > 1 || confirm) {
         try {
           frame = _batch_frame(envelope);
         } catch (const std::exception& error) {
@@ -428,29 +471,39 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
         }
       }
     }
+    if (!frame && confirm) {
+      _cannot_confirm(batch, begin, end);  // no envelope holds them: given up on, as they cannot be numbered
+      begin = end;
+      continue;
+    }
     if (!frame) {
       end = begin + 1;
       frame = _record_frame(&records[begin], batch->group.type);  // a batch of one goes as the message itself
     }
-    // The frame waits for room and for a connection until the earliest of
-    // its messages' deadlines: from their sends in a batch that waited for
-    // a connection with nothing left to write, from now in one that waited
-    // for its delay (see Batch::waits_for_idle).
-    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
-    bool followed = false;
-    std::shared_ptr<std::vector<Batch::Record>> taken = std::make_shared<std::vector<Batch::Record>>();
-    taken->reserve(end - begin);
-    for (std::size_t index = begin; index < end; ++index) {
-      deadline = std::min(
-          deadline, batch->waits_for_idle ? records[index].deadline : _deadline_after(records[index].timeout, now));
-      followed = followed || records[index].state || records[index].done;
-      records[index].raw.reset();  // its bytes are in the frame now: only its end is kept
-      taken->push_back(std::move(records[index]));
+    if (confirm) {
+      // Kept until confirmed, the frame waiting for room and for a
+      // connection until the batch's deadline.
+      frame->mark_confirmed();  // its drop told by the confirmed sends
+      _wait_for_confirmation(batch, begin, end, frame, lane);
+      begin = end;
+      continue;
     }
-    // The frame's end is each message's, in the order they were sent.
+    // The frame waits for room and for a connection until the batch's
+    // deadline. Its end is each message's that someone follows, in the
+    // order they were sent; the rest keep nothing.
+    std::shared_ptr<std::vector<Batch::Record>> taken;
+    for (std::size_t index = begin; index < end; ++index) {
+      Batch::Record& record = records[index];
+      if (record.state || record.done) {
+        if (!taken) {
+          taken = std::make_shared<std::vector<Batch::Record>>();
+        }
+        record.raw.reset();  // its bytes are in the frame now: only its end is kept
+        taken->push_back(std::move(record));
+      }
+    }
     SendCallback ended;
-    if (followed) {
+    if (taken) {
       ended = [taken](unsigned int written) {
         for (Batch::Record& record : *taken) {
           if (record.state && *record.state == SendState::QUEUED) {
@@ -469,7 +522,7 @@ void BasicClient::_send_batch(const BatchPtr& batch, Connection* idle) {
         }
       };
     }
-    _send(frame, false, lane, deadline, 0, NULL, NULL, ended);
+    _send(frame, false, lane, batch->deadline, 0, NULL, NULL, ended);
     begin = end;
   }
 }

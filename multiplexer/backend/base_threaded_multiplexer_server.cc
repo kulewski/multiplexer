@@ -20,6 +20,9 @@ namespace backend {
 using mx::repr;
 
 Request::~Request() {
+  if (confirms_ && mxmsg().has_confirmation()) {
+    client_->confirm(mxmsg(), confirmed_);  // from any thread, through the io thread
+  }
   if (!answered_.load() && !dropped_) {
     MX_LOG(WARNING, LOWVERBOSITY,
            CTX("BaseThreadedMultiplexerServer")
@@ -70,6 +73,7 @@ BaseThreadedMultiplexerServer::BaseThreadedMultiplexerServer(const MultiplexerAd
   if (options_.workers < 1) {
     throw std::invalid_argument("workers must be at least 1");
   }
+  client_.confirm_after_on_message(false);  // a Request confirms its message as it goes
   // A closing server answers no search: the request that would follow is refused.
   client_.set_search_policy([this] { return !closed_.load() && should_respond_to_backend_for_packet_search(); });
 }
@@ -112,6 +116,7 @@ void BaseThreadedMultiplexerServer::_forget_the_parents_threads() MX_NO_THREAD_S
   new (&wake_) std::condition_variable_any();
   for (const RequestPtr& request : queue_) {
     request->dropped_ = true;
+    request->confirms_ = false;
   }
 }
 
@@ -339,6 +344,7 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
   }
   request->dropped_ = true;  // said below, not by the destructor
   if (accepting) {
+    request->confirms_ = false;  // its producer sends it again in time, by when the queue may have room
     // Counted with the client's own drop lines: at most about two a second.
     if (client_.drop_lines().first({BasicClient::REQUESTS_QUEUE_FULL, WARNING, 0, 0},
                                    [] { return "requests dropped: queue full"; })) {
@@ -358,6 +364,13 @@ void BaseThreadedMultiplexerServer::_on_message(const IncomingMessage& incoming)
 void BaseThreadedMultiplexerServer::_refuse(Request& request) {
   request.dropped_ = true;  // said here, not by the destructor
   const MultiplexerMessage& msg = request.mxmsg();
+  if (msg.has_confirmation()) {
+    // Told now, not at its end, which close() reaches after the client's
+    // shutdown: its producer sends it again at once.
+    request.confirms_ = false;
+    client_.confirm(msg, Confirmed::REFUSED);
+    return;
+  }
   if (msg.references()) {
     // A message that answers another is dropped: nobody retries a reply, and
     // refusing one could start a loop, a peer whose handler raised on the
@@ -439,6 +452,7 @@ void BaseThreadedMultiplexerServer::_work() {
     try {
       _handle(request);
     } catch (...) {
+      request->confirmed_ = Confirmed::FAILED;
       _fail(std::current_exception());
       failed = true;
     }
@@ -473,6 +487,7 @@ void BaseThreadedMultiplexerServer::_handle(const RequestPtr& request) {
   } catch (const std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY,
            CTX("BaseThreadedMultiplexerServer") TEXT(std::string("exception in handle_message: ") + error.what()));
+    request->confirmed_ = Confirmed::FAILED;
     if (!request->answered() && !request->mxmsg().references()) {
       // As BaseMultiplexerServer: a report that fails leaves the requester
       // to its timeout, and the handler's exception decides all the same;

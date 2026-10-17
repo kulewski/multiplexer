@@ -34,6 +34,7 @@ from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.clients import BackendError  # re-exported: the one class every client raises for BACKEND_ERROR
 from multiplexer.mxclient import (
     CLOSE_FLUSH_SECONDS,
+    Confirmed,
     ConnectionWrapper,
     DropReason,
     Lane,
@@ -75,6 +76,7 @@ class ThreadedClient:
         search_policy: Callable[[], object] | None = None,
         on_drop: Callable[[int, DropReason], None] | None = None,
         key_filters: Mapping[int, Iterable[str]] | None = None,
+        confirm_after_on_message: bool = True,
     ):
         """Start the io thread and connect to every (host, port) in `addresses`.
 
@@ -96,6 +98,13 @@ class ThreadedClient:
         `key_filters` is set_key_filters() made before the first
         connection, so that its welcome carries them.
 
+        A message of a confirmed batch (set_delivery's `confirm`) is
+        confirmed to its producer once `on_message` returned from it,
+        FAILED when it raised, unless `on_message` confirmed it itself; with
+        `confirm_after_on_message` false the program confirms each message
+        with confirm() or processed() once it is done with it, what a
+        handler that only queues the message, `queue.put`, must do.
+
         `on_message` may run before the constructor returns, once the first
         multiplexer welcomed the client: a handler that needs the client
         passes no addresses and calls connect_all() once it is assigned.
@@ -110,6 +119,7 @@ class ThreadedClient:
                 on_message(self._parse(raw))
 
         self._native = _native.ThreadedClient(type, native_callback if on_message is not None else None)
+        self._native.confirm_after_on_message(confirm_after_on_message)
         self.type = type
         if search_policy is not None:
             self._native.set_search_policy(search_policy)
@@ -218,38 +228,102 @@ class ThreadedClient:
         pattern that does not compile, and logs why. See docs/keys.md."""
         self._native.set_key_filters(key_filters_argument(filters), on_acknowledged)
 
-    def set_batching(
+    def set_delivery(
         self,
         type: int,
         key: str | None = None,
         *,
+        batch: bool = False,
         max_records: int = _native.DEFAULT_BATCH_MAX_RECORDS,
         max_bytes: int = _native.DEFAULT_BATCH_MAX_BYTES,
         max_delay: float = 0.0,
+        confirm: bool = False,
+        retry_after: float = _native.DEFAULT_RETRY_AFTER,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        """Send the events of message `type`, each key apart, or, given
-        `key`, of that key, ahead of what is set for its type, several in
-        one message, which the receiving library splits back into one
-        message each: those send_message() sends without waiting for them,
-        without flush or with a callback, through no lane and not to ALL. A batch goes once it holds `max_records`
-        messages, once one more would take it past `max_bytes` on the wire,
-        or `max_delay` seconds after its first message; with no delay, once
-        a connection has nothing left to write, so that a message sent while
-        one is free goes at once, and those sent while every one is busy go
-        together. A flush, a send that does not batch, another
-        set_batching() or clear_batching() and shutdown() first let every
-        batch go. Checked here, raising ValueError for a protocol message
-        type, a key over MAX_KEY_SIZE bytes, a count below 1, max_records
-        over MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, or a delay
-        negative, over MAX_SECONDS or not finite; in effect
-        for every send made after the call. See docs/batching.md."""
-        self._native.set_batching(type, key, max_records, max_bytes, max_delay)
+        """How the events of message `type` go, each key apart, or, given
+        `key`, those of that key, ahead of what is set for its type: those
+        send_message() sends without waiting for them, without flush or
+        with a callback, through no lane and not to ALL. See
+        docs/delivery.md.
 
-    def clear_batching(self, type: int, key: str | None = None) -> None:
-        """No batching from now on for message `type`, its keys' settings
-        included, or, given `key`, for that key, which then batches as its
-        type says; every batch goes first."""
-        self._native.clear_batching(type, key)
+        With `batch`, several go in one message, which the receiving
+        library splits back into one message each. A batch goes once it
+        holds `max_records` messages, once one more would take it past
+        `max_bytes` on the wire, or `max_delay` seconds after its first
+        message; with no delay, once a connection has nothing left to
+        write, so that a message sent while one is free goes at once, and
+        those sent while every one is busy go together. A flush, a send
+        that does not batch, another set_delivery() or clear_delivery() and
+        shutdown() first let every batch go.
+
+        With `confirm`, every message is kept until its consumer's library
+        says the consumer processed it, its send's callback hearing True
+        and a flush ending only then; without `batch` each goes at once, in
+        a message of its own. It goes again, its id and number kept, when
+        the consumer refused it, when nobody took its batch, when the
+        connection it went on ended, and when nothing confirmed any message
+        of its batch for `retry_after` seconds, which must be longer than a
+        message waits in its consumer's queue and handler; it is given up
+        on, its callback hearing False and on_drop NOT_CONFIRMED, at its
+        batch's timeout, or FAILED when the consumer's handler raised on
+        it. At least once: a message whose confirmation was lost is
+        processed again. Kept without a cap: while every consumer stalls,
+        the messages pile up in this process until their timeout.
+
+        `timeout`, in seconds, is a batch's, the send's own not used: a
+        batch has that long from its first message to be written, and with
+        `confirm` to be confirmed, and what of it is not by then is given
+        up on together; a message that goes alone is a batch of one. A
+        negative one sets no deadline. With neither `batch` nor `confirm`
+        the messages go as any send does, by this timeout: a key sent so
+        while its type is batched.
+
+        Checked here, raising ValueError for a protocol message type, a key
+        over MAX_KEY_SIZE bytes, a count below 1, max_records over
+        MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, a delay
+        negative, over MAX_SECONDS or not finite, with `confirm` a
+        retry_after not over 0, and a timeout NaN, or 0 or more and not
+        over the delay (over 0 without `batch`), which would leave a batch
+        no time; in effect for every send made after the call."""
+        self._native.set_delivery(type, key, batch, max_records, max_bytes, max_delay, confirm, retry_after, timeout)
+
+    def confirm(self, mxmsg: MultiplexerMessage, outcome: Confirmed) -> None:
+        """Tell the producer of `mxmsg`, a message of a confirmed batch,
+        what became of it, from any thread: PROCESSED once the program is
+        done with it, FAILED when it can never process it, its producer
+        giving up on it, REFUSED to have its producer send it again; what
+        the client owes goes from the io thread at the end of its turn.
+        Nothing for a message with no number. See __init__'s
+        `confirm_after_on_message` and docs/delivery.md."""
+        if mxmsg.HasField("confirmation"):
+            self._native.confirm(mxmsg.sender, mxmsg.confirmation, outcome)
+
+    def processed(self, mxmsg: MultiplexerMessage) -> None:
+        """confirm(mxmsg, Confirmed.PROCESSED)."""
+        self.confirm(mxmsg, Confirmed.PROCESSED)
+
+    def unconfirmed(self) -> int:
+        """How many messages this client sent wait for their confirmation;
+        for tests. Not from the io thread."""
+        return self._native.unconfirmed()
+
+    def sent_again(self) -> int:
+        """How many messages this client sent again, unconfirmed; for
+        tests. Not from the io thread."""
+        return self._native.sent_again()
+
+    def confirmations_owed(self) -> int:
+        """How many confirmations this client owes producers; for tests.
+        Not from the io thread."""
+        return self._native.confirmations_owed()
+
+    def clear_delivery(self, type: int, key: str | None = None) -> None:
+        """No delivery set from now on for message `type`, its keys'
+        settings included, its messages going as any send does, or, given
+        `key`, for that key, which then goes as its type says; every batch
+        goes first."""
+        self._native.clear_delivery(type, key)
 
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to
