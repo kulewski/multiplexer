@@ -4,9 +4,8 @@
 //
 // SIGTERM asks the backend to leave: the handler only sets a flag, which
 // periodic_task() reads between iterations, the one async-signal-safe way.
-// A pure C++ process may rely on a signal like this; a Python process
-// should not (see docs/faq.md), which is why the Python echo backend
-// watches a file instead.
+// A Python backend may do the same (docs/api_python.md); the Python echo
+// backend watches a file instead, as a deployment's preStop hook asks.
 
 #include <cctype>
 #include <csignal>
@@ -35,6 +34,17 @@ class EchoBackend : public BaseMultiplexerServer {
     set_drain_routing(routing);
   }
 
+  // "ready" on stdout, once, when a multiplexer has welcomed the backend:
+  // the echo test reads the line and queries at once, so it must mean
+  // reachable. True once said.
+  bool say_ready_once_connected() {
+    if (!ready_said_ && conn->connections_count() > 0) {
+      std::cout << "ready" << std::endl;
+      ready_said_ = true;
+    }
+    return ready_said_;
+  }
+
  protected:
   void handle_message(MultiplexerMessage& mxmsg) override {
     std::string payload = mxmsg.message();
@@ -44,28 +54,39 @@ class EchoBackend : public BaseMultiplexerServer {
     send_message(Kwargs().set("message", payload).set("type", multiplexer::types::ECHO_RESPONSE));
   }
 
-  // Runs after every iteration: start draining once the signal flag is set.
+  // Runs after every iteration: "ready" once a multiplexer welcomed the
+  // backend, if it had none at the start; the drain once the signal flag
+  // is set.
   void periodic_task() override {
+    say_ready_once_connected();
     if (leave_requested) {
       start_draining();
     }
   }
+
+ private:
+  bool ready_said_ = false;
 };
 
 int main(int argc, char** argv) {
   MultiplexerAddresses addresses;  // host:port, or [address]:port for an IPv6 one
   addresses.push_back(multiplexer::parse_endpoint(argc > 1 ? argv[1] : "127.0.0.1:1980"));
-  EchoBackend backend(addresses, multiplexer::peers::ECHO_BACKEND);
-  // The echo test reads "ready" and queries at once, so the line must mean
-  // reachable: connect() first; serve_forever() would otherwise.
-  backend.connect();
-  std::cout << "ready" << std::endl;
-  // Drain for five seconds once asked, as the last resort: while another
-  // backend is there the multiplexers route nothing new here, and alone
-  // this one keeps serving to the end. A rolling restart costs nobody a
-  // request.
+  // The handlers first: a SIGTERM that comes once the backend is
+  // connected starts the drain, never the default end.
   std::signal(SIGTERM, [](int) { leave_requested = 1; });
   std::signal(SIGINT, [](int) { leave_requested = 1; });
+  EchoBackend backend(addresses, multiplexer::peers::ECHO_BACKEND);
+  // connect() waits for the handshakes, so that "ready" can come at once;
+  // with no multiplexer reachable, the loop goes on trying and says it
+  // once one welcomes the backend.
+  backend.connect();
+  if (!backend.say_ready_once_connected()) {
+    std::cerr << "no multiplexer reachable yet; ready once one is" << std::endl;
+  }
+  // Drain for five seconds once asked, as the last resort: while another
+  // backend is there the multiplexers route nothing new here, and alone
+  // this one keeps serving to the end, so a replacement that registers
+  // within those five seconds takes over without a failed request.
   backend.serve_forever(0.5f, 5.0f);
   return 0;
 }

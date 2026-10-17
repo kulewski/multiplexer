@@ -107,12 +107,8 @@ class InferenceExampleTest(unittest.TestCase):
             for digit in (3, 5, 9):
                 self.assertEqual(digit, cli.classify(client, SAMPLES[digit]).label)
         finally:
-            self.cluster.mx[0].start()
-            # Both reconnect on their own; the client is shut down once it
-            # has, with no reconnect pending.
-            self.cluster.wait_for_peer(peers.INFERENCE)
-            self.cluster.wait_for_peer(peers.WEB)
-            client.shutdown()
+            self.cluster.mx[0].start()  # for the tests after this one
+            client.shutdown()  # its reconnect to the restarted multiplexer still pending, which it cancels
 
     def test_no_worker_is_503(self):
         from django.test import Client

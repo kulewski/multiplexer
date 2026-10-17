@@ -8,20 +8,45 @@
 //! the program's waits for them with sigwait and starts the drain through
 //! the server's handle, which any thread may call.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use mx_multiplexer::{direct_only_routing, BaseMultiplexerServer, Handler, HandlerResult, Request};
+use mx_multiplexer::{direct_only_routing, BaseMultiplexerServer, Handler, HandlerResult, Request, ServerHandle};
 
 mod multiplexer_constants; // generated from echo.rules
 use multiplexer_constants::{peers, types};
 
-/// Upper-cases what it is asked.
-struct Echo;
+/// Upper-cases what it is asked, and says "ready" once a multiplexer
+/// welcomed the backend.
+#[derive(Default)]
+struct Echo {
+    ready_said: AtomicBool,
+}
+
+impl Echo {
+    /// "ready" on stdout, once, when `connections` are up: the echo test
+    /// reads the line and queries at once, so it must mean reachable. True
+    /// once said.
+    fn say_ready_once_connected(&self, connections: usize) -> bool {
+        if connections > 0 && !self.ready_said.swap(true, Ordering::SeqCst) {
+            println!("ready");
+        }
+        self.ready_said.load(Ordering::SeqCst)
+    }
+}
 
 impl Handler for Echo {
     fn handle_message(&self, request: Request) -> HandlerResult {
         request.reply(types::ECHO_RESPONSE, request.payload().to_ascii_uppercase())?;
         Ok(())
+    }
+
+    /// After every poll: "ready" once a multiplexer welcomed the backend,
+    /// when it had none at the start.
+    fn periodic_task(&self, server: &ServerHandle) {
+        if !self.ready_said.load(Ordering::SeqCst) {
+            self.say_ready_once_connected(server.connections_count().unwrap_or(0));
+        }
     }
 }
 
@@ -33,11 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut routing = direct_only_routing();
     routing.last_resort = true;
     let mut server =
-        BaseMultiplexerServer::builder(peers::ECHO_BACKEND, [address]).drain_routing(routing).build(Echo)?;
-    // The echo test reads "ready" and queries at once, so the line must mean
-    // reachable: connect() first; serve_forever() would otherwise.
-    server.connect()?;
-    println!("ready");
+        BaseMultiplexerServer::builder(peers::ECHO_BACKEND, [address]).drain_routing(routing).build(Echo::default())?;
+    // connect() waits for the handshakes, so that "ready" can come at once;
+    // with no multiplexer reachable, the loop goes on trying and says it
+    // once one welcomes the backend.
+    let connected = server.connect()?;
+    if !server.handler().say_ready_once_connected(connected) {
+        eprintln!("no multiplexer reachable yet; ready once one is");
+    }
     let handle = server.handle();
     std::thread::spawn(move || {
         wait_for(&signals);
@@ -45,8 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     // Drain for five seconds once asked, as the last resort: while another
     // backend is there the multiplexers route nothing new here, and alone
-    // this one keeps serving to the end. A rolling restart costs nobody a
-    // request.
+    // this one keeps serving to the end, so a replacement that registers
+    // within those five seconds takes over without a failed request.
     server.serve_forever(Duration::from_millis(500), Some(Duration::from_secs(5)))?;
     Ok(())
 }

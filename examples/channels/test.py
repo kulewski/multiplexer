@@ -31,7 +31,7 @@ import msgpack
 from asgiref.sync import async_to_sync
 from channels.exceptions import ChannelFull
 from multiplexer.aio import AsyncClient
-from multiplexer.testing import Cluster, mxcontrol_path
+from multiplexer.testing import Cluster, mxcontrol_path, wait_until
 
 from channels_pb2 import ChannelEnvelope
 from multiplexer_constants import peers, types
@@ -68,9 +68,12 @@ class LayerTest(unittest.IsolatedAsyncioTestCase):
         self.b = MultiplexerChannelLayer(addresses=self.cluster.endpoints, capacity=1000)
         self.channel_a = await self.a.new_channel()  # naming a channel makes the process's client
         self.channel_b = await self.b.new_channel()
-        # The clients connect on their io threads; the multiplexers' peers
-        # files say when both are registered on every multiplexer.
-        await asyncio.to_thread(self.cluster.wait_for_peer, peers.CHANNELS, 2)
+        # The clients are connected, their constructors having waited for
+        # the handshakes; a channel asks the multiplexers for the group
+        # events, which come once every one has that routing in effect.
+        for layer in (self.a, self.b):
+            client = await layer.get_client()
+            await asyncio.to_thread(wait_until, client.routing_acknowledged, 5, "the group events in effect")
 
     async def asyncTearDown(self):
         await self.a.close()
@@ -165,7 +168,7 @@ class LayerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("mxchannels", "WARNING"):
                 for n in range(5):  # from another process: dropped there, with a warning, not raised here
                     await self.a.send(channel, {"type": "y", "n": n})
-                await asyncio.sleep(0.3)
+                await asyncio.to_thread(wait_until, lambda: small.dropped == 5, 10, "the five dropped there")
             self.assertEqual([0, 1, 2], [(await receive(small, channel))["n"] for _ in range(3)])
             with self.assertRaises(asyncio.TimeoutError):
                 await receive(small, channel, 0.3)
@@ -174,7 +177,7 @@ class LayerTest(unittest.IsolatedAsyncioTestCase):
                 await small.send(channel, {"type": "x", "n": n})
             await small.group_send("room", {"type": "z"})  # a group send drops too, here and from elsewhere
             await self.a.group_send("room", {"type": "z"})
-            await asyncio.sleep(0.3)
+            await asyncio.to_thread(wait_until, lambda: small.dropped >= 7, 10, "the two group sends dropped")
             self.assertEqual(7, small.dropped, "five sends from the other process, two group sends")
         finally:
             await small.close()
@@ -287,16 +290,18 @@ class ChatTest(unittest.IsolatedAsyncioTestCase):
         alice = WebsocketCommunicator(application, "/ws/chat/lobby/", headers=origin)
         bob = WebsocketCommunicator(application, "/ws/chat/lobby/", headers=origin)
         carol = WebsocketCommunicator(application, "/ws/chat/elsewhere/", headers=origin)
+        # 10 s for each step, through the multiplexer, rather than the communicator's own
+        # second: a bound that only detects a failure.
         for socket in (alice, bob, carol):
-            connected, _ = await socket.connect()
+            connected, _ = await socket.connect(timeout=10)
             self.assertTrue(connected)
-            self.assertIn("connected to gateway", (await socket.receive_json_from())["message"])
+            self.assertIn("connected to gateway", (await socket.receive_json_from(timeout=10))["message"])
         await alice.send_json_to({"message": "hi bob"})
-        self.assertEqual("hi bob", (await bob.receive_json_from())["message"])
-        self.assertEqual("hi bob", (await alice.receive_json_from())["message"], "the sender hears it too")
+        self.assertEqual("hi bob", (await bob.receive_json_from(timeout=10))["message"])
+        self.assertEqual("hi bob", (await alice.receive_json_from(timeout=10))["message"], "the sender hears it too")
         self.assertTrue(await carol.receive_nothing(0.3), "another room")
         for socket in (alice, bob, carol):
-            await socket.disconnect()
+            await socket.disconnect(timeout=10)
 
     async def test_the_pages_render(self):
         from django.test import AsyncClient

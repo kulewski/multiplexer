@@ -31,7 +31,7 @@ mxcontrol run_multiplexer --rules health.rules --address 127.0.0.1:1980     # th
 mxcontrol run_multiplexer --rules health.rules --address 127.0.0.1:1981     # a second one, in another terminal
 python backend.py 127.0.0.1:1980,127.0.0.1:1981 --name w1 --health-port 8081 --stale-seconds 5   # a worker; w2 on 8082
 curl -s -w '%{http_code}\n' http://127.0.0.1:8081/healthz                   # ok: the loop came round 0.1 s ago, 200
-python work_cli.py 127.0.0.1:1980,127.0.0.1:1981 --seconds 30                # work that holds a handler for 30 s
+python work_cli.py 127.0.0.1:1980,127.0.0.1:1981 --seconds 30 --timeout 60   # work that holds a handler for 30 s
 ```
 
 While the last command waits, the worker that took the request answers

@@ -105,8 +105,10 @@ from multiplexer.servers import BaseMultiplexerServer
 last line answers the request with its upper-cased text; the reply goes
 back to the client that asked, whichever gateway holds it. A line that
 starts with `shout ` also becomes a `CHAT_BROADCAST`, sent before the
-reply with `to=0` and `references=0`, which clears the defaults: it is
-not a reply to anyone, and the rule routes it to every gateway.
+reply with `to=0` and `references=0`, which clear those two defaults: it
+is not a reply to anyone, and the rule routes it to every gateway. It
+still goes through the multiplexer the shout came in on, and carries its
+workflow, the other two defaults.
 
 ```python file=backend.py
 class ChatServer(BaseMultiplexerServer):
@@ -229,10 +231,10 @@ answers it is owed go out before the socket closes, within `LAST_WRITES`
 seconds should it have stopped reading too: `printf 'hello\n' | nc -N
 127.0.0.1 8765` gets its answer. That is a courtesy to plain TCP clients
 such as `nc`; the multiplexer and the client libraries do the opposite,
-since none of their peers closes one side of a connection: when the
-other end stops sending, the connection is over at once and nothing more
-is written to it ([failure
-modes](../../docs/semantics.md#failure-modes)). When the connection
+since their own peers close one side of a connection only when they
+leave, a client's `shutdown()` or a failed write: when the other end
+stops sending, the connection is over at once and nothing more is
+written to it ([failure modes](../../docs/semantics.md#failure-modes)). When the connection
 breaks, or the client sends a line longer than the reader's 64 KiB, the
 client leaves the table and its writer task ends at once.
 
@@ -450,8 +452,10 @@ sequenceDiagram
   dropped, rather than holding the others' broadcasts or growing the
   gateway's memory without end.
 - **A failed line is answered.** `OperationFailed` when no chat server
-  is there, `OperationTimedOut` when none answered in ten seconds: the
-  client reads `! ` and the name, and its next line is served as usual.
+  is there, `OperationTimedOut` when none answered in time, each stage of
+  the query having the ten seconds, so about twenty when the chat server
+  hangs: the client reads `! ` and the name, and its next line is served
+  as usual.
 
 ## Testing it with the harness
 

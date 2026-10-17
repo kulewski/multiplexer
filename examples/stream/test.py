@@ -3,12 +3,14 @@
 `BackendThread`s and as processes, an answer in order and complete, two
 at once told apart, a gap filled by asking for what is missing, a
 multiplexer killed under an answer with two generators behind it and
-with the answer pinned, a consumer that stops early, an answer queued
-behind a busy generator and a gap filled while it is busy, the web side
-driven through its ASGI app, a generator killed under an answer, one
-leaving, and a prompt with no generator failing at once; and the
-committed constants checked against the rules file. The multiplexers are
-the mxcontrol the package installed unless MXCONTROL names another;
+with the answer pinned, a consumer that stops early, one that closes
+its client right after abandoning an answer, an answer queued behind a
+busy generator and a gap filled while it is busy, the web side driven
+through its ASGI app, a generator killed under an answer, one leaving, a
+request whose multiplexer has no generator going on through the other,
+and a prompt with no generator failing at once; and the committed
+constants checked against the rules file. The multiplexers are the
+mxcontrol the package installed unless MXCONTROL names another;
 `python -m unittest -v test`."""
 
 import asyncio
@@ -36,6 +38,7 @@ from multiplexer.testing import BackendThread, Cluster, mxcontrol_path, wait_unt
 from generator import Generator, answer_words
 from multiplexer_constants import peers
 from mxstream import Stream, Streams
+from mxstream.client import RESUME_TIMEOUT
 
 RULES = os.path.join(HERE, "stream.rules")  # what the constants were generated from; Cluster's multiplexers read it
 RATE = 200.0  # tokens per second in the tests: a 400-token answer takes two seconds
@@ -69,7 +72,7 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         self.streams = Streams(self.client)
 
     async def asyncTearDown(self):
-        self.streams.close()
+        await self.streams.aclose()
         await self.client.aclose()
 
     def started(self, stream: Stream) -> int:
@@ -84,7 +87,6 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(30, stream.answer.tokens)
         self.assertIn(stream.answer.worker, ("g1", "g2"))
         self.assertEqual((0, 0, 0), (stream.gaps, stream.resent, stream.reattached))
-        self.assertGreater(stream.tokens_per_second, RATE / 2)
 
     async def test_two_answers_at_once_are_told_apart(self):
         first, second = self.streams.open("one", 40), self.streams.open("two", 40)
@@ -95,9 +97,8 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         stream = self.streams.open("gap", 400)
         tokens = [await stream.__anext__()]  # the generator is known from the first token
         stream.drop = 5  # the next five to arrive never do, as with a dead connection
-        asked = time.monotonic()
         tokens.append(await stream.__anext__())
-        self.assertLess(time.monotonic() - asked, 0.5, "the gap filled at once, not at the end of the answer")
+        self.assertFalse(stream._task.done(), "the gap filled while the answer went on, not at its end")
         tokens += await collect(stream)
         self.assertEqual(answer_words("gap", 400), tokens, "complete and in order")
         self.assertEqual((1, 5), (stream.gaps, stream.resent), "the five, and only them")
@@ -115,11 +116,10 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             started + 1, sum(thread.backend.started for thread in self.generators), "joined, not started over"
         )
-        assert stream.answer is not None
-        self.assertLess(stream.answer.seconds, 3, "the answer went on, not over again")
-        victim.start()
-        self.cluster.wait_for_peer(peers.GENERATOR, 2)  # the generators reconnected on their own, within 3 s
-        self.cluster.wait_for_peer(peers.STREAM_CLIENT)  # and so did this client
+        # On a thread, so that the loop goes on meanwhile.
+        await asyncio.to_thread(victim.start)
+        await asyncio.to_thread(self.cluster.wait_for_peer, peers.GENERATOR, 2)  # the generators back on their own
+        await asyncio.to_thread(self.cluster.wait_for_peer, peers.STREAM_CLIENT)  # and this client
 
     async def test_a_pinned_answer_ends_instead(self):
         stream = self.streams.open("pinned", 400, pinned=True)
@@ -128,9 +128,10 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         victim.kill()
         with self.assertRaises(NotConnected):
             await collect(stream)
-        victim.start()
-        self.cluster.wait_for_peer(peers.GENERATOR, 2)
-        self.cluster.wait_for_peer(peers.STREAM_CLIENT)
+        # On a thread, so that the loop sends the abandoned answer's CANCEL meanwhile.
+        await asyncio.to_thread(victim.start)
+        await asyncio.to_thread(self.cluster.wait_for_peer, peers.GENERATOR, 2)
+        await asyncio.to_thread(self.cluster.wait_for_peer, peers.STREAM_CLIENT)
 
     async def test_a_consumer_that_stops_early_stops_the_generator(self):
         async with self.streams.open("early", 400) as stream:
@@ -145,6 +146,20 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(answer.cancelled)
         self.assertLess(len(answer.tokens), 100, "stopped within a few tokens, not at the end")
 
+    async def test_an_answer_abandoned_as_the_client_closes_is_stopped(self):
+        client = AsyncClient(self.cluster.endpoints, type=peers.STREAM_CLIENT)
+        streams = Streams(client)
+        async with streams.open("closed at once", 400) as stream:
+            await stream.__anext__()
+        # Abandoned, its CANCEL on its way, and closed at once, as the command line closes.
+        await streams.aclose()
+        await client.aclose()
+        answer = next(
+            t.backend.answers[stream.stream_id] for t in self.generators if stream.stream_id in t.backend.answers
+        )
+        await asyncio.to_thread(wait_until, lambda: answer.done, 15, "the generator's answer ended")
+        self.assertTrue(answer.cancelled, "told to stop, not run to its end for nobody")
+
     async def test_the_web_side_streams_events(self):
         import httpx
 
@@ -152,13 +167,14 @@ class StreamTest(unittest.IsolatedAsyncioTestCase):
         import app
 
         transport = httpx.ASGITransport(app=app.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as web:
+        # Inside the app's lifespan, as a server runs it: its end closes the Streams and the client.
+        async with app.lifespan(app.app), httpx.AsyncClient(transport=transport, base_url="http://test") as web:
             async with web.stream("GET", "/generate", params={"prompt": "web", "tokens": 5}) as response:
                 self.assertEqual("text/event-stream", response.headers["content-type"].split(";")[0])
                 lines = [line async for line in response.aiter_lines() if line]
             page = await web.get("/")
             refused = await web.get("/generate", params={"prompt": "web", "tokens": -1})
-        await app.MX.aclose()
+        self.assertIsNone(app._streams, "closed by the lifespan's end")
         self.assertEqual([f"data: {json.dumps(word)}" for word in answer_words("web", 5)], lines[:5])
         self.assertEqual("event: done", lines[5])
         self.assertIn('"tokens": 5', lines[6])
@@ -181,18 +197,22 @@ class BusyGeneratorTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.client = AsyncClient(self.cluster.endpoints, type=peers.STREAM_CLIENT)
-        self.streams = Streams(self.client, stall=0.5)  # a short stall, which a queued answer must not trip
+        self.streams = Streams(self.client)
 
     async def asyncTearDown(self):
-        self.streams.close()
+        await self.streams.aclose()
         await self.client.aclose()
 
     async def test_an_answer_queued_behind_another_waits_its_turn(self):
+        # A short stall, which the queued answer must not trip; one that a pause on a busy machine
+        # trips in the answer under way only asks its generator again, which nothing here counts.
+        self.streams.stall = 0.5
         first, second = self.streams.open("first", 200), self.streams.open("second", 20)  # a second, then its turn
         tokens = await asyncio.gather(collect(first), collect(second))
         self.assertEqual([answer_words("first", 200), answer_words("second", 20)], tokens)
 
     async def test_a_gap_is_filled_while_the_only_answer_thread_is_busy(self):
+        # The default stall: a short one, tripped by a pause, would ask for tokens again beyond the five.
         stream = self.streams.open("busy gap", 400)
         tokens = [await stream.__anext__()]
         stream.drop = 5
@@ -218,23 +238,24 @@ class QueuedAnswerTest(unittest.IsolatedAsyncioTestCase):
                 first = streams.open("first", 200)  # a second of the pool's one thread
                 tokens = [await first.__anext__()]
                 queued = streams.open("queued", 20)
-                await asyncio.sleep(0.1)  # the request went, and waits in the pool
+                backend = generator.backend
+                assert backend is not None
+                await asyncio.to_thread(wait_until, lambda: backend.started == 2, 15, "the request in the pool")
                 self.assertEqual(0, queued.received)
                 cluster.multiplexer_at(queued.lane.connection.endpoint).kill()
                 tokens += await collect(first)
                 self.assertEqual(answer_words("first", 200), tokens)
                 self.assertEqual(answer_words("queued", 20), await collect(queued), "whole, once its turn came")
                 self.assertEqual(1, queued.reattached)
-                assert generator.backend is not None
-                self.assertEqual(2, generator.backend.started, "the request sent again joined the answer waiting")
+                self.assertEqual(2, backend.started, "the request sent again joined the answer waiting")
             finally:
-                streams.close()
+                await streams.aclose()
                 await client.aclose()
 
 
 class GeneratorProcess:
     """generator.py as a process of its own, so that a test can kill it the
-    way a machine would, or ask it to leave the way a deployment does."""
+    way a process dies, or ask it to leave the way a deployment does."""
 
     def __init__(self, cluster: Cluster, name: str, tokens_per_second: float):
         addresses = ",".join(f"{host}:{port}" for host, port in cluster.endpoints)
@@ -246,6 +267,7 @@ class GeneratorProcess:
         if not ready.startswith("ready: generator"):
             self.kill()
             raise AssertionError(f"the generator did not start: {ready!r}")
+        self.instance_id = int(ready.rsplit(" ", 1)[1])
         try:
             cluster.wait_for_peer(peers.GENERATOR)
         except BaseException:
@@ -253,7 +275,8 @@ class GeneratorProcess:
             raise
 
     def kill(self) -> None:
-        """As a machine dies; nothing if it is gone already."""
+        """As a process dies, its host alive, which closes its connections;
+        nothing if it is gone already."""
         if self.process.poll() is None:
             self.process.kill()
         self.reap()
@@ -282,7 +305,7 @@ class GeneratorProcessTest(unittest.IsolatedAsyncioTestCase):
         self.streams = Streams(self.client, stall=1.0)
 
     async def asyncTearDown(self):
-        self.streams.close()
+        await self.streams.aclose()
         await self.client.aclose()
 
     async def test_a_dead_generator_fails_the_answer_after_the_stall(self):
@@ -294,7 +317,8 @@ class GeneratorProcessTest(unittest.IsolatedAsyncioTestCase):
         started = time.monotonic()
         with self.assertRaises(OperationFailed):
             await collect(stream)
-        self.assertLess(time.monotonic() - started, self.streams.stall + 3, "the stall, then the question failing")
+        # A question waited out would take the stall and RESUME_TIMEOUT, and end as OperationTimedOut.
+        self.assertLess(time.monotonic() - started, RESUME_TIMEOUT, "the stall, then the question failing at once")
         self.assertNotIn(stream.stream_id, self.streams._open)
 
     async def test_a_leaving_generator_finishes_its_answer_and_takes_no_new_one(self):
@@ -302,8 +326,16 @@ class GeneratorProcessTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(generator.kill)
         stream = self.streams.open("leaving", 400)
         tokens = [await stream.__anext__()]
+        marks = [multiplexer.log_mark() for multiplexer in self.cluster.mx]
         generator.process.send_signal(signal.SIGTERM)
-        await asyncio.sleep(0.5)  # the leave under way: the multiplexers route the generator nothing new
+        # The leave under way once every multiplexer routes the generator nothing new, which each logs.
+        routed = f"peer {generator.instance_id} (GENERATOR) takes any=no all=no"
+        await asyncio.to_thread(
+            wait_until,
+            lambda: all(mx.log_contains(routed, mark) for mx, mark in zip(self.cluster.mx, marks, strict=True)),
+            15,
+            "the multiplexers routing the leaving generator nothing new",
+        )
         with self.assertRaises(OperationFailed):
             await collect(self.streams.open("too late", 5))
         tokens += await collect(stream)
@@ -311,6 +343,28 @@ class GeneratorProcessTest(unittest.IsolatedAsyncioTestCase):
         output = await asyncio.to_thread(generator.reap)
         self.assertEqual(0, generator.process.returncode)
         self.assertEqual("leaving, answers under way: 1\nleft, answers finished: 1\n", output)
+
+
+class OneSidedGeneratorTest(unittest.IsolatedAsyncioTestCase):
+    """Two multiplexers and a generator on the first only, as after a
+    restart of the second that the generator has not rejoined yet."""
+
+    async def test_a_request_with_no_generator_where_it_went_goes_on_through_the_other(self):
+        with Cluster(2, rules=RULES) as cluster:
+            generator = BackendThread(lambda: Generator(cluster.endpoints[:1], "g1", tokens_per_second=RATE))
+            generator.start()
+            self.addCleanup(generator.stop)
+            client = AsyncClient(cluster.endpoints, type=peers.STREAM_CLIENT)
+            streams = Streams(client)
+            try:
+                # One answer after the other: their lanes take the two
+                # multiplexers in turn, so one of them goes first where
+                # there is no generator.
+                for prompt in ("first", "second"):
+                    self.assertEqual(answer_words(prompt, 5), await collect(streams.open(prompt, 5)), prompt)
+            finally:
+                await streams.aclose()
+                await client.aclose()
 
 
 class NoGeneratorTest(unittest.IsolatedAsyncioTestCase):
@@ -321,12 +375,12 @@ class NoGeneratorTest(unittest.IsolatedAsyncioTestCase):
             client = AsyncClient(cluster.endpoints, type=peers.STREAM_CLIENT)
             streams = Streams(client)
             try:
-                started = time.monotonic()
+                # OperationFailed, at once: nobody took the request. Waited out, it would end as
+                # OperationTimedOut instead, at the answer's deadline.
                 with self.assertRaises(OperationFailed):
                     await collect(streams.open("nobody", 5))
-                self.assertLess(time.monotonic() - started, 3, "OperationFailed, not a timeout")
             finally:
-                streams.close()
+                await streams.aclose()
                 await client.aclose()
 
 

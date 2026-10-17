@@ -35,13 +35,12 @@ the application's traffic. What arrives is delivered on the loop the
 client was made on; new_channel() makes a new client on the running loop
 when that one has closed."""
 
-import asyncio
 import itertools
 import logging
 import random
 import string
+import threading
 import time
-import weakref
 
 import msgpack
 from channels.exceptions import ChannelFull
@@ -76,9 +75,12 @@ class MultiplexerChannelLayer(InMemoryChannelLayer):
         self._holder = AsyncClient.holder(peers.CHANNELS, parse_addresses(addresses), timeout=timeout)
         self._subscribed: AsyncClient | None = None  # the client whose messages this layer already takes
         self._receiving: AsyncClient | None = None  # the client routed the group events, once a channel was made
-        # Sending: each loop's stream, [its id, the last number sent]. Only
-        # on one loop is the order of the numbers the order of the sends.
-        self._streams: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, list[int]] = weakref.WeakKeyDictionary()
+        # Sending: each thread's stream, [its id, the last number sent]. A
+        # thread runs one loop at a time, and a send hands its message to
+        # the library in the step that numbers it, so a thread's numbers
+        # are in the order of its sends; sync code's async_to_sync makes a
+        # loop per call, and a stream per loop would be one per send.
+        self._streams: dict[int, list[int]] = {}
         self._stream_ids = itertools.count(1)
         # Receiving: (sender, stream) -> (the last number delivered, when).
         self._last: dict[tuple[int, int], tuple[int, float]] = {}
@@ -162,12 +164,13 @@ class MultiplexerChannelLayer(InMemoryChannelLayer):
         await self._send_to_others(client, ChannelEnvelope(group=group, payload=payload), types.CHANNEL_GROUP_SEND)
 
     async def _send_to_others(self, client: AsyncClient, envelope: ChannelEnvelope, type: int, to: int = 0) -> None:
-        """Number the envelope in the running loop's stream and send it
-        through every multiplexer; nothing between the number and the send
-        lets another send of this loop in."""
-        stream = self._streams.get(asyncio.get_running_loop())
+        """Number the envelope in this thread's stream and send it through
+        every multiplexer: the library has the message in the step that
+        numbers it, with no await between, and keeps each connection's
+        order."""
+        stream = self._streams.get(threading.get_ident())
         if stream is None:
-            stream = self._streams[asyncio.get_running_loop()] = [next(self._stream_ids), 0]
+            stream = self._streams[threading.get_ident()] = [next(self._stream_ids), 0]
         stream[1] += 1
         envelope.stream, envelope.seq = stream
         await client.send_message(
@@ -180,7 +183,8 @@ class MultiplexerChannelLayer(InMemoryChannelLayer):
         )
 
     async def close(self):
-        """Close the process's client; the in-memory part needs nothing."""
+        """Close the process's client, what was sent written first, a second
+        at most; the in-memory part needs nothing."""
         await self._holder.aclose()
         self._subscribed = self._receiving = None
 

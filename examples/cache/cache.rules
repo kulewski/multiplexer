@@ -211,6 +211,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 
@@ -226,6 +227,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 
@@ -241,6 +243,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 

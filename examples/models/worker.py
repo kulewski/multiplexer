@@ -13,14 +13,19 @@ first use. A MODEL_CONTROL request names a worker in its key,
 worker.NAME, and asks that worker to load or unload a model. The worker
 answers once every multiplexer has its new filters and every request
 routed under the old ones has been served, and only then frees a model
-it unloaded: no request for it is on its way any more."""
+it unloaded: the rules route no request for it any more. One can still
+come addressed, a query's last stage after a search the worker answered
+just before the change, and gets an error, as a request for a model the
+worker never held does."""
 
 import argparse
 import re
 import socket
+import sys
 
 from multiplexer.endpoints import parse_endpoint
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.mxclient import ConnectionWrapper
 from multiplexer.servers import BaseMultiplexerServer
 
 from multiplexer_constants import peers, types
@@ -79,6 +84,7 @@ class Worker(BaseMultiplexerServer):
         # change is acknowledged.
         self.unloading: dict[str, Model] = {}
         self.served = 0
+        self.ready_pending = False  # set by main(): "ready" is printed once a multiplexer welcomed the worker
         self.set_key_filters(self.key_filters())  # before connecting, so that the welcome carries them
 
     def key_filters(self) -> dict[int, list[str]]:
@@ -126,16 +132,21 @@ class Worker(BaseMultiplexerServer):
             self.models[name] = self.unloading.pop(name, None) or Model(name)
         elif action == "unload" and name in self.models:
             unloaded = self.unloading[name] = self.models.pop(name)
-        self.set_key_filters(self.key_filters(), on_acknowledged=lambda: self.acknowledged(mxmsg, unloaded))
+        connection = self.last_connwrap  # the request's, for the answer
+        self.set_key_filters(self.key_filters(), on_acknowledged=lambda: self.acknowledged(mxmsg, connection, unloaded))
         self.no_response()
 
-    def acknowledged(self, request: MultiplexerMessage, unloaded: Model | None) -> None:
+    def acknowledged(
+        self, request: MultiplexerMessage, connection: ConnectionWrapper | None, unloaded: Model | None
+    ) -> None:
         """The change `request` asked for is acknowledged: every
         multiplexer has the filters, and every request routed under the
         old ones has been served. A model it unloaded is freed, unless a
-        load since took it back, since none of its requests can come any
-        more; and the change is answered, in effect everywhere now. On the
-        loop's thread, between two messages."""
+        load since took it back, since the rules route none of its
+        requests any more; and the change is answered, in effect
+        everywhere now, through `connection`, the one the request came
+        on, while it lives, as a reply goes. On the loop's thread, between
+        two messages."""
         if unloaded is not None and self.unloading.get(unloaded.name) is unloaded:
             del self.unloading[unloaded.name]
         self.send_message(
@@ -144,6 +155,7 @@ class Worker(BaseMultiplexerServer):
             to=request.sender,
             references=request.id,
             workflow=request.workflow,
+            multiplexer=connection,
         )
 
     def holding(self) -> str:
@@ -152,6 +164,20 @@ class Worker(BaseMultiplexerServer):
         if self.any_model:
             return f"{self.name} takes every model, holds {held}"
         return f"{self.name} holds {held}"
+
+    def say_ready_once_connected(self) -> None:
+        """Print the "ready" main() asked for, with what the worker holds,
+        once a multiplexer has welcomed the worker: whoever runs the steps,
+        and the test, wait for the line and then send, so it must mean
+        reachable."""
+        if self.ready_pending and self.conn.connections_count() > 0:
+            print(f"ready: {self.holding()}", flush=True)
+            self.ready_pending = False
+
+    def periodic_task(self) -> None:
+        """Say "ready" once a multiplexer welcomed the worker, if none had
+        when main() connected; at least once a second."""
+        self.say_ready_once_connected()
 
 
 def main() -> None:
@@ -172,8 +198,14 @@ def main() -> None:
         if not NAME.fullmatch(name):
             parser.error(f"{name!r}: a name is lower-case letters, digits, dots and dashes")
     worker = Worker([parse_endpoint(text) for text in args.addresses.split(",")], args.name, models)
-    worker.connect()  # so that the line below means reachable: whoever runs the steps, and the test, wait for it
-    print(f"ready: {worker.holding()}", flush=True)
+    # connect() waits for the handshakes, so that "ready" can come at once;
+    # with no multiplexer reachable, the loop goes on trying and says it
+    # once one welcomes the worker.
+    worker.ready_pending = True
+    worker.connect()
+    worker.say_ready_once_connected()
+    if worker.ready_pending:
+        print("no multiplexer reachable yet; ready once one is", file=sys.stderr, flush=True)
     worker.serve_forever()
 
 

@@ -15,7 +15,8 @@
 // periodic_task() reads between polls; the worker then tells the
 // multiplexers to route it nothing new, serves what was already on its
 // way and what is still addressed to it, and exits once they have
-// confirmed, three seconds at the latest. No new stream comes to it; a
+// confirmed: the drain three seconds at the latest, then the close, up
+// to two seconds more when a multiplexer does not answer. No new stream comes to it; a
 // stream addressed to it moves when it closes, its next frame refused at
 // once, and starts afresh on the next worker. A frame on its way at the
 // moment it closes is lost to the gateway's timeout.

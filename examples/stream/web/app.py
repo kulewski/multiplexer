@@ -1,8 +1,9 @@
 """The web side: a FastAPI app whose /generate streams an answer as
 Server-Sent Events, one event per token as the generator produces it,
 and a page that shows the tokens appear. One AsyncClient per process,
-from a holder, as the async web server recipe has it; the answer's tokens
-reach the socket as they reach the process, with nothing buffered between.
+from a holder, closed at shutdown, as the async web server recipe has it;
+the answer's tokens reach the socket as they reach the process, with
+nothing buffered between.
 
     MX_ADDRESSES=127.0.0.1:1980,127.0.0.1:1981 uvicorn app:app --port 8000
     curl -N 'http://127.0.0.1:8000/generate?prompt=hello&tokens=20'
@@ -11,6 +12,8 @@ reach the socket as they reach the process, with nothing buffered between.
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 # The example's directory, for its constants, payloads and client.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +28,6 @@ from mxstream.client import MAX_TOKENS
 
 ENDPOINTS = parse_addresses(os.environ.get("MX_ADDRESSES", "127.0.0.1:1980"))
 MX = AsyncClient.holder(peers.STREAM_CLIENT, lambda: ENDPOINTS)
-app = FastAPI(title="stream")
 _streams: Streams | None = None
 
 
@@ -37,6 +39,23 @@ async def streams() -> Streams:
     if _streams is None or _streams.client is not client:
         _streams = Streams(client)
     return _streams
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Nothing at start, the client being made on first use; at shutdown,
+    the CANCELs of the answers abandoned handed to the client, then the
+    client closed, which writes what it has not yet: a process that exits
+    with its client open loses that, unreported."""
+    global _streams
+    yield
+    if _streams is not None:
+        await _streams.aclose()
+        _streams = None
+    await MX.aclose()
+
+
+app = FastAPI(title="stream", lifespan=lifespan)
 
 
 @app.get("/generate")

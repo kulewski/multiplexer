@@ -621,7 +621,8 @@ handler only sets a flag; the rest of the leaving is below.
 // periodic_task() reads between polls; the worker then tells the
 // multiplexers to route it nothing new, serves what was already on its
 // way and what is still addressed to it, and exits once they have
-// confirmed, three seconds at the latest. No new stream comes to it; a
+// confirmed: the drain three seconds at the latest, then the close, up
+// to two seconds more when a multiplexer does not answer. No new stream comes to it; a
 // stream addressed to it moves when it closes, its next frame refused at
 // once, and starts afresh on the next worker. A frame on its way at the
 // moment it closes is lost to the gateway's timeout.
@@ -773,8 +774,10 @@ where the pods of one deployment differ, and the pid, since the page
 shows sixteen bytes of it, both signals ask to leave, and
 `serve_forever(0.1f, 3.0f)` polls every 100 ms and, once draining,
 leaves as soon as every multiplexer has confirmed that it routes the
-worker nothing new and the worker's queue is empty, three seconds at the
-latest. No new stream comes to it from the moment it asked; the frames
+worker nothing new and the worker's queue is empty, the drain three
+seconds at the latest, then the close, a second to write what is left
+and a second for each multiplexer's end, should one not answer. No new
+stream comes to it from the moment it asked; the frames
 addressed to it keep arriving until it closes, since an addressed
 message always does, and then the next frame of each of those streams
 fails at once, with the multiplexer's delivery error, and the gateway
@@ -913,6 +916,7 @@ QUERY_TIMEOUT = 0.05  # per attempt; a frame lost with its worker costs at most 
 STUCK = 3  # timeouts in a row after which the stream leaves its worker
 STALE_MS = 60  # later than the fastest frame by this much: the page's six frames of buffer, dropped here
 CATCH_UP_MS = 0.01  # per frame, the most the fastest may drift up: clocks of two machines run apart
+LASTING = 100  # stale frames in a row, a second: a delay that lasts, which the fastest is taken from
 
 log = logging.getLogger("room")
 
@@ -938,6 +942,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
         self.worker = 0  # the instance id of the worker this stream sticks to, once one answered
         self.timeouts = 0  # in a row, on that worker
         self.fastest: float | None = None  # the least our clock minus the capture time, in ms
+        self.stale_run = 0  # stale frames in a row
         self.lost = self.stale = 0
         await self.channel_layer.group_add(self.group, self.channel_name)
         await self.accept()
@@ -1023,7 +1028,12 @@ frames the page would buffer at most, waited behind a slow moment, a
 stalled worker or a busy process, and would be skipped by the page
 anyway, after the worker and every socket had carried it; it is dropped
 here. The fastest may drift up by a hundredth of a millisecond a frame,
-since two machines' clocks run apart.
+since two machines' clocks run apart. A delay that lasts is another
+matter: a path that became longer, a VPN, a mobile handover, or the
+browser's clock paused by a laptop's sleep, makes every frame late by
+the same amount, frames the page would play, so after a second of stale
+frames in a row the fastest is taken from the frame at hand, and the
+stream is heard again.
 
 `_ask` is the affinity. While a worker is known, the query is addressed
 to it with `to=`. `OperationFailed` means the multiplexers report it
@@ -1040,10 +1050,20 @@ frame that takes longer than that is not worth having in a live room.
     def _stale(self, captured_at: float) -> bool:
         """Whether the frame waited long enough in front of the consumer
         to be worth nothing: later, against the capture time, than the
-        fastest frame of the stream by more than the page would buffer."""
+        fastest frame of the stream by more than the page would buffer,
+        unless every frame of the last second was: a delay that lasts, a
+        longer path or a clock that jumped, is the stream's from then on."""
         behind = time.monotonic() * 1000 - captured_at  # the clocks' difference, plus the wait
         self.fastest = behind if self.fastest is None else min(self.fastest + CATCH_UP_MS, behind)
-        return behind - self.fastest > STALE_MS
+        if behind - self.fastest <= STALE_MS:
+            self.stale_run = 0
+            return False
+        self.stale_run += 1
+        if self.stale_run < LASTING:
+            return True
+        self.fastest = behind
+        self.stale_run = 0
+        return False
 
     async def _ask(self, client: AsyncClient, payload: bytes):
         """The worker's answer: from the stream's worker while it lives, from any worker after it is gone."""
@@ -1159,10 +1179,6 @@ sequenceDiagram
     Note over B: SIGTERM: route me nothing new
     B->>M: PEER_CONTROL, any and all off
     M->>B: PEER_STATUS, in effect, from every multiplexer
-    G->>M: AUDIO_FRAME, to beta
-    M->>B: an addressed frame still arrives
-    B->>M: AUDIO_PROCESSED
-    M->>G: AUDIO_PROCESSED
     Note over B: confirmed, nothing pending: closes, a fraction of a second after the signal
     G->>M: AUDIO_FRAME, to beta
     M->>G: DELIVERY_ERROR
@@ -1180,8 +1196,10 @@ In short:
   multiplexer gives it to a worker round robin by the `ANY` rule; from
   then on every frame is addressed to that worker with `to=`, because
   the effects keep state per stream: a filter's memory, a modulator's
-  phase, a quarter second of the past for the echo. The library
-  searches for a backend only after a delivery error or a timeout.
+  phase, a quarter second of the past for the echo. An unaddressed frame
+  is searched for after a delivery error or a timeout; an addressed
+  frame's delivery error makes the library look for that worker on every
+  connection, and its timeout simply ends it.
 - **The worker is built on the threaded server class.**
   [worker/worker.cc](worker/worker.cc) is a
   `BaseThreadedMultiplexerServer`: the library's io thread
@@ -1204,8 +1222,9 @@ In short:
   stays with its worker unless three in a row do.
 - **A restart drains.** `SIGTERM` makes the worker tell the multiplexers
   to route it nothing new, serve what was already on its way and what is
-  still addressed to it, and leave once they have confirmed, three
-  seconds at the latest ([docs/leaving.md](../../docs/leaving.md)). No
+  still addressed to it, and leave once they have confirmed, the drain
+  three seconds at the latest and the close up to two more
+  ([docs/leaving.md](../../docs/leaving.md)). No
   new stream comes to it; each of its streams moves when it closes, its
   next frame refused at once, and starts afresh on the next worker, as
   after a kill. A frame on its way at the moment it closes is lost to
@@ -1290,12 +1309,12 @@ frame 221: back via gamma
 capture to arrival: median 1.3 ms, p99 3.0 ms; broker round trip at the gateway: median 0.30 ms, p99 1.10 ms; the worker: median 0.022 ms
 ```
 
-Beta told both multiplexers to route it nothing new, served the frames
-still addressed to it while they confirmed, and left 142 ms after the
-signal, its output ending with `left`; frame 221, its stream's next,
-failed at once and went to gamma. Nothing was lost, and the drain took
-a fraction of the three seconds it was allowed: a stream is addressed,
-so it moves when the worker closes, as after the kill.
+Beta told both multiplexers to route it nothing new and left once they
+had confirmed, its output ending with `left`: the frames addressed to it
+until then were answered before the drain began, and frame 221, its
+stream's next, failed at once and went to gamma. Nothing was lost, and
+the drain took a fraction of the three seconds it was allowed: a stream
+is addressed, so it moves when the worker closes, as after the kill.
 
 **4. A multiplexer killed mid-stream.** Alice streams for six seconds;
 the multiplexer on 1980 is killed with `kill -9` after two and a half
@@ -1418,11 +1437,19 @@ AUDIO_WORKER=bazel-bin/worker/worker python -m unittest -v test
   layer counts and logs.
 - Noticing a multiplexer that freezes with its connections open, as a
   hung machine's do. Nothing closes them, so the frames the round robin
-  sends through it, about half with two multiplexers, time out after
-  their 50 ms and are lost, while the others are answered and the stream
-  stays with its worker. The heartbeats drop the frozen multiplexer's
-  connections about a minute and a half later, and from then on it is
-  step 4.
+  sends through it time out after their 50 ms and are lost; since the
+  consumer handles one frame at a time, each timeout stalls it, and the
+  frames that queued meanwhile are mostly dropped as stale, so about four
+  in five of a stream's frames are lost, one answered, one timed out and
+  three stale in every five, and the stalls delay the room's frames to
+  that socket. Service comes back once the frozen connection's queue is
+  full, its socket buffers first, when the round robin passes it over,
+  tens of seconds in; each group send's copy for it waits then and is
+  dropped. The heartbeats drop the frozen multiplexer's connections about
+  a minute and a half after it froze: its queue, frames whose queries
+  ended long before, goes to the live connection, and the worker applies
+  each to its stream's effect and answers it, the gateway dropping the
+  late replies; from then on it is step 4.
 - Moving a stream without a seam. Its state stays with the worker it
   was on, so the echo loses its tail at a move and a filter can click on
   its first frame; handing the state over would be a message of its

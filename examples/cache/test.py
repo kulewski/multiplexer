@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -51,7 +52,8 @@ def without_journal(rules: str) -> str:
     puts the committed file under them."""
     rules = re.sub(r'peer \{\n    type: 203\n    name: "CACHE_JOURNAL"\n.*?\n\}\n\n', "", rules, flags=re.DOTALL)
     rules = re.sub(
-        r'    to \{\n        peer: "CACHE_JOURNAL"\n        whom: ALL\n        report_delivery_error: false\n    \}\n',
+        r'    to \{\n        peer: "CACHE_JOURNAL"\n        whom: ALL\n        report_delivery_error: false\n'
+        r"        delivery_error_is_error: false\n    \}\n",
         "",
         rules,
     )
@@ -99,6 +101,11 @@ class CacheTest(unittest.TestCase):
     def tearDown(self):
         self.cache.close()
 
+    def stats(self):
+        """Every replica's numbers, once the three answered: 10 s at most, a
+        bound that only detects a failure."""
+        return self.cache.stats(expected=3, wait=10)
+
     def lookup(self, key: str) -> CacheValue:
         """A read that some replica must answer; the test fails otherwise."""
         value = self.cache.lookup(key)
@@ -109,7 +116,7 @@ class CacheTest(unittest.TestCase):
     def test_a_write_reaches_every_replica_and_a_read_any_one(self):
         self.cache.set("k", b"v")
         self.assertEqual(b"v", self.cache.get("k"))
-        stats = self.cache.stats()
+        stats = self.stats()
         self.assertEqual(["r0", "r1", "r2"], [each.replica for each in stats], "every replica answered")
         self.assertEqual([1, 1, 1], [each.entries for each in stats], "every replica holds the key")
         answered = {self.lookup("k").replica for _ in range(12)}
@@ -123,12 +130,15 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(b"2", self.cache.get("b"))
         self.cache.clear()
         self.assertIsNone(self.cache.get("b"))
-        self.assertEqual([0, 0, 0], [each.entries for each in self.cache.stats()])
+        self.assertEqual([0, 0, 0], [each.entries for each in self.stats()])
 
     def test_an_entry_expires(self):
-        self.cache.set("soon", b"gone", expires=time.time() + 0.3)
+        """Found before its time, a miss once it is past: written to expire in an hour, then written
+        again with a time a second gone, so that neither read depends on how long a write and a read
+        take. Only the expiry makes the second read a miss: the value is there, written twice."""
+        self.cache.set("soon", b"gone", expires=time.time() + 3600)
         self.assertEqual(b"gone", self.cache.get("soon"))
-        time.sleep(0.4)
+        self.cache.set("soon", b"gone", expires=time.time() - 1)
         self.assertIsNone(self.cache.get("soon"))
 
     def test_add_is_decided_by_one_replica_for_all(self):
@@ -150,23 +160,22 @@ class CacheTest(unittest.TestCase):
     def test_a_late_copy_of_an_older_write_changes_nothing(self):
         """What a stalled multiplexer delivers after the newer writes went
         through the other one: older stamps, which every replica ignores,
-        however late they come, even past the library's window of ids."""
+        however late they come, even past the library's window of ids.
+        Sent through this test's own client, each copy is ahead of the
+        reads that follow it on its connection, so a replica has it when it
+        answers."""
         from multiplexer.threaded_client import ThreadedClient
 
         from cache_pb2 import CacheEntry
         from multiplexer_constants import types
 
-        late = ThreadedClient(self.cluster.endpoints, type=peers.CACHE_CLIENT)
-        try:
-            self.cache.set("kept", b"new")
-            self.cache.delete("gone")
-            for key in ("kept", "gone"):
-                old = CacheEntry(key=key, value=b"old", version=1, writer=1)
-                late.send_message(old, type=types.CACHE_SET, multiplexer=ThreadedClient.ALL, flush=True)
-            self.assertEqual({"r0": b"new", "r1": b"new", "r2": b"new"}, self.answers_from_every_replica("kept"))
-            self.assertEqual({"r0": None, "r1": None, "r2": None}, self.answers_from_every_replica("gone"))
-        finally:
-            late.shutdown()
+        self.cache.set("kept", b"new")
+        self.cache.delete("gone")
+        for key in ("kept", "gone"):
+            old = CacheEntry(key=key, value=b"old", version=1, writer=1)
+            self.cache._client.send_message(old, type=types.CACHE_SET, multiplexer=ThreadedClient.ALL)
+        self.assertEqual({"r0": b"new", "r1": b"new", "r2": b"new"}, self.answers_from_every_replica("kept"))
+        self.assertEqual({"r0": None, "r1": None, "r2": None}, self.answers_from_every_replica("gone"))
 
     def test_an_add_sent_twice_is_one_add(self):
         """What the library does when a connection dies under an add: the
@@ -206,7 +215,7 @@ class CacheTest(unittest.TestCase):
     def test_a_restarted_replica_starts_empty_and_warms_as_keys_are_written(self):
         for index in range(5):
             self.cache.set(f"key-{index}", b"x")
-        self.assertEqual([5, 5, 5], [each.entries for each in self.cache.stats()])
+        self.assertEqual([5, 5, 5], [each.entries for each in self.stats()])
         self.replicas[0].stop()
         # connected_peers() is the multiplexer's peers file: (id, name, number) per peer.
         wait_until(
@@ -218,13 +227,13 @@ class CacheTest(unittest.TestCase):
         )
         self.replicas[0] = BackendThread(lambda: Replica(self.cluster.endpoints, name="r0")).start()
         self.cluster.wait_for_peer(peers.CACHE, count=3)
-        self.assertEqual([0, 5, 5], [each.entries for each in self.cache.stats()], "nothing is replayed to it")
+        self.assertEqual([0, 5, 5], [each.entries for each in self.stats()], "nothing is replayed to it")
         lookups = [self.lookup(f"key-{index % 5}") for index in range(15)]
         self.assertTrue(any(not each.found and each.replica == "r0" for each in lookups), "r0 misses")
         self.assertTrue(all(each.found for each in lookups if each.replica != "r0"), "the others hit")
         for index in range(5):
             self.cache.set(f"key-{index}", b"x")  # what a cache's callers do on a miss
-        self.assertEqual([5, 5, 5], [each.entries for each in self.cache.stats()])
+        self.assertEqual([5, 5, 5], [each.entries for each in self.stats()])
 
     def test_a_multiplexer_may_die_under_writes_and_reads(self):
         """The multiplexer is frozen first, so that the reads the round robin
@@ -253,11 +262,15 @@ class CacheTest(unittest.TestCase):
         self.cluster.wait_for_peer(peers.CACHE, count=3)  # the replicas reconnect on their own, within 3 s
         self.cluster.wait_for_peer(peers.CACHE_CLIENT)  # and so does this client
 
-    def test_writes_through_every_multiplexer_are_handled_once_per_replica(self):
-        before = {each.replica: each.writes for each in self.cache.stats()}
+    def test_writes_through_every_multiplexer_are_applied_once_per_replica(self):
+        """Two copies of each write, one per multiplexer, and one applied:
+        the library drops the second copy by its id, and the stamp would
+        keep it from counting even if it did not, so this checks the two
+        together; the library's own tests pin the drop alone."""
+        before = {each.replica: each.writes for each in self.stats()}
         for index in range(50):
             self.cache.set(f"dup-{index}", b"x")  # two multiplexers: two copies of each, one per multiplexer
-        after = {each.replica: each.writes for each in self.cache.stats()}
+        after = {each.replica: each.writes for each in self.stats()}
         self.assertEqual({"r0": 50, "r1": 50, "r2": 50}, {name: after[name] - before[name] for name in before})
 
     def test_a_read_after_a_write_is_never_stale_with_writes_through_every_multiplexer(self):
@@ -301,18 +314,26 @@ class JournalTest(unittest.TestCase):
                 journal = None
                 try:
                     cache.set("before", b"1")
-                    with open(path, "w") as f:
-                        f.write(
-                            rules
-                        )  # the file as committed: the journal's peer, and its destination on the three events
+                    # The file as committed, the journal's peer and its destination on the three events,
+                    # written beside the one in use and renamed over it: a check reads the one or the
+                    # other, never a file cut short by the write under way.
+                    with open(path + ".new", "w") as f:
+                        f.write(rules)
+                    os.replace(path + ".new", path)
                     for mx in cluster.mx:
-                        wait_until(lambda mx=mx: mx.log_contains("rules reloaded from"), 5, "the new file put in use")
+                        wait_until(lambda mx=mx: mx.log_contains("rules reloaded from"), 15, "the new file put in use")
+                    # A write while the journal's destination has nobody: one read through each
+                    # connection after it, which follows any delivery error for it on that connection.
+                    cache.set("between", b"333")
+                    for _ in range(2):
+                        cache.lookup("between")
+                    self.assertEqual(0, cache.lost_writes, "no delivery error for the journal's absence")
                     journal = BackendThread(lambda: Journal(cluster.endpoints, lines)).start()
                     cluster.wait_for_peer(peers.CACHE_JOURNAL)
                     cache.set("after", b"22")
                     cache.delete("before")
                     cache.clear()
-                    wait_until(lambda: journal.backend is not None and journal.backend.lines == 3, 5, "three lines")
+                    wait_until(lambda: journal.backend is not None and journal.backend.lines == 3, 15, "three lines")
                     entries = [json.loads(line) for line in lines.getvalue().splitlines()]
                     self.assertEqual(["set", "delete", "clear"], [entry["event"] for entry in entries])
                     self.assertEqual(("after", 2), (entries[0]["key"], entries[0]["bytes"]))
@@ -327,6 +348,24 @@ class JournalTest(unittest.TestCase):
                     replica.stop()
 
 
+class UnreachableMultiplexerTest(unittest.TestCase):
+    """A host that takes the connection and never answers, as a hung
+    multiplexer's does."""
+
+    def test_it_costs_the_client_nothing_and_a_write_it_never_took_is_counted(self):
+        """The client waited ten seconds for its welcome when made, and the
+        write the close gave up on went uncounted."""
+        with socket.socket() as hung:
+            hung.bind(("127.0.0.1", 0))
+            hung.listen()
+            started = time.monotonic()
+            cache = Cache([hung.getsockname()])
+            self.assertLess(time.monotonic() - started, 5, "made without waiting for a welcome")
+            cache.set("anything", b"x")
+            cache.close()
+        self.assertEqual(1, cache.dropped_writes)
+
+
 class NoReplicaTest(unittest.TestCase):
     """A multiplexer with nobody behind it."""
 
@@ -334,9 +373,10 @@ class NoReplicaTest(unittest.TestCase):
         with Cluster(1, rules=RULES) as cluster:
             cache = Cache(cluster.endpoints)
             try:
-                started = time.monotonic()
                 self.assertIsNone(cache.get("anything"))
-                self.assertLess(time.monotonic() - started, 2, "OperationFailed, not a timeout")
+                # OperationFailed: the multiplexer said at once that nobody takes the read; a timeout,
+                # the slow way to a miss, would be OperationTimedOut.
+                self.assertEqual({"OperationFailed": 1}, dict(cache.unavailable_by_error))
                 self.assertEqual(1, cache.unavailable)
                 cache.set("anything", b"x")
                 wait_until(lambda: cache.lost_writes == 1, 5, "the multiplexer's delivery error")
@@ -406,9 +446,9 @@ class DjangoBackendTest(unittest.TestCase):
 
         web = WebClient()
         first = web.get("/slow").content
-        started = time.monotonic()
+        # The page says when it was computed, to the microsecond, and by which process: the same
+        # page again is the cached copy, which no second half second of work could give.
         self.assertEqual(first, web.get("/slow").content, "the cached page, from any web process")
-        self.assertLess(time.monotonic() - started, 0.3, "no half second of work the second time")
         self.assertEqual(b"cleared\n", web.get("/clear").content)
         self.assertNotEqual(first, web.get("/slow").content, "computed again after the clear")
         self.assertEqual([b"1\n", b"2\n"], [web.get("/counter").content for _ in range(2)])

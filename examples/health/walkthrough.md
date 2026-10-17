@@ -641,20 +641,20 @@ container the probe restarted, which `kubectl logs --previous` shows.
 ```
 $ sed -n '/Timeout (/,/<module>/p' w2.log
 Timeout (0:00:03)!
-Thread 0x00007f04e5eff6c0 (most recent call first):
+Thread 0x00007f207b6ff6c0 (most recent call first):
   File "/usr/lib/python3.13/selectors.py", line 398 in select
   File "/usr/lib/python3.13/socketserver.py", line 235 in serve_forever
   File "/usr/lib/python3.13/threading.py", line 994 in run
   File "/usr/lib/python3.13/threading.py", line 1043 in _bootstrap_inner
   File "/usr/lib/python3.13/threading.py", line 1014 in _bootstrap
 
-Thread 0x00007f04e7fb0780 (most recent call first):
+Thread 0x00007f207d8d1780 (most recent call first):
   File "…/examples/health/backend.py", line 68 in work
   File "…/examples/health/backend.py", line 60 in handle_message
-  File "…/multiplexer/servers.py", line 400 in __handle_message
+  File "…/multiplexer/servers.py", line 419 in __handle_message
   File "…/multiplexer/mxlog/__init__.py", line 221 in wrapper
-  File "…/multiplexer/servers.py", line 325 in __handle_received
-  File "…/multiplexer/servers.py", line 276 in serve_forever
+  File "…/multiplexer/servers.py", line 344 in __handle_received
+  File "…/multiplexer/servers.py", line 294 in serve_forever
   File "…/examples/health/backend.py", line 162 in main
   File "…/examples/health/backend.py", line 171 in <module>
 ```

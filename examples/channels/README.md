@@ -47,9 +47,10 @@ layer's client.
 
 Every process of the application is a `CHANNELS` peer on every
 multiplexer, gateways and sync code alike; there is no other kind. A
-group send is routed to `ALL` of them, a send to one channel is
-addressed to the process that owns it, and both go through every
-multiplexer. The walkthrough draws each exchange, step by step.
+group send is routed to `ALL` of them that hold a channel, the
+gateways, sync code, which makes none, being routed nothing; a send to
+one channel is addressed to the process that owns it, and both go
+through every multiplexer. The walkthrough draws each exchange, step by step.
 
 ```mermaid
 flowchart LR

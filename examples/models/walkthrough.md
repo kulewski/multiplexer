@@ -138,14 +138,19 @@ first use. A MODEL_CONTROL request names a worker in its key,
 worker.NAME, and asks that worker to load or unload a model. The worker
 answers once every multiplexer has its new filters and every request
 routed under the old ones has been served, and only then frees a model
-it unloaded: no request for it is on its way any more."""
+it unloaded: the rules route no request for it any more. One can still
+come addressed, a query's last stage after a search the worker answered
+just before the change, and gets an error, as a request for a model the
+worker never held does."""
 
 import argparse
 import re
 import socket
+import sys
 
 from multiplexer.endpoints import parse_endpoint
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
+from multiplexer.mxclient import ConnectionWrapper
 from multiplexer.servers import BaseMultiplexerServer
 
 from multiplexer_constants import peers, types
@@ -233,6 +238,7 @@ class Worker(BaseMultiplexerServer):
         # change is acknowledged.
         self.unloading: dict[str, Model] = {}
         self.served = 0
+        self.ready_pending = False  # set by main(): "ready" is printed once a multiplexer welcomed the worker
         self.set_key_filters(self.key_filters())  # before connecting, so that the welcome carries them
 
     def key_filters(self) -> dict[int, list[str]]:
@@ -303,7 +309,8 @@ brings.
             self.models[name] = self.unloading.pop(name, None) or Model(name)
         elif action == "unload" and name in self.models:
             unloaded = self.unloading[name] = self.models.pop(name)
-        self.set_key_filters(self.key_filters(), on_acknowledged=lambda: self.acknowledged(mxmsg, unloaded))
+        connection = self.last_connwrap  # the request's, for the answer
+        self.set_key_filters(self.key_filters(), on_acknowledged=lambda: self.acknowledged(mxmsg, connection, unloaded))
         self.no_response()
 
 ```
@@ -311,24 +318,37 @@ brings.
 `acknowledged()` is the change's `on_acknowledged`. The library calls
 it on the loop's thread, between two messages, once every multiplexer
 has confirmed the filters and every request routed under the old ones
-has been handled: no request for an unloaded model is on its way from
-any multiplexer, nor waiting in the worker. That is the moment to free
+has been handled: no multiplexer routes a request for an unloaded model
+here any more, and none waits in the worker. That is the moment to free
 the model, unless a load since took it back, and to answer the change,
-in effect everywhere now. The answer is addressed to the peer that
-asked, since outside a handler `send_message()` has no request to reply
-to. Each change brings its own callback, so two in a row each answer
-their own request and free their own model. The confirmation also ends
-the serve loop's wait for a message, so the answer comes within
-milliseconds, not at the next poll.
+in effect everywhere now. One request for the model can still come,
+addressed: a query's last stage, after a search the worker answered just
+before the change, which `to` brings whatever the filters
+([keys](../../docs/keys.md)). `predict()` answers it with an error, so
+that the query fails at once rather than at its timeout.
+
+Outside a handler `send_message()` has no request to reply to, so the
+answer names the peer that asked, the request, and the connection the
+request came on, which `control()` kept: while it lives the answer goes
+that way, as a reply does, and through another live one otherwise. Sent
+round robin instead, it could leave through a multiplexer the asker is
+not connected to, which would drop it. Each change brings its own
+callback, so two in a row each answer their own request and free their
+own model. The confirmation also ends the serve loop's wait for a
+message, so the answer comes within milliseconds, not at the next poll.
 
 ```python file=worker.py
-    def acknowledged(self, request: MultiplexerMessage, unloaded: Model | None) -> None:
+    def acknowledged(
+        self, request: MultiplexerMessage, connection: ConnectionWrapper | None, unloaded: Model | None
+    ) -> None:
         """The change `request` asked for is acknowledged: every
         multiplexer has the filters, and every request routed under the
         old ones has been served. A model it unloaded is freed, unless a
-        load since took it back, since none of its requests can come any
-        more; and the change is answered, in effect everywhere now. On the
-        loop's thread, between two messages."""
+        load since took it back, since the rules route none of its
+        requests any more; and the change is answered, in effect
+        everywhere now, through `connection`, the one the request came
+        on, while it lives, as a reply goes. On the loop's thread, between
+        two messages."""
         if unloaded is not None and self.unloading.get(unloaded.name) is unloaded:
             del self.unloading[unloaded.name]
         self.send_message(
@@ -337,6 +357,7 @@ milliseconds, not at the next poll.
             to=request.sender,
             references=request.id,
             workflow=request.workflow,
+            multiplexer=connection,
         )
 
     def holding(self) -> str:
@@ -345,6 +366,30 @@ milliseconds, not at the next poll.
         if self.any_model:
             return f"{self.name} takes every model, holds {held}"
         return f"{self.name} holds {held}"
+
+```
+
+The line the steps and the test's programs wait for, `ready`, is the
+program's: `main()` asks for it, and it means that a multiplexer has
+welcomed the worker, its filters with it. It comes right after
+connecting, when that found one; otherwise from `periodic_task()`,
+which the serve loop calls at least once a second, once a reconnect
+has. A worker the test serves on a thread prints nothing.
+
+```python file=worker.py
+    def say_ready_once_connected(self) -> None:
+        """Print the "ready" main() asked for, with what the worker holds,
+        once a multiplexer has welcomed the worker: whoever runs the steps,
+        and the test, wait for the line and then send, so it must mean
+        reachable."""
+        if self.ready_pending and self.conn.connections_count() > 0:
+            print(f"ready: {self.holding()}", flush=True)
+            self.ready_pending = False
+
+    def periodic_task(self) -> None:
+        """Say "ready" once a multiplexer welcomed the worker, if none had
+        when main() connected; at least once a second."""
+        self.say_ready_once_connected()
 
 
 ```
@@ -356,7 +401,9 @@ models it holds from the start, or `--any-model`, and refuses a name
 outside `NAME`. It connects before it says it is ready, so that the line
 means the worker is registered with every multiplexer it could reach,
 its filters with it: whoever waits for the line, the steps or the test,
-may send at once. Then it serves until it is killed.
+may send at once. With none reachable it says so on stderr instead, and
+the line comes later, from `periodic_task()`. Then it serves until it
+is killed.
 
 ```python file=worker.py
 def main() -> None:
@@ -377,8 +424,14 @@ def main() -> None:
         if not NAME.fullmatch(name):
             parser.error(f"{name!r}: a name is lower-case letters, digits, dots and dashes")
     worker = Worker([parse_endpoint(text) for text in args.addresses.split(",")], args.name, models)
-    worker.connect()  # so that the line below means reachable: whoever runs the steps, and the test, wait for it
-    print(f"ready: {worker.holding()}", flush=True)
+    # connect() waits for the handshakes, so that "ready" can come at once;
+    # with no multiplexer reachable, the loop goes on trying and says it
+    # once one welcomes the worker.
+    worker.ready_pending = True
+    worker.connect()
+    worker.say_ready_once_connected()
+    if worker.ready_pending:
+        print("no multiplexer reachable yet; ready once one is", file=sys.stderr, flush=True)
     worker.serve_forever()
 
 
@@ -707,6 +760,11 @@ lists all of it. What the test uses, in the order it appears:
   one, the second routed to w1 since w1 has not read the unload yet;
   released, w1 unloads, then serves the second request with the model
   it has not freed, and only then answers the unload.
+- **A change answered the way it came.** A `SyncClient` on the first
+  multiplexer only sends w1 two loads, one after the other, and gets
+  both answers. Answered round robin over w1's two connections, one of
+  them would leave through the second multiplexer, which drops a message
+  for a peer it does not have, and the receive would time out.
 - **A worker without a filter.** g1 takes epsilon, which nobody holds,
   and alpha in turn with w1; unloaded, epsilon is freed, and the next
   request loads it again.

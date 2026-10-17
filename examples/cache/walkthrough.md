@@ -82,7 +82,9 @@ answers them; they are events. That is the whole of the replication: the
 multiplexer copies the message, and every replica applies it. Each of
 the three has a second destination, the journal of section 6, with
 `report_delivery_error: false`: a journal may be absent, and a write
-must not look lost to its sender for that. With the replicas alone the
+must not look lost to its sender for that; and with
+`delivery_error_is_error: false`, so that the multiplexers log its
+absence as a warning, not an error. With the replicas alone the
 default would do, since a write that no replica received is a write to
 report.
 
@@ -99,6 +101,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 
@@ -114,6 +117,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 
@@ -129,6 +133,7 @@ type {
         peer: "CACHE_JOURNAL"
         whom: ALL
         report_delivery_error: false
+        delivery_error_is_error: false
     }
 }
 
@@ -338,16 +343,20 @@ its id; the stamp catches a copy that comes after the library forgot the
 first.
 That costs a copy per multiplexer and buys two things: a multiplexer
 dying at that moment loses nothing, and a read after one's own write is
-never stale, because the read follows the write's copy on whichever
-connection it takes. `ONE` exists for the ordering step below, which
+never stale while the replicas keep up, because the read follows the
+write's copy on whichever connection it takes (a replica that falls
+behind is in "What it does not do"). `ONE` exists for the ordering step below, which
 measures what happens without that. The counters say what a cache's
-caller may want to know and nobody else will tell them; the ordered
+caller may want to know and nobody else will tell them: `dropped_writes`
+counts the writes no multiplexer took within the send's timeout, or that
+the close gave up on, from each write's callback; the ordered
 dictionary behind `lost_writes` remembers the last few thousand writes
 and how many multiplexers have refused each so far.
 
 ```python file=mxcache/client.py
 class Cache:
-    """One ThreadedClient connected to every multiplexer; every method is safe from any thread."""
+    """One ThreadedClient connecting to every multiplexer, waiting for none, so that one unreachable costs
+    nothing here; every method is safe from any thread."""
 
     ALL = ThreadedClient.ALL  # writes through every multiplexer: each replica gets one copy per multiplexer
     ONE = ThreadedClient.ONE  # writes through one multiplexer, round robin: the walkthrough's ordering step
@@ -358,13 +367,17 @@ class Cache:
         self.writes_through = writes_through
         self.timeout = timeout
         self.unavailable = 0  # reads answered as misses because no replica or no multiplexer could be reached
+        self.unavailable_by_error: collections.Counter[str] = collections.Counter()  # those by the error's name
         self.lost_writes = 0  # writes each multiplexer named said it could deliver to no replica
+        self.dropped_writes = 0  # writes no multiplexer took within the send's timeout, or that close() gave up
         self._gathers: dict[int, list[CacheStats]] = {}
         self._refusals: collections.OrderedDict[int, int] = collections.OrderedDict()  # write id: delivery errors
         self._multiplexers = len(addresses)
         self._version = 0
         self._lock = threading.Lock()
-        self._client = ThreadedClient(addresses, type=peers.CACHE_CLIENT, on_message=self._on_message)
+        self._answered = threading.Condition(self._lock)  # a replica's numbers came
+        self._client = ThreadedClient([], type=peers.CACHE_CLIENT, on_message=self._on_message)
+        self._client.connect_all(addresses, 0)  # the connects started, none waited for
 
 ```
 
@@ -372,17 +385,20 @@ A read is a `query()`: the request goes through one connection, the
 multiplexer hands it to one replica, and the reply comes back
 referencing the request's id. Everything the library can raise, no
 multiplexer, no replica, a timeout, a replica's own failure, becomes a
-miss, since a cache that cannot be reached is an empty one; `lookup()`
-keeps the whole answer for the command line, `get()` is what a cache's
-caller wants.
+miss, since a cache that cannot be reached is an empty one; the misses
+are counted by the error's name, which tells a cache with no replica,
+`OperationFailed` at once, from one whose replicas did not answer in
+time, `OperationTimedOut`. `lookup()` keeps the whole answer for the
+command line, `get()` is what a cache's caller wants.
 
 ```python file=mxcache/client.py
     def lookup(self, key: str) -> CacheValue | None:
         """One read: the replica's answer, with which replica it was; None when none could be asked."""
         try:
             reply = self._client.query(CacheKey(key=key), type=types.CACHE_GET, timeout=self.timeout)
-        except (MultiplexerClientError, BackendError):
+        except (MultiplexerClientError, BackendError) as error:
             self.unavailable += 1
+            self.unavailable_by_error[type(error).__name__] += 1
             return None
         value = CacheValue()
         value.ParseFromString(reply.message)
@@ -401,7 +417,8 @@ and nothing comes back.
 
 ```python file=mxcache/client.py
     def set(self, key: str, value: bytes, expires: float = 0.0) -> None:
-        """Write to every replica; `expires` is unix time, 0 for never."""
+        """Write to every replica; `expires` is unix time, 0 for never. An entry over MAX_MESSAGE_SIZE,
+        128 MiB, raises ValueError."""
         self._write(self._entry(key, value, expires), types.CACHE_SET)
 
     def delete(self, key: str) -> None:
@@ -428,12 +445,14 @@ present".
     def add(self, key: str, value: bytes, expires: float = 0.0) -> bool:
         """Set unless present, decided by one replica; False when it was present, or when nobody could decide.
         On a yes, the entry goes to every replica from here, in order with this client's later reads and
-        writes, which a copy from the deciding replica, through one multiplexer, would not be."""
+        writes, which a copy from the deciding replica, through one multiplexer, would not be. An entry
+        over MAX_MESSAGE_SIZE, 128 MiB, raises ValueError."""
         entry = self._entry(key, value, expires)
         try:
             reply = self._client.query(entry, type=types.CACHE_ADD, timeout=self.timeout)
-        except (MultiplexerClientError, BackendError):
+        except (MultiplexerClientError, BackendError) as error:
             self.unavailable += 1
+            self.unavailable_by_error[type(error).__name__] += 1
             return False
         result = CacheResult()
         result.ParseFromString(reply.message)
@@ -452,21 +471,24 @@ sends, waits a moment, and collects whatever came, sorted by replica
 name.
 
 ```python file=mxcache/client.py
-    def stats(self, wait: float = 0.5) -> list[CacheStats]:
+    def stats(self, expected: int = 0, wait: float = 0.5) -> list[CacheStats]:
         """Every replica's numbers: one request to all of them, through every multiplexer so that a
-        replica that is on one only is asked too, and whatever answered within `wait` seconds."""
+        replica that is on one only is asked too, and what answered once `expected` replicas did, or
+        within `wait` seconds."""
         request_id = random.getrandbits(63)
         with self._lock:
             self._gathers[request_id] = []
         self._client.send_message(
             CacheStatsRequest(request_id=request_id), type=types.CACHE_STATS_REQUEST, multiplexer=ThreadedClient.ALL
         )
-        time.sleep(wait)
-        with self._lock:
+        with self._answered:
+            gather = self._gathers[request_id]
+            self._answered.wait_for(lambda: expected > 0 and len(gather) >= expected, timeout=wait)
             return sorted(self._gathers.pop(request_id), key=lambda stats: stats.replica)
 
     def close(self) -> None:
-        """Shut the client down; the object is done."""
+        """Shut the client down, what was sent written first, a second at most, and what is left after it
+        counted in dropped_writes; the object is done."""
         self._client.shutdown()
 
 ```
@@ -490,12 +512,20 @@ goes out through `_write()`, which notes how many copies left.
         return CacheEntry(key=key, value=value, expires=expires, version=version, writer=writer)
 
     def _write(self, message, kind: int) -> None:
-        """An event to every replica, its id remembered for the delivery errors it may bring."""
-        mxmsg_id = self._client.send_message(message, type=kind, multiplexer=self.writes_through)
+        """An event to every replica, its id remembered before it goes, for the delivery errors it may
+        bring, and how it ended followed, for dropped_writes."""
+        mxmsg = self._client.new_message(message=message, type=kind)
         with self._lock:
-            self._refusals[mxmsg_id] = 0
+            self._refusals[mxmsg.id] = 0
             while len(self._refusals) > WRITES_REMEMBERED:
                 self._refusals.popitem(last=False)
+        self._client.send_message(mxmsg, multiplexer=self.writes_through, callback=self._written)
+
+    def _written(self, written: int) -> None:
+        """On the io thread: how a write ended, 1 once a multiplexer took a copy, 0 once none did."""
+        if not written:
+            with self._lock:
+                self.dropped_writes += 1
 
 ```
 
@@ -524,6 +554,7 @@ many copies went out.
                 # A replica answers the request's second copy only when its library forgot the first.
                 if gather is not None and all(held.instance_id != stats.instance_id for held in gather):
                     gather.append(stats)
+                    self._answered.notify_all()
         elif mxmsg.type == types.DELIVERY_ERROR:
             copies = self._multiplexers if self.writes_through == ThreadedClient.ALL else 1
             with self._lock:
@@ -1001,9 +1032,10 @@ CACHES = {
 
 The multiplexers read their rules file again every two seconds, on
 `SIGHUP`, and on `mxcontrol rules reload`, and put a changed file in use
-whole, between two messages, once two reads in a row have seen the same
-new bytes, so that a file caught in the middle of being written is never
-applied
+whole, between two messages: the periodic check once two of its reads in
+a row have seen the same new bytes, so that a file caught in the middle
+of being written is never applied, and a `SIGHUP` or `mxcontrol rules
+reload` at once
 ([changing the rules](../../docs/operations.md#changing-the-rules)). So
 a running cache can grow a consumer that none of its programs know
 about. This section adds a journal of every write: the peer type
@@ -1119,7 +1151,7 @@ constants carry; then the journal starts, connects as the type the
 multiplexers now accept, and every write from then on reaches it as
 well as the replicas. Step 8 below does exactly that and shows what
 each side printed, and the test at the end does it under the harness,
-with the file edited under a `Cluster` started with
+with the file replaced under a `Cluster` started with
 `rules_check_interval=0.2`.
 
 ## 7. What is left
@@ -1159,7 +1191,7 @@ sequenceDiagram
 ```
 
 The read follows the write's copy on the connection it takes, so a read
-after one's own write is never stale. A copy that comes late, from a
+after one's own write is never stale, every replica keeping up. A copy that comes late, from a
 multiplexer that stalled while the other delivered newer writes,
 changes nothing: the replica's library drops it by its id while it
 remembers the first copy, and past that the replica ignores it for its
@@ -1357,8 +1389,9 @@ replica r3 (instance 17012848459393614777): 100 entries, 70068 writes, 23328 rea
 ([semantics](../../docs/semantics.md#delivery)): two messages from one
 peer through one multiplexer arrive in the order they were sent, and
 through two multiplexers there is no order. With writes through every
-multiplexer, a read after one's own write is never stale, because the
-read follows the write's copy on whichever connection it takes. With
+multiplexer, a read after one's own write is never stale, the replicas
+keeping up, because the read follows the write's copy on whichever
+connection it takes. With
 writes through one multiplexer at a time, the writes and the reads take
 the two connections in turn, so every read goes through the other
 multiplexer than the write before it, and races it.
@@ -1456,14 +1489,14 @@ multiplexer 5088910084581933156: rules 88488f58 (27 message types, 7 peer types)
 
 $ cp cache.rules live.rules      # the journal's peer and its three destinations go in; nothing is restarted
 $ mxcontrol rules status -M 127.0.0.1:1980 -M 127.0.0.1:1981
-multiplexer 3607001466710964060: rules 2a100709 (27 message types, 8 peer types) from live.rules, loaded …
-multiplexer 5088910084581933156: rules 2a100709 (27 message types, 8 peer types) from live.rules, loaded …
+multiplexer 3607001466710964060: rules 4fb8c5d8 (27 message types, 8 peer types) from live.rules, loaded …
+multiplexer 5088910084581933156: rules 4fb8c5d8 (27 message types, 8 peer types) from live.rules, loaded …
 
 $ grep -o "rules reloaded from.*peer types" mx1.log
-rules reloaded from live.rules: 88488f58 -> 2a100709, 27 message types, 8 peer types
+rules reloaded from live.rules: 88488f58 -> 4fb8c5d8, 27 message types, 8 peer types
 
 $ grep RULES_FINGERPRINT multiplexer_constants.py
-RULES_FINGERPRINT = "2a100709"
+RULES_FINGERPRINT = "4fb8c5d8"
 ```
 
 Four seconds after the copy, two checks two seconds apart having read
@@ -1562,9 +1595,10 @@ python -m unittest -v test
 - **A rules change under the cluster.** `JournalTest` writes `cache.rules`
   without the journal's lines to a temporary file, starts `Cluster(2,
   rules=path, rules_check_interval=0.2)`, one replica and a client, writes
-  once, then puts the committed file at that path and waits for each
-  multiplexer's `log_contains("rules reloaded from")`; a `Journal` on a
-  `BackendThread` then receives a set, a delete and a clear, and
+  once, then puts the committed file at that path, written beside it and
+  renamed over it so that no check reads it half written, and waits for
+  each multiplexer's `log_contains("rules reloaded from")`; a `Journal` on
+  a `BackendThread` then receives a set, a delete and a clear, and
   `lost_writes` stayed zero throughout. Another test checks that
   `before.rules`, what step 8 starts from, is still `cache.rules` without
   the journal.
@@ -1597,3 +1631,18 @@ the peers file rather than sleeps.
 - Persistence, eviction and memory limits: every replica holds every
   entry until it expires. The journal is a record of the writes, not a
   store: a replica that starts still starts empty.
+- A replica that falls behind. Stalled, or slower than a burst of writes
+  long enough to fill its socket buffers and its queue of 1024 on each
+  multiplexer, it loses the writes the multiplexers drop for it, which
+  they log, while the others apply them; nothing replays them and nothing
+  tells it or the writer, `lost_writes` counting only a write no replica
+  received. It then answers reads with the value it held before, or a
+  miss, until the key is written again or expires. A larger `queue_size`
+  for `CACHE` in the rules file makes such a burst longer.
+- Writes while no multiplexer is reachable for longer than the send's
+  timeout, ten seconds. The client holds each, then drops it, which
+  `dropped_writes` counts; the replicas keep the old value, so a delete
+  made then is lost and reads stay stale until the key expires.
+- Values over 128 MiB, `MAX_MESSAGE_SIZE`: the entry is refused at the
+  call, `ValueError` from `set()` and `add()`, and Django's `set()`,
+  `add()` and `get_or_set()`.

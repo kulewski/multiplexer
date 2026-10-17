@@ -29,8 +29,8 @@ pid unless given, which it prints, the backend drains for five seconds
 as the last resort of its type ([how a backend
 leaves](../../docs/leaving.md#what-a-draining-backend-still-takes)):
 beside another backend the multiplexers route it nothing new, and alone
-it keeps serving to the end, so a rolling restart costs no client a
-request either way.
+it keeps serving to the end, so a replacement that registers within those
+five seconds takes over without a failed request.
 
 ## The peers
 

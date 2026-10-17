@@ -22,6 +22,7 @@ import argparse
 import os
 import signal
 import socket
+import sys
 import time
 
 import torch
@@ -49,13 +50,14 @@ class Classifier(BaseThreadedMultiplexerServer):
     ) -> None:
         # The model first: loading is the slow part and the one that can
         # fail. The order is free otherwise: the base class connects and
-        # handles only in serve_forever().
+        # starts handling in connect(), never in its constructor.
         self.model: DigitNet = load(weights)
         self.name = name or f"{socket.gethostname()}:{os.getpid()}"
         self.slow = slow
         self.drain_file = drain_file
         self.asked_to_leave = False  # set by the SIGTERM handler, read by periodic_task()
         self.answered = 0
+        self.ready_pending = False  # set by main(): "ready" is printed once a multiplexer welcomed the worker
         super().__init__(addresses, workers=workers)
 
     def handle_message(self, request: Request) -> None:
@@ -78,8 +80,19 @@ class Classifier(BaseThreadedMultiplexerServer):
             type=types.INFER_RESPONSE,
         )
 
+    def say_ready_once_connected(self) -> None:
+        """Print the "ready" main() asked for once a multiplexer has
+        welcomed the worker: the notebook and the test wait for the line
+        and then send, so it must mean reachable."""
+        if self.ready_pending and self.client.connections_count() > 0:
+            print(f"ready: worker {self.name}, instance {self.instance_id}", flush=True)
+            self.ready_pending = False
+
     def periodic_task(self) -> None:
-        """Leave once asked, by SIGTERM or the drain file; runs every poll."""
+        """Say "ready" once a multiplexer welcomed the worker, if none had
+        when main() connected; leave once asked, by SIGTERM or the drain
+        file. Runs every poll."""
+        self.say_ready_once_connected()
         if self.asked_to_leave or (self.drain_file and os.path.exists(self.drain_file)):
             self.start_draining()
 
@@ -118,10 +131,14 @@ def main() -> None:
         worker.asked_to_leave = True
 
     signal.signal(signal.SIGTERM, asked_to_leave)
-    # The notebook waits for this line before it sends, so the line must mean
-    # reachable: connect() first; serve_forever() would otherwise.
+    # connect() waits for the handshakes, so that "ready" can come at once;
+    # with no multiplexer reachable, the io thread goes on trying, and
+    # periodic_task() says it once one welcomes the worker.
+    worker.ready_pending = True
     worker.connect()
-    print(f"ready: worker {worker.name}, instance {worker.instance_id}", flush=True)
+    worker.say_ready_once_connected()
+    if worker.ready_pending:
+        print("no multiplexer reachable yet; ready once one is", file=sys.stderr, flush=True)
     worker.serve_forever(poll=0.5, drain_seconds=5)
     print(f"left after {worker.answered} answers", flush=True)
 

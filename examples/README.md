@@ -91,9 +91,15 @@ load("@mx//bazel:setup.bzl", "mx_setup")
 mx_setup()
 ```
 
-Then depend on `@mx//multiplexer:clients` and `@mx//multiplexer:multiplexer_constants`
-from Python, or `@mx//multiplexer:client`, `@mx//multiplexer/backend:base_multiplexer_server`
-and `@mx//multiplexer:multiplexer_cc_constants` from C++. Import paths and
+Then depend, from Python, on `@mx//multiplexer:multiplexer_constants` and
+on what the peer is built on: `@mx//multiplexer:clients` (`SyncClient`),
+`@mx//multiplexer:servers` (`BaseMultiplexerServer`),
+`@mx//multiplexer:threaded_client_py`, `@mx//multiplexer:threaded_server`
+or `@mx//multiplexer:aio`; from C++, on
+`@mx//multiplexer:multiplexer_cc_constants` and `@mx//multiplexer:client`,
+`@mx//multiplexer:threaded_client`,
+`@mx//multiplexer/backend:base_multiplexer_server` or
+`@mx//multiplexer/backend:base_threaded_multiplexer_server`. Import paths and
 include paths are the same as inside the multiplexer's own workspace:
 `from multiplexer.clients import SyncClient`, `#include "multiplexer/client.h"`.
 

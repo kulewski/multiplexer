@@ -592,9 +592,11 @@ a dead connection lost, the generator of the answer is asked, addressed
 with `to`, for the tokens missing. When the lane's multiplexer dies, the
 request goes again through another, addressed to that generator once a
 token has named it, and the generator joins it to the answer under way.
-The query's reply ends the answer.
-With `pinned=True` an answer whose multiplexer dies ends with
-NotConnected instead, for a caller that would rather start over."""
+A request whose multiplexer has no generator for it, one the generators
+have not rejoined since it came back, goes through the next. The
+query's reply ends the answer. With `pinned=True` an answer whose
+multiplexer dies ends with NotConnected instead, for a caller that would
+rather start over."""
 
 import asyncio
 import random
@@ -604,7 +606,7 @@ from typing import AsyncIterator
 from multiplexer.aio import AsyncClient
 from multiplexer.endpoints import parse_endpoint
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.mxclient import NotConnected, OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 
 from multiplexer_constants import types
 from stream_pb2 import Cancel, Generated, Prompt, Resume, Resumed, Token
@@ -669,7 +671,7 @@ class Streams:
             self._cancel(token.stream_id, mxmsg.sender)
 
     def _cancel(self, stream_id: int, generator: int) -> None:
-        """Tell `generator` to stop the answer, once; an event, not awaited by anyone."""
+        """Tell `generator` to stop the answer, once; an event, awaited by nobody but aclose()."""
         if (stream_id, generator) in self._cancelled:
             return
         if len(self._cancelled) > 10000:
@@ -684,16 +686,22 @@ class Streams:
         given up on: the generator then finishes the answer to nobody."""
         try:
             await self.client.send_message(Cancel(stream_id=stream_id), type=types.CANCEL, to=generator, timeout=1.0)
-        except Exception:  # the client closed meanwhile; the generator finishes likewise
+        except Exception:  # the client closed before this ran; the generator finishes likewise
             pass
 
     def _forget(self, stream: "Stream") -> None:
         """A stream that ended: its tokens are not taken any more."""
         self._open.pop(stream.stream_id, None)
 
-    def close(self) -> None:
-        """End the subscription; the client is the caller's."""
+    async def aclose(self) -> None:
+        """End the subscription, once the CANCELs on their way are with the
+        client: awaited before the client's own aclose(), which writes them
+        out, since one that ran only after the client closed would not go,
+        and its generator would finish an answer for nobody. The client is
+        the caller's."""
         self._unsubscribe()
+        if self._cancelling:
+            await asyncio.wait(set(self._cancelling))
 
 
 ```
@@ -719,9 +727,13 @@ told to stop, sends the request to the answer's own. When the
 multiplexer dies before any token has named the generator, the request
 waits `NAME_WAIT` for one, since the generator that had the request may
 have started it; with none, it goes to any generator, and should a
-token name one after all, the request follows it there. `pinned=True`
-ends the answer with `NotConnected` instead, for a caller that would
-rather start over. The library's own timeout of the request is the
+token name one after all, the request follows it there. A request whose
+lane goes to a multiplexer with no generator, one the generators have
+not rejoined since it came back, ends in `OperationFailed` at once,
+since a pinned lane's search asks that multiplexer only; `_ask()` sends
+it again through the next multiplexer, once for each, which starts
+nothing twice, since nobody took it. `pinned=True` ends the answer with
+`NotConnected` instead, for a caller that would rather start over. The library's own timeout of the request is the
 answer's and a margin, so that the answer's deadline comes first: past
 its timeout the library would send the request to another generator
 too.
@@ -767,10 +779,14 @@ class Stream:
         request waits NAME_WAIT for one; with none, it goes to any
         generator, and follows the generator a token names after all. A
         reply from any generator but the answer's, one told to stop, sends
-        the request to the answer's own."""
+        the request to the answer's own. A request the lane's multiplexer
+        has no generator for, a multiplexer the generators have not
+        rejoined since it came back, goes again through the next one,
+        once for each: nobody took it, so it starts nothing twice."""
         prompt = Prompt()
         prompt.CopyFrom(self.prompt)
         client = self.streams.client
+        refused = 0  # multiplexers in a row that had no generator for the request
         while True:
             target = self.worker
             query = asyncio.ensure_future(
@@ -792,11 +808,17 @@ class Stream:
                 continue
             try:
                 reply = query.result()
+            except OperationFailed:
+                refused += 1
+                if refused >= client.connections_count() or time.monotonic() >= self.deadline:
+                    raise
+                self.lane = client.lane(pinned=True)  # the next multiplexer, round robin
+                continue
             except NotConnected:
                 if self.pinned or time.monotonic() >= self.deadline:
                     raise
-                await asyncio.sleep(REORDER_WAIT)  # a moment for the library to see which connections live
                 self.lane = client.lane(pinned=True)
+                refused = 0
                 self.reattached += 1
                 prompt.from_seq = self.next_seq
                 if not self.worker:
@@ -1055,14 +1077,18 @@ The web side, [web/app.py](web/app.py), is a FastAPI app. One
 `AsyncClient` per process, from a holder, as [the async web server
 recipe](../../docs/recipes/async_web_server.md) has it, made on a
 thread at the first request with `aget()`, so that the loop never waits
-for the handshakes; and one `Streams` on it.
+for the handshakes; and one `Streams` on it. The app's lifespan closes
+both at shutdown, the `Streams` first, so that the CANCELs of the
+answers abandoned are with the client when it writes what it has and
+closes.
 
 ```python file=web/app.py
 """The web side: a FastAPI app whose /generate streams an answer as
 Server-Sent Events, one event per token as the generator produces it,
 and a page that shows the tokens appear. One AsyncClient per process,
-from a holder, as the async web server recipe has it; the answer's tokens
-reach the socket as they reach the process, with nothing buffered between.
+from a holder, closed at shutdown, as the async web server recipe has it;
+the answer's tokens reach the socket as they reach the process, with
+nothing buffered between.
 
     MX_ADDRESSES=127.0.0.1:1980,127.0.0.1:1981 uvicorn app:app --port 8000
     curl -N 'http://127.0.0.1:8000/generate?prompt=hello&tokens=20'
@@ -1071,6 +1097,8 @@ reach the socket as they reach the process, with nothing buffered between.
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 # The example's directory, for its constants, payloads and client.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1085,7 +1113,6 @@ from mxstream.client import MAX_TOKENS
 
 ENDPOINTS = parse_addresses(os.environ.get("MX_ADDRESSES", "127.0.0.1:1980"))
 MX = AsyncClient.holder(peers.STREAM_CLIENT, lambda: ENDPOINTS)
-app = FastAPI(title="stream")
 _streams: Streams | None = None
 
 
@@ -1097,6 +1124,23 @@ async def streams() -> Streams:
     if _streams is None or _streams.client is not client:
         _streams = Streams(client)
     return _streams
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Nothing at start, the client being made on first use; at shutdown,
+    the CANCELs of the answers abandoned handed to the client, then the
+    client closed, which writes what it has not yet: a process that exits
+    with its client open loses that, unreported."""
+    global _streams
+    yield
+    if _streams is not None:
+        await _streams.aclose()
+        _streams = None
+    await MX.aclose()
+
+
+app = FastAPI(title="stream", lifespan=lifespan)
 
 
 ```
@@ -1404,7 +1448,8 @@ $ python stream_cli.py 127.0.0.1:1980,127.0.0.1:1981 "what is a multiplexer" --t
 
 **4. A multiplexer killed under an answer, three ways.** Each run is a
 400-token answer, twenty seconds, and five seconds in the multiplexer
-the `via` line names is killed with `SIGKILL`, the way a machine dies.
+the `via` line names is killed with `SIGKILL`, the way a process dies,
+a crash or the OOM killer, its host alive.
 First, killed outright: the requester sees `NotConnected` on the lane
 and sends the request again through 1980, addressed to g2 with the
 token due; g2 joins it to the answer and goes on, and nothing was
@@ -1421,7 +1466,8 @@ $ kill -9 2602411      # the multiplexer on 1981, five seconds in, in another te
 ```
 
 Second, frozen first: `SIGSTOP` for two seconds, then `SIGKILL`, which
-is what a machine that hangs and then dies does. The frozen multiplexer
+is what a process that hangs and is then killed does, by a watchdog
+say. The frozen multiplexer
 took the forty-odd tokens the generator sent meanwhile and never
 forwarded them; once it is killed, the request goes again through 1980,
 from the token due, and g2 sends those again and goes on. The answer is
@@ -1451,7 +1497,8 @@ $ kill -9 2602602      # the multiplexer on 1981, five seconds in
 
 After each run the multiplexer is started again on its port, and the
 generators and the web app reconnect to it within three seconds on
-their own.
+their own; a request whose lane takes it before the generators are back
+on it goes on through the other.
 
 **5. The generator killed under an answer.** With g2 stopped so that g1
 must get the request, g1 is killed with `SIGKILL` five seconds in. The
@@ -1522,47 +1569,61 @@ lists all of it. What the test uses, in the order it appears:
 - **`unittest.IsolatedAsyncioTestCase`** makes a loop per test, and what
   arrives is delivered on the loop an `AsyncClient` was made on, so the
   client and its `Streams` are made in `asyncSetUp()` and closed in
-  `asyncTearDown()`.
+  `asyncTearDown()`, the `Streams` first, with `aclose()`, so that the
+  CANCELs of what a test abandoned go out before the client closes.
 - **`answer_words()`** is what the generator answers, so every test
   asserts the whole answer, in order: the first checks one answer and
   its reply, the second two at once told apart by `stream_id`.
 - **`stream.drop = 5`** is the client's one knob for tests: the next five
   tokens to arrive are dropped on arrival, as a dead connection would
-  drop them; the next token is yielded within half a second, not at the
-  end, and the answer comes out whole, with one gap and exactly five
-  tokens sent again.
+  drop them; the next token is yielded while the answer goes on, before
+  its reply, not at the end, and the answer comes out whole, with one gap
+  and exactly five tokens sent again.
 - **`cluster.multiplexer_at(stream.lane.connection.endpoint)`** finds the
   `Mx` the lane took once the request went, and `kill()` kills it under
   the answer, with two generators behind the multiplexers: the answer is
   complete and in order, the request went again once, only one of the
-  two generators ever had the answer and it started the answer once,
-  and it took no longer than the answer does; after `start()` brings the multiplexer back,
-  `wait_for_peer()` sees the generators and the client on it again. With
+  two generators ever had the answer and it started the answer once;
+  after `start()` brings the multiplexer back, `wait_for_peer()` sees the
+  generators and the client on it again, both called through
+  `asyncio.to_thread()`, so that the loop goes on meanwhile. With
   `pinned=True` the same kill raises `NotConnected`.
 - **A consumer that stops early** leaves `async with` after three
   tokens: the answer is forgotten, and the generator's answer ends
-  cancelled within a few tokens.
+  cancelled within a few tokens. One that closes its `Streams` and its
+  client right after abandoning an answer, as the command line does,
+  stops the generator all the same.
 - **`httpx.ASGITransport(app=app.app)`** drives the FastAPI app in
-  process, no server needed: the response is `text/event-stream`, its
+  process, no server needed, inside the app's lifespan, whose end closes
+  the `Streams` and the client: the response is `text/event-stream`, its
   lines are one `data` event per token and the `done` event, and a
   count of tokens out of range gets 422.
-- **A generator with one answer at a time**, and a short stall: a second
-  answer waits its turn in the pool, longer than the stall, and still
-  comes whole, since nothing is asked before a first token; and a gap in
-  the answer under way is filled while the pool's one thread is busy.
+- **A generator with one answer at a time**: a second answer waits its
+  turn in the pool, longer than a short stall, and still comes whole,
+  since nothing is asked before a first token; and a gap in the answer
+  under way, the stall left at its default, is filled while the pool's
+  one thread is busy.
   With two multiplexers, the multiplexer of an answer waiting in the
-  pool is killed before any token: the request waits for a token to name
+  pool, the generator having counted the request, is killed before any
+  token: the request waits for a token to name
   the generator, goes again, joins the answer waiting, and both answers
   come whole, the generator having started two, not three.
 - **A generator as a process**, started with `subprocess` and read until
   its `ready` line, is what a test kills or asks to leave: killed, the
-  answer fails with `OperationFailed` within the stall plus a little;
-  sent `SIGTERM`, it finishes the answer it has, a new prompt meanwhile
-  fails for want of a generator that takes new ones, and it exits 0
-  with its two lines. Where util-linux's `setpriv` is installed, the
+  answer fails with `OperationFailed` after the stall, its question to
+  the generator failing at once rather than waiting out `RESUME_TIMEOUT`;
+  sent `SIGTERM`, it finishes the answer it has, a new prompt, once
+  both multiplexers have logged that they route the generator nothing
+  new, fails for want of a generator that takes new ones, and it exits
+  0 with its two lines. Where util-linux's `setpriv` is installed, the
   process dies with the test however that ends.
+- **A generator on one multiplexer of two**, as after a restart it has
+  not rejoined: two answers one after the other, whose lanes take the
+  two multiplexers in turn, both come whole, the one that went first
+  where no generator was sent again through the other.
 - **A cluster with no generator** makes the request `OperationFailed`
-  within a second: a delivery error, then a search that nobody answers.
+  at once: a delivery error, then a search that nobody answers; a request
+  left to time out would end as `OperationTimedOut`.
 
 `test.sh` makes a virtual environment with the requirements and runs
 the test on the `mxcontrol` the package installed, or the binary
@@ -1585,7 +1646,8 @@ the test on the `mxcontrol` the package installed, or the binary
   falls behind loses nothing, but its tokens queue without bound in its
   process; a real service would bound the queue, or have the generator
   wait on a window, which is a `Resume` with a different meaning.
-- A multiplexer that freezes with its connections open. The tokens sent
-  through it wait in it until it dies, as in step 4, or until the
-  heartbeats drop it, about a minute and a half; the stall's question
-  may wait in it too.
+- A multiplexer that freezes with its connections open, or whose
+  machine dies, which closes none of them. The tokens sent through it
+  are lost, or wait in it until it dies, as in step 4, and nothing tells
+  the requester until the heartbeats drop it, about a minute and a half;
+  the stall's question may go the same way.

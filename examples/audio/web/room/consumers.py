@@ -50,6 +50,7 @@ QUERY_TIMEOUT = 0.05  # per attempt; a frame lost with its worker costs at most 
 STUCK = 3  # timeouts in a row after which the stream leaves its worker
 STALE_MS = 60  # later than the fastest frame by this much: the page's six frames of buffer, dropped here
 CATCH_UP_MS = 0.01  # per frame, the most the fastest may drift up: clocks of two machines run apart
+LASTING = 100  # stale frames in a row, a second: a delay that lasts, which the fastest is taken from
 
 log = logging.getLogger("room")
 
@@ -66,6 +67,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
         self.worker = 0  # the instance id of the worker this stream sticks to, once one answered
         self.timeouts = 0  # in a row, on that worker
         self.fastest: float | None = None  # the least our clock minus the capture time, in ms
+        self.stale_run = 0  # stale frames in a row
         self.lost = self.stale = 0
         await self.channel_layer.group_add(self.group, self.channel_name)
         await self.accept()
@@ -131,10 +133,20 @@ class AudioConsumer(AsyncWebsocketConsumer):
     def _stale(self, captured_at: float) -> bool:
         """Whether the frame waited long enough in front of the consumer
         to be worth nothing: later, against the capture time, than the
-        fastest frame of the stream by more than the page would buffer."""
+        fastest frame of the stream by more than the page would buffer,
+        unless every frame of the last second was: a delay that lasts, a
+        longer path or a clock that jumped, is the stream's from then on."""
         behind = time.monotonic() * 1000 - captured_at  # the clocks' difference, plus the wait
         self.fastest = behind if self.fastest is None else min(self.fastest + CATCH_UP_MS, behind)
-        return behind - self.fastest > STALE_MS
+        if behind - self.fastest <= STALE_MS:
+            self.stale_run = 0
+            return False
+        self.stale_run += 1
+        if self.stale_run < LASTING:
+            return True
+        self.fastest = behind
+        self.stale_run = 0
+        return False
 
     async def _ask(self, client: AsyncClient, payload: bytes):
         """The worker's answer: from the stream's worker while it lives, from any worker after it is gone."""

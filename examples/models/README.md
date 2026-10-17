@@ -9,10 +9,11 @@ key ([keys](../../docs/keys.md)). A worker loads and unloads models
 while it serves, told so by a request that names the worker in its key
 the same way, `worker.w1`. It changes its filters and answers once every
 multiplexer has them: after a load, the model's requests reach it; after
-an unload, none is on its way any more, and the model is freed. A worker
-started with `--any-model` has no filter for `PREDICT` and takes every
-model, loading each on first use. The models are stand-ins that answer
-at once, since the example is about where requests go.
+an unload, the multiplexers route none there any more, and the model is
+freed. A worker started with `--any-model` has no filter for `PREDICT`
+and takes every model, loading each on first use. The models are
+stand-ins that answer at once, since the example is about where requests
+go.
 
 The example is installed with pip: `mx-multiplexer` from PyPI, which
 brings the multiplexer, `mxcontrol`, with it.

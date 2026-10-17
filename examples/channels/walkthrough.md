@@ -134,13 +134,12 @@ the application's traffic. What arrives is delivered on the loop the
 client was made on; new_channel() makes a new client on the running loop
 when that one has closed."""
 
-import asyncio
 import itertools
 import logging
 import random
 import string
+import threading
 import time
-import weakref
 
 import msgpack
 from channels.exceptions import ChannelFull
@@ -203,9 +202,12 @@ class MultiplexerChannelLayer(InMemoryChannelLayer):
         self._holder = AsyncClient.holder(peers.CHANNELS, parse_addresses(addresses), timeout=timeout)
         self._subscribed: AsyncClient | None = None  # the client whose messages this layer already takes
         self._receiving: AsyncClient | None = None  # the client routed the group events, once a channel was made
-        # Sending: each loop's stream, [its id, the last number sent]. Only
-        # on one loop is the order of the numbers the order of the sends.
-        self._streams: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, list[int]] = weakref.WeakKeyDictionary()
+        # Sending: each thread's stream, [its id, the last number sent]. A
+        # thread runs one loop at a time, and a send hands its message to
+        # the library in the step that numbers it, so a thread's numbers
+        # are in the order of its sends; sync code's async_to_sync makes a
+        # loop per call, and a stream per loop would be one per send.
+        self._streams: dict[int, list[int]] = {}
         self._stream_ids = itertools.count(1)
         # Receiving: (sender, stream) -> (the last number delivered, when).
         self._last: dict[tuple[int, int], tuple[int, float]] = {}
@@ -319,11 +321,13 @@ it goes, the envelope is numbered. A multiplexer keeps order per
 connection only, so two messages through two of them can arrive in
 either order, and the receiving library drops a repeat only among the
 last 2048 messages it saw, which a multiplexer frozen for longer
-outlasts. The numbers make the order the sender's: each event loop that
+outlasts. The numbers make the order the sender's: each thread that
 sends has a stream, numbered from 1 in the order its messages are sent,
-since nothing between taking the number and writing the message lets
-another send of that loop in. Two loops are two writers, with no order
-between them to keep.
+since the message is handed to the library in the same step that takes
+its number, with no await between, and the library keeps each
+connection's order; a thread runs one loop at a time, so the loops that
+sync code's `async_to_sync` makes, one per call, share their thread's
+stream. Two threads are two writers, with no order between them to keep.
 
 ```python file=mxchannels/layer.py
     async def group_send(self, group, message):
@@ -339,12 +343,13 @@ between them to keep.
         await self._send_to_others(client, ChannelEnvelope(group=group, payload=payload), types.CHANNEL_GROUP_SEND)
 
     async def _send_to_others(self, client: AsyncClient, envelope: ChannelEnvelope, type: int, to: int = 0) -> None:
-        """Number the envelope in the running loop's stream and send it
-        through every multiplexer; nothing between the number and the send
-        lets another send of this loop in."""
-        stream = self._streams.get(asyncio.get_running_loop())
+        """Number the envelope in this thread's stream and send it through
+        every multiplexer: the library has the message in the step that
+        numbers it, with no await between, and keeps each connection's
+        order."""
+        stream = self._streams.get(threading.get_ident())
         if stream is None:
-            stream = self._streams[asyncio.get_running_loop()] = [next(self._stream_ids), 0]
+            stream = self._streams[threading.get_ident()] = [next(self._stream_ids), 0]
         stream[1] += 1
         envelope.stream, envelope.seq = stream
         await client.send_message(
@@ -360,7 +365,8 @@ between them to keep.
 
 ```python file=mxchannels/layer.py
     async def close(self):
-        """Close the process's client; the in-memory part needs nothing."""
+        """Close the process's client, what was sent written first, a second
+        at most; the in-memory part needs nothing."""
         await self._holder.aclose()
         self._subscribed = self._receiving = None
 
@@ -751,10 +757,12 @@ What the test uses:
   `IsolatedAsyncioTestCase`s, which make a loop per test, and what
   arrives is delivered on the loop the client was made on, so
   `asyncSetUp` makes a fresh pair and `asyncTearDown` closes it.
-- **`cluster.wait_for_peer(peers.CHANNELS, 2)`**, run in a thread with
-  `asyncio.to_thread` since it blocks, waits until both multiplexers'
-  peers files list both clients, which is when a send can be expected
-  to arrive.
+- **`client.routing_acknowledged()`**, waited for in a thread with
+  `asyncio.to_thread` since it blocks, says that every multiplexer has
+  the routing a channel asked for, the group events: a client made by a
+  layer is connected already, the holder's constructor having waited for
+  every handshake, and from then on an addressed send arrives, a group
+  send once that routing is in effect.
 - **`cluster.mx[0].pause()`, then `kill()`**, in the middle of two
   hundred group sends and two hundred sends to a channel of the other
   process: the first multiplexer freezes, holding every copy that went
@@ -803,4 +811,6 @@ python -m unittest -v test
 - Receiving on more than one loop per process: what arrives is delivered
   on the loop the client was made on, the ASGI server's in a gateway.
 - Messages over the broker's 128 MiB: the library refuses one at the
-  send, before anything goes out.
+  send, before anything goes out to another process; `group_send`
+  delivers to this process's members first, so they get a message the
+  others never will.

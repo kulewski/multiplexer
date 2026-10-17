@@ -92,8 +92,9 @@ such blocks.
 # the crate mx-multiplexer, which this workspace takes from the repository;
 # a program of yours takes it from crates.io or from git
 # (docs/api_rust.md). A Cargo workspace of its own, the files at its top as
-# examples/echo has them. libc is for the backend's signals, the one crate
-# beside the library, which depends on it already.
+# examples/echo has them. libc is for the signals, the backend's and the
+# test's SIGTERM, the one crate beside the library, which depends on it
+# already.
 [package]
 name = "echo-rust"
 version = "0.0.0"
@@ -141,9 +142,10 @@ one request at a time.
 //! the program's waits for them with sigwait and starts the drain through
 //! the server's handle, which any thread may call.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use mx_multiplexer::{direct_only_routing, BaseMultiplexerServer, Handler, HandlerResult, Request};
+use mx_multiplexer::{direct_only_routing, BaseMultiplexerServer, Handler, HandlerResult, Request, ServerHandle};
 
 mod multiplexer_constants; // generated from echo.rules
 use multiplexer_constants::{peers, types};
@@ -154,16 +156,42 @@ The handler upper-cases the payload and replies: `reply()` addresses the
 answer to the client that asked and makes it reference the request's id,
 which is how the client knows it is the answer to its question. A handler
 that returned an error, or panicked, would get the client a
-`BACKEND_ERROR` saying so, at once.
+`BACKEND_ERROR` saying so, at once. `periodic_task()`, which the loop
+calls after every poll, says `ready` once a multiplexer has welcomed the
+backend, when none had at the start: the line means reachable.
 
 ```rust file=backend.rs
-/// Upper-cases what it is asked.
-struct Echo;
+/// Upper-cases what it is asked, and says "ready" once a multiplexer
+/// welcomed the backend.
+#[derive(Default)]
+struct Echo {
+    ready_said: AtomicBool,
+}
+
+impl Echo {
+    /// "ready" on stdout, once, when `connections` are up: the echo test
+    /// reads the line and queries at once, so it must mean reachable. True
+    /// once said.
+    fn say_ready_once_connected(&self, connections: usize) -> bool {
+        if connections > 0 && !self.ready_said.swap(true, Ordering::SeqCst) {
+            println!("ready");
+        }
+        self.ready_said.load(Ordering::SeqCst)
+    }
+}
 
 impl Handler for Echo {
     fn handle_message(&self, request: Request) -> HandlerResult {
         request.reply(types::ECHO_RESPONSE, request.payload().to_ascii_uppercase())?;
         Ok(())
+    }
+
+    /// After every poll: "ready" once a multiplexer welcomed the backend,
+    /// when it had none at the start.
+    fn periodic_task(&self, server: &ServerHandle) {
+        if !self.ready_said.load(Ordering::SeqCst) {
+            self.say_ready_once_connected(server.connections_count().unwrap_or(0));
+        }
     }
 }
 
@@ -173,8 +201,9 @@ impl Handler for Echo {
 starts a thread, then builds the server: its drain routing is the last
 resort of the type, so that during the drain the multiplexers route it
 nothing new while another backend of its type is there, and everything
-while none is. `connect()` waits for the handshake, so that `ready` means
-reachable. A thread of the program's waits for `SIGTERM` or `SIGINT` and
+while none is. `connect()` waits for the handshakes and says how many
+came up, so that `ready` comes at once; with none, the loop goes on
+trying, and the handler says it later. A thread of the program's waits for `SIGTERM` or `SIGINT` and
 starts the drain through the server's handle, which any thread may use;
 `serve_forever()` returns once the drain is over, five seconds at most,
 and the program ends with 0.
@@ -188,11 +217,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut routing = direct_only_routing();
     routing.last_resort = true;
     let mut server =
-        BaseMultiplexerServer::builder(peers::ECHO_BACKEND, [address]).drain_routing(routing).build(Echo)?;
-    // The echo test reads "ready" and queries at once, so the line must mean
-    // reachable: connect() first; serve_forever() would otherwise.
-    server.connect()?;
-    println!("ready");
+        BaseMultiplexerServer::builder(peers::ECHO_BACKEND, [address]).drain_routing(routing).build(Echo::default())?;
+    // connect() waits for the handshakes, so that "ready" can come at once;
+    // with no multiplexer reachable, the loop goes on trying and says it
+    // once one welcomes the backend.
+    let connected = server.connect()?;
+    if !server.handler().say_ready_once_connected(connected) {
+        eprintln!("no multiplexer reachable yet; ready once one is");
+    }
     let handle = server.handle();
     std::thread::spawn(move || {
         wait_for(&signals);
@@ -200,8 +232,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     // Drain for five seconds once asked, as the last resort: while another
     // backend is there the multiplexers route nothing new here, and alone
-    // this one keeps serving to the end. A rolling restart costs nobody a
-    // request.
+    // this one keeps serving to the end, so a replacement that registers
+    // within those five seconds takes over without a failed request.
     server.serve_forever(Duration::from_millis(500), Some(Duration::from_secs(5)))?;
     Ok(())
 }
@@ -432,7 +464,8 @@ and the multiplexer says why it could not route the request:
 
 With a second backend running, the one asked to leave gets nothing new
 during its drain and the other answers, so a rolling restart costs no
-client a request ([how a backend leaves](../../docs/leaving.md)).
+client a request; alone, it takes a replacement that registers within the
+five seconds ([how a backend leaves](../../docs/leaving.md)).
 
 ## 9. The test
 
@@ -441,22 +474,32 @@ or this repository's, built with Bazel. The test runs the two binaries,
 which cargo builds for it, against a multiplexer it starts for each test
 on a port the system picks, as examples/echo's `echo_test.py` does: the
 backend read `ready` before anything asks, the client's output compared;
-then `SIGTERM`, a query answered during the drain, and the backend's end
-with 0. Every process it starts is killed when the test ends, however it
-ends.
+then `SIGTERM`, a query answered during the drain, asked once the
+multiplexer has logged the drain routing in effect, since before it the
+request is routed as if no drain had begun, by a `SyncClient` of the
+crate connected before the signal, so that the drain's five seconds hold
+a query and not a process starting, and the backend's end with 0. Every
+process it starts is killed when the test ends, however it ends.
 
 ```rust file=echo_test.rs
 //! The echo example end to end, as examples/echo's echo_test.py runs its
 //! binaries: a multiplexer started for each test with echo.rules, on a port
 //! the system picks; the backend, read "ready" before anything asks; the
 //! client asking. Then the backend asked to leave with SIGTERM: alone, the
-//! last resort of its type, it answers through its drain and leaves after
-//! it with 0. The multiplexer is `$MXCONTROL`, or `mxcontrol` on the PATH.
+//! last resort of its type, it answers through its drain, asked once the
+//! multiplexer has logged the drain routing in effect, by a `SyncClient`
+//! the test connected before the signal, and leaves after it with 0. The
+//! multiplexer is `$MXCONTROL`, or `mxcontrol` on the PATH.
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use mx_multiplexer::SyncClient;
+
+mod multiplexer_constants; // generated from echo.rules
+use multiplexer_constants::{peers, types};
 
 /// A process the test started, killed when the test ends, however it ends.
 struct Running(Child);
@@ -468,20 +511,37 @@ impl Drop for Running {
     }
 }
 
-/// A directory of this test's own, for the port file.
-fn scratch(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("echo-rust-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
-    directory
+/// A directory of this test's own, for the port file and the
+/// multiplexer's log, removed when the test ends.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let directory = std::env::temp_dir().join(format!("echo-rust-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        Scratch(directory)
+    }
+
+    /// Whether the multiplexer has logged `text`.
+    fn logged(&self, text: &str) -> bool {
+        std::fs::read_to_string(self.0.join("log")).is_ok_and(|log| log.contains(text))
+    }
 }
 
-/// A multiplexer with echo.rules on a port the system picks, and its
-/// address once it wrote it: 15 s at most, a bound that only detects a
-/// failure.
-fn multiplexer(name: &str) -> (Running, String) {
-    let directory = scratch(name);
-    let port_file = directory.join("port");
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A multiplexer with echo.rules on a port the system picks, its address
+/// once it wrote it, 15 s at most, a bound that only detects a failure,
+/// and the directory it logs in.
+fn multiplexer(name: &str) -> (Running, String, Scratch) {
+    let scratch = Scratch::new(name);
+    let port_file = scratch.0.join("port");
     let _ = std::fs::remove_file(&port_file);
+    let log = std::fs::File::create(scratch.0.join("log")).expect("a log file");
     let mxcontrol = std::env::var_os("MXCONTROL").unwrap_or_else(|| "mxcontrol".into());
     let child = Command::new(mxcontrol)
         .args(["run_multiplexer", "--address", "127.0.0.1:0", "--rules"])
@@ -489,7 +549,7 @@ fn multiplexer(name: &str) -> (Running, String) {
         .arg("--port-file")
         .arg(&port_file)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(log)
         .spawn()
         .expect("mxcontrol runs: set MXCONTROL, as test.sh does");
     let running = Running(child);
@@ -497,8 +557,7 @@ fn multiplexer(name: &str) -> (Running, String) {
     loop {
         if let Ok(address) = std::fs::read_to_string(&port_file) {
             if !address.trim().is_empty() {
-                let _ = std::fs::remove_dir_all(&directory);
-                return (running, address.trim().to_string());
+                return (running, address.trim().to_string(), scratch);
             }
         }
         assert!(Instant::now() < until, "the multiplexer wrote no port");
@@ -527,18 +586,31 @@ fn ask(address: &str, text: &str) -> (bool, String) {
 
 #[test]
 fn the_client_gets_the_text_upper_cased_from_the_backend() {
-    let (_mx, address) = multiplexer("query");
+    let (_mx, address, _scratch) = multiplexer("query");
     let _backend = backend(&address);
     assert_eq!((true, "HELLO MULTIPLEXER\n".to_string()), ask(&address, "hello multiplexer"));
 }
 
 #[test]
 fn the_last_backend_answers_through_its_drain_and_leaves_after_it() {
-    let (_mx, address) = multiplexer("drain");
+    let (_mx, address, scratch) = multiplexer("drain");
     let mut backend = backend(&address);
-    let status = Command::new("kill").args(["-TERM", &backend.0.id().to_string()]).status().expect("kill runs");
-    assert!(status.success());
-    assert_eq!((true, "STILL HERE\n".to_string()), ask(&address, "still here"));
+    // Connected before the signal, so that what the drain's five seconds
+    // must hold is one query, not a client process starting.
+    let mut client = SyncClient::builder(peers::ECHO_CLIENT).connect([&address]).expect("a client");
+    assert_eq!(1, client.connections_count().expect("its connections"), "connected before the signal");
+    // SAFETY: kill(2) takes a process id and a signal and touches no memory.
+    let sent = unsafe { libc::kill(backend.0.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(0, sent, "SIGTERM sent");
+    // Asked once the multiplexer has the drain routing, which it logs:
+    // before it, the request is routed as if no drain had begun.
+    let until = Instant::now() + Duration::from_secs(15);
+    while !scratch.logged("(ECHO_BACKEND) takes any=no all=no last_resort=yes") {
+        assert!(Instant::now() < until, "the multiplexer never had the drain routing");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let reply = client.query(types::ECHO_REQUEST, "still here").timeout(Duration::from_secs(10)).wait();
+    assert_eq!("STILL HERE", String::from_utf8_lossy(&reply.expect("an answer during the drain").message.payload));
     let until = Instant::now() + Duration::from_secs(30);
     let code = loop {
         if let Some(status) = backend.0.try_wait().expect("the backend's status") {

@@ -39,13 +39,11 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(b"HELLO\n", await asyncio.wait_for(first[0].readline(), 10))
                 second[1].write(b"shout everyone\n")
                 await second[1].drain()
-                lines = sorted(
-                    [
-                        await asyncio.wait_for(second[0].readline(), 10),
-                        await asyncio.wait_for(second[0].readline(), 10),
-                    ]
-                )
-                self.assertEqual([b"* EVERYONE\n", b"SHOUT EVERYONE\n"], lines)
+                lines = [
+                    await asyncio.wait_for(second[0].readline(), 10),
+                    await asyncio.wait_for(second[0].readline(), 10),
+                ]
+                self.assertEqual([b"* EVERYONE\n", b"SHOUT EVERYONE\n"], lines, "the broadcast, then the answer")
                 self.assertEqual(b"* EVERYONE\n", await asyncio.wait_for(first[0].readline(), 10))
                 for _, writer in (first, second):
                     writer.close()
@@ -70,7 +68,10 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
             try:
                 stalled.connect(("127.0.0.1", port))
                 reader, writer = await asyncio.open_connection("127.0.0.1", port)
-                await asyncio.sleep(0.1)
+                for _ in range(100):  # the gateway serves on this loop: both are in its table within a few turns
+                    if len(chat.clients) == 2:
+                        break
+                    await asyncio.sleep(0.01)
                 self.assertEqual(2, len(chat.clients))
                 padding = b"x" * 60000  # sixty of these are more than a stalled socket takes
                 for n in range(60):

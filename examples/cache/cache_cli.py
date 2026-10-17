@@ -7,7 +7,7 @@
     python cache_cli.py ADDRESSES clear
     python cache_cli.py ADDRESSES stats
     python cache_cli.py ADDRESSES fill N
-    python cache_cli.py ADDRESSES loop [--pairs N | --seconds S] [--writes-through all|one]
+    python cache_cli.py ADDRESSES [--writes-through all|one] loop [--pairs N | --seconds S] [--key KEY]
 
 ADDRESSES is host:port of every multiplexer, comma-separated. `get` says
 which replica answered, so `--repeat` shows the round robin. `fill` sets N
@@ -106,7 +106,14 @@ def main() -> int:
             cache.set(args.key, args.value.encode(), time.time() + args.ttl if args.ttl else 0.0)
             print(f"{args.key} set")
         elif args.command == "add":
-            print(f"{args.key} {'added' if cache.add(args.key, args.value.encode()) else 'was there already'}")
+            unavailable = cache.unavailable
+            added = cache.add(args.key, args.value.encode())
+            if added:
+                print(f"{args.key} added")
+            elif cache.unavailable > unavailable:
+                print(f"{args.key} not added, no replica reachable")
+            else:
+                print(f"{args.key} was there already")
         elif args.command == "delete":
             cache.delete(args.key)
             print(f"{args.key} deleted")
@@ -130,6 +137,8 @@ def main() -> int:
         cache.close()
     if cache.lost_writes:
         print(f"{cache.lost_writes} write(s) reached no replica, as a multiplexer reported")
+    if cache.dropped_writes:
+        print(f"{cache.dropped_writes} write(s) no multiplexer took, within the timeout or before the close")
     return status
 
 

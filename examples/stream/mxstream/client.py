@@ -12,9 +12,11 @@ a dead connection lost, the generator of the answer is asked, addressed
 with `to`, for the tokens missing. When the lane's multiplexer dies, the
 request goes again through another, addressed to that generator once a
 token has named it, and the generator joins it to the answer under way.
-The query's reply ends the answer.
-With `pinned=True` an answer whose multiplexer dies ends with
-NotConnected instead, for a caller that would rather start over."""
+A request whose multiplexer has no generator for it, one the generators
+have not rejoined since it came back, goes through the next. The
+query's reply ends the answer. With `pinned=True` an answer whose
+multiplexer dies ends with NotConnected instead, for a caller that would
+rather start over."""
 
 import asyncio
 import random
@@ -24,7 +26,7 @@ from typing import AsyncIterator
 from multiplexer.aio import AsyncClient
 from multiplexer.endpoints import parse_endpoint
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage
-from multiplexer.mxclient import NotConnected, OperationTimedOut
+from multiplexer.mxclient import NotConnected, OperationFailed, OperationTimedOut
 
 from multiplexer_constants import types
 from stream_pb2 import Cancel, Generated, Prompt, Resume, Resumed, Token
@@ -79,7 +81,7 @@ class Streams:
             self._cancel(token.stream_id, mxmsg.sender)
 
     def _cancel(self, stream_id: int, generator: int) -> None:
-        """Tell `generator` to stop the answer, once; an event, not awaited by anyone."""
+        """Tell `generator` to stop the answer, once; an event, awaited by nobody but aclose()."""
         if (stream_id, generator) in self._cancelled:
             return
         if len(self._cancelled) > 10000:
@@ -94,16 +96,22 @@ class Streams:
         given up on: the generator then finishes the answer to nobody."""
         try:
             await self.client.send_message(Cancel(stream_id=stream_id), type=types.CANCEL, to=generator, timeout=1.0)
-        except Exception:  # the client closed meanwhile; the generator finishes likewise
+        except Exception:  # the client closed before this ran; the generator finishes likewise
             pass
 
     def _forget(self, stream: "Stream") -> None:
         """A stream that ended: its tokens are not taken any more."""
         self._open.pop(stream.stream_id, None)
 
-    def close(self) -> None:
-        """End the subscription; the client is the caller's."""
+    async def aclose(self) -> None:
+        """End the subscription, once the CANCELs on their way are with the
+        client: awaited before the client's own aclose(), which writes them
+        out, since one that ran only after the client closed would not go,
+        and its generator would finish an answer for nobody. The client is
+        the caller's."""
         self._unsubscribe()
+        if self._cancelling:
+            await asyncio.wait(set(self._cancelling))
 
 
 class Stream:
@@ -146,10 +154,14 @@ class Stream:
         request waits NAME_WAIT for one; with none, it goes to any
         generator, and follows the generator a token names after all. A
         reply from any generator but the answer's, one told to stop, sends
-        the request to the answer's own."""
+        the request to the answer's own. A request the lane's multiplexer
+        has no generator for, a multiplexer the generators have not
+        rejoined since it came back, goes again through the next one,
+        once for each: nobody took it, so it starts nothing twice."""
         prompt = Prompt()
         prompt.CopyFrom(self.prompt)
         client = self.streams.client
+        refused = 0  # multiplexers in a row that had no generator for the request
         while True:
             target = self.worker
             query = asyncio.ensure_future(
@@ -171,11 +183,17 @@ class Stream:
                 continue
             try:
                 reply = query.result()
+            except OperationFailed:
+                refused += 1
+                if refused >= client.connections_count() or time.monotonic() >= self.deadline:
+                    raise
+                self.lane = client.lane(pinned=True)  # the next multiplexer, round robin
+                continue
             except NotConnected:
                 if self.pinned or time.monotonic() >= self.deadline:
                     raise
-                await asyncio.sleep(REORDER_WAIT)  # a moment for the library to see which connections live
                 self.lane = client.lane(pinned=True)
+                refused = 0
                 self.reattached += 1
                 prompt.from_seq = self.next_seq
                 if not self.worker:

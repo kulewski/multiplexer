@@ -35,6 +35,7 @@ services:
     build: .
     platform: linux/amd64
     command: ["python", "web/manage.py", "runserver", "--noreload", "0.0.0.0:8000"]
+    init: true  # runserver --noreload has no SIGTERM handler, and as PID 1 would ignore the signal
     environment: {MX_ADDRESSES: "mx1:1980,mx2:1980", MX_LOG_VERBOSITY: "DEBUG:LOW"}
     ports: ["8000:8000"]
     depends_on: [mx1, mx2]

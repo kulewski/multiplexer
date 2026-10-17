@@ -260,16 +260,18 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         alice = WebsocketCommunicator(application, "/ws/audio/studio/", headers=origin)
         bob = WebsocketCommunicator(application, "/ws/audio/studio/", headers=origin)
         hellos = {}
+        # 10 s for each step, through the multiplexer and the worker, rather than the
+        # communicator's own second: a bound that only detects a failure.
         for name, socket in (("alice", alice), ("bob", bob)):
-            connected, _ = await socket.connect()
+            connected, _ = await socket.connect(timeout=10)
             self.assertTrue(connected)
-            hellos[name] = await socket.receive_json_from()
+            hellos[name] = await socket.receive_json_from(timeout=10)
             self.assertEqual(["none", "telephone", "robot", "echo"], hellos[name]["effects"])
         await alice.send_json_to({"effect": "telephone"})
         first_sent = time.monotonic()
         await alice.send_to(bytes_data=UP.pack(0, 1000.0) + tone(1000))
         for socket in (alice, bob):
-            frame = await socket.receive_from(timeout=5)
+            frame = await socket.receive_from(timeout=10)
             assert isinstance(frame, bytes), "binary, not text"
             participant, seq, captured_at, gateway_us, worker_us, worker = DOWN.unpack_from(frame)
             self.assertEqual((hellos["alice"]["participant"], 0, 1000.0), (participant, seq, captured_at))
@@ -283,11 +285,49 @@ class GatewayTest(unittest.IsolatedAsyncioTestCase):
         now = 1000.0 + (time.monotonic() - first_sent) * 1000
         await alice.send_to(bytes_data=UP.pack(1, now - 300) + tone(1000))
         await alice.send_to(bytes_data=UP.pack(2, now) + tone(1000))
-        frame = await bob.receive_from(timeout=5)
+        frame = await bob.receive_from(timeout=10)
         assert isinstance(frame, bytes)
         self.assertEqual(2, DOWN.unpack_from(frame)[1], "the stale one never reached the room")
         for socket in (alice, bob):
-            await socket.disconnect()
+            await socket.disconnect(timeout=10)
+
+    async def test_a_delay_that_lasts_is_the_streams_after_a_second(self):
+        """Every frame 100 ms later than the stream's fastest, from a path
+        grown longer: each was dropped as stale until the fastest crept up,
+        a millisecond a second, for forty seconds of silence. A second of
+        them in a row, LASTING frames, and the delay is the stream's."""
+        from channels.testing import WebsocketCommunicator
+
+        from room.consumers import DOWN, LASTING, UP
+        from webapp.asgi import application
+
+        origin = [(b"origin", b"http://localhost")]
+        alice = WebsocketCommunicator(application, "/ws/audio/delay/", headers=origin)
+        bob = WebsocketCommunicator(application, "/ws/audio/delay/", headers=origin)
+        for socket in (alice, bob):
+            connected, _ = await socket.connect(timeout=10)
+            self.assertTrue(connected)
+            await socket.receive_json_from(timeout=10)
+        started = time.monotonic()
+
+        def page_clock() -> float:
+            """The page's clock: ms, the first frame's 1000."""
+            return 1000.0 + (time.monotonic() - started) * 1000
+
+        await alice.send_to(bytes_data=UP.pack(0, page_clock()) + tone(1000))
+        frame = await bob.receive_from(timeout=10)
+        assert isinstance(frame, bytes)
+        self.assertEqual(0, DOWN.unpack_from(frame)[1], "the first, on time")
+        for seq in range(1, LASTING + 2):
+            await alice.send_to(bytes_data=UP.pack(seq, page_clock() - 100) + tone(1000))
+        heard = []
+        for _ in range(2):
+            frame = await bob.receive_from(timeout=10)
+            assert isinstance(frame, bytes)
+            heard.append(DOWN.unpack_from(frame)[1])
+        self.assertEqual([LASTING, LASTING + 1], heard, "dropped until a second of them, then heard")
+        for socket in (alice, bob):
+            await socket.disconnect(timeout=10)
 
 
 class ConstantsTest(unittest.TestCase):

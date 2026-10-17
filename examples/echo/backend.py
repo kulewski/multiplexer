@@ -35,14 +35,27 @@ class EchoBackend(BaseMultiplexerServer):
         )
         self.drain_file = drain_file
         self._drain_checked_at = 0.0
+        self.ready_said = False
 
     def handle_message(self, mxmsg):
         """Reply to one request."""
         self.send_message(message=mxmsg.message.upper(), type=types.ECHO_RESPONSE)
 
+    def say_ready_once_connected(self) -> bool:
+        """Print "ready", once, when a multiplexer has welcomed the backend:
+        the echo test reads the line and queries at once, so it must mean
+        reachable. True once said."""
+        if not self.ready_said and self.conn.connections_count() > 0:
+            print("ready", flush=True)
+            self.ready_said = True
+        return self.ready_said
+
     def periodic_task(self):
-        """After every message and every poll: start draining once the drain file exists, looked for
-        twice a second rather than on every message, and remove it."""
+        """After every message and every poll: "ready" once a multiplexer
+        welcomed the backend, if it had none at the start; then start
+        draining once the drain file exists, looked for twice a second
+        rather than on every message, and remove it."""
+        self.say_ready_once_connected()
         now = time.monotonic()
         if now - self._drain_checked_at < DRAIN_CHECK_EVERY:
             return
@@ -57,15 +70,17 @@ def main(argv: list[str]) -> None:
     endpoint = parse_endpoint(argv[1] if len(argv) > 1 else "127.0.0.1:1980")  # [address]:port for IPv6
     drain_file = argv[2] if len(argv) > 2 else f"/tmp/echo-backend-leave-{os.getpid()}"
     backend = EchoBackend([endpoint], drain_file)
-    # The echo test reads "ready" and queries at once, so the line must mean
-    # reachable: connect() first; serve_forever() would otherwise.
+    # connect() waits for the handshakes, so that "ready" can come at once;
+    # with no multiplexer reachable, the loop goes on trying and says it
+    # once one welcomes the backend.
     backend.connect()
     print(f"drain file: {drain_file}", file=sys.stderr, flush=True)
-    print("ready", flush=True)
+    if not backend.say_ready_once_connected():
+        print("no multiplexer reachable yet; ready once one is", file=sys.stderr, flush=True)
     # Drain for five seconds once asked, as the last resort: while another
     # backend is there the multiplexers route nothing new here, and alone
-    # this one keeps serving to the end. A rolling restart costs nobody a
-    # request.
+    # this one keeps serving to the end, so a replacement that registers
+    # within those five seconds takes over without a failed request.
     backend.serve_forever(poll=0.5, drain_seconds=5)
 
 

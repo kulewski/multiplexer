@@ -21,7 +21,8 @@ int main(int argc, char** argv) {
 
   // query() sends the request through one connection and returns the reply;
   // it throws when there is none: OperationFailed when no backend of the
-  // type is connected anywhere, OperationTimedOut when nothing answered.
+  // type is connected anywhere, OperationTimedOut when nothing answered,
+  // NotConnected when no multiplexer could be reached within the timeout.
   try {
     multiplexer::IncomingMessage reply = client.query(text, multiplexer::types::ECHO_REQUEST, /*timeout=*/10);
     std::cout << reply.third->message() << std::endl;
@@ -30,6 +31,9 @@ int main(int argc, char** argv) {
     return 1;
   } catch (const multiplexer::SyncClient::OperationTimedOut&) {
     std::cerr << "no answer within the timeout" << std::endl;
+    return 1;
+  } catch (const multiplexer::SyncClient::NotConnected&) {
+    std::cerr << "no multiplexer reachable within the timeout" << std::endl;
     return 1;
   }
   client.shutdown();

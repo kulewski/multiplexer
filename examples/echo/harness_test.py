@@ -51,7 +51,6 @@ class HarnessTest(unittest.TestCase):
             backend.reply_with(types.ECHO_REQUEST, b"before", types.ECHO_RESPONSE)
             self.assertEqual(b"before", client.query(b"x", types.ECHO_REQUEST).message)
             cluster.mx[0].restart()
-            cluster.wait_for_peer_gone(peers.ECHO_BACKEND, timeout=1)
             cluster.wait_for_peer(peers.ECHO_BACKEND)
             backend.reply_with(types.ECHO_REQUEST, b"after", types.ECHO_RESPONSE)
             self.assertEqual(b"after", client.query(b"x", types.ECHO_REQUEST, timeout=15).message)

@@ -14,12 +14,14 @@ from inference_pb2 import InferRequest, InferResponse
 from multiplexer_constants import types
 
 # What each failure means, for the status code and the message: no live
-# multiplexer at all; no worker anywhere, or the one asked left; the answer
-# did not come in time; the worker's own code failed.
+# multiplexer at all; no worker anywhere, or the one asked left; no answer
+# in time, from a worker too slow or for a request that never reached one,
+# held up in a multiplexer that stopped reading; the worker's own code
+# failed.
 FAILURES = {
     NotConnected: (503, "no multiplexer is reachable"),
     OperationFailed: (503, "no worker is available"),
-    OperationTimedOut: (504, "the worker did not answer in time"),
+    OperationTimedOut: (504, "no answer came in time"),
     BackendError: (502, "the worker failed on this image"),
 }
 

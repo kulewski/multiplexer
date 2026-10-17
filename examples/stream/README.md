@@ -66,7 +66,7 @@ flowchart LR
 ## What is what
 
 - `stream.rules`: the system rules, then `STREAM_CLIENT`, `GENERATOR`,
-  and the message types: `GENERATE` with its `ANY` rule, and the four
+  and the message types: `GENERATE` with its `ANY` rule, and the five
   that are addressed or replies and need none; `multiplexer_constants.py`
   is what `mxcontrol generate_constants` wrote from it, and
   `stream.proto` the payloads, compiled to `stream_pb2.py`.

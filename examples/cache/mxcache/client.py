@@ -29,7 +29,8 @@ def parse_addresses(text: str) -> list[tuple[str, int]]:
 
 
 class Cache:
-    """One ThreadedClient connected to every multiplexer; every method is safe from any thread."""
+    """One ThreadedClient connecting to every multiplexer, waiting for none, so that one unreachable costs
+    nothing here; every method is safe from any thread."""
 
     ALL = ThreadedClient.ALL  # writes through every multiplexer: each replica gets one copy per multiplexer
     ONE = ThreadedClient.ONE  # writes through one multiplexer, round robin: the walkthrough's ordering step
@@ -40,20 +41,25 @@ class Cache:
         self.writes_through = writes_through
         self.timeout = timeout
         self.unavailable = 0  # reads answered as misses because no replica or no multiplexer could be reached
+        self.unavailable_by_error: collections.Counter[str] = collections.Counter()  # those by the error's name
         self.lost_writes = 0  # writes each multiplexer named said it could deliver to no replica
+        self.dropped_writes = 0  # writes no multiplexer took within the send's timeout, or that close() gave up
         self._gathers: dict[int, list[CacheStats]] = {}
         self._refusals: collections.OrderedDict[int, int] = collections.OrderedDict()  # write id: delivery errors
         self._multiplexers = len(addresses)
         self._version = 0
         self._lock = threading.Lock()
-        self._client = ThreadedClient(addresses, type=peers.CACHE_CLIENT, on_message=self._on_message)
+        self._answered = threading.Condition(self._lock)  # a replica's numbers came
+        self._client = ThreadedClient([], type=peers.CACHE_CLIENT, on_message=self._on_message)
+        self._client.connect_all(addresses, 0)  # the connects started, none waited for
 
     def lookup(self, key: str) -> CacheValue | None:
         """One read: the replica's answer, with which replica it was; None when none could be asked."""
         try:
             reply = self._client.query(CacheKey(key=key), type=types.CACHE_GET, timeout=self.timeout)
-        except (MultiplexerClientError, BackendError):
+        except (MultiplexerClientError, BackendError) as error:
             self.unavailable += 1
+            self.unavailable_by_error[type(error).__name__] += 1
             return None
         value = CacheValue()
         value.ParseFromString(reply.message)
@@ -65,7 +71,8 @@ class Cache:
         return value.value if value is not None and value.found else None
 
     def set(self, key: str, value: bytes, expires: float = 0.0) -> None:
-        """Write to every replica; `expires` is unix time, 0 for never."""
+        """Write to every replica; `expires` is unix time, 0 for never. An entry over MAX_MESSAGE_SIZE,
+        128 MiB, raises ValueError."""
         self._write(self._entry(key, value, expires), types.CACHE_SET)
 
     def delete(self, key: str) -> None:
@@ -81,12 +88,14 @@ class Cache:
     def add(self, key: str, value: bytes, expires: float = 0.0) -> bool:
         """Set unless present, decided by one replica; False when it was present, or when nobody could decide.
         On a yes, the entry goes to every replica from here, in order with this client's later reads and
-        writes, which a copy from the deciding replica, through one multiplexer, would not be."""
+        writes, which a copy from the deciding replica, through one multiplexer, would not be. An entry
+        over MAX_MESSAGE_SIZE, 128 MiB, raises ValueError."""
         entry = self._entry(key, value, expires)
         try:
             reply = self._client.query(entry, type=types.CACHE_ADD, timeout=self.timeout)
-        except (MultiplexerClientError, BackendError):
+        except (MultiplexerClientError, BackendError) as error:
             self.unavailable += 1
+            self.unavailable_by_error[type(error).__name__] += 1
             return False
         result = CacheResult()
         result.ParseFromString(reply.message)
@@ -94,21 +103,24 @@ class Cache:
             self._write(entry, types.CACHE_SET)
         return result.done
 
-    def stats(self, wait: float = 0.5) -> list[CacheStats]:
+    def stats(self, expected: int = 0, wait: float = 0.5) -> list[CacheStats]:
         """Every replica's numbers: one request to all of them, through every multiplexer so that a
-        replica that is on one only is asked too, and whatever answered within `wait` seconds."""
+        replica that is on one only is asked too, and what answered once `expected` replicas did, or
+        within `wait` seconds."""
         request_id = random.getrandbits(63)
         with self._lock:
             self._gathers[request_id] = []
         self._client.send_message(
             CacheStatsRequest(request_id=request_id), type=types.CACHE_STATS_REQUEST, multiplexer=ThreadedClient.ALL
         )
-        time.sleep(wait)
-        with self._lock:
+        with self._answered:
+            gather = self._gathers[request_id]
+            self._answered.wait_for(lambda: expected > 0 and len(gather) >= expected, timeout=wait)
             return sorted(self._gathers.pop(request_id), key=lambda stats: stats.replica)
 
     def close(self) -> None:
-        """Shut the client down; the object is done."""
+        """Shut the client down, what was sent written first, a second at most, and what is left after it
+        counted in dropped_writes; the object is done."""
         self._client.shutdown()
 
     def _stamp(self) -> tuple[int, int]:
@@ -124,12 +136,20 @@ class Cache:
         return CacheEntry(key=key, value=value, expires=expires, version=version, writer=writer)
 
     def _write(self, message, kind: int) -> None:
-        """An event to every replica, its id remembered for the delivery errors it may bring."""
-        mxmsg_id = self._client.send_message(message, type=kind, multiplexer=self.writes_through)
+        """An event to every replica, its id remembered before it goes, for the delivery errors it may
+        bring, and how it ended followed, for dropped_writes."""
+        mxmsg = self._client.new_message(message=message, type=kind)
         with self._lock:
-            self._refusals[mxmsg_id] = 0
+            self._refusals[mxmsg.id] = 0
             while len(self._refusals) > WRITES_REMEMBERED:
                 self._refusals.popitem(last=False)
+        self._client.send_message(mxmsg, multiplexer=self.writes_through, callback=self._written)
+
+    def _written(self, written: int) -> None:
+        """On the io thread: how a write ended, 1 once a multiplexer took a copy, 0 once none did."""
+        if not written:
+            with self._lock:
+                self.dropped_writes += 1
 
     def _on_message(self, mxmsg) -> None:
         """On the io thread: a replica's numbers, or a multiplexer saying a message reached nobody. A write
@@ -143,6 +163,7 @@ class Cache:
                 # A replica answers the request's second copy only when its library forgot the first.
                 if gather is not None and all(held.instance_id != stats.instance_id for held in gather):
                     gather.append(stats)
+                    self._answered.notify_all()
         elif mxmsg.type == types.DELIVERY_ERROR:
             copies = self._multiplexers if self.writes_through == ThreadedClient.ALL else 1
             with self._lock:

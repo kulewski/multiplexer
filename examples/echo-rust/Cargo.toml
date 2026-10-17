@@ -2,8 +2,9 @@
 # the crate mx-multiplexer, which this workspace takes from the repository;
 # a program of yours takes it from crates.io or from git
 # (docs/api_rust.md). A Cargo workspace of its own, the files at its top as
-# examples/echo has them. libc is for the backend's signals, the one crate
-# beside the library, which depends on it already.
+# examples/echo has them. libc is for the signals, the backend's and the
+# test's SIGTERM, the one crate beside the library, which depends on it
+# already.
 [package]
 name = "echo-rust"
 version = "0.0.0"

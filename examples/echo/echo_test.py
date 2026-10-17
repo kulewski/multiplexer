@@ -3,14 +3,15 @@ from multiplexer.testing's Cluster, a backend binary started with Process
 and waited for by its "ready" line, and a client in each language asking
 it. Leaving the Cluster's block stops the backend with SIGTERM and fails the
 test unless it ended cleanly, the way docs/recipes/test_a_service.md tests
-a service binary in any language."""
+a service binary in any language; a test that has a backend only help
+kills it first, rather than wait out the C++ one's five seconds of drain."""
 
 import subprocess
 import unittest
 
 from multiplexer.clients import SyncClient
 from multiplexer.multiplexer_constants import peers, types
-from multiplexer.testing import Cluster, Process, runfile
+from multiplexer.testing import Cluster, Process, runfile, wait_until
 
 RULES = runfile("echo.rules")
 
@@ -34,10 +35,11 @@ class EchoTest(unittest.TestCase):
     def query_in_process(self, backend: str) -> None:
         """Query the backend from this process with the Python SyncClient."""
         with Cluster(1, rules=RULES) as cluster:
-            self.run_backend(cluster, backend)
+            process = self.run_backend(cluster, backend)
             client = SyncClient(cluster.endpoints, type=peers.ECHO_CLIENT)
             response = client.query(b"hello multiplexer", type=types.ECHO_REQUEST, timeout=10)
             client.shutdown()
+            process.kill()
         self.assertEqual(types.ECHO_RESPONSE, response.type)
         self.assertEqual(b"HELLO MULTIPLEXER", response.message)
 
@@ -54,22 +56,33 @@ class EchoTest(unittest.TestCase):
 
     def test_python_client(self):
         with Cluster(1, rules=RULES) as cluster:
-            self.run_backend(cluster, "backend_cc")
+            backend = self.run_backend(cluster, "backend_cc")
             self.assertEqual("HELLO MULTIPLEXER\n", self.ask(cluster, "client_py", "hello multiplexer"))
+            backend.kill()
 
     def test_worker_threads_share_one_threaded_client(self):
         with Cluster(1, rules=RULES) as cluster:
-            self.run_backend(cluster, "backend_cc")
+            backend = self.run_backend(cluster, "backend_cc")
             lines = sorted(self.ask(cluster, "workers", "3", "4").splitlines())
+            backend.kill()
         self.assertEqual(sorted("worker-%d: W%d JOB %d" % (w, w, j) for w in range(3) for j in range(4)), lines)
 
     def test_the_cpp_backend_answers_through_its_drain_and_exits_0(self):
         """SIGTERM starts the C++ backend's drain. Alone, the last backend
-        of its type, it still answers, then exits 0."""
+        of its type, it still answers, asked once the multiplexer has the
+        drain routing, which it logs: before it, the request is routed as
+        if no drain had begun. Then it exits 0. The client is connected
+        before the signal, so that what the drain's five seconds must hold
+        is one query, not a client process starting."""
         with Cluster(1, rules=RULES) as cluster:
             backend = self.run_backend(cluster, "backend_cc")
-            backend.proc.terminate()
-            self.assertEqual("STILL HERE\n", self.ask(cluster, "client_py", "still here"))
+            with SyncClient(cluster.endpoints, type=peers.ECHO_CLIENT) as client:
+                mark = cluster.mx[0].log_mark()
+                backend.proc.terminate()
+                routed = "(ECHO_BACKEND) takes any=no all=no last_resort=yes"
+                wait_until(lambda: cluster.mx[0].log_contains(routed, mark), 15, "the drain routing in effect")
+                response = client.query(b"still here", type=types.ECHO_REQUEST, timeout=10)
+            self.assertEqual(b"STILL HERE", response.message)
             self.assertEqual(0, backend.wait(30))
 
 

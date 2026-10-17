@@ -23,11 +23,12 @@ bazel run @mx//mxcontrol -- run_multiplexer --address 127.0.0.1:1980 --rules $PW
 The multiplexer reads the rules file and starts listening. Its log goes to
 stderr, one line per entry: the rules it loaded, with their fingerprint
 and how many types they name, then the address. The time, the host's
-name that starts the context and the checkout's path are left out.
+name that starts the context, the checkout's path and the source lines
+are left out.
 
 ```
-[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo/echo.rules: d0c6f537, 20 message types, 7 peer types"  from=external/mx/multiplexer/server.cc:618
-[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer  flw=""  txt="starting MX server on 127.0.0.1:1980"  from=external/mx/mxcontrol/start_multiplexer_server.cc:128
+[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer.multiplexer.server  flw=""  txt="rules loaded from …/examples/echo/echo.rules: d0c6f537, 20 message types, 7 peer types"  from=external/mx/multiplexer/server.cc:…
+[INFO]  ts=…  pid=233871  ctx=….mxcontrol.run_multiplexer  flw=""  txt="starting MX server on 127.0.0.1:1980"  from=external/mx/mxcontrol/start_multiplexer_server.cc:…
 ```
 
 Leave it running.
@@ -122,15 +123,21 @@ explains the rule.
   leaves five seconds later; the client keeps getting answers from the
   other backend throughout, and would from this one if it were alone.
   `SIGTERM` does the same for the C++ backend.
-- **No backend.** Stop both backends and run the client. It fails at once with
-  `OperationFailed`: the multiplexer reported that nobody could take the
-  request, the client searched for a backend, and nobody answered. Nothing
-  waits for a timeout.
+- **No backend.** Stop both backends and, once terminal 1 has logged
+  `unregistered connection` for each, the C++ one after its five seconds
+  of drain, run the client. It fails at once with `OperationFailed`: the
+  multiplexer reported that nobody could take the request, the client
+  searched for a backend, and nobody answered. Nothing waits for a
+  timeout.
 - **No multiplexer.** Stop the multiplexer and run the client. The connect
   attempt does not fail on its own; the query keeps trying to reconnect for
   its timeout, 10 s, and then fails with `NotConnected`. Start the
-  multiplexer again within those seconds and the query goes through. A real
-  client lists several multiplexers, so one that is down costs nothing.
+  multiplexer again within those seconds and the query goes through if the
+  backend registers first; the client and the backend each try every 3 s,
+  so which comes first is chance, and a client first draws a delivery
+  error, finds nobody in its search and fails at once with
+  `OperationFailed`. A real client lists several multiplexers, so one that
+  is down costs nothing.
 - **A rule of your own.** Add a peer type and a message type to `echo.rules`,
   as described in [the rules file](../../docs/rules.md), rebuild, and the generated
   constants carry your names in both languages. The running multiplexer
@@ -162,8 +169,12 @@ on the multiplexer's own test infrastructure. Each test opens a `Cluster`
 and starts a backend binary with `Process`, waiting for its `ready`
 line, then asks it with the Python and C++ clients and the workers
 program. Leaving the cluster stops the backend with SIGTERM and fails
-the test unless it ended cleanly. One test sends SIGTERM itself: alone,
-the C++ backend still answers through its drain, then exits 0.
+the test unless it ended cleanly. One test sends SIGTERM itself, and
+asks once the multiplexer has logged the drain routing in effect, before
+which a request is routed as if no drain had begun, through a
+`SyncClient` connected before the signal, so that the drain's five
+seconds hold a query and not a process starting: alone, the C++ backend
+still answers through its drain, then exits 0.
 [Test a service binary](../../docs/recipes/test_a_service.md) is this
 way for a service in any language. [harness_test.py](harness_test.py)
 tests the same exchange
@@ -183,9 +194,10 @@ file it runs with, `Cluster(1, rules=runfile("echo.rules"))`. See
 - Several multiplexers. Each program here takes one address; a client
   or a backend given several connects to all of them, and one that is
   down costs nothing ([operations](../../docs/operations.md)).
-- Signals in Python. The library handles none, so the Python backend is
-  asked to leave through its drain file; the C++ one turns `SIGTERM`
-  into the same drain.
+- Signals in Python. The library handles none: the Python backend is
+  asked to leave through its drain file, as a deployment's preStop hook
+  asks, though it could turn `SIGTERM` into a flag that `periodic_task()`
+  reads, as the C++ one does ([api_python.md](../../docs/api_python.md#basemultiplexerserver)).
 - Work. The handler upper-cases a few bytes, so what the client waits
   for is the broker and the two hops; the other examples do something
   between the request and the reply.

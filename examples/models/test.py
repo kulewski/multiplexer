@@ -5,11 +5,12 @@ Each model's requests are answered only by the workers that hold it, and
 a model nobody holds fails at once, a worker that holds none taking none;
 a model loaded is answered by its worker from the answer to the load on,
 and a model unloaded while its requests keep coming loses none of them,
-none reaching its old worker once the answer to the unload came; a worker
-with no filter for PREDICT takes every model. Then the two programs as
-the steps run them, and the committed constants checked against the rules
-file. The multiplexers are the mxcontrol the package installed unless
-MXCONTROL names another; `python -m unittest -v test`.
+none reaching its old worker once the answer to the unload came; a
+change is answered the way it came, to a caller on one multiplexer; a
+worker with no filter for PREDICT takes every model. Then the two
+programs as the steps run them, and the committed constants checked
+against the rules file. The multiplexers are the mxcontrol the package
+installed unless MXCONTROL names another; `python -m unittest -v test`.
 
 The walkthrough's "Testing it with the harness" walks through this file."""
 
@@ -28,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # directory goes first on the path.
 sys.path.insert(0, HERE)
 
+from multiplexer.clients import SyncClient
 from multiplexer.mxclient import OperationFailed
 from multiplexer.testing import BackendThread, Cluster, mxcontrol_path, wait_until
 from multiplexer.threaded_client import ThreadedClient
@@ -115,6 +117,18 @@ class ModelsTest(unittest.TestCase):
         self.assertEqual([], failed, "no request for beta failed while it moved")
         self.assertIn("w1", {worker for worker, after in answered if not after}, "w1 served beta before")
         self.assertEqual({"w2"}, {worker for worker, after in answered if after}, "and none after the answer")
+
+    def test_a_change_is_answered_the_way_it_came(self):
+        """A caller on one multiplexer gets every answer. Sent round robin
+        over the worker's connections instead, every other answer would
+        leave through the multiplexer the caller is not on, which drops it."""
+        self.worker("w1", ["alpha"])
+        caller = SyncClient([self.cluster.endpoints[0]], type=peers.MODEL_CLIENT)
+        self.addCleanup(caller.shutdown)
+        for change, holding in (("load beta", "w1 holds alpha, beta"), ("load gamma", "w1 holds alpha, beta, gamma")):
+            caller.send_message(change, type=types.MODEL_CONTROL, key=worker_key("w1"))
+            answer, _ = caller.receive_message(timeout=15)
+            self.assertEqual((types.MODEL_STATUS, holding), (answer.type, answer.message.decode()))
 
     def test_a_worker_without_a_filter_takes_every_model(self):
         self.worker("w1", ["alpha"])

@@ -64,7 +64,7 @@ async def main_async(args: argparse.Namespace) -> int:
         print(f"\nfailed: {type(error).__name__}")
         return 1
     finally:
-        streams.close()
+        await streams.aclose()  # the CANCELs of what was abandoned, before the client closes
         await client.aclose()
     return 0
 
