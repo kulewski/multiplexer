@@ -14,8 +14,11 @@ multiplexer a batch is one message of the events' type and key, routed by
 the rules as any message is. The receiving library splits it back into
 the events and hands each to the program as if it had come alone, with
 the id, sender, payload, workflow and key it was sent with.
-Batching suits a stream of small events of one type that one client
-sends faster than the multiplexer moves them one at a time, or
+[examples/clicks](../examples/clicks/README.md) is a complete program on
+batching: a clickstream whose sources batch their clicks by shard, each
+batch going whole to the collector of its shard, measured with batching
+and without. Batching suits a stream of small events of one type that
+one client sends faster than the multiplexer moves them one at a time, or
 that should cost the multiplexer less. What it gives up, each below:
 
 - order between two batched types or keys ([order](#order));
@@ -205,8 +208,9 @@ connection is free. A connection is busy only while a write is on its
 way, a few microseconds, or while its socket is full, the multiplexer
 behind. So with no delay events gather only while the program sends
 faster than its connections write, and a Python program, which spends
-microseconds of its own on each event, seldom does: one Python source
-sending events as fast as it went put one in forty in a batch, and the
+microseconds of its own on each event, seldom does: in
+[examples/clicks](../examples/clicks/walkthrough.md), one source sending
+as fast as it went put one click in eighty in a batch, and the
 multiplexers' work stayed what it was without batching. No delay costs
 an event no time and batches what would have queued anyway; a delay of a
 few milliseconds batches for sure, each event waiting that long at most.

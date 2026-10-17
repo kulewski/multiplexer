@@ -1,0 +1,19 @@
+// The payloads of the clicks example. Compiled once with `protoc
+// --python_out=. --pyi_out=. clicks.proto`; the generated clicks_pb2.py
+// and its stub are committed next to it.
+syntax = "proto3";
+
+package clicks;
+
+// CLICK: who clicked which page, and when, in nanoseconds since the epoch.
+message Click {
+  string user = 1;
+  string page = 2;
+  int64 time_ns = 3;
+}
+
+// CLICK_COUNTS_ANSWER: one shard's clicks, per page and in all.
+message Counts {
+  map<string, uint64> pages = 1;
+  uint64 clicks = 2;
+}

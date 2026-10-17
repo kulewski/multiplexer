@@ -230,6 +230,12 @@ graph LR
   when its multiplexer dies, with a multiplexer and a generator killed
   under an answer and a rolling restart; with the measured steps and the
   test.
+- [Building the clickstream, step by step](../examples/clicks/walkthrough.md):
+  web workers sending an event per click keyed with its shard, batched
+  for up to 50 ms, and collectors whose key filters take some shards
+  each, every line explained as it is added; a million clicks with and
+  without batching, what the batches on the wire held and a shard nobody
+  takes, with the measured steps and the test.
 - [Building the audio room, step by step](../examples/audio/walkthrough.md):
   live audio through a C++ worker, every 10 ms frame a query answered in
   a fifth of a millisecond and heard by everyone in the room, the worker

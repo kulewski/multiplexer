@@ -1,0 +1,4 @@
+# What the example runs on: `pip install -r requirements.txt`. The library,
+# and protobuf for the payloads; the test runs on the library's harness.
+mx-multiplexer
+protobuf

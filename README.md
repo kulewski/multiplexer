@@ -303,7 +303,8 @@ Bazel build.
   whenever a connection has nothing left to write, and events gather only
   while the program sends faster than its connections write; a
   `SyncClient` batching for 5 ms moved more than eight times as many
-  100-byte events a second through one multiplexer ([batching](docs/delivery.md)).
+  100-byte events a second through one multiplexer ([batching](docs/delivery.md)),
+  and the sources of [a clickstream](examples/clicks/) batch for 50 ms.
 - **Knowing each event was processed.** A type may be confirmed, its
   events in batches or one by one: the sender's library keeps each event
   until the receiver's library says its program processed it, sends it
@@ -401,6 +402,10 @@ what the broker's latency makes possible:
   models, a request's key naming its model and each worker's key filter
   the models it holds, and a model loaded, and unloaded while its
   requests keep coming.
+- [clicks](examples/clicks/): a clickstream, every click an event keyed
+  with its shard and batched by its source, a batch routed whole to the
+  collector whose key filter takes the shard, and the multiplexers' CPU
+  with batching and without.
 - [stream](examples/stream/): an answer that arrives token by token, as
   a language model's does, one request and one reply with the pieces
   addressed and numbered between them, a multiplexer killed under it
