@@ -64,6 +64,7 @@ bazel test --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLE
 bazel test --test_env=MX_SERVER_THREADS=4 --test_tag_filters=-slow //...  # every multiplexer the tests start on four event loops (run_multiplexer --threads)
 bazel build --config=asan //...            # AddressSanitizer
 ./check.sh --leaks                         # LeakSanitizer over the scenarios; soak_memory samples RSS per process
+./check.sh --valgrind                      # memcheck over the C++ tests and the scenarios' multiplexers, and the routing's instruction budget (tests/budgets); needs valgrind
 ./docker/check.sh [bazel|make] [debian:12] # the build and the fast tests on a clean distribution, needs Docker
 ./docker/runner_limits.sh                  # the fast tests as a GitHub runner runs them: 4 CPUs, 32 MB TCP buffers
 packaging/release_check.sh [COMMIT]        # what a release checks, before the tag; an hour or two, needs Docker

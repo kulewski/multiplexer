@@ -1,0 +1,26 @@
+# The reports valgrind's memcheck makes that are no error, for ./check.sh
+# --valgrind: RE2's SparseSet and SparseArray read slots never written on
+# purpose, the sparse set of Briggs and Torczon, which trusts a slot only
+# once its value checks out against the dense array; RE2 tells only
+# MemorySanitizer so. The multiplexer's key filters and the clients' match
+# keys through RE2.
+{
+   re2-sparse-set-branch
+   Memcheck:Cond
+   fun:*SparseSet*contains*
+}
+{
+   re2-sparse-set-value
+   Memcheck:Value8
+   fun:*SparseSet*contains*
+}
+{
+   re2-sparse-array-branch
+   Memcheck:Cond
+   fun:*SparseArray*has_index*
+}
+{
+   re2-sparse-array-value
+   Memcheck:Value8
+   fun:*SparseArray*has_index*
+}

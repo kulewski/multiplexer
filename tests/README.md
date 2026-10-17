@@ -99,6 +99,14 @@ with it the Rust toolchain Bazel would fetch.
   configuration; the macro is `multiplexer/testing/defs.bzl`, `defs.bzl`
   here fixes its rules file and constants. The language matrix is a list
   comprehension in `scenarios/BUILD`.
+- `budgets/`: what the multiplexer may spend, counted by valgrind rather
+  than timed: `instructions_test.py` holds the instructions of a query's
+  round trip, its request and its reply each routed alone, measured by
+  callgrind between the C++ roles, to a budget, failing past 5% either
+  way, a fall being a budget to lower. Built `-c opt` and run by
+  `./check.sh --valgrind`, which also runs memcheck over the C++ unit
+  tests and every multiplexer of the scenarios with C++ roles; tagged
+  `manual`, as valgrind is no requirement of the build.
 
 ## Writing a scenario
 

@@ -21,6 +21,16 @@
 # a leaked allocation at exit, an exit code leaving the Cluster checks, and
 # off for the Python ones. The runtime is preloaded because the test's own
 # process is the Python interpreter.
+#
+# ./check.sh --valgrind runs valgrind's checks, which no sanitizer makes,
+# needing valgrind installed: memcheck over the C++ unit tests and over
+# every multiplexer the scenarios with C++ roles start, for a value never
+# initialized that a branch or a system call reads (MemorySanitizer is not
+# run, and frames' buffers are made without zero-fill), RE2's reads of what
+# it never wrote, on purpose, suppressed (tools/memcheck.supp); and the
+# instructions the multiplexer spends on a query's round trip, counted by
+# callgrind against their budget (tests/budgets). Tens of times slower than
+# a native run, so local only, a few minutes in all.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source tools/dev_tools.sh  # the pinned tools: black, ruff, pyright, clang-format and buildifier
@@ -34,6 +44,33 @@ if [[ "${1:-}" == "--leaks" ]]; then
   bazel test --config=asan --test_env=LD_PRELOAD="$preload" --test_env=ASAN_OPTIONS=detect_leaks=0 \
     //tests/scenarios:soak_memory_cc_cc //tests/scenarios:soak_memory_py_py
   echo "check --leaks: no leaks in the C++ processes"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--valgrind" ]]; then
+  if ! command -v valgrind > /dev/null; then
+    echo "check --valgrind: valgrind is not installed (apt install valgrind)" >&2
+    exit 1
+  fi
+  memcheck="valgrind --tool=memcheck --error-exitcode=99 --track-origins=yes --leak-check=no"
+  memcheck+=" --suppressions=$PWD/tools/memcheck.supp"
+  # The tests that cannot run under valgrind: those that count allocations
+  # by an operator new of their own, which valgrind replaces, one that runs
+  # a renamed child, which valgrind refuses to start, and one whose sends
+  # wait for room within the default deadline, ten seconds, which memcheck's
+  # pace outlasts while the test holds a multiplexer frozen.
+  cannot="ProcessName.*:ParseTarget.*:ReceiveAllocations.*:SendAllocations.*:RouteAllocations.*"
+  cannot+=":ThreadedClient.EveryMultiplexerGetsItsCopyOfASendToAll"
+  bazel test --run_under="$memcheck" --test_lang_filters=cc --test_arg=--gtest_filter="-$cannot" \
+    --test_timeout=3600 --test_tag_filters=-slow //lib/... //multiplexer/...
+  bazel build //mxcontrol
+  bazel test --test_env=MXCONTROL="$PWD/tools/memcheck_mxcontrol.sh" \
+    --test_env=MX_MEMCHECK_MXCONTROL="$PWD/bazel-bin/mxcontrol/mxcontrol" --test_timeout=3600 --build_tests_only \
+    --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...
+  bazel test -c opt //tests/budgets:instructions_test
+  # Back to the default configuration, where the stubs and an editor expect bazel-bin.
+  bazel build //multiplexer:_native_pyi > /dev/null
+  echo "check --valgrind: nothing uninitialized read, and the routing within its budget"
   exit 0
 fi
 
