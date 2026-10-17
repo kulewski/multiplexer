@@ -9,6 +9,13 @@
 // forwarded as the same RawMessage, so the bytes forwarded are those that
 // came, never re-serialized; parsing the body to route it copies the
 // payload once.
+//
+// A client that batches makes the frame of a message that may go in a
+// batch without its checksum (Unsealed): in a batch only its body is read,
+// and its own checksum would be computed for nothing, a pass over every
+// byte. One that goes alone after all is sealed, its checksum and header
+// made in place, on the thread that sends it, before any connection has it
+// (seal(), in BasicClient::_send and outbox.cc's writable()).
 #ifndef MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 #define MX_MULTIPLEXER_IO_RAW_MESSAGE_H_
 
@@ -16,8 +23,10 @@
 #include <chrono>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "lib/assertion.h"
 #include "multiplexer/Multiplexer.pb.h" /* generated */
@@ -56,7 +65,7 @@ inline void check_key_size(std::size_t size) {
  */
 class RawMessage {
  public:
-  enum Usability { READING, WRITING, NONE, PRE_WRITING };
+  enum Usability { READING, WRITING, NONE, PRE_WRITING, UNSEALED };
   static const std::uint32_t HEADER_LENGTH = 8;  // for length_ and checksum_
 
   // construct message suitable for reading input with ASIO
@@ -94,13 +103,31 @@ class RawMessage {
     switch_to_writing();
   }
 
-  // `mxmsg` serialized into a frame, with its id and type. One protobuf
+  // `message`, a serialized MultiplexerMessage, swapped out, with the id
+  // and the type it carries, its checksum and header not made yet: the frame of
+  // a message that may go in a batch (see the file comment), sealed by
+  // seal() if it goes alone. Its size is checked here, as any frame's.
+  struct Unsealed {};
+  inline RawMessage(Unsealed, std::string* message, std::uint64_t id, std::uint32_t type)
+      : usability_(UNSEALED),
+        length_(message->size()),
+        checksum_(0),
+        header_(HEADER_LENGTH, 0),
+        contents_(),
+        id_(id),
+        type_(type) {
+    contents_.swap(*message);
+    check_message_size(contents_.size());
+  }
+
+  // `mxmsg` serialized into a frame, with its id and type, unsealed when
+  // `sealed` is false (Unsealed). One protobuf
   // will not serialize, over 2 GiB, raises std::length_error as one over
   // MAX_MESSAGE_SIZE does, its size measured: protobuf leaves the string
   // empty, which went out as a frame with no body, and the multiplexer
   // closed the connection. A key over MAX_KEY_SIZE raises
   // std::length_error too: the multiplexer would drop the message.
-  static RawMessage* FromMessage(const MultiplexerMessage& mxmsg) {
+  static RawMessage* FromMessage(const MultiplexerMessage& mxmsg, bool sealed = true) {
     check_key_size(mxmsg.key().size());
     std::string serialized;
     if (!mxmsg.SerializeToString(&serialized)) {
@@ -108,7 +135,93 @@ class RawMessage {
       throw std::length_error("a message protobuf could not serialize, of " + std::to_string(mxmsg.ByteSizeLong()) +
                               " bytes");
     }
+    if (!sealed) {
+      return new RawMessage(Unsealed(), &serialized, mxmsg.id(), mxmsg.type());
+    }
     return new RawMessage(&serialized, mxmsg.id(), mxmsg.type());
+  }
+
+  // An unsealed frame's checksum and header made, in place, and the frame
+  // switched to writing; nothing for any other. Called on the thread that
+  // sends the frame, before any connection has it: the client's own
+  // thread, its io thread for ThreadedClient, to which the caller's thread
+  // handed the frame through a post, so nothing else reads it meanwhile.
+  // Const, as a queued frame is shared as const; what it fills is mutable.
+  void seal() const;
+
+  // A message taken out of a batch that arrived (MessageBatch), or made of
+  // one, a DELIVERY_ERROR for a message inside, its serialized form swapped
+  // out of `message`, with its id and type: for the program to read as it
+  // reads a frame's (get_message()), unframed, which a client sending it on
+  // frames then (outbox.cc's writable()).
+  static std::shared_ptr<const RawMessage> FromBatch(std::string* message, std::uint64_t id, std::uint32_t type) {
+    return std::make_shared<RawMessage>(Unframed(), message, id, type);  // one allocation, for every message of a batch
+  }
+
+  // The body of a frame that goes in a batch, which only its body is read
+  // of (BasicClient::_send_batch): moved out when `raw` is the frame's only
+  // holder, as a frame made for a send is by then, so that a message's
+  // bytes are not copied on their way into the batch, else copied.
+  // GiveBodyBack() returns it to a frame left empty so, for a message cut
+  // from the batch, or one whose batch could not be made, to go alone or
+  // in the next. A frame is never made const (writable()'s copies, made
+  // const, never join a batch), so the body may be moved out of one held
+  // as const.
+  static std::string TakeBody(const std::shared_ptr<const RawMessage>& raw) {
+    if (raw.use_count() == 1) {
+      return std::move(const_cast<RawMessage&>(*raw).contents_);
+    }
+    return raw->contents_;
+  }
+  static void GiveBodyBack(const std::shared_ptr<const RawMessage>& raw, std::string* body) {
+    std::string& contents = const_cast<RawMessage&>(*raw).contents_;
+    if (contents.empty()) {
+      contents.swap(*body);
+    }
+  }
+
+  // What a client's batching (BasicClient::set_batching) needs of the
+  // message in a frame: whether it may go in a batch, a plain event
+  // (plain_event()), and its key, which its batch goes by, or none, which
+  // routes otherwise than an empty one. A client that batches marks the
+  // frames it makes of whole messages (frame_stamped), which no other
+  // client pays for; any other frame knows none, UNKNOWN, until a client
+  // batching its type reads them from the bytes. Kept apart (BatchMarks),
+  // made for a marked frame only, so that every other frame, every one a
+  // multiplexer routes, carries a null pointer for them. Mutable because a
+  // queued frame is shared as const.
+  enum class Batchable : unsigned char { UNKNOWN, NO, YES };
+  inline Batchable batchable() const { return batch_marks_ ? batch_marks_->batchable : Batchable::UNKNOWN; }
+  inline bool batch_keyed() const { return batch_marks_ && batch_marks_->keyed; }
+  inline const std::string& batch_key() const {
+    static const std::string none;
+    return batch_marks_ ? batch_marks_->key : none;
+  }
+  inline void mark_batchable(Batchable batchable, bool keyed, std::string key) const {
+    BatchMarks& marks = _batch_marks();
+    marks.batchable = batchable;
+    marks.keyed = keyed;
+    marks.key = std::move(key);
+  }
+  // Whether `mxmsg` may go in a batch: an event the program sends that
+  // nobody waits for, with an id, a sender, a type, a payload and at most a
+  // key, a workflow and a timestamp, nothing that routes it otherwise or
+  // asks the multiplexer for a report, and no batch itself.
+  static bool plain_event(const MultiplexerMessage& mxmsg) {
+    return !mxmsg.to() && !mxmsg.references() && !mxmsg.report_delivery_error() &&
+           !mxmsg.include_original_packet_in_report() && mxmsg.override_rrules_size() == 0 &&
+           mxmsg.logging_method() == LoggingMethod::BOTH && mxmsg.compression() == Compression::NO_COMPRESSION &&
+           !mxmsg.has_batch();
+  }
+  // A batch's frame: the ids of the messages inside, in order, by which a
+  // drop of the frame is told, one each (BasicClient::report_drop). Null
+  // for any other frame.
+  inline void mark_batch(std::shared_ptr<const std::vector<std::uint64_t>> ids) const {
+    _batch_marks().ids = std::move(ids);
+  }
+  inline const std::shared_ptr<const std::vector<std::uint64_t>>& batch_ids() const {
+    static const std::shared_ptr<const std::vector<std::uint64_t>> none;
+    return batch_marks_ ? batch_marks_->ids : none;
   }
 
   /* accessors */
@@ -208,15 +321,39 @@ class RawMessage {
   // forwarded as is.
   bool verify();
 
- private:
-  static std::uint32_t Checksum(const std::string& message);
-  void initialize_header();
-  void switch_to_writing();
+  // FromBatch's: the body alone, unframed; public for make_shared, made
+  // through FromBatch().
+  struct Unframed {};
+  RawMessage(Unframed, std::string* message, std::uint64_t id, std::uint32_t type)
+      : usability_(NONE), length_(message->size()), checksum_(0), header_(HEADER_LENGTH, 0), id_(id), type_(type) {
+    contents_.swap(*message);
+  }
 
  private:
-  Usability usability_;
-  std::uint32_t length_, checksum_;
-  std::string header_;
+  // Batching's marks, apart; see batchable() and batch_ids().
+  struct BatchMarks {
+    Batchable batchable = Batchable::UNKNOWN;
+    bool keyed = false;
+    std::string key;
+    std::shared_ptr<const std::vector<std::uint64_t>> ids;
+  };
+  BatchMarks& _batch_marks() const {
+    if (!batch_marks_) {
+      batch_marks_.reset(new BatchMarks());
+    }
+    return *batch_marks_;
+  }
+  static std::uint32_t Checksum(const std::string& message);
+  void initialize_header() const;
+  void switch_to_writing() const;
+
+ private:
+  // Mutable for seal(), which fills them once for a frame made unsealed;
+  // nothing else changes them through a const frame.
+  mutable Usability usability_;
+  std::uint32_t length_;
+  mutable std::uint32_t checksum_;
+  mutable std::string header_;
   std::string contents_;
   std::uint64_t id_ = 0;    // see id()
   std::uint32_t type_ = 0;  // see type()
@@ -226,7 +363,8 @@ class RawMessage {
   mutable std::uint64_t number_ = 0;
   mutable std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
   mutable bool deadline_marked_ = false;
-  std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
+  mutable std::unique_ptr<BatchMarks> batch_marks_;        // see batchable() and batch_ids()
+  mutable std::list<asio::const_buffer> writing_buffers_;  // buffers that can be used in write operations
 };
 
 };  // namespace multiplexer

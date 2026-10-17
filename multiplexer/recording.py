@@ -259,6 +259,10 @@ def describe(record: Record, constants=multiplexer_constants) -> str:
         line += " references=%d" % routed.references
     if routed.error_reported:
         line += " error_reported"
+    if routed.HasField("key"):
+        line += " key=%r" % routed.key
+    if routed.batch:
+        line += " batch"  # the payload is the batch's: its messages, each whole
     line += " payload=%r%s" % (routed.payload[:64], "..." if routed.truncated or len(routed.payload) > 64 else "")
     return line
 

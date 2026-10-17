@@ -20,8 +20,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use mx_multiplexer::{
-    BaseMultiplexerServer, BaseThreadedMultiplexerServer, Error, Handler, HandlerResult, Message, Request, Routing,
-    ServeError, ServerHandle, SyncClient, ThreadedClient,
+    BaseMultiplexerServer, BaseThreadedMultiplexerServer, Batching, Error, Handler, HandlerResult, Message, Request,
+    Routing, ServeError, ServerHandle, SyncClient, ThreadedClient,
 };
 use support::testing_constants::{peers, types};
 use support::{beside, thread_id, wait_in_epoll_wait, Multiplexer};
@@ -771,6 +771,58 @@ fn a_drain_waits_for_what_it_holds_for_a_connection() {
         let served = within_bound(move || serving.join().unwrap());
         assert!(served.is_some(), "threaded: {threaded}: the drain over once the reply went");
         assert_eq!(0, served.unwrap().unwrap(), "threaded: {threaded}: the reply written once a connection was back");
+    }
+}
+
+/// Answers nothing; for a server that only sends.
+struct Quiet;
+
+impl Handler for Quiet {
+    fn handle_message(&self, request: Request) -> HandlerResult {
+        request.no_response();
+        Ok(())
+    }
+}
+
+#[test]
+fn a_drain_waits_for_what_waits_in_a_batch() {
+    // A server drains while its only multiplexer is down, an event it sent
+    // waiting in a batch, its delay an hour: the drain lets the batch go,
+    // to be held for the next connection, and waits for it, the
+    // multiplexer back, where the drain ended at once, nothing being held,
+    // and the close dropped the batch. Counted: what the server's client
+    // gave up on.
+    for threaded in [false, true] {
+        let mut mx = Multiplexer::start();
+        let (handle, serving) = if threaded {
+            let server =
+                BaseThreadedMultiplexerServer::builder(peers::TEST_BACKEND_A, [mx.address()]).build(Quiet).unwrap();
+            server.connect().unwrap();
+            let handle = server.handle();
+            (handle, beside(move || server.serve_forever(HOUR, Some(HOUR)).map(|()| server.client().dropped())))
+        } else {
+            let mut server =
+                BaseMultiplexerServer::builder(peers::TEST_BACKEND_A, [mx.address()]).build(Quiet).unwrap();
+            server.connect().unwrap();
+            let handle = server.handle();
+            (handle, beside(move || server.serve_forever(HOUR, Some(HOUR)).map(|()| server.dropped())))
+        };
+        let batching = Batching { max_delay: HOUR, ..Batching::default() };
+        handle.set_batching(types::TEST_EVENT, None, batching).unwrap();
+        mx.stop(); // every connection to it ends
+        if threaded {
+            assert!(eventually(|| handle.connections_count().is_ok_and(|count| count == 0)));
+        }
+        handle.send(types::TEST_EVENT, "batched").unwrap();
+        handle.start_draining();
+        assert!(
+            eventually(|| serving.is_finished() || !matches!(handle.held_for_a_connection(), Ok(0))),
+            "threaded: {threaded}: the batch let go, and held"
+        );
+        mx.start_again(); // back on the same address
+        let served = within_bound(move || serving.join().unwrap());
+        assert!(served.is_some(), "threaded: {threaded}: the drain over once the batch went");
+        assert_eq!(0, served.unwrap().unwrap(), "threaded: {threaded}: the batch written once a connection was back");
     }
 }
 

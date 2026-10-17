@@ -551,6 +551,22 @@ cc_test(
 )
 
 cc_test(
+    name = "batching_test",
+    size = "small",
+    srcs = ["batching_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":client",
+        ":in_process_multiplexer",
+        ":multiplexer_cc_constants",
+        ":multiplexer_cc_proto",
+        ":threaded_client",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "read_syscalls_test",
     size = "small",
     srcs = ["read_syscalls_test.cc"],
@@ -920,8 +936,10 @@ cc_library(
     name = "basic_client",
     srcs = [
         "basic_client.cc",
+        "basic_client_batching.cc",
         "basic_client_connect.cc",
         "basic_client_routing.cc",
+        "batching.h",
         "outbox.cc",
         "outbox.h",
         "outbox_expiry.cc",
@@ -1419,6 +1437,23 @@ py_test(
         ":clients",
         ":multiplexer_constants",
         ":mxclient",
+        "//multiplexer/testing",
+    ],
+)
+
+py_test(
+    name = "batching_py_test",
+    size = "small",
+    srcs = ["batching_test.py"],
+    main = "batching_test.py",
+    deps = [
+        ":_native",
+        ":aio",
+        ":clients",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        ":recording",
+        ":threaded_client_py",
         "//multiplexer/testing",
     ],
 )

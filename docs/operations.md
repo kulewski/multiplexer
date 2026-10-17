@@ -352,7 +352,8 @@ to peer ID of type N (NAME)`.
 A line about a message that went nowhere is logged at once the first time,
 and about once a second after that, while it goes on happening, as the
 same line with a count: `routing while none present of type 106 (BACKEND)
-[1999 more in the last 1.0 s]`. A kind of line that has nothing to say for
+[1999 more in the last 1.0 s]`; a batch of events counts as one message
+([batching](batching.md)). A kind of line that has nothing to say for
 a whole second is logged at once again the next time. So a receiver that
 falls behind, or a type nobody serves, costs the log about two lines a
 second for each kind, where it used to cost up to three for every message,
@@ -539,7 +540,11 @@ every peer that takes the message has its queue full, `NOT_ACCEPTED` when
 none takes it; a fan-out (`whom: ALL`) records each peer it passed over
 besides. A rule for `ALL_TYPES` that no type took has one such record,
 its peer type `ALL_TYPES`, and none when nobody is connected, which is no
-failure for it. The record of a keyed message carries its `key`. A `PeerEvent` marks a peer
+failure for it. The record of a keyed message carries its `key`. A
+batch, a client's events in one message, is recorded as one message,
+marked `batch`, its payload the batch's bytes, its events together
+([batching](batching.md#what-changes-for-a-program)); both readers print
+the key, `key=`, and the mark, `batch`, on its line. A `PeerEvent` marks a peer
 arriving, leaving, or changing its routing. A peer's `DISCONNECTED` comes
 when its connection has closed, after the records of what it sent last: a
 connection whose write failed reads on to the peer's end and routes what

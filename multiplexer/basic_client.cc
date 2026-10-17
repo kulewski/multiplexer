@@ -12,6 +12,7 @@
 #include "lib/fork.h"
 #include "lib/logging/logging.h"
 #include "lib/repr.h"
+#include "multiplexer/batching.h"
 #include "multiplexer/multiplexer.constants.h"
 #include "multiplexer/outbox.h"
 
@@ -27,7 +28,8 @@ BasicClient::BasicClient(asio::io_service& io_service, std::uint32_t client_type
       drop_lines_(io_service, "BasicClient"),
       fork_generation_at_creation_(mx::fork_generation()),
       resolver_(io_service),
-      outbox_(new Outbox(io_service)) {}
+      outbox_(new Outbox(io_service)),
+      batcher_(new Batcher(io_service)) {}
 
 BasicClient::~BasicClient() {}
 
@@ -73,6 +75,14 @@ void BasicClient::handle_message(const Connection::pointer& conn, const std::sha
     return;
   }
 
+  if (mxmsg->has_batch()) {
+    _split_batch(conn, *mxmsg);
+    return;
+  }
+  if (mxmsg->type() == types::DELIVERY_ERROR && _split_delivery_error(conn, *mxmsg)) {
+    return;
+  }
+
   IncomingMessagesBuffer::value_type incoming = mx::make_triple(raw, _wrap(conn), mxmsg);
   if (incoming_sink_) {
     incoming_sink_(incoming);
@@ -95,8 +105,135 @@ void BasicClient::queue_incoming(const IncomingMessagesBuffer::value_type& incom
     }
     return;  // drop
   }
+  _enqueue(incoming);
+}
+
+void BasicClient::_enqueue(const IncomingMessagesBuffer::value_type& incoming) {
   incoming_messages_.push_back(incoming);
   ++enqueued_;
+}
+
+// Only the plain events of the batch's own type and key belong in it,
+// which a client's batching packs (basic_client_batching.cc): anything else
+// inside, or a batch of a protocol type, that does not parse or that holds
+// more than MAX_BATCH_RECORDS messages, is dropped and said; a message seen
+// before is dropped as one that came alone is. A full incoming queue drops
+// the batch whole, as it drops a message, and takes its copy through
+// another multiplexer once there is room; one with room takes every
+// message of it, past its limit by one batch at most, and a poll counts
+// each.
+void BasicClient::_split_batch(const Connection::pointer& conn, const MultiplexerMessage& envelope) {
+  MessageBatch batch;
+  if (envelope.type() <= types::MAX_MULTIPLEXER_META_PACKET || !batch.ParseFromString(envelope.batch()) ||
+      batch.message_size() > static_cast<int>(MAX_BATCH_RECORDS)) {
+    if (const std::string* line = drop_lines_.first({BATCH_NOT_SPLIT, WARNING, envelope.type(), 0}, [] {
+          return "a batch that arrived dropped: of a protocol type, not parsing, or of more than MAX_BATCH_RECORDS "
+                 "messages";
+        })) {
+      MX_LOG(WARNING, LogSummary::VERBOSITY,
+             CTX("BasicClient") TEXT(*line + "; id " + repr(envelope.id()) + ", type " + repr(envelope.type())));
+    }
+    return;
+  }
+  if (!incoming_sink_ && incoming_queue_full()) {
+    last_seen_message_ids_.forget_last();
+    incoming_dropped_.fetch_add(batch.message_size(), std::memory_order_relaxed);
+    if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
+      MX_LOG(WARNING, LogSummary::VERBOSITY,
+             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping a batch of " +
+                                                    repr(batch.message_size()) + ", #" + repr(envelope.id())));
+    }
+    return;
+  }
+  if (batch.message_size() > 1) {
+    frames_handled_ += batch.message_size() - 1;  // poll() reads a queue's worth of messages at most
+  }
+  const ConnectionWrapper wrapper = _wrap(conn);
+  for (std::string& body : *batch.mutable_message()) {
+    std::shared_ptr<MultiplexerMessage> mxmsg = std::make_shared<MultiplexerMessage>();
+    if (!mxmsg->ParseFromString(body) || !mxmsg->id() || !RawMessage::plain_event(*mxmsg) ||
+        mxmsg->type() != envelope.type() || mxmsg->has_key() != envelope.has_key() || mxmsg->key() != envelope.key()) {
+      if (const std::string* line = drop_lines_.first({BATCH_NOT_SPLIT, WARNING, envelope.type(), 1}, [] {
+            return "a message in a batch that arrived dropped: no plain event of the batch's type and key";
+          })) {
+        MX_LOG(WARNING, LogSummary::VERBOSITY,
+               CTX("BasicClient")
+                   TEXT(*line + "; batch id " + repr(envelope.id()) + ", type " + repr(envelope.type())));
+      }
+      continue;
+    }
+    if (!last_seen_message_ids_.insert(mxmsg->id())) {
+      continue;  // seen before, as a message that came alone would be
+    }
+    IncomingMessagesBuffer::value_type incoming =
+        mx::make_triple(RawMessage::FromBatch(&body, mxmsg->id(), mxmsg->type()), wrapper, mxmsg);
+    if (incoming_sink_) {
+      incoming_sink_(incoming);
+    } else {
+      _enqueue(incoming);
+    }
+  }
+}
+
+// A DELIVERY_ERROR for a batch this client sent, which the multiplexer
+// sends back whole for this (Server::MessageMetaHandler): one DELIVERY_ERROR
+// for each message inside, as the multiplexer would have sent it for that
+// message alone, the message's id as the packet's and the reference, its
+// workflow, the message itself as the original, each handed out as one that
+// came alone; a full incoming queue drops them all, as it drops a batch.
+// False, and nothing done, for any other, which goes on as it is: one whose
+// original is no batch, or was left out for its size, or never sent, by a
+// multiplexer that does not send a batch back. Only a failure pays the read.
+bool BasicClient::_split_delivery_error(const Connection::pointer& conn, const MultiplexerMessage& error) {
+  DeliveryError report;
+  MessageBatch batch;
+  if (!report.ParseFromString(error.message()) || !report.has_original_message() ||
+      !report.original_message().has_batch() || !batch.ParseFromString(report.original_message().batch()) ||
+      batch.message_size() > static_cast<int>(MAX_BATCH_RECORDS)) {
+    return false;
+  }
+  if (!incoming_sink_ && incoming_queue_full()) {
+    last_seen_message_ids_.forget_last();
+    incoming_dropped_.fetch_add(batch.message_size(), std::memory_order_relaxed);
+    if (drop_lines_.first({INCOMING_QUEUE_FULL, WARNING, 0, 0}, [] { return "incoming_queue_full, dropping"; })) {
+      MX_LOG(WARNING, LogSummary::VERBOSITY,
+             CTX("BasicClient.handle_message") TEXT("incoming_queue_full, dropping the delivery errors of a batch of " +
+                                                    repr(batch.message_size()) + ", #" + repr(error.id())));
+    }
+    return true;
+  }
+  if (batch.message_size() > 1) {
+    frames_handled_ += batch.message_size() - 1;  // poll() reads a queue's worth of messages at most
+  }
+  report.clear_original_message();
+  const ConnectionWrapper wrapper = _wrap(conn);
+  for (const std::string& body : batch.message()) {
+    MultiplexerMessage message;
+    if (!message.ParseFromString(body) || !message.id()) {
+      continue;  // nothing to tell it by
+    }
+    std::shared_ptr<MultiplexerMessage> told = std::make_shared<MultiplexerMessage>();
+    told->set_id(random64());
+    told->set_sender(error.sender());
+    told->set_to(error.to());
+    told->set_report_delivery_error(false);
+    told->set_type(types::DELIVERY_ERROR);
+    told->set_references(message.id());
+    told->set_workflow(message.workflow());
+    DeliveryError each(report);
+    each.set_packet_id(message.id());
+    each.mutable_original_message()->Swap(&message);
+    each.SerializeToString(told->mutable_message());
+    std::string serialized = told->SerializeAsString();
+    IncomingMessagesBuffer::value_type incoming =
+        mx::make_triple(RawMessage::FromBatch(&serialized, told->id(), told->type()), wrapper, told);
+    if (incoming_sink_) {
+      incoming_sink_(incoming);
+    } else {
+      _enqueue(incoming);
+    }
+  }
+  return true;
 }
 
 bool BasicClient::wait_to_receive(mx::SimpleTimer& timer, bool end_on_acknowledgement) {
@@ -134,6 +271,11 @@ void BasicClient::shutdown() {
     return;
   }
   MX_DCHECK_RUN_ON(&owner_thread());
+  // What waits in a batch goes where every message goes now: written if
+  // the connections still take it, else dropped and told with the rest.
+  close_batches();
+  asio::error_code cancelled;
+  batcher_->timer.cancel(cancelled);
   shuts_down_ = true;
   resolver_.cancel();
   MX_LOG(DEBUG, HIGHVERBOSITY,

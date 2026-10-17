@@ -532,7 +532,13 @@ impl<H: Handler> BaseMultiplexerServer<H> {
         };
         let by_default = past_cap
             || (nothing_more_arrives(&self.shared.drain_routing) && {
-                let client = self.shared.lock();
+                let mut client = self.shared.lock();
+                // What waits in a batch goes first, a flush that waits for
+                // nothing, to be held with the rest; its loop runs first, so
+                // that a connection that died since is gone before the
+                // confirmation is asked, the handler's sends into a batch
+                // having run none.
+                let _ = client.flush_all(Some(Duration::ZERO));
                 client.routing_acknowledged().unwrap_or(true) && client.held_for_a_connection().unwrap_or(0) == 0
             });
         self.handler.drained(by_default)

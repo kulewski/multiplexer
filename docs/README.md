@@ -153,7 +153,9 @@ graph LR
 - A request either gets its answer or the call fails with a timeout or a
   delivery error, so the caller always knows. A request addressed to one
   instance reaches that instance or fails; it never goes to another.
-- Order holds per connection; a lane keeps a stream on one connection.
+- Order holds per connection; a lane keeps a stream on one connection. A
+  client that batches keeps it within each batched type and key
+  ([batching](batching.md#order)).
 - Delivery is at most once per multiplexer; sending through several
   multiplexers can produce copies, which the receiving library drops by
   message id.
@@ -271,6 +273,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Keys](keys.md): a message's key and the peers' key filters, which send
   the messages of one type to some of its peers: pools by tenant, workers
   by loaded model, subscriptions by group.
+- [Batching](batching.md): a client's events of one type, or of one key,
+  sent several in one message, which the receiving library splits back
+  into one message each: what goes in a batch, when it goes, the order
+  kept, and what it changes for senders and receivers.
 - [Building](building.md): the packages a clean machine needs, bringing
   your own protobuf, the build configurations, the Docker check, and the
   build without Bazel.

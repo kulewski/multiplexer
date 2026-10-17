@@ -11,6 +11,7 @@
 //! reported meanwhile; a flush that waits for those callbacks ends after
 //! them.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::state::{tracker_key, Flush, Follow};
@@ -102,10 +103,17 @@ impl Core {
                 self.outbox.follows.remove(&key);
             }
         }
-        match follow.done.take() {
-            Some(SendDone::Callback(done)) => guarded(|| "a send's callback".to_string(), || done(written)),
-            Some(SendDone::Settle(id)) => self.settle_send(id, written, written == 0),
-            None => {}
+        if let Some(done) = follow.done.take() {
+            self.end_send(done, written);
+        }
+    }
+
+    /// A send's `done` hears `written`, once.
+    pub(crate) fn end_send(&mut self, done: SendDone, written: u32) {
+        match done {
+            SendDone::Callback(done) => guarded(|| "a send's callback".to_string(), || done(written)),
+            SendDone::Settle(id) => self.settle_send(id, written, written == 0),
+            SendDone::Batch(ends) => self.end_batch(ends, written),
         }
     }
 
@@ -127,6 +135,12 @@ impl Core {
     /// `done` is told once, when they are out, with whether every one was
     /// written.
     pub(crate) fn begin_flush(&mut self, done: Option<FlushDone>) -> FlushId {
+        // What waits in a batch goes now, and the flush waits for it; a
+        // batch given up on at once, with no connection to wait for, is
+        // lost to it.
+        let dropped = self.client.dropped.load(Ordering::Relaxed);
+        self.close_batches();
+        let lost = self.client.dropped.load(Ordering::Relaxed) != dropped;
         if !self.outbox.follow_events.is_empty() || !self.outbox.drop_events.is_empty() {
             self.process_callbacks(); // what ended before the flush began is heard before it ends
         }
@@ -147,7 +161,7 @@ impl Core {
             marks,
             done,
             flushed: false,
-            lost: false,
+            lost,
         };
         self.outbox.flush_states.insert(id, flush);
         self.outbox.flushes.push(id);

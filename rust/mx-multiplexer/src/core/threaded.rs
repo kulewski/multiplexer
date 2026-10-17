@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use prost::Message as _;
 
+use super::batching::BatchMark;
 use super::client::{guarded, DropLine, DropReason, Incoming, Wrapper};
 use super::lane::Lane;
 use super::outbox::{FlushDone, FlushId, Frame, SendDone};
@@ -203,7 +204,7 @@ impl Core {
             );
         }
         let Ok(bytes) = frame::encode(&pong) else { return };
-        let frame = Frame { bytes, id: pong.id.unwrap_or(0), r#type: pong.r#type };
+        let frame = Frame { bytes, id: pong.id.unwrap_or(0), r#type: pong.r#type, batch: BatchMark::None };
         let timeout = Some(DEFAULT_TIMEOUT);
         if self.schedule_on(frame.clone(), false, &incoming.connection, timeout, 0, None).is_none() {
             self.schedule_one(frame, false, None, timeout, 0, None);
@@ -320,8 +321,10 @@ impl Core {
         settled: Option<SendSettled>,
     ) {
         let number = self.next_number();
+        // What a drop report reads, never the bytes: a second hold on the
+        // frame's buffer would make sealing it a copy (`frame::seal`).
         let report = OutFrame {
-            bytes: frame.bytes.clone(),
+            bytes: bytes::Bytes::new(),
             id: frame.id,
             r#type: frame.r#type,
             pinned: false,
@@ -329,6 +332,7 @@ impl Core {
             own: false,
             number,
             deadline: None,
+            batch: None,
         };
         if self.threaded.torn_down {
             self.report_drop(&report, DropReason::ShutDown);
@@ -351,7 +355,8 @@ impl Core {
         }
         let left = deadline.map(|deadline| deadline.saturating_duration_since(self.now));
         let timeout = if wait { left.map(|left| left + ROOM_GRACE_SECONDS) } else { left };
-        if !self.send(frame, all, lane.as_ref(), timeout, number, None, None, follow) {
+        // A send nobody waits for may go in a batch (`batching`).
+        if !self.send(frame, all, lane.as_ref(), timeout, number, None, None, follow, !wait) {
             self.report_drop(&report, DropReason::ConnectionLost);
             if let Some(id) = send_id {
                 self.settle_send(id, 0, true);

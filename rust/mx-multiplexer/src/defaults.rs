@@ -50,6 +50,21 @@ pub const MAX_KEY_SIZE: usize = 256;
 /// See [`MAX_KEY_SIZE`].
 pub const MAX_KEY_PATTERN_SIZE: usize = 1024;
 
+/// A client's batching (BasicClient::set_batching), what a batch holds at
+/// most unless told otherwise before it goes: messages, and bytes of the
+/// batch's own message, its envelope and every message inside included, as
+/// it goes on the wire.
+pub const DEFAULT_BATCH_MAX_RECORDS: usize = 1000;
+
+/// See [`DEFAULT_BATCH_MAX_RECORDS`].
+pub const DEFAULT_BATCH_MAX_BYTES: usize = 1024 * 1024;
+
+/// The most messages one batch holds, a contract like MAX_MESSAGE_SIZE: a
+/// client refuses a max_records above it, and a receiving library drops a
+/// batch that holds more, whole, so that what one frame becomes in a
+/// receiver stays a queue's worth (DEFAULT_INCOMING_QUEUE_MAX_SIZE) at most.
+pub const MAX_BATCH_RECORDS: usize = 1024;
+
 /// Seconds of silence before a side sends a HEARTBIT.
 pub const HEARTBIT_INTERVAL: Duration = Duration::from_secs(3);
 

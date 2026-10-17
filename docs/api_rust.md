@@ -407,7 +407,8 @@ type serves on the threaded class unchanged.
   `start_draining()` and `draining()`; `working()`; `instance_id()`;
   `send(type, payload)` and `send_message(message)` for a message that is
   no reply, routed by its type, as every client sends; `set_key_filters()`
-  and `set_key_filters_then()`; `connections_count()`,
+  and `set_key_filters_then()`; `set_batching()` and `clear_batching()`
+  ([batching](#batching)); `connections_count()`,
   `routing_acknowledged()` and `held_for_a_connection()`; `dropped()`, the
   requests dropped, here those the client's full receive queue dropped.
   From another thread than the server's own, a call that needs the client
@@ -658,6 +659,63 @@ server classes send through their client:
 
 Written means handed to the kernel on a live connection: only a reply says
 a message arrived ([semantics](semantics.md#failure-modes)).
+
+## Batching
+
+`set_batching(type, key, batching)` on `SyncClient`, `ThreadedClient` and
+the servers' `ServerHandle` sends the events of a message type, or of one
+key of it, several in one message, which the receiving library splits
+back into one message each, as if each had come alone;
+[batching](batching.md) says what goes in a batch, when it goes and what
+it changes.
+
+```rust
+use mx_multiplexer::Batching;
+
+let batching = Batching { max_delay: Duration::from_millis(5), ..Batching::default() };
+client.set_batching(types::METRIC_SAMPLE, None, batching)?;
+client.send(types::METRIC_SAMPLE, payload).queue()?;  // in a batch, which goes once full or 5 ms on
+```
+
+- `Batching`, at the crate's root, has `max_records`
+  (`DEFAULT_BATCH_MAX_RECORDS`, 1000), `max_bytes`
+  (`DEFAULT_BATCH_MAX_BYTES`, 1 MiB, measured as `MAX_MESSAGE_SIZE` is)
+  and `max_delay`, a `Duration`, zero for no delay, a batch going as soon
+  as a connection has nothing left to write; `Batching::default()` is
+  those defaults. With `key` `None`, every key of the type batches, each
+  apart, and its messages without a key apart again; `Some(key)` sets one
+  key, ahead of what is set for its type. `clear_batching(type, key)`
+  ends what was set for the type, its keys' settings included, or for
+  one key, which then batches as its type says. Each lets every batch go
+  first.
+- `InvalidArgument`, at the call, for a protocol message type, a key over
+  `MAX_KEY_SIZE`, a `max_records` or `max_bytes` of 0, a `max_records`
+  over `MAX_BATCH_RECORDS`, a `max_bytes` over `MAX_MESSAGE_SIZE`, or a
+  delay over 10⁹ s; on `ThreadedClient` the
+  change is made on the io thread right after, ahead of every send made
+  after the call.
+- What batches is a plain event, no `to`, no `references`, no delivery
+  report asked for, no `override_rrules`, sent by a send's `queue()`
+  without `lane()`, `connection()` or `all()`, or by a server handle's
+  `send()` and `send_message()`. What goes by `wait()` or `written()`, to
+  `all()`, through a lane or a connection, with a timeout of zero, a reply
+  and a query's request go alone, after every batch.
+- `SyncClient` runs its loop only inside its calls: with no delay its
+  messages gather only while the socket is full, so give it one. A batch
+  then goes when it fills or at the first call after its delay, and
+  `flush_all()` and `shutdown()` let it go at once. A `queue()` that only
+  joins a batch with a delay runs no loop; the one that fills it, or
+  comes after a delay is over, does.
+  `BaseMultiplexerServer` is built on a `SyncClient` and wants a delay
+  too; its loop runs while `serve_forever()` waits, so the delay ends on
+  time between two messages. `ThreadedClient` and
+  `BaseThreadedMultiplexerServer` keep the delay on their io thread; with
+  no delay their messages gather only while the program sends faster than
+  the io thread writes them or the multiplexer is behind, so a delay of a
+  few milliseconds batches for sure.
+- Each message's `on_end` hears its batch's end; a batch given up on is
+  counted in `dropped()` and told to the drop observer once for each
+  message in it.
 
 ## Messages the library gives up on
 

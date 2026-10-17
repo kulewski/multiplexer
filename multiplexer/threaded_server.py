@@ -422,7 +422,10 @@ class BaseThreadedMultiplexerServer:
             # what is held for the next connection, a reply made while every
             # multiplexer was down, is waited for too, where the close would
             # drop it: a flush wakes the loop once it is written, a
-            # connection back, or given up on at its own deadline.
+            # connection back, or given up on at its own deadline. What
+            # waits in a batch is let go first, a flush that waits for
+            # nothing, to be held with the rest.
+            client.flush_all(0)
             if client.held_for_a_connection() == 0:
                 return True
             if not self._held_flush_armed:

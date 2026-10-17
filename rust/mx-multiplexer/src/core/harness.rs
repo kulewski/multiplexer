@@ -236,7 +236,9 @@ impl Harness {
         self.deliver(conn, &message);
     }
 
-    /// An event's frame from this client: its id, type and payload.
+    /// An event's frame from this client: its id, type and payload, made
+    /// unsealed, as `message::frame_of` makes a plain event's for a client
+    /// that batches.
     pub(crate) fn event(&self, id: u64, r#type: u32, payload: &[u8]) -> super::outbox::Frame {
         let message = MultiplexerMessage {
             id: Some(id),
@@ -245,14 +247,19 @@ impl Harness {
             message: Some(Bytes::copy_from_slice(payload)),
             ..Default::default()
         };
-        super::outbox::Frame { bytes: frame::encode(&message).expect("a frame"), id, r#type }
+        super::outbox::Frame {
+            bytes: frame::encode_unsealed(&message).expect("a frame"),
+            id,
+            r#type,
+            batch: super::batching::BatchMark::Event(None),
+        }
     }
 
     /// Sends an event of id `id` and type 300, ONE way, waiting 10 s at
     /// most: true when the client took it.
     pub(crate) fn send(&mut self, id: u64) -> bool {
         let frame = self.event(id, 300, b"event");
-        let taken = self.core.send(frame, false, None, Some(Duration::from_secs(10)), 0, None, None, None);
+        let taken = self.core.send(frame, false, None, Some(Duration::from_secs(10)), 0, None, None, None, false);
         self.settle();
         taken
     }
@@ -269,7 +276,7 @@ impl Harness {
     ) -> (bool, Vec<Arc<super::Tracker>>) {
         let frame = self.event(id, 300, b"event");
         let mut trackers = Vec::new();
-        let taken = self.core.send(frame, all, lane, timeout, 0, Some(&mut trackers), None, None);
+        let taken = self.core.send(frame, all, lane, timeout, 0, Some(&mut trackers), None, None, false);
         self.settle();
         (taken, trackers)
     }
@@ -384,7 +391,14 @@ impl Harness {
     }
 }
 
-/// A written frame's message.
+/// A written frame's message, its header checked as the multiplexer checks
+/// it: a frame written unsealed, or with a wrong length, fails the test.
 pub(crate) fn decode(bytes: &Bytes) -> MultiplexerMessage {
+    let header: [u8; HEADER_LENGTH] = bytes[..HEADER_LENGTH].try_into().expect("a header");
+    let header = frame::unpack_header(header).expect("a header the multiplexer takes");
+    assert!(
+        frame::verify(header, &bytes[HEADER_LENGTH..]),
+        "a frame written with a length or a checksum not its body's"
+    );
     frame::decode(bytes.slice(HEADER_LENGTH..)).expect("the client writes whole messages")
 }

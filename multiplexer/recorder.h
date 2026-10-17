@@ -39,7 +39,8 @@ void fill_rules(Record& record, const std::string& fingerprint, const std::strin
 // `payload_limit` bytes of the payload are copied into the record, all of
 // it for 0, `truncated` set when that cut it: the most any sink keeps, so
 // that what no sink keeps is never copied. cut_payload() cuts it further
-// for a sink with a smaller limit.
+// for a sink with a smaller limit. A batch's payload is its batch, marked
+// `batch`.
 void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t from_peer_type, std::uint64_t recipient,
                  std::uint32_t recipient_type, RoutedMessage::Disposition disposition, bool error_reported,
                  unsigned int payload_limit = 0);

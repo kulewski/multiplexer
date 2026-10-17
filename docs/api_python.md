@@ -110,7 +110,8 @@ its loop, which for a client means inside calls. A call that waits, the
 connect in the constructor or `connect_to()`, a read, a query, a flush,
 `flush_all()`, a send waiting for a connection, `shutdown()`, runs the loop
 without the GIL, so the program's other threads go on meanwhile. `on_drop=` and `dropped` are under [Messages the
-library gives up on](#messages-the-library-gives-up-on).
+library gives up on](#messages-the-library-gives-up-on), `set_batching()`
+and `clear_batching()` under [Batching](#batching).
 The peer type must be marked `is_passive` in the rules file: this is the
 one class that needs the mark, since nothing heartbeats between its calls;
 `ThreadedClient`, `AsyncClient` and both server classes run the loop all
@@ -838,7 +839,8 @@ run before the constructor returns, once the first multiplexer welcomed
 the client: a handler that needs the client passes no addresses and calls
 `connect_all(addresses)` once it is assigned.
 `on_drop=` and `dropped` are under [Messages the library gives up
-on](#messages-the-library-gives-up-on). The constructor connects, so a
+on](#messages-the-library-gives-up-on), `set_batching()` and
+`clear_batching()` under [Batching](#batching). The constructor connects, so a
 client whose key filters must be in effect from its first message passes
 them as `key_filters=`; `set_key_filters()` changes them later, as on
 `SyncClient` ([keys](keys.md)). `set_routing()` and `set_key_filters()`
@@ -1165,6 +1167,61 @@ per connection; a lane keeps a stream on one ([Lanes, pinning and
 addressed queries](#lanes-pinning-and-addressed-queries)). `flush=True`
 makes no send faster: the message goes out as soon either way, and the
 call returns later.
+
+## Batching
+
+`set_batching()` on `SyncClient`, `ThreadedClient` and `AsyncClient` sends
+the events of a message type, or of one key of it, several in one
+message, which the receiving library splits back into one message each,
+as if each had come alone; [batching](batching.md) says what goes in a
+batch, when it goes and what it changes.
+
+```python
+client = ThreadedClient(addresses, peers.METRICS_AGENT)
+client.set_batching(types.METRIC_SAMPLE, max_delay=0.005)      # every key, each apart, 5 ms at most
+client.set_batching(types.LOG_LINE, "audit", max_records=100)  # one key, with settings of its own, no delay
+client.send_message(sample.SerializeToString(), type=types.METRIC_SAMPLE)  # returns at once, the batch within 5 ms
+```
+
+- `set_batching(type, key=None, *, max_records=DEFAULT_BATCH_MAX_RECORDS,
+  max_bytes=DEFAULT_BATCH_MAX_BYTES, max_delay=0.0)`: without `key`, every
+  key of the type, each apart, and its messages without a key apart
+  again; with `key`, that key, ahead of what is set for its type. The two
+  constants, on `multiplexer.mxclient`, are 1000 messages and 1 MiB,
+  measured as `MAX_MESSAGE_SIZE` is; `max_delay` is seconds, 0 for no
+  delay, a batch going as soon as a connection has nothing left to write.
+  `clear_batching(type, key=None)` ends what was set for the type, its
+  keys' settings included, or for one key, which then batches as its type
+  says. Each lets every batch go first.
+- `ValueError`, at the call, for a protocol message type, a key over
+  `MAX_KEY_SIZE`, a `max_records` below 1 or over `MAX_BATCH_RECORDS`, a
+  `max_bytes` below 1 or over
+  `MAX_MESSAGE_SIZE`, or a delay negative, over `MAX_SECONDS` or not
+  finite. On
+  `ThreadedClient` and `AsyncClient` the change is in effect for every
+  send made after the call.
+- What batches is a `send_message()` that returns at once, without
+  `flush` or with a `callback`, through `multiplexer=ONE`, the default, of
+  a plain event: no `to`, no `references`, no delivery report asked for,
+  no `override_rrules`. What goes by `event()` or `multiplexer=ALL`,
+  through a lane or a connection, by a flushing send, with `timeout=0`,
+  and a query's request go alone, after every batch.
+- A `SyncClient` runs its loop only inside its calls: with no delay its
+  messages gather only while the socket is full, so give it one. A batch
+  then goes when it fills or at the first call after its delay, and
+  `flush_all()` and `shutdown()` let it go at once. A `send_message()`
+  that only joins a batch with a delay runs no loop; the one that fills
+  it, or comes after a delay is over, does. `ThreadedClient` and
+  `AsyncClient` keep the delay on their io thread; with no delay their
+  messages gather only while the program sends faster than the io thread
+  writes them, which a Python program seldom does, or the multiplexer is
+  behind, so a delay of a few milliseconds batches for sure.
+- The server classes batch through their client, `self.conn` on
+  `BaseMultiplexerServer` and `self.client` on
+  `BaseThreadedMultiplexerServer`: their `send_message()` of a message
+  that is no reply batches as the client's does.
+- Each message's `callback` hears its batch's end; a batch given up on is
+  counted in `dropped` and told to `on_drop` once for each message in it.
 
 ## Messages the library gives up on
 

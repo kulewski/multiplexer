@@ -150,9 +150,19 @@ bool BaseMultiplexerServer::drained() const {
   // ending on the confirmation alone; 0 and NaN end it at once: as
   // mx::from_seconds reads them, and the threaded server too. With no
   // connection live the confirmation holds at once, so what is held for
-  // the next connection is waited for too.
-  return std::chrono::steady_clock::now() - draining_since_ >= mx::from_seconds(drain_seconds_) ||
-         (nothing_more_arrives(drain_routing_) && conn->routing_acknowledged() && conn->held_for_a_connection() == 0);
+  // the next connection is waited for too. What waits in a batch is let go
+  // first, a flush that waits for nothing, to be held with the rest; its
+  // loop runs first (SyncClient::flush_all), so that a connection that
+  // died since is gone before the confirmation is asked, the handler's
+  // sends into a batch having run none.
+  if (std::chrono::steady_clock::now() - draining_since_ >= mx::from_seconds(drain_seconds_)) {
+    return true;
+  }
+  if (!nothing_more_arrives(drain_routing_)) {
+    return false;
+  }
+  conn->flush_all(0);
+  return conn->routing_acknowledged() && conn->held_for_a_connection() == 0;
 }
 
 float BaseMultiplexerServer::_wait(float poll) const {

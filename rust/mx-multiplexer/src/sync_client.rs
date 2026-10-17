@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
+use crate::core::batching::Batching;
 use crate::core::client::{target_of, DropReason, IncomingMode};
 use crate::core::outbox::{Frame, SendDone};
 use crate::core::query::{check_size_sent_again, Outcome, QueryId};
@@ -447,6 +448,7 @@ impl SyncClient {
 
     /// `flush_all()` with no check, for the shutdown.
     fn flush_all_unchecked(&mut self, timeout: Option<Duration>) -> bool {
+        self.poll_before_batches_go();
         let flush = self.engine().call(|core| core.begin_flush(None));
         let until = deadline(timeout);
         loop {
@@ -502,6 +504,47 @@ impl SyncClient {
     ) -> Result<()> {
         self.check()?;
         self.engine().call(|core| core.set_key_filters(filters, Some(Box::new(on_acknowledged))))
+    }
+
+    /// Batching (docs/batching.md): the events of `r#type`, each key
+    /// apart, or, given `key`, of that key, ahead of what is set for its
+    /// type, that `queue()` sends through no lane and not to ALL, go several
+    /// in one message, which the receiving library splits back into one
+    /// message each. A batch goes once it holds `max_records` messages,
+    /// once one more would take it past `max_bytes` on the wire, or
+    /// `max_delay` after its first message; with no delay, once a
+    /// connection has nothing left to write. This client writes only inside
+    /// its calls, so give it a delay: without one, messages gather only
+    /// while the socket is full. A flush, a send that does not batch,
+    /// another change of what is batched and the shutdown first let every
+    /// batch go. `InvalidArgument` for a protocol message type, a key over
+    /// MAX_KEY_SIZE, no message in a batch or more than MAX_BATCH_RECORDS,
+    /// no byte or more than MAX_MESSAGE_SIZE, or a delay over MAX_SECONDS.
+    pub fn set_batching(&mut self, r#type: u32, key: Option<&str>, batching: Batching) -> Result<()> {
+        self.check()?;
+        self.poll_before_batches_go();
+        self.engine().call(|core| core.set_batching(r#type, key, batching))
+    }
+
+    /// No batching from now on for `r#type`, its keys' settings included,
+    /// or, given `key`, for that key, which then batches as its type says;
+    /// every batch goes first.
+    pub fn clear_batching(&mut self, r#type: u32, key: Option<&str>) -> Result<()> {
+        self.check()?;
+        self.poll_before_batches_go();
+        self.engine().call(|core| core.clear_batching(r#type, key));
+        Ok(())
+    }
+
+    /// A call that lets the batches go runs the loop first while any message
+    /// waits in one, so that a connection the multiplexer closed meanwhile
+    /// is retired before a batch chooses one, as a send's poll does for its
+    /// message: the `queue()` calls that put them in their batches ran none
+    /// (`Core::send_needs_loop`). A send that lets them go polls already.
+    fn poll_before_batches_go(&mut self) {
+        if self.engine_ref().core.batches_open() {
+            self.engine().poll();
+        }
     }
 
     /// Whether every multiplexer has the current routing and key filters in
@@ -609,7 +652,7 @@ impl SyncClient {
     /// size and key checked.
     fn frame_of(&self, message: Message) -> Result<Frame> {
         let core = &self.engine_ref().core;
-        crate::message::frame_of(message, || core.random64(), core.instance_id)
+        crate::message::frame_of(message, || core.random64(), core.instance_id, core.batcher.configured())
     }
 }
 
@@ -818,10 +861,16 @@ impl SyncSend<'_> {
         }
         let frame = client.frame_of(message)?;
         let id = frame.id;
-        client.engine().poll();
-        let done = on_end.map(|on_end| SendDone::Callback(Box::new(move |written| on_end(written > 0))));
+        // The loop runs first unless the message only joins a batch.
         let lane = lane.map(|lane| lane.0);
-        let taken = client.engine().call(|core| core.send(frame, all, lane.as_ref(), timeout, 0, None, None, done));
+        let now = Instant::now();
+        if client.engine().call(|core| core.send_needs_loop(&frame, all, lane.is_some(), timeout, now)) {
+            client.engine().poll();
+        }
+        let done = on_end.map(|on_end| SendDone::Callback(Box::new(move |written| on_end(written > 0))));
+        // A send nobody waits for, which may go in a batch (`set_batching()`).
+        let taken =
+            client.engine().call(|core| core.send(frame, all, lane.as_ref(), timeout, 0, None, None, done, true));
         if !taken {
             return Err(Error::NotConnected);
         }
@@ -854,7 +903,7 @@ impl SyncSend<'_> {
         let mut copies = Vec::new();
         let taken = client
             .engine()
-            .call(|core| core.send(frame, all, core_lane.as_ref(), room, 0, Some(&mut copies), None, done));
+            .call(|core| core.send(frame, all, core_lane.as_ref(), room, 0, Some(&mut copies), None, done, false));
         if !taken {
             return Err(Error::NotConnected);
         }

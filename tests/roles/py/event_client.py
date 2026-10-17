@@ -1,4 +1,11 @@
-"""Event client role: a client that sends events and never waits for answers."""
+"""Event client role: a client that sends events and never waits for answers.
+
+With --batch-records N it batches every type of its --send list
+(set_batching), N messages a batch, --batch-delay S their max_delay: each
+send then returns at once, the message in its type's batch, which goes
+once full, and flush_all() after the last lets the last one go and is
+reported as `flushed`.
+"""
 
 import time
 
@@ -16,12 +23,20 @@ def main() -> None:
     p.add_argument("--interval", type=float, default=0.0, help="pause between sends")
     p.add_argument("--linger", type=float, default=0.0, help="stay connected this long after sending")
     p.add_argument("--key", default=None, help="the key every message carries")
+    p.add_argument(
+        "--batch-records", type=int, default=0, help="batch every type sent, N messages a batch, flushed at the end"
+    )
+    p.add_argument("--batch-delay", type=float, default=0.0, help="the batches' max_delay, in seconds")
     args = p.parse_args()
 
     client = clients.Client(common.endpoints(args), type=args.type)
     emit("connected", instance_id=client.instance_id, connections=client.connections_count(), name=args.name)
+    sends = common.typed_payloads(args.send)
+    if args.batch_records:
+        for type_ in sorted({type_ for type_, _ in sends}):
+            client.set_batching(type_, max_records=args.batch_records, max_delay=args.batch_delay)
     sent = 0
-    for type_, payload in common.typed_payloads(args.send):
+    for type_, payload in sends:
         fields = dict(type=type_)
         if args.to:
             fields["to"] = args.to
@@ -30,7 +45,11 @@ def main() -> None:
         mxmsg = client.new_message(message=payload, **fields)
         state = {}
         try:
-            if args.no_flush:
+            if args.batch_records and not args.all:
+                # Returns at once, the message in its type's batch, which
+                # goes once full; the flush after the last lets the last go.
+                client.send_message(mxmsg)
+            elif args.no_flush:
                 # Queue only, and report where the message stands right after,
                 # as its callback has heard: nothing yet while it waits.
                 heard: list[int] = []
@@ -53,6 +72,8 @@ def main() -> None:
         emit("sent", type=type_, id=mxmsg.id, **state)
         if args.interval:
             time.sleep(args.interval)
+    if args.batch_records:
+        emit("flushed", is_sent=client.flush_all())
     if args.linger:
         time.sleep(args.linger)
     emit("done", sent=sent, connections=client.connections_count())

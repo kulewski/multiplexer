@@ -305,7 +305,8 @@ class Client : public ExceptionDefinitions {
   // Runs the loop until the tracked message is written or lost, or the
   // timeout passes; at once, whatever the timeout, when no connection is
   // live or coming (BasicClient::connection_live_or_coming), which leaves
-  // a held message held.
+  // a held message held. Every batch goes first, the message's own among
+  // them when it waits in one.
   void flush(ScheduledMessageTracker tracker, float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
 
@@ -315,6 +316,8 @@ class Client : public ExceptionDefinitions {
 
   void flush(ScheduledMessageTracker tracker, mx::SimpleTimer& timer) const {
     basic_client_->check_not_orphaned();
+    _poll_before_batches_go();
+    basic_client_->close_batches();
     while (tracker && tracker.in_queue() && !timer.expired() && basic_client_->connection_live_or_coming()) {
       if (basic_client_->run_one() == 0) {
         break;  // nothing gives the loop work: nothing more can happen
@@ -332,6 +335,7 @@ class Client : public ExceptionDefinitions {
   bool flush_all(float timeout = DEFAULT_TIMEOUT) const {
     basic_client_->check_not_orphaned();
     std::unique_ptr<mx::SimpleTimer> timer = basic_client_->create_timer(timeout);
+    _poll_before_batches_go();
     BasicClient::FlushPtr flush = basic_client_->begin_flush();
     while (!basic_client_->flushed(flush) && !timer->expired() && basic_client_->connection_live_or_coming()) {
       if (basic_client_->run_one() == 0) {
@@ -348,7 +352,10 @@ class Client : public ExceptionDefinitions {
   // loop runs; a message the client gives up on is reported
   // (set_drop_observer). queue_all() gives every live connection a copy,
   // and a multiplexer whose first connection is still in its handshake one
-  // at its welcome.
+  // at its welcome. A message queue() sends through no lane goes in a
+  // batch when its type or key is batched (set_batching); queue() runs the
+  // loop first unless the message only joins a batch with a delay
+  // (BasicClient::send's poll_first).
   // `done`, when given, hears how the message ended, once, inside a later
   // call that runs the loop: 1 once it was written, the first copy for
   // ALL, 0 once it was given up on or shutdown() came first, as the Python
@@ -449,6 +456,40 @@ class Client : public ExceptionDefinitions {
   }
 
   mx::Random64::result_type random64() const { return basic_client_->random64(); }  // a message id
+
+  // Batching, docs/api_cpp.md "Batching": the events of `type`, each key
+  // apart, or of one key of it, that queue() sends go several in one
+  // message, which the receiving library splits back into one message
+  // each. Throws std::invalid_argument as BasicClient::check_batching says.
+  // A batch goes full, after `max_delay`, or, with no delay, as soon as a
+  // connection has nothing left to write; on this client, whose loop runs
+  // inside its calls, inside a later call, as a queued message is written.
+  // See BasicClient::set_batching.
+  typedef BasicClient::Batching Batching;
+  void set_batching(std::uint32_t type, const Batching& batching = Batching()) {
+    basic_client_->check_not_orphaned();
+    _poll_before_batches_go();
+    basic_client_->set_batching(type, batching);
+  }
+  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching = Batching()) {
+    basic_client_->check_not_orphaned();
+    _poll_before_batches_go();
+    basic_client_->set_batching(type, key, batching);
+  }
+  void clear_batching(std::uint32_t type) {
+    basic_client_->check_not_orphaned();
+    _poll_before_batches_go();
+    basic_client_->clear_batching(type);
+  }
+  void clear_batching(std::uint32_t type, const std::string& key) {
+    basic_client_->check_not_orphaned();
+    _poll_before_batches_go();
+    basic_client_->clear_batching(type, key);
+  }
+  // How many messages wait in batches, and whether the batches' timer is
+  // armed: for tests.
+  std::size_t batched_messages() const { return basic_client_->batched_messages(); }
+  bool batch_timer_armed() const { return basic_client_->batch_timer_armed(); }
 
   // Every message the program sent that the client gives up on, each copy
   // of one sent to ALL, is told to `observer` with its id and why
@@ -560,13 +601,25 @@ class Client : public ExceptionDefinitions {
   unsigned int _send_and_wait(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane,
                               mx::SimpleTimer& timer, ConnectionWrapper* used, bool* taken, bool* lost,
                               BasicClient::BasicScheduledMessageTracker* placed = NULL);
+  // A call that lets the batches go runs the loop first while any message
+  // waits in one, so that a connection the peer closed meanwhile is retired
+  // before a batch chooses one, as a send's poll does for its message: the
+  // queue() calls that put them in their batches ran none (BasicClient::
+  // send's poll_first). A send that lets them go polls already.
+  void _poll_before_batches_go() const {
+    if (basic_client_->batched_messages()) {
+      basic_client_->poll();
+    }
+  }
   // queue() and queue_all(), and the binding's non-flushing send.
   ScheduledMessageTracker _queue(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
                                  const SendCallback& done) {
     basic_client_->check_not_orphaned();
-    basic_client_->poll();
     std::vector<BasicScheduledMessageTracker> trackers;
-    if (!basic_client_->send(raw, all, lane, timeout, 0, &trackers, NULL, done) || trackers.empty()) {
+    // The loop runs first unless the message only joins a batch (poll_first).
+    if (!basic_client_->send(raw, all, lane, timeout, 0, &trackers, NULL, done, /*may_batch=*/true,
+                             /*poll_first=*/true) ||
+        trackers.empty()) {
       return ScheduledMessageTracker(BasicScheduledMessageTracker());
     }
     return ScheduledMessageTracker(trackers.front());
@@ -579,10 +632,10 @@ class Client : public ExceptionDefinitions {
   MultiplexerMessage _locator_for(const MultiplexerMessage& query);
   IncomingMessage _receive(mx::SimpleTimer& timer, const std::vector<uint64_t>& accept_ids, uint32_t ignore_type,
                            uint64_t ignore_id, const ConnectionWrapper* watch = NULL, bool* lost = NULL);
-  // A send's `msg` as a frame: a whole message stamped (frame_stamped), a
-  // frame as it is.
+  // A send's `msg` as a frame: a whole message stamped (frame_stamped),
+  // marked for batching while anything is batched, a frame as it is.
   shared_ptr<const RawMessage> _serialize(const MultiplexerMessage& msg) {
-    return frame_stamped(msg, instance_id(), [this] { return random64(); });
+    return frame_stamped(msg, instance_id(), [this] { return random64(); }, basic_client_->batching());
   }
   shared_ptr<const RawMessage> _serialize(shared_ptr<const RawMessage> raw) { return raw; }
 

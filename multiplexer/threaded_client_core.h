@@ -47,6 +47,8 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
   void set_resolver(BasicClient::Resolver resolver);
   void set_routing(const Routing& routing, BasicClient::AcknowledgedCallback acknowledged);
   void set_key_filters(const BasicClient::KeyFilters& filters, BasicClient::AcknowledgedCallback acknowledged);
+  void set_batching(std::uint32_t type, const std::string* key, const BasicClient::Batching& batching);
+  void clear_batching(std::uint32_t type, const std::string* key);
   bool routing_acknowledged();
   std::size_t held_for_a_connection();
   bool flush_all(float timeout);
@@ -237,6 +239,10 @@ class ThreadedClient::Core : public std::enable_shared_from_this<ThreadedClient:
 
   mx::Mutex random_mutex_;
   mx::Random64 random_ MX_GUARDED_BY(random_mutex_);
+  // Whether set_batching() was ever called: the callers' threads then mark
+  // the frames they make for it (_stamped); a hint, a frame made unmarked
+  // read on the io thread instead.
+  std::atomic<bool> batching_{false};
 
   // shutdown() is the only thing that touches the thread. Every other entry
   // point posts through _post_unless_stopped(), which counts itself in

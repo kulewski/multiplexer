@@ -128,6 +128,22 @@ message MultiplexerMessage {
     // filter for its type only when that filter takes the key. Absent, no
     // filter applies. At most MAX_KEY_SIZE bytes. docs/keys.md.
     optional string key = 9;
+
+    // Several messages in one, a client's batching (set_batching): a
+    // serialized MessageBatch, in place of `message`, which the receiving
+    // library splits back into its messages, each handed out as if it had
+    // come alone. The envelope has the type and the key the multiplexer
+    // routes by, which every message inside has too. Bytes, not a repeated
+    // field, so that the multiplexer, which parses every message it routes,
+    // copies the batch as one blob and never parses what is inside.
+    optional bytes batch = 10;
+}
+
+// The messages of a batch (MultiplexerMessage.batch), in the order they
+// were sent: each a serialized MultiplexerMessage, as it would have gone
+// alone, every one of the batch's type and key.
+message MessageBatch {
+    repeated bytes message = 1;
 }
 
 // Which keys of one message type reach a peer by the rules: a filter on
@@ -219,11 +235,13 @@ message DeliveryError {
     //(set only if no MultiplexerMessage.to() nor MultiplexerMessage.override_rrules() provided)
     optional bool is_known_type = 4;
 
-    // MultiplexerMessage that caused the error
+    // MultiplexerMessage that caused the error: when asked for
+    // (include_original_packet_in_report), and always for a batch, which its
+    // sender's library splits into one report for each message inside.
     optional MultiplexerMessage original_message = 20;
 
-    // The original was asked for (include_original_packet_in_report) and
-    // left out, because the report would have been over MAX_MESSAGE_SIZE.
+    // The original was asked for, or is a batch's, and left out, because the
+    // report would have been over MAX_MESSAGE_SIZE.
     optional bool original_message_omitted = 21;
 }
 

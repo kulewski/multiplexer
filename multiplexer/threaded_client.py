@@ -218,6 +218,39 @@ class ThreadedClient:
         pattern that does not compile, and logs why. See docs/keys.md."""
         self._native.set_key_filters(key_filters_argument(filters), on_acknowledged)
 
+    def set_batching(
+        self,
+        type: int,
+        key: str | None = None,
+        *,
+        max_records: int = _native.DEFAULT_BATCH_MAX_RECORDS,
+        max_bytes: int = _native.DEFAULT_BATCH_MAX_BYTES,
+        max_delay: float = 0.0,
+    ) -> None:
+        """Send the events of message `type`, each key apart, or, given
+        `key`, of that key, ahead of what is set for its type, several in
+        one message, which the receiving library splits back into one
+        message each: those send_message() sends without waiting for them,
+        without flush or with a callback, through no lane and not to ALL. A batch goes once it holds `max_records`
+        messages, once one more would take it past `max_bytes` on the wire,
+        or `max_delay` seconds after its first message; with no delay, once
+        a connection has nothing left to write, so that a message sent while
+        one is free goes at once, and those sent while every one is busy go
+        together. A flush, a send that does not batch, another
+        set_batching() or clear_batching() and shutdown() first let every
+        batch go. Checked here, raising ValueError for a protocol message
+        type, a key over MAX_KEY_SIZE bytes, a count below 1, max_records
+        over MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, or a delay
+        negative, over MAX_SECONDS or not finite; in effect
+        for every send made after the call. See docs/batching.md."""
+        self._native.set_batching(type, key, max_records, max_bytes, max_delay)
+
+    def clear_batching(self, type: int, key: str | None = None) -> None:
+        """No batching from now on for message `type`, its keys' settings
+        included, or, given `key`, for that key, which then batches as its
+        type says; every batch goes first."""
+        self._native.clear_batching(type, key)
+
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to
         set_routing(), and the filters given to set_key_filters(), in

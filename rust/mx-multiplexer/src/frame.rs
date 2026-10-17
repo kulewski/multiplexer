@@ -11,6 +11,12 @@
 //! buffer, header and body, which every connection it goes to shares. A
 //! body read from a connection decodes into a message whose payload is a
 //! slice of that body, never a copy.
+//!
+//! A client that batches frames an event that may go in a batch without its
+//! checksum (`encode_unsealed`): in a batch only its body is read, and its
+//! own checksum would be a pass over every byte for nothing. One that goes alone
+//! after all is sealed as it is placed (`seal`, in the outbox's
+//! `Core::out_frame`), in place, the buffer being its own by then.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message as _;
@@ -44,6 +50,37 @@ pub(crate) fn check_key_size(key: Option<&str>) -> Result<()> {
 
 /// `message` serialized into a frame, header and body in one buffer.
 pub(crate) fn encode(message: &MultiplexerMessage) -> Result<Bytes> {
+    let mut buffer = encode_body(message)?;
+    write_checksum(&mut buffer);
+    Ok(buffer.freeze())
+}
+
+/// `encode` without the checksum, which `seal` writes if the frame goes alone:
+/// the frame of an event that may go in a batch (see the module comment).
+/// Its sizes are checked here, as any frame's.
+pub(crate) fn encode_unsealed(message: &MultiplexerMessage) -> Result<Bytes> {
+    Ok(encode_body(message)?.freeze())
+}
+
+/// The frame of `encode_unsealed` with its checksum written: in place when
+/// nothing else holds its buffer, as nothing does once a frame goes alone,
+/// else in a copy.
+pub(crate) fn seal(bytes: Bytes) -> Bytes {
+    let mut buffer = BytesMut::from(bytes);
+    write_checksum(&mut buffer);
+    #[cfg(test)]
+    SEALED.with(|sealed| sealed.set(sealed.get() + 1));
+    buffer.freeze()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The frames `seal` sealed on this thread, for the tests that count them.
+    pub(crate) static SEALED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The header with the body's length and a checksum left 0, then the body.
+fn encode_body(message: &MultiplexerMessage) -> Result<BytesMut> {
     check_key_size(message.key.as_deref())?;
     let size = message.encoded_len();
     check_message_size(size)?;
@@ -52,16 +89,20 @@ pub(crate) fn encode(message: &MultiplexerMessage) -> Result<Bytes> {
     // A BytesMut grows as it is written to, so prost never runs out of room;
     // the error is its only other way to say so.
     message.encode(&mut buffer).map_err(|_| Error::TooLarge { what: Limit::Message, size, limit: MAX_MESSAGE_SIZE })?;
-    let checksum = checksum(&buffer[HEADER_LENGTH..]);
     buffer[..4].copy_from_slice(&(size as u32).to_le_bytes());
-    buffer[4..HEADER_LENGTH].copy_from_slice(&checksum.to_le_bytes());
-    Ok(buffer.freeze())
+    Ok(buffer)
 }
 
 /// The checksum a frame's header carries for `body`: the low 32 bits of
 /// its XXH3-64.
 pub(crate) fn checksum(body: &[u8]) -> u32 {
     xxh3_64(body) as u32
+}
+
+/// The checksum of the frame's body, into its header.
+fn write_checksum(buffer: &mut BytesMut) {
+    let checksum = checksum(&buffer[HEADER_LENGTH..]);
+    buffer[4..HEADER_LENGTH].copy_from_slice(&checksum.to_le_bytes());
 }
 
 /// A frame's header as read: the body's length and its checksum.

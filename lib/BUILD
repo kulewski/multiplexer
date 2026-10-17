@@ -190,6 +190,17 @@ cc_library(
     name = "spanset",
     hdrs = ["spanset.h"],
     visibility = ["//multiplexer:__pkg__"],
+    deps = [":assert"],
+)
+
+cc_test(
+    name = "spanset_test",
+    size = "small",
+    srcs = ["spanset_test.cc"],
+    deps = [
+        ":spanset",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_library(

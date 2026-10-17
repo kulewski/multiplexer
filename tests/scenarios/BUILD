@@ -189,6 +189,22 @@ LANGS = [
     for event_client in LANGS
 ]
 
+# A client's batches, split by a backend of every language, the sender's
+# own and the others.
+[
+    mx_integration_test(
+        name = "batched_events_%s_%s" % (event_backend, event_client),
+        extra_deps = ["//multiplexer:multiplexer_py_proto"],
+        roles = {
+            "event_backend": event_backend,
+            "event_client": event_client,
+        },
+        scenario = "batched_events/batched_events.py",
+    )
+    for event_backend in LANGS
+    for event_client in LANGS
+]
+
 # Multi-mx and failure scenarios.
 [
     mx_integration_test(

@@ -115,6 +115,9 @@ pub(crate) struct Conn {
     outgoing_max: usize,
     out: Channel,
     write_in_flight: bool,
+    /// The next write that leaves the queue empty tells the client
+    /// (`Core::outgoing_queue_idle`), once.
+    notify_when_idle: bool,
     set_aside: VecDeque<QueueEntry>,
     heartbit: Arc<OutFrame>,
 }
@@ -154,6 +157,7 @@ impl Conn {
             outgoing_max: 1,
             out: Channel::Free,
             write_in_flight: false,
+            notify_when_idle: false,
             set_aside: VecDeque::new(),
             heartbit,
         }
@@ -167,6 +171,18 @@ impl Conn {
     /// Whether its outgoing queue is at its limit.
     pub(crate) fn outgoing_queue_full(&self) -> bool {
         self.outgoing_max <= self.outgoing.len()
+    }
+
+    /// Whether nothing is queued, being written or waiting to be.
+    pub(crate) fn outgoing_queue_empty(&self) -> bool {
+        self.outgoing.is_empty()
+    }
+
+    /// The next time a write leaves the queue empty, the client hears of
+    /// it (`Core::outgoing_queue_idle`), once: for the batches that wait
+    /// for a connection with nothing left to write.
+    pub(crate) fn notify_when_idle(&mut self) {
+        self.notify_when_idle = true;
     }
 
     /// The entry queued last but the connection's own frames, which
@@ -212,6 +228,7 @@ pub(crate) fn heartbit_frame(instance_id: u64) -> Arc<OutFrame> {
         own: true,
         number: 0,
         deadline: None,
+        batch: None,
     })
 }
 
@@ -361,6 +378,13 @@ impl Core {
         let has_room = self.conns.get(&conn).is_some_and(|state| !state.outgoing_queue_full());
         if was_full && has_room {
             self.outgoing_queue_has_room(conn);
+        }
+        // Nothing left to write is news for a client that asked, once.
+        if let Some(state) = self.conns.get_mut(&conn) {
+            if state.notify_when_idle && state.outgoing.is_empty() {
+                state.notify_when_idle = false;
+                self.outgoing_queue_idle(conn);
+            }
         }
     }
 

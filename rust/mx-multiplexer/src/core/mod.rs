@@ -3,7 +3,8 @@
 //! classes and runs on a virtual clock in tests. Mirrors the client half of
 //! multiplexer/io/connection.h (`connection`), basic_client.cc and its
 //! parts with the client's half of connections_manager.h (`client`),
-//! outbox.cc and its parts (`outbox`), the query state machine of
+//! outbox.cc and its parts (`outbox`), basic_client_batching.cc
+//! (`batching`), the query state machine of
 //! threaded_client_query.cc (`query`) and the io thread's other work of
 //! threaded_client_io.cc (`threaded`); this file holds what they share.
 //!
@@ -23,6 +24,7 @@
 
 pub(crate) mod timers;
 
+pub(crate) mod batching;
 pub(crate) mod client;
 pub(crate) mod connection;
 pub(crate) mod lane;
@@ -43,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use batching::Batcher;
 pub(crate) use client::{ClientState, IncomingMode};
 pub(crate) use connection::Conn;
 pub(crate) use outbox::Outbox;
@@ -113,9 +116,10 @@ pub(crate) fn followed(tracker: &Arc<Tracker>) -> bool {
 /// back (C++ RawMessage's marks): the id and type a drop is reported by,
 /// whether it is pinned to its connection, one of a send to ALL, or a
 /// connection's own protocol frame, its place in the order sent, which
-/// flush_all() goes by, and the deadline its first send gave it. Built
-/// whole where it is first placed and never changed, so that a frame a dead
-/// connection hands over keeps its place and its deadline.
+/// flush_all() goes by, the deadline its first send gave it, and, for a
+/// batch's frame, the ids of the messages inside, by which a drop of it is
+/// told. Built whole where it is first placed and never changed, so that a
+/// frame a dead connection hands over keeps its place and its deadline.
 #[derive(Debug)]
 pub(crate) struct OutFrame {
     pub(crate) bytes: Bytes,
@@ -126,6 +130,7 @@ pub(crate) struct OutFrame {
     pub(crate) own: bool,
     pub(crate) number: u64,
     pub(crate) deadline: Option<Instant>,
+    pub(crate) batch: Option<Arc<[u64]>>,
 }
 
 /// One entry of a connection's outgoing queue: the frame and its tracker,
@@ -175,6 +180,8 @@ pub(crate) enum Due {
     SendsExpire,
     /// The shutdown's write-out ran out of time.
     Drain,
+    /// The earliest max_delay's end among the batches open.
+    Batches,
 }
 
 /// What the core wants done with a socket, for the driver to carry out in
@@ -266,6 +273,7 @@ pub(crate) struct Core {
     pub(crate) round_robin: VecDeque<ConnId>,
     pub(crate) client: ClientState,
     pub(crate) outbox: Outbox,
+    pub(crate) batcher: Batcher,
     pub(crate) queries: Queries,
     queries_fill_posted: bool,
     pub(crate) threaded: Threaded,
@@ -303,6 +311,7 @@ impl Core {
             round_robin: VecDeque::new(),
             client: ClientState::new(mode),
             outbox: Outbox::default(),
+            batcher: Batcher::default(),
             queries: Queries::default(),
             queries_fill_posted: false,
             threaded: Threaded::default(),
@@ -340,6 +349,7 @@ impl Core {
             Due::FlushWait(id) => self.flush_wait_expired(id),
             Due::SendsExpire => self.sends_expire(),
             Due::Drain => self.drain_expired(),
+            Due::Batches => self.batch_timer_fired(),
         }
         true
     }

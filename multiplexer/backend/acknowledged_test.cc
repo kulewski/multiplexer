@@ -518,6 +518,76 @@ TEST(Acknowledged, APlainDrainWaitsForWhatItHoldsForAConnection) {
   EXPECT_EQ(0u, client.dropped()) << "the reply written once a connection was back, not dropped";
 }
 
+// As HeldPlain, but what it sends once released is an event that waits in
+// a batch, its delay an hour.
+class HeldBatch : public BaseMultiplexerServer {
+ public:
+  explicit HeldBatch(Client* client) : BaseMultiplexerServer(client, multiplexer::peers::PYTHON_TEST_SERVER) {
+    Client::Batching batching;
+    batching.max_delay = 3600;
+    client->set_batching(multiplexer::types::TEST_EVENT, batching);
+  }
+  std::promise<void> holding;
+  std::promise<void> release;
+  std::atomic<std::size_t> held{0};
+
+ protected:
+  void handle_message(MultiplexerMessage& mxmsg) override {
+    if (mxmsg.message() == "hold") {
+      start_draining();
+      holding.set_value();
+      release.get_future().wait_for(BOUND);
+    }
+    MultiplexerMessage event;
+    event.set_type(multiplexer::types::TEST_EVENT);
+    event.set_message("batched");
+    conn->queue(event);  // its id and sender filled in
+  }
+  void periodic_task() override { held = std::max(held.load(), conn->held_for_a_connection()); }
+};
+
+// A plain server's drain waits for what waits in a batch, its only
+// multiplexer down: the drain lets the batch go, to be held for the next
+// connection and written once it is back, where the drain ended at once,
+// nothing being held, and the close dropped the batch.
+TEST(Acknowledged, APlainDrainWaitsForWhatWaitsInABatch) {
+  std::unique_ptr<InProcessMultiplexer> mx(new InProcessMultiplexer());
+  const unsigned short port = mx->port;
+  Client client(multiplexer::peers::PYTHON_TEST_SERVER);
+  ASSERT_TRUE(client.connect("127.0.0.1", port, 5));
+  const std::uint64_t server_id = client.instance_id();
+  HeldBatch server(&client);
+  std::promise<void> left;
+  std::thread serving([&] {
+    server.serve_forever(HOUR, HOUR);
+    left.set_value();
+  });
+  Client asking(multiplexer::peers::WEBSITE);
+  ASSERT_TRUE(asking.connect("127.0.0.1", port, 5));
+  asking.flush(asking.schedule_one(hold_request(asking)));
+  ASSERT_EQ(std::future_status::ready, server.holding.get_future().wait_for(BOUND))
+      << "the request reached the server, which holds it, draining";
+  mx.reset();  // stopped: every connection to it ends
+  server.release.set_value();
+  EXPECT_TRUE(eventually([&] { return server.held.load() == 1; })) << "the batch let go, and held";
+  mx.reset(new InProcessMultiplexer(port));  // back on the same address
+  std::future<void> leaving = left.get_future();
+  const bool drained = leaving.wait_for(BOUND) == std::future_status::ready;
+  EXPECT_TRUE(drained) << "the drain over once the batch went";
+  if (!drained) {
+    server.stop();  // the test fails; a request addressed to the server wakes its loop to see the stop
+    Client waking(multiplexer::peers::WEBSITE);
+    if (waking.connect("127.0.0.1", port, 5)) {
+      MultiplexerMessage wake = hold_request(waking);
+      wake.set_message("wake");
+      wake.set_to(server_id);
+      waking.flush(waking.schedule_one(wake));
+    }
+  }
+  serving.join();
+  EXPECT_EQ(0u, client.dropped()) << "the batch written once a connection was back, not dropped";
+}
+
 // Leaving, its drain keeping events coming: only the cap can end it.
 class OpenLeaving : public Leaving {
  public:

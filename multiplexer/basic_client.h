@@ -63,24 +63,51 @@ class BasicClient;
 class Client;
 
 // `msg` framed for a send, as every send that takes a whole message frames
-// it: as it is when it has an id and a sender, else a copy with an empty id
-// made fresh by `fresh_id` and an empty sender set to `instance_id`, as
+// it: as it is when it has an id and a sender, else with an empty id made
+// fresh by `fresh_id` and an empty sender set to `instance_id`, as
 // new_message() and a reply fill them, since every receiver drops a message
-// without an id.
+// without an id, appended to its bytes rather than set in a copy. For a
+// client that batches, `batching`, the frame is marked as its batching
+// needs it (RawMessage::batchable), and the frame of a plain event, which
+// may go in a batch, is made unsealed (RawMessage::Unsealed), its checksum
+// computed only if it goes alone; a client that does not batch reads
+// nothing more of the message for it.
 template <typename FreshId>
 std::shared_ptr<const RawMessage> frame_stamped(const MultiplexerMessage& msg, std::uint64_t instance_id,
-                                                FreshId fresh_id) {
+                                                FreshId fresh_id, bool batching = false) {
+  const bool plain = batching && RawMessage::plain_event(msg);
+  std::shared_ptr<const RawMessage> raw;
   if (msg.id() && msg.sender()) {
-    return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(msg));
+    raw.reset(RawMessage::FromMessage(msg, /*sealed=*/!plain));
+  } else {
+    // What the message lacks, appended to its own bytes rather than set in
+    // a copy of it: protobuf reads serializations put end to end as one
+    // message, the later fields' values winning, so the message is
+    // serialized once and its payload never copied in between.
+    MultiplexerMessage stamp;
+    if (!msg.id()) {
+      stamp.set_id(fresh_id());
+    }
+    if (!msg.sender()) {
+      stamp.set_sender(instance_id);
+    }
+    check_key_size(msg.key().size());
+    std::string serialized;
+    serialized.reserve(msg.ByteSizeLong() + stamp.ByteSizeLong());
+    if (!msg.AppendToString(&serialized) || !stamp.AppendPartialToString(&serialized)) {
+      check_message_size(msg.ByteSizeLong());
+      throw std::length_error("a message protobuf could not serialize, of " + std::to_string(msg.ByteSizeLong()) +
+                              " bytes");
+    }
+    const std::uint64_t id = msg.id() ? msg.id() : stamp.id();
+    raw = plain ? std::make_shared<RawMessage>(RawMessage::Unsealed(), &serialized, id, msg.type())
+                : std::make_shared<RawMessage>(&serialized, id, msg.type());
   }
-  MultiplexerMessage stamped(msg);
-  if (!stamped.id()) {
-    stamped.set_id(fresh_id());
+  if (batching) {
+    raw->mark_batchable(plain ? RawMessage::Batchable::YES : RawMessage::Batchable::NO, plain && msg.has_key(),
+                        plain ? msg.key() : std::string());
   }
-  if (!stamped.sender()) {
-    stamped.set_sender(instance_id);
-  }
-  return std::shared_ptr<const RawMessage>(RawMessage::FromMessage(stamped));
+  return raw;
 }
 
 // A queued frame's fate: not written yet, written to the socket, or
@@ -111,6 +138,9 @@ struct ConnectionsManagerTraits<BasicClient> : public DefaultConnectionsManagerT
   // A ThreadedClient holds back what a full connection cannot take and
   // queues it as soon as the connection says it has room.
   static constexpr bool REPORTS_ROOM = true;
+  // A batch that goes as soon as a connection has nothing left to write
+  // waits for the connection to say so (BasicClient::outgoing_queue_idle).
+  static constexpr bool REPORTS_IDLE = true;
   // What a connection that ends leaves and nothing can take, the client
   // reports itself (BasicClient::report_drop).
   static constexpr bool REPORTS_DROPS = true;
@@ -506,7 +536,10 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   }
 
   // Called by a Connection with every parsed message: drops ones without an
-  // id or seen before, then queues or hands to the sink.
+  // id or seen before, then queues or hands to the sink; a batch, split
+  // into its messages (_split_batch), each as one that came alone, and a
+  // DELIVERY_ERROR for a batch into one for each message inside
+  // (_split_delivery_error).
   void handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
                       const std::shared_ptr<MultiplexerMessage>& mxmsg);
 
@@ -733,7 +766,8 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     // room moves in under the peer type's size, ahead of what waited for
     // any connection, as no room event comes but for a queue that was full.
     outgoing_queue_has_room(conn.get());
-    _place_held();  // what waited for a connection goes out now, in order
+    _place_held();                    // what waited for a connection goes out now, in order
+    _close_idle_batches(conn.get());  // and the batches that waited for one with nothing to write, on it
     if (connection_observer_) {
       connection_observer_(_wrap(conn), true);
     }
@@ -768,6 +802,7 @@ class BasicClient : public ConnectionsManager<BasicClient>,
     SENT_NO_CONNECTION,    // DropReason::NO_CONNECTION
     SENT_CONNECTION_LOST,  // DropReason::CONNECTION_LOST
     SENT_SHUT_DOWN,        // DropReason::SHUT_DOWN
+    BATCH_NOT_SPLIT,       // a batch that arrived and does not parse, or a message in one that does not belong
     OWN_LINES = 1000,      // and up: a message callback's own kinds (ThreadedClient::drop_lines)
   };
   LogSummary& drop_lines() { return drop_lines_; }
@@ -953,11 +988,78 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // the client shut down first. False, with nothing placed or reported and
   // `done` not called, when nothing may take it: the client is shutting
   // down, or a pinned lane's connection is gone; the caller says so, by an
-  // exception or a report.
+  // exception or a report. `may_batch`: a send nobody waits for, which may
+  // go in a batch (set_batching below). `poll_first`: a synchronous
+  // client's send, which runs the loop first (poll()) when the message is
+  // to choose a connection, so that one the peer closed meanwhile is
+  // retired first, or when something is due: always, but for a message
+  // that only joins a batch with a delay, which chooses none, while that
+  // batch has room and no batch's delay is over (_batch_needs_loop).
   typedef std::function<void(unsigned int written)> SendCallback;
   bool send(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
             std::uint64_t number = 0, std::vector<BasicScheduledMessageTracker>* trackers = NULL,
-            ConnectionWrapper* used = NULL, SendCallback done = SendCallback());
+            ConnectionWrapper* used = NULL, SendCallback done = SendCallback(), bool may_batch = false,
+            bool poll_first = false);
+  // Batching (basic_client_batching.cc, docs/api_cpp.md "Batching"): the
+  // events of a type, or of one key of a type, that the program sends
+  // without waiting for them go together, several in one message, which
+  // the receiving library splits back into one message each, as if each
+  // had come alone. `may_batch` above marks those sends: queue(), the
+  // Python send_message() that does not wait, without flush or with a
+  // callback, ThreadedClient's sends without a timeout, through no lane and
+  // not to ALL, with time to wait, a timeout of 0 going alone. A message
+  // goes in a batch when it is a plain event (RawMessage::plain_event) of a
+  // type or key set here; every message inside a batch has the batch's
+  // type and key, the keys of a type each batched apart. A batch goes when
+  // it holds `max_records` messages, when one more would take its message
+  // past `max_bytes`, as it goes on the wire, or `max_delay` seconds after
+  // its first message; with `max_delay` 0, when a connection has nothing
+  // left to write, on it, so that a message sent while one has goes at
+  // once, alone, and those sent while every connection is busy go together
+  // as soon as one is not, or when their first timeout is up: such a batch
+  // waits for room, its messages' timeouts counting from their sends,
+  // where with a delay they count from when the batch goes. A batch that
+  // goes on its own takes those waiting for a connection with nothing left
+  // to write with it. A send that does not batch, a flush, a shutdown and a
+  // change of what is batched first let every batch go, in the order they
+  // began: nothing overtakes a message sent before it. A batch is one
+  // message for the rest of the library, its connection, its wait for room
+  // and its deadline, the earliest of its messages', its loss told for
+  // each message inside (report_drop); each message keeps its own tracker
+  // and `done`. On the owner thread.
+  struct Batching {
+    unsigned int max_records = DEFAULT_BATCH_MAX_RECORDS;
+    std::size_t max_bytes = DEFAULT_BATCH_MAX_BYTES;
+    float max_delay = 0;  // seconds
+  };
+  // For every key of `type`, each key's messages in batches of their own;
+  // for one key, ahead of what is set for its type. Throws
+  // std::invalid_argument for a protocol message type (99 and below), a
+  // key over MAX_KEY_SIZE, no record or more than MAX_BATCH_RECORDS in a
+  // batch, no byte or more than MAX_MESSAGE_SIZE, or a delay negative, over
+  // MAX_SECONDS, infinite or NaN (check_batching()), as the Rust crate
+  // refuses them.
+  void set_batching(std::uint32_t type, const Batching& batching);
+  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching);
+  // What set_batching() set for `type`, its keys' included, or for one key
+  // of it: no batching for them from now on.
+  void clear_batching(std::uint32_t type);
+  void clear_batching(std::uint32_t type, const std::string& key);
+  static void check_batching(std::uint32_t type, const std::string* key, const Batching& batching);
+  // Every batch goes now, in the order they began; what a flush and a send
+  // that does not batch do first.
+  void close_batches();
+  // Called by a connection that was asked to (Connection::notify_when_idle)
+  // when it has nothing left to write: the batches waiting for that go.
+  void outgoing_queue_idle(Connection* conn);
+  // How many messages wait in batches, and whether the batches' timer is
+  // armed: for tests.
+  std::size_t batched_messages() const;
+  bool batch_timer_armed() const;
+  // Whether anything is batched: a client frames its messages for it then
+  // (frame_stamped).
+  bool batching() const;
+
   // Ends every send still followed, each `done` hearing 0, at once, after
   // the drop observer heard of every drop reported before: for a client
   // whose loop will not run again, once its shutdown has let what was
@@ -1176,6 +1278,39 @@ class BasicClient : public ConnectionsManager<BasicClient>,
   // What the connections cannot take yet; see "The outbox" in outbox.cc.
   struct Outbox;
   std::unique_ptr<Outbox> outbox_;
+  // What is batched, and the batches open; see basic_client_batching.cc.
+  struct Batcher;
+  std::unique_ptr<Batcher> batcher_;
+  struct Batch;
+  typedef std::shared_ptr<Batch> BatchPtr;
+  const Batching* _batching_for(const std::shared_ptr<const RawMessage>& raw);
+  bool _batch_needs_loop(const std::shared_ptr<const RawMessage>& raw, const Batching& batching) const;
+  bool _batch(const std::shared_ptr<const RawMessage>& raw, const Batching& batching, float timeout,
+              std::vector<BasicScheduledMessageTracker>* trackers, const SendCallback& done);
+  void _close_batch(const BatchPtr& batch, Connection* idle = nullptr);
+  void _close_on_its_own(const BatchPtr& batch);
+  void _due_at(const BatchPtr& batch, std::chrono::steady_clock::time_point due);
+  void _send_batch(const BatchPtr& batch, Connection* idle);
+  bool _idle_or_none();
+  void _wait_for_idle();
+  void _close_idle_batches(Connection* idle = nullptr);
+  void _arm_batch_timer();
+  void _batch_timer_fired();
+  // A batch that arrived, split into its messages, each handed out as one
+  // that came alone; see handle_message().
+  void _split_batch(const Connection::pointer& conn, const MultiplexerMessage& envelope);
+  // A DELIVERY_ERROR for a batch, told for each message inside; see
+  // basic_client.cc.
+  bool _split_delivery_error(const Connection::pointer& conn, const MultiplexerMessage& error);
+  void _enqueue(const IncomingMessagesBuffer::value_type& incoming);
+  // send() but for batching.
+  bool _send(const std::shared_ptr<const RawMessage>& raw, bool all, const LanePtr& lane,
+             std::chrono::steady_clock::time_point deadline, std::uint64_t number,
+             std::vector<BasicScheduledMessageTracker>* trackers, ConnectionWrapper* used, const SendCallback& done);
+  // When a message given `timeout` seconds from `now` stops waiting; see
+  // outbox.cc.
+  static std::chrono::steady_clock::time_point _deadline_after(
+      float timeout, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   struct Waiting;
   typedef std::shared_ptr<Waiting> WaitingPtr;
   struct Backlog;

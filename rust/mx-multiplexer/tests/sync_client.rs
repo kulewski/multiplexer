@@ -1,9 +1,10 @@
 //! `SyncClient` against real multiplexers: connecting, a query answered by
 //! a backend, events to every backend of a type, what a query reads
 //! meanwhile, receiving, a wait ended by an acknowledgement, the addresses
-//! it refuses, a connect that ended while it idled, and one busy
-//! connection beside another. Each test starts the multiplexers it needs
-//! (tests/support).
+//! it refuses, a connect that ended while it idled, one busy connection
+//! beside another, and batches: split by a receiver of any class, and a
+//! DELIVERY_ERROR for one nobody took told for each message inside. Each
+//! test starts the multiplexers it needs (tests/support).
 
 mod support;
 
@@ -12,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mx_multiplexer::{
-    Error, Message, Routing, SyncClient, AUTO_RECONNECT_TIME, CONNECT_ATTEMPT_SECONDS, MAX_MESSAGE_SIZE,
+    Batching, DeliveryError, Error, Message, Routing, SyncClient, ThreadedClient, AUTO_RECONNECT_TIME,
+    CONNECT_ATTEMPT_SECONDS, MAX_MESSAGE_SIZE,
 };
 use support::testing_constants::{peers, types};
 use support::{beside, Multiplexer};
@@ -235,4 +237,44 @@ fn a_query_too_large_once_its_sender_is_filled_in_is_refused_at_the_call() {
         Err(Error::TooLarge { size, .. }) => assert_eq!(MAX_MESSAGE_SIZE + 1, size),
         other => panic!("refused as too large, not {other:?}"),
     }
+}
+
+#[test]
+fn a_delivery_error_for_a_batch_is_told_for_each_message() {
+    // Nobody takes TEST_EVENT: the multiplexer sends the batch back whole in
+    // its DELIVERY_ERROR, and the program hears one DELIVERY_ERROR for each
+    // message, naming it, with its workflow and the message as the original,
+    // as without batching, on a SyncClient and on a ThreadedClient.
+    let mx = Multiplexer::start();
+    let batching = Batching { max_records: 3, max_delay: Duration::from_secs(3600), ..Batching::default() };
+    let mut client = SyncClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
+    client.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let sent: Vec<u64> = (0..3)
+        .map(|number| client.send(types::TEST_EVENT, format!("{number}")).workflow(format!("flow {number}")).queue())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let told: Vec<Message> = sent.iter().map(|_| client.receive(TEN).unwrap().message).collect();
+    let threaded = ThreadedClient::builder(peers::TEST_EVENT_CLIENT).connect([mx.address()]).unwrap();
+    let errors = threaded.messages();
+    threaded.set_batching(types::TEST_EVENT, None, batching).unwrap();
+    let threaded_sent: Vec<u64> = (0..3)
+        .map(|number| threaded.send(types::TEST_EVENT, format!("{number}")).workflow(format!("flow {number}")).queue())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let threaded_told: Vec<Message> =
+        threaded_sent.iter().map(|_| errors.recv(TEN).expect("a delivery error").message).collect();
+    for (name, ids, told) in [("SyncClient", sent, told), ("ThreadedClient", threaded_sent, threaded_told)] {
+        for (number, (id, error)) in ids.iter().zip(&told).enumerate() {
+            assert_eq!(types::DELIVERY_ERROR, error.r#type, "{name}");
+            assert_eq!(*id, error.references, "{name}");
+            assert_eq!(Some(format!("flow {number}")), error.workflow, "{name}");
+            let report = DeliveryError::decode(&error.payload).expect("a DeliveryError");
+            assert_eq!(*id, report.packet_id, "{name}");
+            assert_eq!(vec![peers::TEST_EVENT_BACKEND], report.failed_type, "{name}");
+            let original = report.original_message.expect("the message");
+            assert_eq!(*id, original.id, "{name}");
+            assert_eq!(format!("{number}").as_bytes(), &original.payload[..], "{name}");
+        }
+    }
+    threaded.shutdown(None).wait().unwrap();
 }

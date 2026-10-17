@@ -187,4 +187,9 @@ impl Outbox {
     pub(crate) fn last_number(&self) -> u64 {
         self.last_number
     }
+
+    /// Whether messages wait in `conn`'s backlog, its queue being full.
+    pub(crate) fn waits_for(&self, conn: ConnId) -> bool {
+        self.backlogs.iter().any(|backlog| backlog.conn == conn && backlog.live > 0)
+    }
 }

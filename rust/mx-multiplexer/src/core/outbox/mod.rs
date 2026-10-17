@@ -34,26 +34,31 @@ use bytes::Bytes;
 use state::{Backlog, WaitKey, Waiting};
 pub(crate) use state::{FlushId, Outbox};
 
+use super::batching::BatchMark;
 use super::client::{DropReason, Wrapper};
 use super::lane::Lane;
 use super::{deadline_after, ConnId, Core, OutFrame, SendState, Tracker};
 
 /// A frame as a caller hands it over, before its first placement: the
-/// bytes, header and body, and the id and type a drop is reported by.
+/// bytes, header and body, the id and type a drop is reported by, and what
+/// batching knows of it.
 #[derive(Debug, Clone)]
 pub(crate) struct Frame {
     pub(crate) bytes: Bytes,
     pub(crate) id: u64,
     pub(crate) r#type: u32,
+    pub(crate) batch: BatchMark,
 }
 
 /// Who hears a send's end, once: 1 once a copy is written, the first for
 /// ALL, 0 once every copy was given up on or the client shut down first. A
-/// callback of the program's, or a send the threaded client follows for
-/// its caller, settled by the core.
+/// callback of the program's, a send the threaded client follows for its
+/// caller, settled by the core, or the messages of a batch, each its own
+/// `done` and tracker (`Core::end_batch`).
 pub(crate) enum SendDone {
     Callback(Box<dyn FnOnce(u32) + Send>),
     Settle(u64),
+    Batch(Vec<(Option<SendDone>, Option<Arc<Tracker>>)>),
 }
 
 /// Who hears a flush's end: whether every message it waited for was
@@ -73,10 +78,16 @@ impl Core {
         self.outbox.last_number
     }
 
-    /// `frame` as it is first placed, with its marks.
+    /// `frame` as it is first placed, with its marks; an event's, made
+    /// unsealed for a batch it did not go in (`BatchMark::Event`), sealed.
     fn out_frame(frame: Frame, pinned: bool, for_all: bool, number: u64, deadline: Option<Instant>) -> Arc<OutFrame> {
+        let (bytes, batch) = match frame.batch {
+            BatchMark::Event(_) => (crate::frame::seal(frame.bytes), None),
+            BatchMark::Batch(ids) => (frame.bytes, Some(ids)),
+            BatchMark::None => (frame.bytes, None),
+        };
         Arc::new(OutFrame {
-            bytes: frame.bytes,
+            bytes,
             id: frame.id,
             r#type: frame.r#type,
             pinned,
@@ -84,6 +95,7 @@ impl Core {
             own: false,
             number,
             deadline,
+            batch,
         })
     }
 
@@ -105,6 +117,7 @@ impl Core {
         number: u64,
         lane: Option<&Lane>,
     ) -> Option<Arc<Tracker>> {
+        self.close_batches(); // nothing overtakes a message sent before it
         let mut conn = None;
         if let Some(lane) = lane {
             if !self.outbox.handovers.is_empty() && lane.holds_connection() {
@@ -136,6 +149,7 @@ impl Core {
         if self.client.shuts_down || !self.conn_living(conn) {
             return None;
         }
+        self.close_batches();
         let number = if number != 0 { number } else { self.next_number() };
         let deadline = deadline_after(self.now, timeout);
         let frame = Self::out_frame(frame, pinned, false, number, deadline);
@@ -155,6 +169,7 @@ impl Core {
         if self.client.shuts_down {
             return 0;
         }
+        self.close_batches();
         let number = if number != 0 { number } else { self.next_number() };
         let deadline = deadline_after(self.now, timeout);
         let frame = Self::out_frame(frame, false, true, number, deadline);
@@ -184,7 +199,10 @@ impl Core {
     /// The trackers of what was placed or held go to `trackers`; `done`
     /// hears the message's end, once, posted. False, nothing placed, when
     /// nothing may take it: the client is shutting down, or a pinned lane's
-    /// connection is gone.
+    /// connection is gone. `may_batch`: a send nobody waits for, which goes
+    /// in a batch when its type or key is batched, through no lane and not
+    /// to ALL (`batching`); any other lets every batch go first, so that
+    /// nothing overtakes a message sent before it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn send(
         &mut self,
@@ -192,6 +210,35 @@ impl Core {
         all: bool,
         lane: Option<&Lane>,
         timeout: Option<Duration>,
+        number: u64,
+        trackers: Option<&mut Vec<Arc<Tracker>>>,
+        used: Option<&mut Option<Wrapper>>,
+        done: Option<SendDone>,
+        may_batch: bool,
+    ) -> bool {
+        if self.client.shuts_down {
+            return false;
+        }
+        // One with no time to wait goes alone: in a batch it would leave the
+        // batch no time either.
+        if may_batch && !all && lane.is_none() && timeout != Some(Duration::ZERO) {
+            if let Some(batching) = self.batching_for(&frame) {
+                return self.batch(frame, batching, timeout, trackers, done);
+            }
+        }
+        self.close_batches();
+        let deadline = deadline_after(self.now, timeout);
+        self.send_at(frame, all, lane, deadline, number, trackers, used, done)
+    }
+
+    /// `send()` but for batching: the message waits until `deadline`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_at(
+        &mut self,
+        frame: Frame,
+        all: bool,
+        lane: Option<&Lane>,
+        deadline: Option<Instant>,
         number: u64,
         trackers: Option<&mut Vec<Arc<Tracker>>>,
         used: Option<&mut Option<Wrapper>>,
@@ -210,7 +257,6 @@ impl Core {
         let before = trackers.as_ref().map_or(0, |trackers| trackers.len());
         let pinned = !all && lane.is_some_and(Lane::pinned);
         let number = if number != 0 { number } else { self.next_number() };
-        let deadline = deadline_after(self.now, timeout);
         let frame = Self::out_frame(frame, pinned, all, number, deadline);
         let mut refused = false;
         let placed = self.outbox.held_live == 0

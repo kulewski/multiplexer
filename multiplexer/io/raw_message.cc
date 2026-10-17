@@ -13,13 +13,22 @@ using namespace multiplexer;
 
 // Builds the scatter list Asio writes from: the 8-byte header and the body,
 // both already in place, so writing a frame copies nothing.
-void RawMessage::switch_to_writing() {
+void RawMessage::switch_to_writing() const {
   Assert(usability_ == PRE_WRITING || usability_ == READING);
   Assert(writing_buffers_.empty());
-  usability_ = READING;  // fool get_header_buffer() and get_body_buffer()
-  writing_buffers_.push_back(get_header_buffer());
-  writing_buffers_.push_back(get_body_buffer());
+  writing_buffers_.push_back(asio::buffer(header_.data(), header_.size()));
+  writing_buffers_.push_back(asio::buffer(contents_.data(), contents_.size()));
   usability_ = WRITING;
+}
+
+void RawMessage::seal() const {
+  if (usability_ != UNSEALED) {
+    return;
+  }
+  checksum_ = Checksum(contents_);
+  initialize_header();
+  usability_ = PRE_WRITING;
+  switch_to_writing();
 }
 
 bool RawMessage::unpack_header() {
@@ -76,7 +85,7 @@ std::uint32_t RawMessage::Checksum(const std::string& message) {
   return static_cast<std::uint32_t>(mx::xxh3_64(message.data(), message.size()));
 }
 
-void RawMessage::initialize_header() {
+void RawMessage::initialize_header() const {
   mx::encoders::EncodeToRange<std::string::iterator, mx::encodings::LittleEndian> encoder(header_.begin(),
                                                                                           header_.end());
   encoder(length_);

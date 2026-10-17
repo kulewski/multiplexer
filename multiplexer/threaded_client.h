@@ -146,6 +146,17 @@ class ThreadedClient : public ExceptionDefinitions {
   // for set_routing().
   void set_key_filters(const BasicClient::KeyFilters& filters,
                        BasicClient::AcknowledgedCallback acknowledged = BasicClient::AcknowledgedCallback());
+  // Batching, docs/api_cpp.md "Batching": the events of `type`, each key
+  // apart, or of one key of it, that send() sends with no timeout, through
+  // no lane and not to ALL, go several in one message, which the receiving
+  // library splits back into one message each; see
+  // BasicClient::set_batching. Checked on the calling thread, which gets
+  // std::invalid_argument; in effect on the io thread right after.
+  typedef BasicClient::Batching Batching;
+  void set_batching(std::uint32_t type, const Batching& batching = Batching());
+  void set_batching(std::uint32_t type, const std::string& key, const Batching& batching = Batching());
+  void clear_batching(std::uint32_t type);
+  void clear_batching(std::uint32_t type, const std::string& key);
   // Whether every connected multiplexer has the current routing in effect;
   // see BasicClient::routing_acknowledged. Not from the io thread.
   bool routing_acknowledged();

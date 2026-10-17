@@ -451,6 +451,26 @@ impl ServerHandle {
         }
     }
 
+    /// Batching for the events the server sends with `send()`, as
+    /// `SyncClient::set_batching()` and `ThreadedClient::set_batching()`
+    /// say: the plain server writes only inside its loop's calls, so give
+    /// it a delay. Waits as `connections_count()` does.
+    pub fn set_batching(&self, r#type: u32, key: Option<&str>, batching: crate::Batching) -> Result<()> {
+        match &self.0 {
+            Controlled::Plain(shared) => shared.client()?.set_batching(r#type, key, batching),
+            Controlled::Threaded(control) => control.client().set_batching(r#type, key, batching),
+        }
+    }
+
+    /// No batching from now on for `r#type`, or, given `key`, for that key;
+    /// see `SyncClient::clear_batching()`.
+    pub fn clear_batching(&self, r#type: u32, key: Option<&str>) -> Result<()> {
+        match &self.0 {
+            Controlled::Plain(shared) => shared.client()?.clear_batching(r#type, key),
+            Controlled::Threaded(control) => control.client().clear_batching(r#type, key),
+        }
+    }
+
     /// Which keys of each message type reach this backend by the rules,
     /// replacing those set before, a drain keeping them.
     pub fn set_key_filters(&self, filters: crate::message::KeyFilters) -> Result<()> {

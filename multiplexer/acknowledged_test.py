@@ -442,6 +442,52 @@ class AcknowledgedTest(unittest.TestCase):
         wait_until(lambda: not served.running, BOUND, "the drain over once the reply went")
         self.assertEqual(0, server.conn.dropped, "the reply written once a connection was back, not dropped")
 
+    def test_a_plain_drain_waits_for_what_waits_in_a_batch(self) -> None:
+        """The same for an event the server sends into a batch, its delay
+        an hour, its only multiplexer down: the drain lets the batch go,
+        held for the next connection, and waits for it, where it ended at
+        once, nothing being held, and the close dropped the batch."""
+        held = threading.Event()
+
+        class HeldBatch(BaseMultiplexerServer):
+            """As HeldPlain, sending once released an event into a batch."""
+
+            multiplexer_client_type = peers.PYTHON_TEST_SERVER
+
+            def __init__(self, addresses) -> None:
+                super().__init__(addresses)
+                self.conn.set_batching(EVENT, max_delay=HOUR)
+                self.holding = threading.Event()
+                self.release = threading.Event()
+
+            def handle_message(self, mxmsg) -> None:
+                if mxmsg.message == b"hold":
+                    self.start_draining()
+                    self.holding.set()
+                    self.release.wait(BOUND)
+                self.conn.send_message(b"batched", type=EVENT)
+
+            def periodic_task(self) -> None:
+                if self.conn.held_for_a_connection():
+                    held.set()
+
+        served = BackendThread(lambda: HeldBatch([self.endpoint]), poll=HOUR, drain_seconds=HOUR).start()
+        server = served.backend
+        assert server is not None
+        self.addCleanup(served.stop)
+        self.addCleanup(server.release.set)
+        asking = SyncClient([self.endpoint], peers.WEBSITE)
+        self.addCleanup(asking.shutdown)
+        asking.send_message(b"hold", type=REQUEST, flush=True)
+        self.assertTrue(server.holding.wait(BOUND), "the request reached the server, which holds it, draining")
+        multiplexer = self.cluster.mx[0]
+        multiplexer.stop()  # every connection to it ends
+        server.release.set()
+        self.assertTrue(held.wait(BOUND), "the batch let go, and held")
+        multiplexer.start()  # back on the same address
+        wait_until(lambda: not served.running, BOUND, "the drain over once the batch went")
+        self.assertEqual(0, server.conn.dropped, "the batch written once a connection was back, not dropped")
+
     def test_a_plain_drain_ends_on_its_cap_whatever_the_poll(self) -> None:
         """A drain that keeps a path open ends on its cap alone: with a poll
         of an hour the loop's wait ends at the cap, where nothing woke the

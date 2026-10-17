@@ -91,9 +91,11 @@ ThreadedClient::SendCallback settle(std::shared_ptr<std::promise<unsigned int>> 
 }
 }  // namespace
 
-// A caller's whole message framed, its empty id and sender filled (frame_stamped).
+// A caller's whole message framed, its empty id and sender filled
+// (frame_stamped), marked for batching once anything was batched: a frame
+// made before a set_batching() reached the io thread is read there.
 std::shared_ptr<const RawMessage> ThreadedClient::Core::_stamped(const MultiplexerMessage& msg) {
-  return frame_stamped(msg, instance_id_, [this] { return random64(); });
+  return frame_stamped(msg, instance_id_, [this] { return random64(); }, batching_.load(std::memory_order_relaxed));
 }
 
 void ThreadedClient::Core::send(const MultiplexerMessage& msg) { send(msg, LanePtr(), SendCallback()); }
@@ -149,8 +151,12 @@ void ThreadedClient::Core::send_serialized(std::string serialized, std::uint64_t
   if (lane && lane->closed()) {
     MXTHROW(NotConnected());  // as send() does
   }
-  _submit_send(std::shared_ptr<const RawMessage>(new RawMessage(&serialized, id, type)), false, false, timeout, done,
-               lane);
+  // Once anything is batched, a frame that may go in a batch is made
+  // unsealed, its checksum computed on the io thread only if it goes alone.
+  RawMessage* raw = !lane && batching_.load(std::memory_order_relaxed)
+                        ? new RawMessage(RawMessage::Unsealed(), &serialized, id, type)
+                        : new RawMessage(&serialized, id, type);
+  _submit_send(std::shared_ptr<const RawMessage>(raw), false, false, timeout, done, lane);
 }
 
 void ThreadedClient::Core::send_all_serialized(std::string serialized, std::uint64_t id, std::uint32_t type,
@@ -280,7 +286,10 @@ void ThreadedClient::Core::_place(const PendingSendPtr& pending) {
     };
   }
   const float timeout = left_until(pending->deadline) + (pending->wait ? ROOM_GRACE_SECONDS : 0.0f);
-  if (!basic_client_->send(pending->raw, pending->all, pending->lane, timeout, pending->number, NULL, NULL, followed)) {
+  // A send nobody waits for may go in a batch (BasicClient::set_batching).
+  const bool may_batch = !pending->wait && !pending->flushed;
+  if (!basic_client_->send(pending->raw, pending->all, pending->lane, timeout, pending->number, NULL, NULL, followed,
+                           may_batch)) {
     _refuse(pending);
     _settle(pending, 0, /*not_connected=*/true);
   }

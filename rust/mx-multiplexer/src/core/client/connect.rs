@@ -110,7 +110,8 @@ impl Core {
     /// Right after the registration: the multiplexer's welcome confirms the
     /// routing ours carried, a change made meanwhile goes out now; what
     /// waited on this connection for room moves in, then what waited for
-    /// any connection; the observer hears "up".
+    /// any connection, then the batches that waited for a connection with
+    /// nothing to write; the observer hears "up".
     pub(crate) fn after_connection_registration(&mut self, conn: ConnId) {
         let version = self.client.routing_version;
         let Some(state) = self.conns.get_mut(&conn) else { return };
@@ -124,6 +125,7 @@ impl Core {
         self.client.first_connection_over.insert(target);
         self.outgoing_queue_has_room(conn);
         self.place_held();
+        self.close_idle_batches(Some(conn)); // and the batches that waited for one with nothing to write, on it
         let wrapper = self.wrap(conn);
         self.on_connection(&wrapper, true);
     }

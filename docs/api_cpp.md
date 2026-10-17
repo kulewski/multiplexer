@@ -107,7 +107,8 @@ client.shutdown();
 ```
 
 - `set_drop_observer()` and `dropped()` are under [Messages the library
-  gives up on](#messages-the-library-gives-up-on).
+  gives up on](#messages-the-library-gives-up-on), `set_batching()` and
+  `clear_batching()` under [Batching](#batching).
 - The constructor takes the peer type and creates its own `io_service`; the
   overloads taking an `asio::io_service` share yours. The client runs
   that service only inside its calls, so the peer type must be
@@ -696,7 +697,8 @@ connections on a thread of its own, so heartbeats and reconnects happen
 without the program calling in, the peer type need not be passive, and any
 thread may use it. Target `@mx//multiplexer:threaded_client`.
 `set_drop_observer()` and `dropped()` are under [Messages the library gives
-up on](#messages-the-library-gives-up-on).
+up on](#messages-the-library-gives-up-on), `set_batching()` and
+`clear_batching()` under [Batching](#batching).
 
 ```cpp
 multiplexer::ThreadedClient client(multiplexer::peers::MY_SERVICE,
@@ -895,6 +897,64 @@ Every client sends the same way, through one mechanism in the library
 tracker, or 0, when no connection is live, nothing held. Written means
 handed to the kernel on a live connection: only a reply says a message
 arrived ([semantics](semantics.md#failure-modes)).
+
+## Batching
+
+`set_batching()` on `SyncClient` and `ThreadedClient` sends the events of
+a message type, or of one key of it, several in one message, which the
+receiving library splits back into one message each, as if each had come
+alone; [batching](batching.md) says what goes in a batch, when it goes
+and what it changes.
+
+```cpp
+multiplexer::SyncClient::Batching batching;
+batching.max_delay = 0.005;  // seconds
+client.set_batching(multiplexer::types::METRIC_SAMPLE, batching);
+client.queue(sample);  // in a batch, which goes once full or at the first call after 5 ms
+```
+
+- `set_batching(type, batching = Batching())` batches every key of
+  `type`, each apart, and its messages without a key apart again;
+  `set_batching(type, key, batching = Batching())` one key, ahead of what
+  is set for its type. `Batching`, one struct named
+  `SyncClient::Batching` and `ThreadedClient::Batching` alike, holds
+  `max_records` (`DEFAULT_BATCH_MAX_RECORDS`, 1000), `max_bytes`
+  (`DEFAULT_BATCH_MAX_BYTES`, 1 MiB, measured as `MAX_MESSAGE_SIZE` is)
+  and `max_delay`, seconds as a `float`, 0 by default: no delay, a batch
+  going as soon as a connection has nothing left to write.
+  `clear_batching(type)` ends what was set for `type`, its keys' settings
+  included, and `clear_batching(type, key)` one key's, which then batches
+  as its type says. Each lets every batch go first.
+- They throw `std::invalid_argument` for a protocol message type, a key
+  over `MAX_KEY_SIZE`, a `max_records` of 0 or over `MAX_BATCH_RECORDS`,
+  a `max_bytes` of 0 or over
+  `MAX_MESSAGE_SIZE`, or a delay negative, over `MAX_SECONDS`, infinite or NaN;
+  `ThreadedClient`'s on the calling thread, the change made on the io
+  thread right after, ahead of every send made after the call.
+- What batches is a plain event, no `to`, no `references`, no delivery
+  report asked for, no `override_rrules`, sent through no lane by
+  `SyncClient::queue()` or by `ThreadedClient`'s `send(msg)`,
+  `send(msg, LanePtr(), done)` and `send_serialized()`. What goes by
+  `queue_all()` or `send_all()`, a flushing send, `schedule_*()`, a lane
+  or a connection, one with a timeout of 0, and a query's request go
+  alone, after every batch.
+- `SyncClient` runs its loop only inside its calls: with no delay its
+  messages gather only while the socket is full, so give it one. A batch
+  then goes when it fills or at the first call after its delay, and
+  `flush_all()`, `flush(tracker)` and `shutdown()` let it go at once. A
+  `queue()` that only joins a batch with a delay runs no loop; the one
+  that fills it, or comes after a delay is over, does.
+  `ThreadedClient` keeps the delay on its io thread; with no delay its
+  messages gather only while the program sends faster than the io thread
+  writes them or the multiplexer is behind, so a delay of a few
+  milliseconds batches for sure.
+- A server class batches through its client: on `BaseMultiplexerServer`
+  the protected `conn`, or the `SyncClient` given to its constructor,
+  whose `send_message()` of a message that is no reply queues; on
+  `BaseThreadedMultiplexerServer`, `client()`.
+- Each message keeps its tracker and its `done`, which hear its batch's
+  end; a batch given up on is counted in `dropped()` and told to the drop
+  observer once for each message in it.
 
 ## Messages the library gives up on
 

@@ -23,6 +23,8 @@ import google.protobuf.message
 import multiplexer._native as _mxclient
 from multiplexer._native import (
     CLOSE_FLUSH_SECONDS,
+    DEFAULT_BATCH_MAX_BYTES,
+    DEFAULT_BATCH_MAX_RECORDS,
     DEFAULT_TIMEOUT,
     MAX_KEY_SIZE,
     MAX_SECONDS,
@@ -41,8 +43,8 @@ from multiplexer.mxlog import HIGHVERBOSITY, MEDIUMVERBOSITY, WARNING, log
 import multiplexer.protocolbuffers  # the read-only aliases of the sender's former names
 
 # What this module is imported for: the client, its exceptions and handles,
-# the message helpers, the default timeout, and how long an end call writes
-# what was sent before it.
+# the message helpers, the default timeout, how long an end call writes
+# what was sent before it, and how big a batch goes by default.
 __all__ = [
     "Client",
     "ConnectionWrapper",
@@ -55,6 +57,8 @@ __all__ = [
     "UsedAfterFork",
     "DEFAULT_TIMEOUT",
     "CLOSE_FLUSH_SECONDS",
+    "DEFAULT_BATCH_MAX_RECORDS",
+    "DEFAULT_BATCH_MAX_BYTES",
     "TimeoutTicker",
     "initialize_message",
     "make_message",
@@ -455,6 +459,42 @@ class Client(_mxclient.Client):
         a pattern over MAX_KEY_PATTERN_SIZE bytes; a multiplexer refuses a
         pattern that does not compile, and logs why. See docs/keys.md."""
         super(Client, self).set_key_filters(key_filters_argument(filters), on_acknowledged)
+
+    # The settings keyword-only, which the native method takes by position.
+    def set_batching(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        type: int,
+        key: str | None = None,
+        *,
+        max_records: int = DEFAULT_BATCH_MAX_RECORDS,
+        max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
+        max_delay: float = 0.0,
+    ) -> None:
+        """Send the events of message `type`, each key apart, or, given
+        `key`, of that key, ahead of what is set for its type, several in
+        one message, which the receiving library splits back into one
+        message each: those send_message() sends without waiting for them,
+        without flush or with a callback, through no lane and not to ALL. A batch goes once it holds `max_records`
+        messages, once one more would take it past `max_bytes` on the wire,
+        or `max_delay` seconds after its first message; with no delay, once
+        a connection has nothing left to write. This client writes only
+        inside its calls, so give it a delay: without one, messages gather
+        only while the socket is full. A flush, a send that does not batch,
+        another set_batching() or clear_batching() and shutdown() first let
+        every batch go. Raises ValueError for a protocol message type, a key
+        over MAX_KEY_SIZE bytes, a count below 1, max_records over
+        MAX_BATCH_RECORDS, max_bytes over MAX_MESSAGE_SIZE, or a delay
+        negative, over MAX_SECONDS or not finite. See docs/batching.md."""
+        super(Client, self).set_batching(type, key, max_records, max_bytes, max_delay)
+
+    # Narrower than the native method, whose type is anything int() takes.
+    def clear_batching(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, type: int, key: str | None = None
+    ) -> None:
+        """No batching from now on for message `type`, its keys' settings
+        included, or, given `key`, for that key, which then batches as its
+        type says; every batch goes first."""
+        super(Client, self).clear_batching(type, key)
 
     def routing_acknowledged(self) -> bool:
         """Whether every connected multiplexer has the routing given to

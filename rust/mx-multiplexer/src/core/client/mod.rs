@@ -23,15 +23,16 @@ use prost::Message as _;
 pub(crate) use connect::target_of;
 pub(crate) use routing::{check_key_filters, Acknowledged, KeyFilters};
 
+use super::batching::plain_event;
 use super::connection::heartbit_frame;
 use super::timers::TimerKey;
 use super::{Action, ConnId, Core, Due, LivingFlag, OutFrame, Target};
 use crate::constants::types;
-use crate::defaults::DEFAULT_INCOMING_QUEUE_MAX_SIZE;
+use crate::defaults::{DEFAULT_INCOMING_QUEUE_MAX_SIZE, MAX_BATCH_RECORDS};
 use crate::fork::DescriptorTable;
 use crate::frame;
 use crate::log_summary::{Kind, LogSummary};
-use crate::proto::multiplexer::{KeyFilter, MultiplexerMessage, Routing, WelcomeMessage};
+use crate::proto::multiplexer::{DeliveryError, KeyFilter, MessageBatch, MultiplexerMessage, Routing, WelcomeMessage};
 use crate::spanset::SpanSet;
 
 /// Why a client gave up on a message the program sent, as the drop
@@ -63,6 +64,9 @@ pub(crate) enum DropLine {
     SentNoConnection = 4,
     SentConnectionLost = 5,
     SentShutDown = 6,
+    /// A batch that arrived and does not decode, or a message in one that
+    /// does not belong.
+    BatchNotSplit = 7,
 }
 
 /// Whether what arrives is queued for a receive (`SyncClient` and the
@@ -252,6 +256,7 @@ impl Core {
             own: true,
             number: 0,
             deadline: None,
+            batch: None,
         });
         self.client.welcome = Some(Arc::clone(&frame));
         frame
@@ -288,7 +293,9 @@ impl Core {
 
     /// Every message the connections read: a PEER_STATUS answers the
     /// client's PEER_CONTROL; one without an id or seen before is dropped;
-    /// the rest goes out as the mode says.
+    /// a batch is split into its messages (`split_batch`), and a
+    /// DELIVERY_ERROR for a batch into one for each message inside
+    /// (`split_delivery_error`); the rest goes out as the mode says.
     pub(crate) fn handle_message(&mut self, conn: ConnId, message: MultiplexerMessage) {
         self.client.frames_handled += 1;
         if message.r#type == types::PEER_STATUS {
@@ -297,6 +304,13 @@ impl Core {
         }
         let id = message.id.unwrap_or(0);
         if id == 0 || !self.client.last_seen.insert(id) {
+            return;
+        }
+        if message.batch.is_some() {
+            self.split_batch(conn, message);
+            return;
+        }
+        if message.r#type == types::DELIVERY_ERROR && self.split_delivery_error(conn, &message) {
             return;
         }
         let incoming = Incoming { message, connection: self.wrap(conn) };
@@ -330,6 +344,180 @@ impl Core {
                 self.client.enqueued += 1;
             }
         }
+    }
+
+    /// Only the plain events of the batch's own type and key belong in it,
+    /// which a client's batching packs (`batching`): anything else inside,
+    /// or a batch of a protocol type, that does not decode or that holds
+    /// more than MAX_BATCH_RECORDS messages, is dropped and said; a message
+    /// seen before is dropped as one that came alone is. A full incoming queue drops the batch whole, as it drops a
+    /// message, and takes its copy through another multiplexer once there
+    /// is room; one with room takes every message of it, past its limit by
+    /// one batch at most, and a poll counts each. Each message then goes
+    /// out as one that came alone (C++ BasicClient::_split_batch).
+    fn split_batch(&mut self, conn: ConnId, mut envelope: MultiplexerMessage) {
+        let (id, r#type) = (envelope.id.unwrap_or(0), envelope.r#type);
+        let decoded = envelope.batch.take().map(MessageBatch::decode);
+        let batch = match decoded {
+            Some(Ok(batch))
+                if r#type > types::MAX_MULTIPLEXER_META_PACKET && batch.message.len() <= MAX_BATCH_RECORDS =>
+            {
+                batch
+            }
+            _ => {
+                let kind = Kind { reason: DropLine::BatchNotSplit as u32, level: log::Level::Warn, r#type, peer: 0 };
+                if self.drop_line_first(kind, || {
+                    "a batch that arrived dropped: of a protocol type, not decoding, or of more than \
+                     MAX_BATCH_RECORDS messages"
+                        .to_string()
+                }) {
+                    log::warn!(
+                        "a batch that arrived dropped: of a protocol type, not decoding, or of more than \
+                         MAX_BATCH_RECORDS messages; id {id}, type {type}"
+                    );
+                }
+                return;
+            }
+        };
+        // A leaving server refuses each message, as one that came alone,
+        // whatever its queue holds.
+        if self.client.mode == IncomingMode::Queue
+            && !self.client.refusing
+            && self.client.incoming.len() >= self.client.incoming_max
+        {
+            self.client.last_seen.forget_last();
+            self.client.incoming_dropped.fetch_add(batch.message.len() as u64, Ordering::Relaxed);
+            let kind = Kind { reason: DropLine::IncomingQueueFull as u32, level: log::Level::Warn, r#type: 0, peer: 0 };
+            if self.drop_line_first(kind, || "incoming_queue_full, dropping".to_string()) {
+                log::warn!("incoming_queue_full, dropping a batch of {}, #{id}", batch.message.len());
+            }
+            return;
+        }
+        if batch.message.len() > 1 {
+            self.client.frames_handled += batch.message.len() as u64 - 1; // a poll reads a queue's worth at most
+        }
+        let connection = self.wrap(conn);
+        for body in batch.message {
+            let message = match MultiplexerMessage::decode(body) {
+                Ok(message)
+                    if message.id.unwrap_or(0) != 0
+                        && plain_event(&message)
+                        && message.r#type == r#type
+                        && message.key == envelope.key =>
+                {
+                    message
+                }
+                _ => {
+                    let kind =
+                        Kind { reason: DropLine::BatchNotSplit as u32, level: log::Level::Warn, r#type, peer: 1 };
+                    if self.drop_line_first(kind, || {
+                        "a message in a batch that arrived dropped: no plain event of the batch's type and key"
+                            .to_string()
+                    }) {
+                        log::warn!(
+                            "a message in a batch that arrived dropped: no plain event of the batch's type and key; \
+                             batch id {id}, type {type}"
+                        );
+                    }
+                    continue;
+                }
+            };
+            if !self.client.last_seen.insert(message.id.unwrap_or(0)) {
+                continue; // seen before, as a message that came alone would be
+            }
+            let incoming = Incoming { message, connection: connection.clone() };
+            match self.client.mode {
+                IncomingMode::Dispatch => self.dispatch_incoming(incoming),
+                IncomingMode::Queue => {
+                    let Some(incoming) = self.query_takes(incoming) else { continue };
+                    if self.client.refusing {
+                        self.refuse(incoming);
+                        continue;
+                    }
+                    self.client.incoming.push_back(incoming);
+                    self.client.enqueued += 1;
+                }
+            }
+        }
+    }
+
+    /// A DELIVERY_ERROR for a batch this client sent, which the multiplexer
+    /// sends back whole for this: one DELIVERY_ERROR for each message
+    /// inside, as the multiplexer would have sent it for that message
+    /// alone, the message's id as the packet's and the reference, its
+    /// workflow, the message itself as the original, each handed out as one
+    /// that came alone; a full incoming queue drops them all, as it drops a
+    /// batch. False, and nothing done, for any other, which goes on as it
+    /// is: one whose original is no batch, or was left out for its size, or
+    /// never sent, by a multiplexer that does not send a batch back. Only a
+    /// failure pays the read (C++ BasicClient::_split_delivery_error).
+    fn split_delivery_error(&mut self, conn: ConnId, error: &MultiplexerMessage) -> bool {
+        let Some(payload) = error.message.clone() else { return false };
+        let Ok(mut report) = DeliveryError::decode(payload) else { return false };
+        let Some(batch) = report.original_message.as_ref().and_then(|original| original.batch.clone()) else {
+            return false;
+        };
+        let Ok(batch) = MessageBatch::decode(batch) else { return false };
+        if batch.message.len() > MAX_BATCH_RECORDS {
+            return false;
+        }
+        if self.client.mode == IncomingMode::Queue
+            && !self.client.refusing
+            && self.client.incoming.len() >= self.client.incoming_max
+        {
+            self.client.last_seen.forget_last();
+            self.client.incoming_dropped.fetch_add(batch.message.len() as u64, Ordering::Relaxed);
+            let kind = Kind { reason: DropLine::IncomingQueueFull as u32, level: log::Level::Warn, r#type: 0, peer: 0 };
+            if self.drop_line_first(kind, || "incoming_queue_full, dropping".to_string()) {
+                log::warn!(
+                    "incoming_queue_full, dropping the delivery errors of a batch of {}, #{}",
+                    batch.message.len(),
+                    error.id.unwrap_or(0)
+                );
+            }
+            return true;
+        }
+        if batch.message.len() > 1 {
+            self.client.frames_handled += batch.message.len() as u64 - 1; // a poll reads a queue's worth at most
+        }
+        report.original_message = None;
+        let connection = self.wrap(conn);
+        for body in batch.message {
+            let Ok(message) = MultiplexerMessage::decode(body) else { continue };
+            let id = message.id.unwrap_or(0);
+            if id == 0 {
+                continue; // nothing to tell it by
+            }
+            let workflow = message.workflow.clone();
+            let mut each = report.clone();
+            each.packet_id = id;
+            each.original_message = Some(message);
+            let told = MultiplexerMessage {
+                id: Some(self.random64()),
+                sender: error.sender,
+                to: error.to,
+                report_delivery_error: Some(false),
+                r#type: types::DELIVERY_ERROR,
+                references: Some(id),
+                workflow,
+                message: Some(each.encode_to_vec().into()),
+                ..Default::default()
+            };
+            let incoming = Incoming { message: told, connection: connection.clone() };
+            match self.client.mode {
+                IncomingMode::Dispatch => self.dispatch_incoming(incoming),
+                IncomingMode::Queue => {
+                    let Some(incoming) = self.query_takes(incoming) else { continue };
+                    if self.client.refusing {
+                        self.refuse(incoming);
+                        continue;
+                    }
+                    self.client.incoming.push_back(incoming);
+                    self.client.enqueued += 1;
+                }
+            }
+        }
+        true
     }
 
     /// Leaving, for the server classes: from now on a request that arrives
@@ -384,9 +572,14 @@ impl Core {
             ..Default::default()
         };
         let Ok(bytes) = frame::encode(&refusal) else { return };
-        let frame = super::outbox::Frame { bytes, id: refusal_id, r#type: types::DELIVERY_ERROR };
+        let frame = super::outbox::Frame {
+            bytes,
+            id: refusal_id,
+            r#type: types::DELIVERY_ERROR,
+            batch: super::batching::BatchMark::None,
+        };
         let lane = super::lane::Lane::seeded(&incoming.connection, false);
-        self.send(frame, false, Some(&lane), Some(crate::defaults::DEFAULT_TIMEOUT), 0, None, None, None);
+        self.send(frame, false, Some(&lane), Some(crate::defaults::DEFAULT_TIMEOUT), 0, None, None, None, false);
     }
 
     /// The oldest message queued for a receive, taken out.
@@ -437,7 +630,10 @@ impl Core {
     /// observer told its id and why in the pass that runs the sends'
     /// callbacks, ahead of them.
     pub(crate) fn report_drop(&mut self, frame: &OutFrame, reason: DropReason) {
-        self.client.dropped.fetch_add(1, Ordering::Relaxed);
+        // A batch's frame is told and counted for each message inside, its
+        // one line naming the batch.
+        let batch = frame.batch.as_deref();
+        self.client.dropped.fetch_add(batch.map_or(1, |ids| ids.len() as u64), Ordering::Relaxed);
         let (line, text) = match reason {
             DropReason::NoRoom => {
                 (DropLine::SentNoRoom, "message dropped: it waited for room on its connection past its timeout")
@@ -452,13 +648,17 @@ impl Core {
         };
         let kind = Kind { reason: line as u32, level: log::Level::Warn, r#type: frame.r#type, peer: 0 };
         if self.drop_line_first(kind, || text.to_string()) {
-            log::warn!("{text}; id {}, type {}", frame.id, frame.r#type);
+            let batch_of = batch.map(|ids| format!("a batch of {}, ", ids.len())).unwrap_or_default();
+            log::warn!("{text}; {batch_of}id {}, type {}", frame.id, frame.r#type);
         }
         self.flushes_lost(frame.number);
         // Told in the pass after the handler this is in, which may be in
         // the middle of the outbox's bookkeeping (process_callbacks).
         if self.client.drop_observer.is_some() {
-            self.outbox.drop_events.push((frame.id, reason));
+            match batch {
+                Some(ids) => self.outbox.drop_events.extend(ids.iter().map(|id| (*id, reason))),
+                None => self.outbox.drop_events.push((frame.id, reason)),
+            }
             self.post_callbacks();
         }
     }
@@ -480,6 +680,7 @@ impl Core {
         if self.client.shuts_down {
             return;
         }
+        self.stop_batching(); // what waits in a batch goes first, as anything sent before
         self.client.shuts_down = true;
         self.actions.push(Action::CancelResolves);
         log::debug!(

@@ -193,6 +193,12 @@ int DumpRecording::run() {
         if (routed.error_reported()) {
           std::cout << " error_reported";
         }
+        if (routed.has_key()) {
+          std::cout << " key=" << routed.key();
+        }
+        if (routed.batch()) {
+          std::cout << " batch";  // the payload is the batch's: its messages, each whole
+        }
         std::cout << " payload_bytes=" << routed.payload().size() << (routed.truncated() ? " truncated" : "") << "\n";
       }
     }

@@ -186,6 +186,10 @@ impl Core {
         }
         *outgoing = left;
         self.replace_displaced(conn);
+        // A batch that waited for a busy connection to finish waits no more
+        // once none is busy or none is live: after what the dead one handed
+        // over, which was sent before it.
+        self.close_idle_batches_if_idle();
     }
 
     /// A message somebody follows went to another connection from a dead

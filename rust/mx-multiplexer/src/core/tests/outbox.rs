@@ -122,7 +122,7 @@ fn a_drop_is_told_in_the_pass_after_its_handler_ahead_of_the_sends_callback() {
     let hearing = Arc::clone(&heard);
     let done = SendDone::Callback(Box::new(move |written| hearing.lock().unwrap().push(written)));
     let frame = h.event(5, 300, b"event");
-    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, Some(done)));
+    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, Some(done), false));
     assert_eq!(1, h.core.client.dropped.load(std::sync::atomic::Ordering::Relaxed), "counted at once");
     assert!(drops.lock().unwrap().is_empty(), "not told inside the send");
     assert!(h.core.run_one_posted());
@@ -135,7 +135,7 @@ fn a_flush_begun_after_a_drop_ends_after_it_was_told() {
     let mut h = Harness::new(200, IncomingMode::Queue);
     let drops = h.observe_drops();
     let frame = h.event(5, 300, b"event");
-    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, None));
+    assert!(h.core.send(frame, false, None, Some(Duration::ZERO), 0, None, None, None, false));
     h.core.begin_flush(None);
     assert_eq!(vec![(5, DropReason::NoConnection)], *drops.lock().unwrap(), "told as the flush begins");
 }
@@ -292,7 +292,7 @@ fn a_flush_waits_for_what_was_sent_before_it_and_after_the_sends_callbacks() {
         let seen = Arc::clone(&ends);
         let done = SendDone::Callback(Box::new(move |written| seen.lock().unwrap().push(format!("{id} {written}"))));
         let frame = h.event(id, 300, b"event");
-        assert!(h.core.send(frame, false, None, TEN, 0, None, None, Some(done)));
+        assert!(h.core.send(frame, false, None, TEN, 0, None, None, Some(done), false));
         h.settle();
     }
     flush_into(&mut h, &ends);
@@ -350,7 +350,7 @@ fn a_send_callback_hears_zero_once_its_message_is_given_up_on() {
     let seen = Arc::clone(&ends);
     let done = SendDone::Callback(Box::new(move |written| seen.lock().unwrap().push(written)));
     let frame = h.event(5, 300, b"event");
-    assert!(h.core.send(frame, true, None, Some(Duration::from_secs(1)), 0, None, None, Some(done)));
+    assert!(h.core.send(frame, true, None, Some(Duration::from_secs(1)), 0, None, None, Some(done), false));
     h.settle();
     h.advance(Duration::from_secs(5));
     assert_eq!(vec![0], *ends.lock().unwrap());

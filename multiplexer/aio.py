@@ -55,6 +55,8 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 from multiplexer.Multiplexer_pb2 import MultiplexerMessage, Routing
 from multiplexer.mxclient import (
     CLOSE_FLUSH_SECONDS,
+    DEFAULT_BATCH_MAX_BYTES,
+    DEFAULT_BATCH_MAX_RECORDS,
     ConnectionWrapper,
     DropReason,
     Lane,
@@ -265,6 +267,26 @@ class AsyncClient:
         see ThreadedClient.set_key_filters. Does not block.
         `on_acknowledged` as for set_routing()."""
         self._threaded.set_key_filters(filters, self._on_loop(on_acknowledged))
+
+    def set_batching(
+        self,
+        type: int,
+        key: str | None = None,
+        *,
+        max_records: int = DEFAULT_BATCH_MAX_RECORDS,
+        max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
+        max_delay: float = 0.0,
+    ) -> None:
+        """Send the events of message `type`, or of one `key` of it,
+        several in one message, which the receiving library splits back
+        into one message each; see ThreadedClient.set_batching. Does not
+        block."""
+        self._threaded.set_batching(type, key, max_records=max_records, max_bytes=max_bytes, max_delay=max_delay)
+
+    def clear_batching(self, type: int, key: str | None = None) -> None:
+        """No batching from now on for message `type`, or for one `key` of
+        it; see ThreadedClient.clear_batching. Does not block."""
+        self._threaded.clear_batching(type, key)
 
     def _on_loop(self, callback: Callable[[], None] | None) -> Callable[[], None] | None:
         """`callback` as the io thread calls it, run on the loop instead,

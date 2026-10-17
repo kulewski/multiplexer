@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use prost::Message as _;
 
+use crate::core::batching::{plain_event, BatchMark};
 use crate::proto::multiplexer as proto;
 
 /// The key filters of a peer: per message type, the patterns, RE2 regular
@@ -149,11 +150,15 @@ impl DeliveryError {
 
 /// `message` as a frame to send: its empty id given by `next_id`, its
 /// empty sender `sender`, its size and key checked before anything is
-/// queued.
+/// queued; for a client that batches, `batching`, marked a plain event,
+/// with its key, when it may go in a batch, the key moved out of the
+/// encoded message rather than copied; a client that does not looks at
+/// nothing for it.
 pub(crate) fn frame_of(
     mut message: Message,
     next_id: impl FnOnce() -> u64,
     sender: u64,
+    batching: bool,
 ) -> crate::error::Result<crate::core::outbox::Frame> {
     if message.id == 0 {
         message.id = next_id();
@@ -162,8 +167,15 @@ pub(crate) fn frame_of(
         message.sender = sender;
     }
     let (id, r#type) = (message.id, message.r#type);
-    let bytes = crate::frame::encode(&proto::MultiplexerMessage::from(message))?;
-    Ok(crate::core::outbox::Frame { bytes, id, r#type })
+    let mut encoded = proto::MultiplexerMessage::from(message);
+    // An event that may go in a batch is framed unsealed, its checksum
+    // written only if it goes alone (`frame::seal`): what its mark says.
+    if batching && plain_event(&encoded) {
+        let bytes = crate::frame::encode_unsealed(&encoded)?;
+        return Ok(crate::core::outbox::Frame { bytes, id, r#type, batch: BatchMark::Event(encoded.key.take()) });
+    }
+    let bytes = crate::frame::encode(&encoded)?;
+    Ok(crate::core::outbox::Frame { bytes, id, r#type, batch: BatchMark::None })
 }
 
 /// A u64 field the libraries read as absent when 0.
@@ -213,6 +225,7 @@ impl From<Message> for proto::MultiplexerMessage {
                 .collect(),
             logging_method: message.logging_method,
             key: message.key,
+            batch: None,
         }
     }
 }
@@ -300,6 +313,32 @@ mod tests {
     use crate::proto::multiplexer as proto;
     use bytes::Bytes;
 
+    #[test]
+    fn a_frame_is_marked_for_batching_only_by_a_client_that_batches() {
+        use crate::core::batching::BatchMark;
+        let keyed = Message { r#type: 300, key: Some("k".to_string()), ..Default::default() };
+        let marked = super::frame_of(keyed.clone(), || 1, 2, true).unwrap();
+        assert_eq!(BatchMark::Event(Some("k".to_string())), marked.batch);
+        let unmarked = super::frame_of(keyed.clone(), || 1, 2, false).unwrap();
+        assert_eq!(BatchMark::None, unmarked.batch, "no look for a client that does not batch");
+        let addressed = Message { to: Some(9), ..keyed };
+        assert_eq!(BatchMark::None, super::frame_of(addressed, || 1, 2, true).unwrap().batch, "no plain event");
+    }
+
+    #[test]
+    fn a_frame_marked_for_batching_is_made_unsealed_and_sealed_alone() {
+        use crate::frame::{seal, unpack_header, verify, HEADER_LENGTH};
+        let event = Message { r#type: 300, payload: Bytes::from_static(b"event"), ..Default::default() };
+        let header = |bytes: &Bytes| unpack_header(bytes[..HEADER_LENGTH].try_into().unwrap()).expect("a length");
+        let marked = super::frame_of(event.clone(), || 1, 2, true).unwrap();
+        assert_eq!(0, header(&marked.bytes).checksum, "no checksum: in a batch only the body is read");
+        let sealed = seal(marked.bytes);
+        assert!(verify(header(&sealed), &sealed[HEADER_LENGTH..]), "sealed, its checksum the body's");
+        let unmarked = super::frame_of(event, || 1, 2, false).unwrap();
+        assert!(verify(header(&unmarked.bytes), &unmarked.bytes[HEADER_LENGTH..]), "sealed as it is made");
+        assert_eq!(sealed, unmarked.bytes, "the same frame either way");
+    }
+
     /// A generated message with every field set.
     fn every_field() -> proto::MultiplexerMessage {
         proto::MultiplexerMessage {
@@ -324,6 +363,7 @@ mod tests {
             }],
             logging_method: Some(2),
             key: Some("key".into()),
+            batch: None, // a batch never becomes a Message: it is split into its messages first
         }
     }
 
@@ -334,11 +374,12 @@ mod tests {
         assert_eq!(Some(Whom::All), converted.override_rrules[0].whom);
         assert_eq!(generated, proto::MultiplexerMessage::from(converted));
         // The debug form names every field of the generated type: the same
-        // count of them here.
+        // count of them here, but for `batch`, which no Message has, a
+        // batch being split into its messages before any becomes one.
         let fields = |text: String| text.matches(": ").count();
         assert_eq!(
             fields(format!("{:?}", proto::MultiplexerMessage::default())),
-            fields(format!("{:?}", Message::default())),
+            fields(format!("{:?}", Message::default())) + 1,
         );
         assert_eq!(
             fields(format!("{:?}", proto::multiplexer_message_description::RoutingRule::default())),

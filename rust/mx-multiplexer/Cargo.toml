@@ -27,7 +27,7 @@ categories = ["network-programming"]
 exclude = ["BUILD", "generated_test.py", "testdata/golden.py"]
 
 [dependencies]
-bytes = "1"
+bytes = "1.7"
 libc = "0.2"
 log = "0.4"
 mio = { version = "1", features = ["os-poll", "net"] }

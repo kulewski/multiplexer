@@ -184,6 +184,12 @@ void BasicClient::handle_orphaned_outgoing_messages(Connection* dead, Connection
     report_drop(message.second, shuts_down_ ? DropReason::SHUT_DOWN : DropReason::CONNECTION_LOST);
   }
   _replace_displaced(conn);
+  // A batch that waited for a busy connection to finish waits no more once
+  // none is busy or none is live: after what the dead one handed over,
+  // which was sent before it.
+  if (_idle_or_none()) {
+    _close_idle_batches();
+  }
 }
 
 // A message somebody follows went to `conn` from a dead connection, or

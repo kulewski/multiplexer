@@ -127,6 +127,10 @@ message RoutedMessage {
   optional bytes payload = 12;
   optional bool truncated = 13;         // payload cut at the --record-payload-bytes limit
   optional string key = 14;             // the envelope's key (Multiplexer.proto's KeyFilter), when it has one
+  // The payload is a batch's (Multiplexer.proto's MultiplexerMessage.batch):
+  // a serialized MessageBatch, several messages in one, which the envelope
+  // above routed together.
+  optional bool batch = 15;
 }
 
 // The multiplexer put another rules file in use (docs/operations.md,

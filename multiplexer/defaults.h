@@ -43,6 +43,17 @@ static const unsigned int MAX_MESSAGE_SIZE = 128 * 1024 * 1024;
 // (KeyPatterns in multiplexer/key_filters.h says what they cost).
 static const unsigned int MAX_KEY_SIZE = 256;
 static const unsigned int MAX_KEY_PATTERN_SIZE = 1024;
+// A client's batching (BasicClient::set_batching), what a batch holds at
+// most unless told otherwise before it goes: messages, and bytes of the
+// batch's own message, its envelope and every message inside included, as
+// it goes on the wire.
+static const unsigned int DEFAULT_BATCH_MAX_RECORDS = 1000;
+static const unsigned int DEFAULT_BATCH_MAX_BYTES = 1024 * 1024;
+// The most messages one batch holds, a contract like MAX_MESSAGE_SIZE: a
+// client refuses a max_records above it, and a receiving library drops a
+// batch that holds more, whole, so that what one frame becomes in a
+// receiver stays a queue's worth (DEFAULT_INCOMING_QUEUE_MAX_SIZE) at most.
+static const unsigned int MAX_BATCH_RECORDS = 1024;
 
 // Seconds of silence before a side sends a HEARTBIT.
 static const float HEARTBIT_INTERVAL = 3.0;

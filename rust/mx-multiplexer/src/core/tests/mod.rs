@@ -2,6 +2,7 @@
 //! says what the sockets and the multiplexers do and when, and checks what
 //! the client did, by the C++ tests and docs each case names.
 
+mod batching;
 mod connection;
 mod outbox;
 mod query;

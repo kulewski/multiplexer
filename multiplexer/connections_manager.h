@@ -43,6 +43,10 @@ struct DefaultConnectionsManagerTraits {
   // manager that holds messages back for a full connection. The
   // multiplexer drops them instead, so it is not told.
   static constexpr bool REPORTS_ROOM = false;
+  // Whether a connection asked to (Connection::notify_when_idle) tells its
+  // manager, through outgoing_queue_idle(), that it has nothing left to
+  // write: for a client whose batches wait for that.
+  static constexpr bool REPORTS_IDLE = false;
   // Whether the manager counts and logs the messages a connection that
   // ends leaves to it and it cannot place (the client, which reports every
   // drop in one place), so that the connection does not log them as well.

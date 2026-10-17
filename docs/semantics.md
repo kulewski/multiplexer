@@ -36,6 +36,11 @@ that changes.
   connection. It breaks only where a message went out through fewer
   connections than the one after it, one being down at that moment, or
   where a late copy came after the library forgot the first.
+  A client's batching keeps the order of what it batches within a message
+  type and key, and against what it sends unbatched, but not between two
+  types or keys: a batch that goes on its own, full, at its delay or when
+  a connection is free, may go ahead of an older one of another type or
+  key ([batching](batching.md#order)).
 - **A key narrows.** A keyed message reaches, of the peers its rule names,
   those with no key filter for its type and those whose filter takes the
   key, and among them a last resort is a last resort for that key: a
@@ -79,7 +84,11 @@ that changes.
   so one the io thread reaches with its time up is placed only where a
   connection has room for it then, and dropped and reported otherwise;
   a query's first stage's time starts when the io thread takes the query
-  up.
+  up. A client's queue to a multiplexer and a multiplexer's queue to a
+  peer count a batch, many events in one message
+  ([batching](batching.md#on-the-way-a-batch-is-one-message)), as one
+  message; the receiving library holds its events one by one, taking a
+  batch whole, past its 1024 by one batch at most, or dropping it whole.
 - **Requests always resolve.** `query()` returns the reply, or raises: a
   delivery error, a lost connection or a typed query's first timeout
   means the search starts, the search finding nobody means
@@ -129,7 +138,10 @@ that changes.
   sent through every connection can bring one `DELIVERY_ERROR` per
   multiplexer, each with an id of its own and `references` set to the
   event's id, and one of them says only that its multiplexer had nobody.
-  A multiplexer that is down says nothing.
+  A multiplexer that is down says nothing. A batch is one message to the
+  multiplexer, which sends it back whole in its `DELIVERY_ERROR`, and the
+  library tells each event of its own, as for one sent alone
+  ([batching](batching.md#what-changes-for-a-program)).
 
 ## Failure modes
 
@@ -279,7 +291,8 @@ that changes.
   connection that multiplexer closed is retired first and the message goes
   through another, or waits for the reconnect, rather than into the closed
   socket, which would succeed and lose it. The loop reads a queue's worth
-  of frames there at most (the incoming queue's size, 1024 by default), so
+  of frames there at most (the incoming queue's size, 1024 by default, a
+  batch counting as the messages in it), so
   that a multiplexer sending faster than the client reads cannot hold the
   call: a closure behind more unread frames than that is noticed by a later
   call, and a message sent meanwhile may go into the closed socket.
@@ -330,6 +343,9 @@ that changes.
   ([Python](api_python.md#messages-the-library-gives-up-on),
   [C++](api_cpp.md#messages-the-library-gives-up-on),
   [Rust](api_rust.md#messages-the-library-gives-up-on)). Each is logged too.
+  A batch given up on is counted and told once for each message in it,
+  and each message's callback hears it
+  ([batching](batching.md#on-the-way-a-batch-is-one-message)).
 - **A written message is lost.** Written means handed to the kernel on a
   live connection, which is what a flushing send waits for and all a
   library can know: a multiplexer that dies before reading what its socket
@@ -383,9 +399,10 @@ In [multiplexer/defaults.h](../multiplexer/defaults.h), but for the three
 rows that say where they are set, compiled into the multiplexer and the C++
 library, exported to Python as attributes of `multiplexer._native`,
 `DEFAULT_READ_TIMEOUT` and `DEFAULT_REMOTE_RECORDING_MAX_BYTES` apart, with
-`DEFAULT_TIMEOUT`, `CLOSE_FLUSH_SECONDS`, `MAX_KEY_SIZE` and `MAX_SECONDS`
-also on `multiplexer.mxclient`, and to Rust as constants at the crate's
-root, generated from the header.
+`DEFAULT_TIMEOUT`, `CLOSE_FLUSH_SECONDS`, `MAX_KEY_SIZE`, `MAX_SECONDS`,
+`DEFAULT_BATCH_MAX_RECORDS` and `DEFAULT_BATCH_MAX_BYTES` also on
+`multiplexer.mxclient`, and to Rust as constants at the crate's root,
+generated from the header.
 
 | Constant | Value | Where it applies |
 |---|---|---|
@@ -404,6 +421,9 @@ root, generated from the header.
 | `MAX_MESSAGE_SIZE` | 128 MiB | largest frame body accepted |
 | `MAX_KEY_SIZE` | 256 bytes | the longest key a message may carry; a library refuses a longer one where the message is built, a multiplexer drops and reports it ([keys](keys.md)) |
 | `MAX_KEY_PATTERN_SIZE` | 1024 bytes | the longest pattern of a key filter |
+| `DEFAULT_BATCH_MAX_RECORDS` | 1000 messages | the most messages in a client's batch, unless `set_batching()` says otherwise ([batching](batching.md)) |
+| `DEFAULT_BATCH_MAX_BYTES` | 1 MiB | the most bytes of a batch's message, the envelope with every message inside, unless `set_batching()` says otherwise |
+| `MAX_BATCH_RECORDS` | 1024 messages | the most messages one batch holds: a client refuses a larger `max_records`, a receiving library drops a larger batch whole |
 | `DEFAULT_INCOMING_QUEUE_MAX_SIZE` | 1024 messages | unread messages a synchronous client holds; a `ThreadedClient` with no `on_message` drops what arrives on its own, with a warning |
 | `queue_size`, in the rules file | 1024 messages | unsent messages the multiplexer holds per connection, per peer type; also a tap's buffer |
 | `FORCED_FRAMES_PAST_FULL_QUEUE` | 64 frames | protocol frames, a welcome, a heartbeat, a status reply or a routing request, that a full queue still takes past its limit, in the multiplexer and the libraries |

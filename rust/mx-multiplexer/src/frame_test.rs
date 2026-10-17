@@ -69,6 +69,7 @@ fn golden_messages() -> Vec<(&'static str, MultiplexerMessage)> {
         ],
         logging_method: Some(logging_method::Values::Console as i32),
         key: Some("ключ-κλειδί".into()),
+        batch: None, // golden.py's every_field has none either
     };
     let welcome = WelcomeMessage {
         r#type: 65,

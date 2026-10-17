@@ -1080,8 +1080,28 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
         }
       }
     }
+    // Nothing left to write is news for a manager that asked
+    // (notify_when_idle), once; the multiplexer's traits compile this out.
+    if constexpr (ConnectionsManagerTraits::REPORTS_IDLE) {
+      if (notify_when_idle_ && outgoing_queue_.empty()) {
+        notify_when_idle_ = false;
+        if (ManagerPointer manager = manager_.lock()) {
+          manager->outgoing_queue_idle(this);
+        }
+      }
+    }
   }
 
+ public:
+  // The next time the queue is left empty by a write, the manager hears
+  // of it (outgoing_queue_idle), once: a client whose batches wait for a
+  // connection with nothing left to write.
+  void notify_when_idle() {
+    MX_DCHECK_RUN_ON(&io_thread_);
+    notify_when_idle_ = true;
+  }
+
+ private:
   // On shutdown, offers the unsent queue to the manager (the client moves
   // entries to another connection and takes them out of the queue, and
   // after them what waited for this one, so it is told even of an empty
@@ -1216,6 +1236,7 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // shutdown meanwhile, the frame it writes is set aside, with the manager
   // to tell, for that handler to settle (see _orphan_outgoing_messages).
   bool write_in_flight_ MX_GUARDED_BY(io_thread_) = false;
+  bool notify_when_idle_ MX_GUARDED_BY(io_thread_) = false;  // see notify_when_idle()
   MessagesBuffer set_aside_ MX_GUARDED_BY(io_thread_);
   std::weak_ptr<ConnectionsManagerImplementation> set_aside_manager_ MX_GUARDED_BY(io_thread_);
 

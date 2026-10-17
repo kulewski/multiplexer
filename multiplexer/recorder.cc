@@ -67,7 +67,11 @@ void fill_routed(Record& record, const MultiplexerMessage& msg, std::uint32_t fr
   }
   routed->set_disposition(disposition);
   routed->set_error_reported(error_reported);
-  const std::string& payload = msg.message();
+  // A batch's payload is the batch, its messages together.
+  if (msg.has_batch()) {
+    routed->set_batch(true);
+  }
+  const std::string& payload = msg.has_batch() ? msg.batch() : msg.message();
   if (payload_limit && payload.size() > payload_limit) {
     routed->set_payload(payload.data(), payload_limit);
     routed->set_truncated(true);

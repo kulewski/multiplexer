@@ -328,6 +328,9 @@ impl<H: Handler> Shared<H> {
     /// wakes the loop once it is written, a connection back, or given up on
     /// at its own deadline.
     fn nothing_held(&self) -> bool {
+        // What waits in a batch goes first, a flush that waits for nothing,
+        // to be held with the rest.
+        let _ = self.client.flush_all(Some(Duration::ZERO)).wait();
         if self.client.held_for_a_connection().unwrap_or(0) == 0 {
             return true;
         }

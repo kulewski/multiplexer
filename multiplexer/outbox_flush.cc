@@ -163,6 +163,11 @@ void BasicClient::end_follows() {
 
 BasicClient::FlushPtr BasicClient::begin_flush(std::function<void(bool all_written)> done) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  // What waits in a batch goes now, and the flush waits for it; a batch
+  // given up on at once, with no connection to wait for, is lost to it.
+  const std::uint64_t dropped = dropped_.load(std::memory_order_relaxed);
+  close_batches();
+  const bool lost = dropped_.load(std::memory_order_relaxed) != dropped;
   if (!outbox_->follow_events.empty() || !outbox_->drop_events.empty()) {
     _process_callbacks();  // what ended before the flush began is heard before it ends
   }
@@ -170,6 +175,7 @@ BasicClient::FlushPtr BasicClient::begin_flush(std::function<void(bool all_writt
   flush->last_number = outbox_->last_number;
   flush->waiting = outbox_->waiting;
   flush->done = done;
+  flush->lost = lost;
   for (ConnectionById::const_iterator entry = connection_by_id_.begin(); entry != connection_by_id_.end(); ++entry) {
     Connection::pointer conn = entry->second.lock();
     if (conn && conn->living()) {

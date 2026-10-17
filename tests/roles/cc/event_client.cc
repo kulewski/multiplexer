@@ -1,6 +1,7 @@
 // The `event_client` role: sends events, never runs a loop. See
 // tests/README.md for options and events.
 #include <chrono>
+#include <set>
 #include <thread>
 
 #include "multiplexer/Multiplexer.pb.h"
@@ -16,7 +17,11 @@ using multiplexer::MultiplexerMessage;
 // never waits for answers. --send TYPE:payload (repeatable) in order;
 // --to ID addresses one peer directly; --all sends through every connection;
 // --no-flush returns before the write; --interval pauses between sends;
-// --linger keeps the process alive after the last one. Events: sent, done.
+// --linger keeps the process alive after the last one. --batch-records N
+// batches every type sent (set_batching), N messages a batch, --batch-delay
+// S their max_delay: each send then returns at once, queue() putting the
+// message in its type's batch, and flush_all() after the last lets the last
+// batch go. Events: sent, error, flushed, done.
 class EventClientRole : public mxcontrol::Task {
  public:
   virtual std::string short_description() const { return "send events as a passive peer, never run a loop"; }
@@ -24,6 +29,18 @@ class EventClientRole : public mxcontrol::Task {
     std::unique_ptr<Client> client = common_.connect();
     emit(common_.connected_event(*client));
     std::vector<std::pair<std::uint32_t, std::string>> sends = typed_payloads(send_);
+    if (batch_records_ > 0) {
+      Client::Batching batching;
+      batching.max_records = batch_records_;
+      batching.max_delay = static_cast<float>(batch_delay_);
+      std::set<std::uint32_t> types;
+      for (const std::pair<std::uint32_t, std::string>& send : sends) {
+        types.insert(send.first);
+      }
+      for (std::uint32_t type : types) {
+        client->set_batching(type, batching);
+      }
+    }
     int sent_count = 0;
     for (size_t index = 0; index < sends.size(); ++index) {
       MultiplexerMessage message;
@@ -47,6 +64,12 @@ class EventClientRole : public mxcontrol::Task {
       try {
         if (all_) {
           sent.set_connections(client->schedule_all(message));
+        } else if (batch_records_ > 0) {
+          // Returns at once, the message in its type's batch, which goes
+          // once full; the flush after the last lets the last go.
+          if (!client->queue(message)) {
+            throw Client::NotConnected();  // nothing may take it, as Python's and Rust's sends say
+          }
         } else if (no_flush_) {
           multiplexer::Client::ScheduledMessageTracker tracker = client->schedule_one(message);
           sent.set_in_queue(tracker.in_queue());
@@ -71,6 +94,11 @@ class EventClientRole : public mxcontrol::Task {
         std::this_thread::sleep_for(std::chrono::milliseconds(int(interval_ * 1000)));
       }
     }
+    if (batch_records_ > 0) {
+      Event flushed = event("flushed");
+      flushed.set_is_sent(client->flush_all(10.0f));  // the waiting send's 10 s
+      emit(flushed);
+    }
     if (linger_ > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(int(linger_ * 1000)));
     }
@@ -92,6 +120,8 @@ class EventClientRole : public mxcontrol::Task {
     options.add("interval", &interval_, 0.0, "pause between sends");
     options.add("linger", &linger_, 0.0, "stay connected this long after sending");
     options.add("key", &key_, "", "the key every message carries");
+    options.add("batch-records", &batch_records_, 0u, "batch every type sent, N messages a batch, flushed at the end");
+    options.add("batch-delay", &batch_delay_, 0.0, "the batches' max_delay, in seconds");
   }
 
  private:
@@ -103,6 +133,8 @@ class EventClientRole : public mxcontrol::Task {
   double interval_;
   double linger_;
   std::string key_;
+  unsigned int batch_records_;
+  double batch_delay_;
 };
 
 REGISTER_MXCONTROL_SUBCOMMAND(event_client, EventClientRole);

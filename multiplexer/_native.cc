@@ -31,8 +31,11 @@ using Callable = pybind11::function;
 #include <pthread.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <thread>
 
@@ -293,6 +296,18 @@ static BasicClient::AcknowledgedCallback acknowledged_callback_for(pybind11::obj
   return python_callback<>(callback.cast<pybind11::function>());
 }
 
+// set_batching()'s numbers as Python passes them, any int: a count below 1
+// as 0 and one past what Batching holds as its most, for
+// BasicClient::check_batching to refuse, a ValueError, or to take.
+static BasicClient::Batching batching_from(std::int64_t max_records, std::int64_t max_bytes, double max_delay) {
+  BasicClient::Batching batching;
+  batching.max_records =
+      static_cast<unsigned int>(std::clamp<std::int64_t>(max_records, 0, std::numeric_limits<unsigned int>::max()));
+  batching.max_bytes = static_cast<std::size_t>(std::max<std::int64_t>(max_bytes, 0));
+  batching.max_delay = static_cast<float>(max_delay);
+  return batching;
+}
+
 // One of a query's attempts, mxclient's: the tracker of the message it
 // went out as, from the moment send_one() placed it, whatever the send then
 // came to, which says whether the client gave it up.
@@ -319,6 +334,7 @@ struct PythonClient : public Client {
     basic_client_->release_drop_observer();  // nothing calls into Python while the client dies
     if (!basic_client_->orphaned()) {
       basic_client_->bind_to_current_thread();
+      basic_client_->close_batches();    // the batched sends' callbacks become their frames' to let go of
       basic_client_->release_follows();  // a send's callback included
       Client::shutdown();
     }
@@ -328,8 +344,13 @@ struct PythonClient : public Client {
   // The frame every send here queues: a serialized MultiplexerMessage,
   // with the id and the type mxclient gives beside it. A send that lets
   // go of the GIL makes it after, so that the checksum of a large message
-  // holds no other thread.
-  static std::shared_ptr<const RawMessage> _frame(std::string* serialized, std::uint64_t id, std::uint32_t type) {
+  // holds no other thread. Unsealed, its checksum computed only if it goes
+  // alone, when it may go in a batch (RawMessage::Unsealed).
+  static std::shared_ptr<const RawMessage> _frame(std::string* serialized, std::uint64_t id, std::uint32_t type,
+                                                  bool sealed = true) {
+    if (!sealed) {
+      return std::shared_ptr<const RawMessage>(new RawMessage(RawMessage::Unsealed(), serialized, id, type));
+    }
     return std::shared_ptr<const RawMessage>(new RawMessage(serialized, id, type));
   }
 
@@ -435,9 +456,12 @@ struct PythonClient : public Client {
             float timeout, std::optional<mxtyping::Callable<void(unsigned int)>> callback) {
     basic_client_->check_not_orphaned();
     std::string message(serialized);
-    basic_client_->poll();
-    return basic_client_->send(_frame(&message, id, type), all, lane.value_or(LanePtr()), timeout, 0, NULL, NULL,
-                               callback ? send_callback_for(*callback) : BasicClient::SendCallback());
+    const bool may_batch = !all && !lane && basic_client_->batching();
+    // The loop runs first unless the message only joins a batch (poll_first).
+    return basic_client_->send(_frame(&message, id, type, /*sealed=*/!may_batch), all, lane.value_or(LanePtr()),
+                               timeout, 0, NULL, NULL,
+                               callback ? send_callback_for(*callback) : BasicClient::SendCallback(),
+                               /*may_batch=*/true, /*poll_first=*/true);
   }
   // What mxclient's query names as it sends, and forgets as it ends, for
   // a client that refuses what arrives: Client::_awaiting.
@@ -630,6 +654,26 @@ struct PythonThreadedClient {
     BasicClient::AcknowledgedCallback acknowledged = acknowledged_callback_for(on_acknowledged);
     GilRelease release;
     client.set_key_filters(filters, std::move(acknowledged));
+  }
+  // ThreadedClient::set_batching and clear_batching, for every key of the
+  // type or for one.
+  void set_batching(std::uint32_t type, std::optional<std::string> key, std::int64_t max_records,
+                    std::int64_t max_bytes, double max_delay) {
+    const BasicClient::Batching batching = batching_from(max_records, max_bytes, max_delay);
+    GilRelease release;
+    if (key) {
+      client.set_batching(type, *key, batching);
+    } else {
+      client.set_batching(type, batching);
+    }
+  }
+  void clear_batching(std::uint32_t type, std::optional<std::string> key) {
+    GilRelease release;
+    if (key) {
+      client.clear_batching(type, *key);
+    } else {
+      client.clear_batching(type);
+    }
   }
   bool routing_acknowledged() {
     GilRelease release;
@@ -1008,6 +1052,32 @@ PYBIND11_MODULE(_native, module) {
           },
           pybind11::arg("filters"), pybind11::arg("on_acknowledged") = pybind11::none(),
           "Which keys of each message type reach this peer; see multiplexer.mxclient.Client.set_key_filters.")
+      .def(
+          "set_batching",
+          [](multiplexer::PythonClient& client, std::uint32_t type, std::optional<std::string> key,
+             std::int64_t max_records, std::int64_t max_bytes, double max_delay) {
+            const multiplexer::BasicClient::Batching batching =
+                multiplexer::batching_from(max_records, max_bytes, max_delay);
+            if (key) {
+              client.set_batching(type, *key, batching);
+            } else {
+              client.set_batching(type, batching);
+            }
+          },
+          pybind11::arg("type"), pybind11::arg("key"), pybind11::arg("max_records"), pybind11::arg("max_bytes"),
+          pybind11::arg("max_delay"),
+          "Batch the events of a type or key; see multiplexer.mxclient.Client.set_batching.")
+      .def(
+          "clear_batching",
+          [](multiplexer::PythonClient& client, std::uint32_t type, std::optional<std::string> key) {
+            if (key) {
+              client.clear_batching(type, *key);
+            } else {
+              client.clear_batching(type);
+            }
+          },
+          pybind11::arg("type"), pybind11::arg("key"),
+          "No batching for a type or key any more; see multiplexer.mxclient.Client.clear_batching.")
       .def("routing_acknowledged", &multiplexer::PythonClient::routing_acknowledged)
       .def("held_for_a_connection", &multiplexer::PythonClient::held_for_a_connection,
            "How many messages wait for a connection to come up; see "
@@ -1099,6 +1169,12 @@ PYBIND11_MODULE(_native, module) {
            pybind11::arg("on_acknowledged") = pybind11::none(),
            "Which keys of each message type reach this peer; see "
            "multiplexer.threaded_client.ThreadedClient.set_key_filters.")
+      .def("set_batching", &multiplexer::PythonThreadedClient::set_batching, pybind11::arg("type"),
+           pybind11::arg("key"), pybind11::arg("max_records"), pybind11::arg("max_bytes"), pybind11::arg("max_delay"),
+           "Batch the events of a type or key; see multiplexer.threaded_client.ThreadedClient.set_batching.")
+      .def("clear_batching", &multiplexer::PythonThreadedClient::clear_batching, pybind11::arg("type"),
+           pybind11::arg("key"),
+           "No batching for a type or key any more; see multiplexer.threaded_client.ThreadedClient.clear_batching.")
       .def("routing_acknowledged", &multiplexer::PythonThreadedClient::routing_acknowledged)
       .def("held_for_a_connection", &multiplexer::PythonThreadedClient::held_for_a_connection,
            "How many messages wait for a connection to come up; see "
@@ -1168,6 +1244,9 @@ PYBIND11_MODULE(_native, module) {
   module.attr("CLOSE_FLUSH_SECONDS") = pybind11::float_(multiplexer::CLOSE_FLUSH_SECONDS);
   module.attr("MAX_MESSAGE_SIZE") = pybind11::int_(multiplexer::MAX_MESSAGE_SIZE);
   module.attr("MAX_KEY_SIZE") = pybind11::int_(multiplexer::MAX_KEY_SIZE);
+  module.attr("DEFAULT_BATCH_MAX_RECORDS") = pybind11::int_(multiplexer::DEFAULT_BATCH_MAX_RECORDS);
+  module.attr("DEFAULT_BATCH_MAX_BYTES") = pybind11::int_(multiplexer::DEFAULT_BATCH_MAX_BYTES);
+  module.attr("MAX_BATCH_RECORDS") = pybind11::int_(multiplexer::MAX_BATCH_RECORDS);
   module.attr("MAX_KEY_PATTERN_SIZE") = pybind11::int_(multiplexer::MAX_KEY_PATTERN_SIZE);
   module.attr("HEARTBIT_INTERVAL") = pybind11::float_(multiplexer::HEARTBIT_INTERVAL);
   module.attr("MAX_SECONDS") = pybind11::float_(mx::MAX_SECONDS);

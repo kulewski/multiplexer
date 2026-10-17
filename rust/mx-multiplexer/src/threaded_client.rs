@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::constants::types;
+use crate::core::batching::{check_batching, Batching};
 use crate::core::client::{check_key_filters, DropReason, IncomingMode};
 use crate::core::query::{check_size_sent_again, Outcome};
 use crate::core::{deadline_after, Core, Posted};
@@ -153,6 +154,7 @@ impl ThreadedClientBuilder {
             generation: crate::fork::generation(),
             dropped: Arc::clone(&core.client.dropped),
             descriptors: Arc::clone(&core.client.descriptors),
+            batching: AtomicBool::new(false),
         });
         let io_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -197,6 +199,10 @@ struct Shared {
     generation: u32,
     dropped: Arc<AtomicU64>,
     descriptors: Arc<DescriptorTable>,
+    /// Whether `set_batching()` was ever called: the callers' threads then
+    /// mark the frames they make for it (`frame_of`); a hint, a frame made
+    /// unmarked going alone.
+    batching: AtomicBool,
 }
 
 /// Ends a post's count, telling a shutdown that waits for the last one.
@@ -620,6 +626,48 @@ impl ThreadedClient {
         Ok(())
     }
 
+    /// Batching (docs/batching.md): the events of `r#type`, each key
+    /// apart, or, given `key`, of that key, ahead of what is set for its
+    /// type, that `queue()` sends through no lane and not to ALL, go several
+    /// in one message, which the receiving library splits back into one
+    /// message each. A batch goes once it holds `max_records` messages,
+    /// once one more would take it past `max_bytes` on the wire, or
+    /// `max_delay` after its first message; with no delay, once a
+    /// connection has nothing left to write, so that a message sent while
+    /// one is free goes at once, and those sent while every one is busy go
+    /// together. A flush, a send that does not batch, another change of
+    /// what is batched and the shutdown first let every batch go.
+    /// `InvalidArgument`, here, for a protocol message type, a key over
+    /// MAX_KEY_SIZE, no message in a batch or more than MAX_BATCH_RECORDS,
+    /// no byte or more than MAX_MESSAGE_SIZE, or a delay over MAX_SECONDS;
+    /// in effect for every send made after the call.
+    pub fn set_batching(&self, r#type: u32, key: Option<&str>, batching: Batching) -> Result<()> {
+        self.shared().check()?;
+        check_batching(r#type, key, &batching)?;
+        self.shared().batching.store(true, Ordering::Relaxed); // frames are marked for it from now on
+        let key = key.map(str::to_string);
+        self.shared().post(move |core| {
+            if !core.threaded.shut_down {
+                let _ = core.set_batching(r#type, key.as_deref(), batching);
+            }
+        });
+        Ok(())
+    }
+
+    /// No batching from now on for `r#type`, its keys' settings included,
+    /// or, given `key`, for that key, which then batches as its type says;
+    /// every batch goes first.
+    pub fn clear_batching(&self, r#type: u32, key: Option<&str>) -> Result<()> {
+        self.shared().check()?;
+        let key = key.map(str::to_string);
+        self.shared().post(move |core| {
+            if !core.threaded.shut_down {
+                core.clear_batching(r#type, key.as_deref());
+            }
+        });
+        Ok(())
+    }
+
     /// `set_key_filters()`, and `on_acknowledged` as for `set_routing_then()`.
     pub fn set_key_filters_then(
         &self,
@@ -979,7 +1027,8 @@ impl ThreadedSend<'_> {
         if self.lane.as_ref().is_some_and(Lane::closed) {
             return Err(Error::NotConnected); // a pinned lane whose connection is gone
         }
-        frame_of(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id)
+        let batching = shared.batching.load(Ordering::Relaxed);
+        frame_of(std::mem::take(&mut self.message), || shared.ids.next(), shared.instance_id, batching)
     }
 
     /// Sends the message and returns its id at once: the io thread queues

@@ -19,6 +19,7 @@ LIB_SRCS := \
   multiplexer/backend/base_multiplexer_server.cc \
   multiplexer/backend/base_threaded_multiplexer_server.cc \
   multiplexer/basic_client.cc \
+  multiplexer/basic_client_batching.cc \
   multiplexer/basic_client_connect.cc \
   multiplexer/basic_client_routing.cc \
   multiplexer/client.cc \
@@ -112,6 +113,7 @@ HEADERS := \
   multiplexer/backend/base_multiplexer_server.h \
   multiplexer/backend/base_threaded_multiplexer_server.h \
   multiplexer/basic_client.h \
+  multiplexer/batching.h \
   multiplexer/client.h \
   multiplexer/config.h \
   multiplexer/connections_manager.h \
@@ -182,12 +184,14 @@ CC_TEST_SRCS := \
   lib/logging/verbosity_test.cc \
   lib/options_test.cc \
   lib/protobuf/stream_test.cc \
+  lib/spanset_test.cc \
   lib/thread_checker_test.cc \
   lib/xxh3_test.cc \
   multiplexer/backend/acknowledged_test.cc \
   multiplexer/backend/connect_test.cc \
   multiplexer/backend/serve_thread_test.cc \
   multiplexer/backend/threaded_server_test.cc \
+  multiplexer/batching_test.cc \
   multiplexer/client_moves_test.cc \
   multiplexer/client_names_test.cc \
   multiplexer/close_on_exec_test.cc \
@@ -231,6 +235,7 @@ PY_TEST_FILES := \
   multiplexer/aio_test.py \
   multiplexer/all_at_start_test.py \
   multiplexer/all_types_test.py \
+  multiplexer/batching_test.py \
   multiplexer/callback_errors_test.py \
   multiplexer/client_names_test.py \
   multiplexer/connect_again_test.py \

@@ -369,7 +369,10 @@ void Server::MessageMetaHandler::__create_delivery_error_message(bool include_or
   }
   delivery_error_message.reset(new DeliveryError());
   delivery_error_message->set_packet_id(this->msg.id());
-  if (include_original_packet_in_report) {
+  // A batch goes back whole, asked for or not: its sender's library tells
+  // each message inside of its own failure, as it would have been told of
+  // it alone (BasicClient::_split_delivery_error); only a failure pays.
+  if (include_original_packet_in_report || this->msg.has_batch()) {
     *delivery_error_message->mutable_original_message() = this->msg;
   }
 }

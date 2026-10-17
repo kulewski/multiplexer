@@ -43,18 +43,33 @@ namespace multiplexer {
 using mx::repr;
 
 namespace {
-// When a message given `timeout` seconds stops waiting. A negative or an
-// infinite timeout never ends, as lib/seconds.h reads every timeout: the
-// message waits until it is written or goes nowhere. 0 and NaN are no time
-// at all: a deadline already past, so that the message waits for nothing.
-std::chrono::steady_clock::time_point deadline_after(float timeout) {
+// When a message given `timeout` seconds from `now` stops waiting. A
+// negative or an infinite timeout never ends, as lib/seconds.h reads every
+// timeout: the message waits until it is written or goes nowhere. 0 and NaN
+// are no time at all: a deadline already past, so that the message waits
+// for nothing.
+std::chrono::steady_clock::time_point deadline_after(
+    float timeout, std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
   if (timeout < 0 || std::isinf(timeout)) {
     return std::chrono::steady_clock::time_point::max();
   }
   if (!(timeout > 0)) {
     return std::chrono::steady_clock::time_point::min();  // 0 and NaN
   }
-  return std::chrono::steady_clock::now() + mx::from_seconds(timeout);
+  return now + mx::from_seconds(timeout);
+}
+
+// `raw` as a frame that can be written: itself, sealed in place when it was
+// made without its checksum for a batch it did not go in (RawMessage::Unsealed),
+// or a framed copy of one that never was a frame, a message taken out of a
+// batch that arrived (RawMessage::FromBatch) and sent on, which a
+// connection could not write.
+std::shared_ptr<const RawMessage> writable(std::shared_ptr<const RawMessage> raw) {
+  if (raw->usability() != RawMessage::NONE) {
+    raw->seal();
+    return raw;
+  }
+  return std::make_shared<const RawMessage>(raw->get_message(), raw->id(), raw->type());
 }
 
 // The log kind, and what its line says, of a drop for `reason`.
@@ -86,13 +101,17 @@ const char* drop_text(DropReason reason) {
 }
 }  // namespace
 
+// A batch's frame (RawMessage::batch_ids) is told and counted for each
+// message inside, its one line naming the batch.
 void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, DropReason reason) {
   MX_DCHECK_RUN_ON(&owner_thread());
-  dropped_.fetch_add(1, std::memory_order_relaxed);
+  const std::shared_ptr<const std::vector<std::uint64_t>>& batch = raw->batch_ids();
+  dropped_.fetch_add(batch ? batch->size() : 1, std::memory_order_relaxed);
   if (const std::string* text =
           drop_lines_.first({drop_line(reason), WARNING, raw->type(), 0}, [reason] { return drop_text(reason); })) {
     MX_LOG(WARNING, LogSummary::VERBOSITY,
-           CTX("BasicClient") TEXT(*text + "; id " + repr(raw->id()) + ", type " + repr(raw->type())));
+           CTX("BasicClient") TEXT(*text + "; " + (batch ? "a batch of " + repr(batch->size()) + ", " : std::string()) +
+                                   "id " + repr(raw->id()) + ", type " + repr(raw->type())));
   }
   // A flush that waits for the message ends with not all written.
   const std::uint64_t number = raw->number();
@@ -104,7 +123,13 @@ void BasicClient::report_drop(const std::shared_ptr<const RawMessage>& raw, Drop
   // Told in the pass after the handler this is in, which may be in the
   // middle of the outbox's bookkeeping (_process_callbacks).
   if (drop_observer_) {
-    outbox_->drop_events.emplace_back(raw->id(), reason);
+    if (batch) {
+      for (std::uint64_t id : *batch) {
+        outbox_->drop_events.emplace_back(id, reason);
+      }
+    } else {
+      outbox_->drop_events.emplace_back(raw->id(), reason);
+    }
     _post_callbacks();
   }
 }
@@ -126,10 +151,17 @@ std::size_t BasicClient::outbox_entries() const {
   return entries;
 }
 
+std::chrono::steady_clock::time_point BasicClient::_deadline_after(float timeout,
+                                                                   std::chrono::steady_clock::time_point now) {
+  return deadline_after(timeout, now);
+}
+
 BasicClient::BasicScheduledMessageTracker BasicClient::schedule_one(std::shared_ptr<const RawMessage> raw,
                                                                     ConnectionWrapper* used, float timeout,
                                                                     std::uint64_t number, LanePtr lane) {
   MX_DCHECK_RUN_ON(&owner_thread());
+  raw = writable(std::move(raw));
+  close_batches();  // nothing overtakes a message sent before it
   Connection::pointer conn;
   if (lane && !outbox_->handovers.empty() && lane->holds_connection()) {
     conn = _handed_to(lane->connection());  // its connection died: after the messages it had not written
@@ -155,10 +187,12 @@ BasicClient::BasicScheduledMessageTracker BasicClient::schedule_on(std::shared_p
   }
   check_ours(wrapper);
   MX_DCHECK_RUN_ON(&owner_thread());
+  raw = writable(std::move(raw));
   Connection::pointer conn = wrapper.lock();
   if (shuts_down_ || !conn || !conn->living()) {
     return BasicScheduledMessageTracker();  // after shutdown() nothing is placed, as send() says
   }
+  close_batches();
   return _place_on(conn, raw, BasicScheduledMessageTracker(), number ? number : next_number(), deadline_after(timeout),
                    false, lane);
 }
@@ -170,6 +204,8 @@ unsigned int BasicClient::schedule_all(std::shared_ptr<const RawMessage> raw, st
   if (shuts_down_) {
     return 0;  // nothing is placed after shutdown(), as send() says
   }
+  raw = writable(std::move(raw));
+  close_batches();
   raw->mark_for_all();
   if (!number) {
     number = next_number();
@@ -199,12 +235,51 @@ unsigned int BasicClient::schedule_all(std::shared_ptr<const RawMessage> raw, st
 
 bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const LanePtr& lane, float timeout,
                        std::uint64_t number, std::vector<BasicScheduledMessageTracker>* trackers,
-                       ConnectionWrapper* used, SendCallback done) {
+                       ConnectionWrapper* used, SendCallback done, bool may_batch, bool poll_first) {
   check_ours(lane);  // the caller's thread, for the synchronous client; ThreadedClient checked before posting
   MX_DCHECK_RUN_ON(&owner_thread());
   if (shuts_down_) {
     return false;
   }
+  // A message for a batch goes there (basic_client_batching.cc), as it is:
+  // only its body is read there, so a frame made unsealed for it stays so.
+  // Any other lets every batch go first, so that nothing overtakes a message
+  // sent before it, and is made writable as it goes (_send). One with no
+  // time to wait, 0 or NaN, goes alone: in a batch it would leave the batch
+  // no time either. The loop runs first where `poll_first` says (above);
+  // what it ran may have changed what is batched, so that is asked again.
+  if (may_batch && !all && !lane && (timeout > 0 || timeout < 0)) {
+    const Batching* batching = _batching_for(raw);
+    if (batching && poll_first && _batch_needs_loop(raw, *batching)) {
+      poll();
+      poll_first = false;
+      if (shuts_down_) {
+        return false;
+      }
+      batching = _batching_for(raw);
+    }
+    if (batching) {
+      return _batch(raw, *batching, timeout, trackers, done);
+    }
+  }
+  if (poll_first) {
+    poll();
+    if (shuts_down_) {
+      return false;
+    }
+  }
+  close_batches();
+  return _send(raw, all, lane, deadline_after(timeout), number, trackers, used, done);
+}
+
+bool BasicClient::_send(const std::shared_ptr<const RawMessage>& raw, bool all, const LanePtr& lane,
+                        std::chrono::steady_clock::time_point deadline, std::uint64_t number,
+                        std::vector<BasicScheduledMessageTracker>* trackers, ConnectionWrapper* used,
+                        const SendCallback& done) {
+  if (raw->usability() == RawMessage::NONE) {
+    return _send(writable(raw), all, lane, deadline, number, trackers, used, done);  // a message out of a batch
+  }
+  raw->seal();  // made unsealed for a batch, it goes alone
   std::vector<BasicScheduledMessageTracker> own;
   if (!trackers && done) {
     trackers = &own;  // what `done` follows
@@ -218,7 +293,6 @@ bool BasicClient::send(std::shared_ptr<const RawMessage> raw, bool all, const La
   if (!number) {
     number = next_number();
   }
-  const std::chrono::steady_clock::time_point deadline = deadline_after(timeout);
   bool refused = false;
   if (outbox_->held_live ||
       !_place_now(raw, all, lane, number, deadline, BasicScheduledMessageTracker(), trackers, used, &refused)) {
@@ -462,6 +536,7 @@ BasicClient::BasicScheduledMessageTracker BasicClient::_place_on(
   if (!conn->living()) {
     return BasicScheduledMessageTracker();
   }
+  DbgAssert(raw->usability() == RawMessage::WRITING);  // sealed and framed on its way here (writable, _send)
   raw->mark_number(number);
   raw->mark_deadline(deadline);
   if (lane) {

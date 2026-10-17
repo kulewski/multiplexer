@@ -294,6 +294,14 @@ Bazel build.
   round trip when idle, 7 MB resident, measured with
   [tests/bench.sh](tests/bench.sh) on a Threadripper PRO 9965WX, and as
   fast with Rust peers as with C++ ones.
+- **Many small events in one message.** A client may batch the events of
+  a type, or of one key: several go in one message, which the receiving
+  library, in every language, splits back into one message each, as if
+  each had come alone. With no delay set, an event still goes at once
+  whenever a connection has nothing left to write, and events gather only
+  while the program sends faster than its connections write; a
+  `SyncClient` batching for 5 ms moved more than five times as many
+  100-byte events a second through one multiplexer ([batching](docs/batching.md)).
 - **Stateless and lightweight.** No external coordination service, no
   persistence, one binary and one rules file; scale horizontally by adding
   instances and backends. A documented binary protocol over TCP with

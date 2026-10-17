@@ -206,12 +206,15 @@ class BaseMultiplexerServer(MultiplexerPeer):
         if time.monotonic() - since >= mxclient.wait_seconds(self._drain_seconds):
             return True
         # With no connection live the confirmation holds at once, so what
-        # is held for the next connection is waited for too.
-        return (
-            nothing_more_arrives(self.drain_routing)
-            and self.conn.routing_acknowledged()
-            and self.conn.held_for_a_connection() == 0
-        )
+        # is held for the next connection is waited for too. What waits in
+        # a batch is let go first, a flush that waits for nothing, to be
+        # held with the rest; its loop runs first, so that a connection that
+        # died since is gone before the confirmation is asked, the handler's
+        # sends into a batch having run none.
+        if not nothing_more_arrives(self.drain_routing):
+            return False
+        self.conn.flush_all(0)
+        return self.conn.routing_acknowledged() and self.conn.held_for_a_connection() == 0
 
     def __wait(self, poll: float) -> float:
         """What serve_forever()'s next wait may last: `poll`, and while a
