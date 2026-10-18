@@ -9,6 +9,7 @@
 #include <exception>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lib/logging/logging.h"
@@ -48,6 +49,15 @@ void Server::finish_loops() {
   if (loops_) {
     loops_->finish();
   }
+}
+
+void Server::post_to_loop(unsigned int loop, std::function<void()> work) {
+  if (loops_) {
+    asio::post(loops_->loop(loop), std::move(work));
+    return;
+  }
+  AssertMsg(loop == 0, "loop " + repr(loop) + " of a multiplexer on one loop asked for");
+  asio::post(io_service_, std::move(work));
 }
 
 void Server::_lock_routing() const {

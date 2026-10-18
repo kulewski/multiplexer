@@ -1526,7 +1526,8 @@ class SearchTest(unittest.TestCase):
 
 - `Cluster(count=1, rules=None, memory_log_every=0, record=False,
   record_payload_bytes=0, remote_recording=False,
-  rules_check_interval=None, drain_seconds=None, host="127.0.0.1")`,
+  rules_check_interval=None, drain_seconds=None, host="127.0.0.1",
+  monitor=False)`,
   every argument after `rules` best given by name, starts `count`
   multiplexers on entering and, on leaving, stops every role process
   still running and then the multiplexers; the in-process peers,
@@ -1556,7 +1557,9 @@ class SearchTest(unittest.TestCase):
   stop goes on sending what is queued (their default when `None`); `host`
   is the address they listen on, each on a port of its own: `"::1"` for
   IPv6, `"::"` for every address, IPv6 and, as Linux maps it by default,
-  IPv4. The
+  IPv4; with `monitor=True` each also serves `/healthz` and `/readyz`
+  ([health](operations.md#health)) on `host`, on another port of its
+  own. The
   multiplexers run the binary `MXCONTROL` names when
   it is set, else the `mxcontrol` that came with the package, the wheel's
   or, under Bazel, `@mx//mxcontrol` in the runfiles; PATH is never
@@ -1578,7 +1581,14 @@ class SearchTest(unittest.TestCase):
   listens, and `restart()` is both; `pause()` freezes it with `SIGSTOP`, a
   hung multiplexer whose sockets stay open, and `resume()` thaws it;
   `log_contains(text)`, with `wait_until`, waits for a line of its log
-  such as `rules reloaded from`; `endpoint` is its `(host, port)`, and
+  such as `rules reloaded from`; with a monitor, `healthz(timeout=10)`
+  and `readyz(timeout=10)` return the `(status, body)` of the monitor's
+  answer, `(200, "ok\n")` while every event loop runs and, for
+  `readyz()`, `(503, "the multiplexer is stopping\n")` from the moment a
+  stop began, its drain included, `ValueError` without a monitor and
+  `ConnectionRefusedError` while the process is not running, and
+  `monitor_address` is where it listens, the same port through a
+  restart; `endpoint` is its `(host, port)`, and
   `cluster.multiplexer_at(endpoint)` is the `Mx` at the `(host, port)` a
   lane's or a reply's connection names.
   The logs and files go to Bazel's outputs directory under `bazel test`,

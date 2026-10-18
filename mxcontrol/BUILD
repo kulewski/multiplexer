@@ -71,6 +71,7 @@ cc_library(
         ":tasks_holder",
         "//lib:memory",
         "//multiplexer:endpoint",
+        "//multiplexer:monitor",
         "//multiplexer:recorder",
         "//multiplexer:server",
         "@asio",
@@ -248,6 +249,19 @@ py_test(
     name = "addresses_test",
     size = "small",
     srcs = ["addresses_test.py"],
+    data = [
+        ":mxcontrol",
+        "//tests:testing.rules",
+    ],
+    deps = ["//multiplexer/testing"],
+)
+
+# run_multiplexer --monitor-address: /healthz and /readyz over HTTP, and the
+# addresses it refuses.
+py_test(
+    name = "monitor_test",
+    size = "small",
+    srcs = ["monitor_test.py"],
     data = [
         ":mxcontrol",
         "//tests:testing.rules",

@@ -1183,6 +1183,34 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "monitor",
+    srcs = ["monitor.cc"],
+    hdrs = ["monitor.h"],
+    visibility = ["//mxcontrol:__pkg__"],
+    deps = [
+        ":server",
+        "//lib:http_server",
+        "//lib:mutex",
+        "//lib:repr",
+        "//lib:seconds",
+        "@asio",
+    ],
+)
+
+cc_test(
+    name = "monitor_test",
+    size = "small",
+    srcs = ["monitor_test.cc"],
+    data = ["//tests:testing.rules"],
+    deps = [
+        ":in_process_multiplexer",
+        ":monitor",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 # Python side: the pybind11 module and the pure-Python client library.
 pybind_extension(
     name = "_native_with_debug_symbols",

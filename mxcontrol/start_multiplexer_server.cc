@@ -1,7 +1,8 @@
 // run_multiplexer: creates the Server, reads the rules, binds, optionally
-// writes the port file, and runs the io_service until a signal stops it;
-// SIGHUP reloads the rules on the way. The first SIGTERM or SIGINT drains,
-// a second one stops at once; SIGPIPE and SIGXFSZ are ignored.
+// starts the monitor and writes the port file, and runs the io_service
+// until a signal stops it; SIGHUP reloads the rules on the way. The first
+// SIGTERM or SIGINT drains, a second one stops at once; SIGPIPE and
+// SIGXFSZ are ignored.
 #include "mxcontrol/start_multiplexer_server.h"
 
 #include <signal.h>  // sigaction
@@ -15,12 +16,16 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <tuple>
+#include <utility>
 
 #include "lib/memory.h"
 #include "lib/repr.h"
 #include "multiplexer/endpoint.h"
+#include "multiplexer/monitor.h"
 #include "multiplexer/recorder.h"
 #include "multiplexer/server.h"
 #include "mxcontrol/tasks_holder.h"
@@ -30,6 +35,28 @@ namespace {
 
 // The port of an --address given without one.
 constexpr std::uint16_t DEFAULT_PORT = 1980;
+
+// `text`, the value of --`option`, as an IP address and a port to listen
+// on, `default_port` when it has none, refused as a malformed line when it
+// is not one (multiplexer/endpoint.h). An acceptor binds an address: a
+// name would have to pick one of those it resolves to, and the socket
+// would listen on that one only.
+std::pair<std::string, std::uint16_t> listening_endpoint(const std::string& option, const std::string& text,
+                                                         std::optional<std::uint16_t> default_port) {
+  std::pair<std::string, std::uint16_t> endpoint;
+  try {
+    endpoint = multiplexer::parse_endpoint(text, default_port);
+  } catch (const std::invalid_argument& error) {
+    throw mx::options::Error("--" + option + ": " + error.what());
+  }
+  asio::error_code not_an_address;
+  asio::ip::make_address(endpoint.first, not_an_address);
+  if (not_an_address) {
+    throw mx::options::Error("--" + option + ": '" + text +
+                             "': not an IP address; 0.0.0.0 listens on every IPv4 one, [::] on every one");
+  }
+  return endpoint;
+}
 
 // Writes `address` to `path` atomically (temporary file plus rename), so a
 // reader never sees a partially written file. A write that failed, a full
@@ -123,18 +150,11 @@ void StartMultiplexerServer::parse_options(std::vector<std::string>& args) {
   if (!refused.empty()) {
     throw mx::options::Error("--rules-check-interval: " + refused);
   }
-  try {
-    std::tie(host_, port_) = multiplexer::parse_endpoint(host_port_, DEFAULT_PORT);
-  } catch (const std::invalid_argument& error) {
-    throw mx::options::Error(std::string("--address: ") + error.what());
-  }
-  // The acceptor binds an address: a name would have to pick one of those
-  // it resolves to, and the multiplexer would listen on that one only.
-  asio::error_code not_an_address;
-  asio::ip::make_address(host_, not_an_address);
-  if (not_an_address) {
-    throw mx::options::Error("--address: '" + host_port_ +
-                             "': not an IP address; 0.0.0.0 listens on every IPv4 one, [::] on every one");
+  std::tie(host_, port_) = listening_endpoint("address", host_port_, DEFAULT_PORT);
+  if (!monitor_host_port_.empty()) {
+    std::tie(monitor_host_, monitor_port_) = listening_endpoint("monitor-address", monitor_host_port_, std::nullopt);
+  } else if (!monitor_port_file_.empty()) {
+    throw mx::options::Error("--monitor-port-file: there is no monitor without --monitor-address");
   }
   // --threads, else MX_SERVER_THREADS, else one loop.
   if (!threads_) {
@@ -176,7 +196,17 @@ int StartMultiplexerServer::run() {
   }
 
   asio::io_service io_service;
-  multiplexer::Server::pointer server = multiplexer::Server::Create(io_service, host_, port_);
+  // An address that cannot be bound, one in use or not this host's, ends
+  // the start naming the option, as the monitor's does below; the
+  // exception's own words, `bind: Address already in use`, said neither
+  // which option nor which address.
+  multiplexer::Server::pointer server;
+  try {
+    server = multiplexer::Server::Create(io_service, host_, port_);
+  } catch (const std::system_error& error) {
+    std::cerr << "--address " << multiplexer::format_endpoint(host_, port_) << ": " << error.what() << "\n";
+    return 1;
+  }
   // The signals first, before anything a supervisor might react to: SIGTERM
   // and SIGINT shut the server down, so the process exits with 0; SIGHUP
   // reloads the rules, and must not end the process from the moment it
@@ -216,9 +246,33 @@ int StartMultiplexerServer::run() {
   if (!peers_file_.empty()) {
     server->set_peers_file(peers_file_);
   }
+  // The monitor before the server starts, so that an address it cannot
+  // bind ends the start as the multiplexer's own does; a check posted
+  // meanwhile waits in the loops' queues until they run.
+  std::unique_ptr<multiplexer::Monitor> monitor;
+  if (!monitor_host_port_.empty()) {
+    try {
+      monitor.reset(new multiplexer::Monitor(
+          server, asio::ip::tcp::endpoint(asio::ip::make_address(monitor_host_), monitor_port_)));
+    } catch (const std::system_error& error) {
+      std::cerr << "--monitor-address " << multiplexer::format_endpoint(monitor_host_, monitor_port_) << ": "
+                << error.what() << "\n";
+      return 1;
+    }
+  }
   server->start();
   const std::string bound = multiplexer::format_endpoint(host_, server->local_port());
   MX_LOG(INFO, LOWVERBOSITY, TEXT("starting MX server on " + bound));
+  if (monitor) {
+    MX_LOG(
+        INFO, LOWVERBOSITY,
+        TEXT("serving /healthz and /readyz on http://" + multiplexer::format_endpoint(monitor_host_, monitor->port())));
+  }
+  // The monitor's file first: once the multiplexer's says it listens, a
+  // reader finds the monitor's too.
+  if (monitor && !monitor_port_file_.empty()) {
+    write_port_file(monitor_port_file_, multiplexer::format_endpoint(monitor_host_, monitor->port()));
+  }
   if (!port_file_.empty()) {
     write_port_file(port_file_, bound);
   }
@@ -232,6 +286,9 @@ int StartMultiplexerServer::run() {
     } catch (const std::exception& e) {
       MX_LOG(ERROR, LOWVERBOSITY, TEXT(std::string("exception escaped an io handler: ") + e.what()));
     }
+  }
+  if (monitor) {
+    monitor->stop();  // before the loops finish, which a check under way would wait for in vain
   }
   server->finish_loops();  // the other loops, on several: every connection has ended by now
   MX_LOG(INFO, LOWVERBOSITY, TEXT("MX server stopped"));

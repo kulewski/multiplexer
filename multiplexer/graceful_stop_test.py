@@ -2,7 +2,9 @@
 is queued for a peer that reads is written before its connection closes; a
 peer that does not read ends the stop at the deadline, its queue dropped and
 counted; a connection that never sent its welcome does not hold the stop up;
-a second signal stops at once. And a connection whose first frame is a
+a second signal stops at once; through the drain the monitor's /readyz says
+503 while /healthz says 200, and the monitor goes with the process. And a
+connection whose first frame is a
 heartbeat rather than its welcome, which used to stay forever, and the
 accept loop that spun when descriptors ran out. Counts, never speed: a receiver that does not read
 until the stop has begun holds whatever the machine's speed, and a message
@@ -97,6 +99,31 @@ class GracefulStopTest(unittest.TestCase):
             log = read(multiplexer.log_path)
             self.assertIn("stopped: every connection closed in", log)
             self.assertNotIn("dropped", log[log.index("stopping:") :])
+
+    def test_readiness_ends_with_the_stop_and_health_holds_through_the_drain(self) -> None:
+        """A drain held open by a receiver that does not read: from the
+        moment the stop began /readyz answers 503, the multiplexer stopping,
+        while /healthz goes on answering 200, its loop running the drain;
+        once the receiver has read everything the process exits 0, the
+        monitor with it."""
+        with Cluster(1, rules=RULES, drain_seconds=60, monitor=True) as cluster:
+            multiplexer = cluster.mx[0]
+            self.assertEqual((200, "ok\n"), multiplexer.readyz())
+            receiver, sender, sent = queue_for_a_receiver(cluster)
+            codes = []
+            stopping = threading.Thread(target=lambda: codes.append(multiplexer.stop(timeout=90)))
+            stopping.start()
+            wait_until(lambda: multiplexer.log_contains("stopping:"), 20, "the stop began")
+            self.assertEqual((503, "the multiplexer is stopping\n"), multiplexer.readyz())
+            self.assertEqual((200, "ok\n"), multiplexer.healthz())
+            self.assertEqual(sent, count_until_the_end(receiver, types.PYTHON_TEST_REQUEST))
+            receiver.close()
+            self.assertEqual(0, count_until_the_end(sender, types.PYTHON_TEST_REQUEST))
+            sender.close()
+            stopping.join(90)
+            self.assertEqual([0], codes)
+            with self.assertRaises(ConnectionRefusedError):
+                multiplexer.healthz()
 
     def test_a_receiver_that_does_not_read_ends_the_stop_at_the_deadline(self) -> None:
         """With --drain-seconds 1, a receiver that never reads: the stop

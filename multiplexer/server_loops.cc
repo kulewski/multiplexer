@@ -22,8 +22,10 @@ ServerLoops::Loop::Loop() : work(asio::make_work_guard(io_service)) { asio::stea
 ServerLoops::ServerLoops(asio::io_service& main, unsigned int count) : main_(main), count_(count) {
   MX_DCHECK_RUN_ON(&main_thread_);
   AssertMsg(count >= 2, "ServerLoops are 2 loops at least, " + mx::repr(count) + " asked for");
+  services_.push_back(&main);
   for (unsigned int loop = 1; loop < count; ++loop) {
     loops_.emplace_back(new Loop());
+    services_.push_back(&loops_.back()->io_service);
   }
 }
 
@@ -38,6 +40,11 @@ ServerLoops::~ServerLoops() {
       loop->thread.join();
     }
   }
+}
+
+asio::io_service& ServerLoops::loop(unsigned int index) const {
+  AssertMsg(index < count_, "loop " + mx::repr(index) + " of " + mx::repr(count_) + " asked for");
+  return *services_[index];
 }
 
 asio::io_service& ServerLoops::next() {

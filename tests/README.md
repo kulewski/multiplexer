@@ -74,6 +74,11 @@ with it the Rust toolchain Bazel would fetch.
   `remote_recording_new_address` scenario uses both.
 - A drain in a unit test: `BackendThread(factory, drain_seconds=...)` is the
   cap of a drain the test starts with the backend's `start_draining()`.
+- The multiplexer's health: `Cluster(monitor=True)` starts each
+  multiplexer with `--monitor-address` on a port of its own, and
+  `Mx.healthz()` and `Mx.readyz()` return the monitor's `(status, body)`;
+  `multiplexer/graceful_stop_test.py` holds a drain open and watches
+  `/readyz` say 503 while `/healthz` says 200.
 - The rules file under running multiplexers: a scenario gives `Cluster` a
   copy of the file it may edit, `rules=path`, and
   `rules_check_interval=0.1` to have it read again that often (0 never);

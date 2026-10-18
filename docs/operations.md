@@ -72,10 +72,11 @@ spec:
       containers:
         - name: mx
           image: ghcr.io/kulewski/multiplexer:<version>
-          args: [run_multiplexer, --rules, /etc/mx/multiplexer.rules, --address, "0.0.0.0:1980"]
-          ports: [{containerPort: 1980}]
-          readinessProbe: {tcpSocket: {port: 1980}, periodSeconds: 5}
-          livenessProbe: {tcpSocket: {port: 1980}, periodSeconds: 10}
+          args: [run_multiplexer, --rules, /etc/mx/multiplexer.rules, --address, "0.0.0.0:1980",
+                 --monitor-address, "0.0.0.0:9180"]
+          ports: [{name: mx, containerPort: 1980}, {name: monitor, containerPort: 9180}]
+          readinessProbe: {httpGet: {path: /readyz, port: monitor}, periodSeconds: 5, timeoutSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: monitor}, periodSeconds: 10, timeoutSeconds: 5}
           resources: {requests: {cpu: 100m, memory: 64Mi}}
           volumeMounts: [{name: rules, mountPath: /etc/mx, readOnly: true}]
       volumes:
@@ -102,6 +103,17 @@ needs no rollout: the pods put the new file in use on their own, see
 "Changing the rules" below. A ClusterIP Service per pod,
 which older libraries needed for an address that never changes, still
 works; it is just no longer required.
+
+The probes ask the multiplexer itself, over HTTP on a port of its own
+([health](#health)): `/healthz` answers 200 while every event loop runs,
+and `/readyz` the same until the multiplexer begins to stop. A
+`tcpSocket` probe of port 1980 would see only the kernel, which completes
+the handshake for a multiplexer stuck in a handler as for a running one,
+so that a liveness probe never restarted it and a rolling update went on
+past it. `timeoutSeconds` is above the 2 s a check gives a loop, so that
+the check decides: on the default of 1 s, a loop slow for a moment would
+fail the probe while the check still waited for it. The monitor's port is
+the pods' alone: the Service leaves it out, and only the kubelet asks it.
 
 The image runs as `nonroot` and holds only the binary, so there is no
 shell to `kubectl exec` into; the logs go to stderr, and
@@ -463,7 +475,7 @@ by default.
 
 ## Watching it
 
-There is no status port and no metrics endpoint. What you have:
+There is no metrics endpoint. What you have:
 
 - the log, above: registrations tell you who is connected, undelivered
   messages tell you when a backend type has nobody behind it;
@@ -474,10 +486,48 @@ There is no status port and no metrics endpoint. What you have:
 - the peers themselves: a client that gets `OperationFailed` has learned that
   no backend of that type is connected anywhere, and a backend's
   `connections_count()` says how many multiplexers it currently reaches;
+- the health of each multiplexer over HTTP, below;
 - the peers file and the recording, below.
 
 A `PING` addressed to a backend's instance id is answered by the backend's
 library, which makes a liveness check possible from any client.
+
+### Health
+
+`run_multiplexer --monitor-address HOST:PORT` serves two paths over
+HTTP, on an address and a thread of their own, for Kubernetes probes, a
+load balancer's health check or `curl`:
+
+- `GET /healthz`: `200 ok` while every event loop runs. Each loop is
+  posted a check, which it runs in its turn, after what it is running and
+  what was posted there before; a loop that has not run it within 2 s is
+  named in a 503: `event loop(s) 2 of 4 (0 the main one) did not run a
+  check within 2 s`, or `the event loop did not run ...` on one loop.
+- `GET /readyz`: the same, and `503 the multiplexer is stopping` from the
+  moment a stop begins, the drain at a `SIGTERM` included, while
+  `/healthz` stays 200 as long as the loops run. A rolling update waits
+  for the new pod to be ready, a multiplexer whose loops run; a pod that
+  is terminating Kubernetes takes out of its Service's endpoints on its
+  own, and `/readyz` says the same to a load balancer or a registry that
+  asks.
+- Anything else is 404, and a query string is ignored.
+
+Nothing is served without the option, and it has no default port. The
+address is an IP address and a port, which it needs, read as `--address`
+is ([addresses](mxcontrol.md#addresses)); one in use ends the start with
+exit 1, `--monitor-address 0.0.0.0:9180: bind: Address already in use`,
+before the multiplexer listens. At start the log says `serving /healthz
+and /readyz on http://0.0.0.0:9180`, and `--monitor-port-file PATH`
+writes the address, the port the system picked for port 0, before the
+`--port-file`. In a test, `Cluster(monitor=True)` starts every
+multiplexer with a monitor, and `Mx.healthz()` and `Mx.readyz()` ask it
+([testing](api_python.md#testing)). The monitor answers one request at
+a time, `GET` only, and closes each connection after its answer; one
+that has not sent its request within 10 s is closed, and beyond 16 at
+once a new one is closed at once ([mx::HttpServer](../lib/http_server.h)).
+A loop stuck for good is not posted a check per probe: the next probe
+waits again for the check still queued there, so checks do not pile up
+in it.
 
 ### Who is connected
 

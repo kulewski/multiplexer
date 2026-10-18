@@ -1173,6 +1173,39 @@ from any thread; `serve_forever()` notices within one poll. A
 the workers, its `Request` may be answered from any thread, and
 `serve_forever()` only polls.
 
+## A health endpoint
+
+`mx::HttpServer` (`lib/http_server.h`, `@mx//lib:http_server` in Bazel)
+serves a program's `/healthz`, or any other path, over HTTP on a thread
+of its own, as the multiplexer serves its own probes on it
+([health](operations.md#health)):
+
+```cpp
+#include "lib/http_server.h"
+
+mx::HttpServer health(asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 8080),
+                      [](const std::string& path, std::string& body) {
+                        body = "ok\n";
+                        return path == "/healthz" ? 200 : 404;
+                      });
+```
+
+The constructor binds and starts serving, and throws `std::system_error`
+when it cannot bind; `port()` is the port, the one the system picked for
+port 0; `stop()`, or the destructor, closes the listening socket and every
+connection and joins the thread, after a handler's call under way. The
+handler gets the request target as sent, a query string included, and
+returns the status; its body goes out as text/plain. It runs on the
+server's thread, one request at a time, and one that throws, or returns a
+status outside 100 to 599, is answered 500. The server takes `GET` alone,
+405 for another method, one request a connection, a head of 8 KiB at
+most, 431 beyond, and 16 connections at once, closing one beyond at once;
+a connection has the constructor's `timeout`, 10 s, from its accept for
+its request and the answer, so that a client that connects and says
+nothing holds up nobody. [Check a backend's
+health](recipes/check_backend_health.md#in-c) ties the answer to a
+backend's serve loop.
+
 ## Testing
 
 A C++ service is tested as it runs: its binary, as the data of a

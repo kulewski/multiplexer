@@ -10,8 +10,10 @@ came after the mark, where it searched the whole log, so that a wait for a
 line an earlier step wrote ended at once; and a role's wait that sees
 nothing, and a program's, blocks until its deadline once, where a role's
 woke every half second to see whether the role had exited. Each failed on
-the harness before. Counted, not timed, but for receive_type() and those
-waits, whose timeouts are the thing tested: every other wait is a failure
+the harness before. And a multiplexer's monitor answers healthz() and
+readyz() and keeps its port through a restart, while one without a monitor
+refuses both. Counted, not timed, but for receive_type() and those waits,
+whose timeouts are the thing tested: every other wait is a failure
 detector.
 """
 
@@ -27,6 +29,7 @@ import threading
 import unittest
 
 from multiplexer import recording, testing
+from multiplexer.endpoints import parse_endpoint
 from multiplexer.multiplexer_constants import peers, types
 from multiplexer.servers import BaseMultiplexerServer
 from multiplexer.testing import (
@@ -86,6 +89,24 @@ class HarnessTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 peer.receive_type(types.TEST_EVENT, timeout=4)
             peer.close()
+
+    def test_a_monitor_answers_and_keeps_its_port_through_a_restart(self) -> None:
+        """Cluster(monitor=True): healthz() and readyz() answer 200 from
+        the port the system picked, which a restart serves again; a
+        multiplexer without a monitor refuses both."""
+        with Cluster(1, rules=RULES, monitor=True) as cluster:
+            multiplexer = cluster.mx[0]
+            address = multiplexer.monitor_address
+            assert address is not None
+            self.assertNotEqual(0, parse_endpoint(address)[1])
+            self.assertEqual((200, "ok\n"), multiplexer.healthz())
+            self.assertEqual((200, "ok\n"), multiplexer.readyz())
+            multiplexer.restart()
+            self.assertEqual(address, multiplexer.monitor_address)
+            self.assertEqual((200, "ok\n"), multiplexer.healthz())
+        with Cluster(1, rules=RULES) as cluster:
+            with self.assertRaises(ValueError):
+                cluster.mx[0].healthz()
 
     def test_a_killed_multiplexer_lists_no_peers(self) -> None:
         """The peers file a killed process left is gone: its peers are not

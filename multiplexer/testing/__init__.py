@@ -23,6 +23,7 @@ role), --rules (the rules file) and --params, available as CONFIG.
 """
 
 import atexit
+import http.client
 import json
 import os
 import re
@@ -318,6 +319,12 @@ class Mx:
     multiplexers a prefix of their own, c<n>-, so that two clusters alive
     at once never share a file.
 
+    `monitor_address`, when given, is where the process serves /healthz
+    and /readyz (run_multiplexer --monitor-address, docs/operations.md's
+    "Health"), port 0 for one the system picks, and once started the
+    address the monitor reported in its port file; healthz() and readyz()
+    ask it. A restart serves both on the ports the first start got.
+
     Every process it runs is expected to end at a stop() with exit code 0.
     One that ends otherwise, exits on its own or has to be killed when its
     stop() runs out of time, is kept with the end of its log for the
@@ -340,6 +347,7 @@ class Mx:
         prefix: str = "",
         drain_seconds: float | None = None,
         logging_fd: int | None = None,
+        monitor_address: str | None = None,
     ):
         self.index = index
         self.rules = rules
@@ -360,6 +368,8 @@ class Mx:
         # --logging-fd: a descriptor of this process, passed on to the
         # multiplexer, that gets its binary log stream.
         self.logging_fd = logging_fd
+        # --monitor-address: see the class comment; None serves nothing.
+        self.monitor_address = monitor_address
         self.proc: subprocess.Popen | None = None
         # How the running process ends: "stop" or "kill" once the harness
         # ended it, "itself" once it was found ended without either, None
@@ -374,6 +384,9 @@ class Mx:
         stem = os.path.join(output_dir(), "%smx%d" % (prefix, index))
         self.log_path = stem + ".log"
         self.port_file = stem + ".port"
+        # --monitor-port-file, with a monitor: where the monitor listens,
+        # written before the port file.
+        self.monitor_port_file = stem + ".monitor.port"
         # --peers-file: one line per connected peer, rewritten by the
         # multiplexer on every change; connected_peers() reads it.
         self.peers_file = stem + ".peers"
@@ -409,10 +422,9 @@ class Mx:
         first, self._started = not self._started, True
         if self not in Mx._all:
             Mx._all.append(self)
-        if os.path.exists(self.port_file):
-            os.unlink(self.port_file)
-        if os.path.exists(self.peers_file):
-            os.unlink(self.peers_file)
+        for stale in (self.port_file, self.monitor_port_file, self.peers_file):
+            if os.path.exists(stale):
+                os.unlink(stale)
         if self.record and first and os.path.exists(self.record_file):
             os.unlink(self.record_file)  # an earlier run's; the multiplexer appends to the file
         command = [
@@ -439,6 +451,8 @@ class Mx:
             command += ["--rules-check-interval", str(self.rules_check_interval)]
         if self.drain_seconds is not None:
             command += ["--drain-seconds", str(self.drain_seconds)]
+        if self.monitor_address is not None:
+            command += ["--monitor-address", self.monitor_address, "--monitor-port-file", self.monitor_port_file]
         passed: tuple[int, ...] = ()
         if self.logging_fd is not None:
             command += ["--logging-fd", str(self.logging_fd)]
@@ -469,6 +483,9 @@ class Mx:
             time.sleep(0.02)
         with open(self.port_file) as port_file:
             self.address = port_file.read().strip()
+        if self.monitor_address is not None:
+            with open(self.monitor_port_file) as monitor_port_file:
+                self.monitor_address = monitor_port_file.read().strip()
         return self
 
     def stop(self, timeout: float | None = None) -> int | None:
@@ -634,6 +651,36 @@ class Mx:
         """The multiplexer's resident set size in KiB right now."""
         return rss_kb(self.proc.pid) if self.proc else 0
 
+    def healthz(self, timeout: float = 10) -> tuple[int, str]:
+        """GET /healthz from the multiplexer's monitor: (status, body),
+        (200, "ok\\n") while every event loop of it runs, 503 and the loops
+        that did not run a check within 2 s otherwise. ValueError without a
+        monitor (monitor_address, Cluster(monitor=True));
+        ConnectionRefusedError while the process is not running;
+        TimeoutError past `timeout`, a paused() one's answer."""
+        return self._ask_monitor("/healthz", timeout)
+
+    def readyz(self, timeout: float = 10) -> tuple[int, str]:
+        """GET /readyz from the multiplexer's monitor: as healthz(), and
+        (503, "the multiplexer is stopping\\n") from the moment its stop
+        began, through the drain."""
+        return self._ask_monitor("/readyz", timeout)
+
+    def _ask_monitor(self, path: str, timeout: float) -> tuple[int, str]:
+        """GET `path` from the monitor, on the loopback for one that
+        listens on every address: (status, body)."""
+        if self.monitor_address is None:
+            raise ValueError("mx%d serves no monitor: Mx(monitor_address=...) or Cluster(monitor=True)" % self.index)
+        host, port = parse_endpoint(self.monitor_address)
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        try:
+            connection.request("GET", path)
+            answer = connection.getresponse()
+            return answer.status, answer.read().decode()
+        finally:
+            connection.close()
+
     def memory_samples(self) -> list[tuple[int, int]]:
         """(messages routed, C heap bytes in use) from the log lines written
         every memory_log_every messages."""
@@ -668,7 +715,9 @@ class Cluster:
     None, 0 at once); `host`, the address every multiplexer listens on, on
     a port of its own: 127.0.0.1 unless told, "::1" for IPv6, or "::" for
     every address, IPv6 and, where the system maps it, as Linux does by
-    default, IPv4. Use as a context
+    default, IPv4; `monitor`, whether each also serves /healthz and
+    /readyz on `host`, on another port of its own, which Mx.healthz() and
+    Mx.readyz() ask. Use as a context
     manager: entering starts the multiplexers, leaving stops every role
     and every Process that is still running and then them. The in-process peers of fakes.py
     are the test's to stop, inside the cluster's block, since they would
@@ -700,6 +749,7 @@ class Cluster:
         rules_check_interval: float | None = None,
         drain_seconds: float | None = None,
         host: str = "127.0.0.1",
+        monitor: bool = False,
     ):
         if rules is None:
             if CONFIG is None or not CONFIG.rules:
@@ -728,6 +778,7 @@ class Cluster:
                 rules_check_interval=rules_check_interval,
                 prefix="c%d-" % Cluster._counter,
                 drain_seconds=drain_seconds,
+                monitor_address=format_endpoint((host, 0)) if monitor else None,
             )
             for index in range(count)
         ]

@@ -9,6 +9,7 @@ LIB_SRCS := \
   lib/crc32.cc \
   lib/exception.cc \
   lib/fork.cc \
+  lib/http_server.cc \
   lib/kwargs.cc \
   lib/logging/logging.cc \
   lib/memory.cc \
@@ -32,6 +33,7 @@ LIB_SRCS := \
   multiplexer/io/raw_message.cc \
   multiplexer/key_filters.cc \
   multiplexer/log_summary.cc \
+  multiplexer/monitor.cc \
   multiplexer/outbox.cc \
   multiplexer/outbox_expiry.cc \
   multiplexer/outbox_flush.cc \
@@ -93,6 +95,7 @@ HEADERS := \
   lib/fingerprint.h \
   lib/fork.h \
   lib/functors.h \
+  lib/http_server.h \
   lib/initialization.h \
   lib/kwargs.h \
   lib/logging/impl.h \
@@ -135,6 +138,7 @@ HEADERS := \
   multiplexer/io/shared_outgoing.h \
   multiplexer/key_filters.h \
   multiplexer/log_summary.h \
+  multiplexer/monitor.h \
   multiplexer/outbox.h \
   multiplexer/recorder.h \
   multiplexer/server.h \
@@ -190,6 +194,7 @@ CC_TEST_SRCS := \
   lib/digest_test.cc \
   lib/encoding/little_endian_test.cc \
   lib/exception_test.cc \
+  lib/http_server_test.cc \
   lib/kwargs_test.cc \
   lib/logging/concurrent_settings_test.cc \
   lib/logging/process_name_test.cc \
@@ -229,6 +234,7 @@ CC_TEST_SRCS := \
   multiplexer/key_filters_test.cc \
   multiplexer/live_id_test.cc \
   multiplexer/log_summary_test.cc \
+  multiplexer/monitor_test.cc \
   multiplexer/negative_timeout_test.cc \
   multiplexer/oversized_message_test.cc \
   multiplexer/parse_target_test.cc \

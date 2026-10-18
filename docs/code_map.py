@@ -126,6 +126,12 @@ INDEX = [
         "`multiplexer/server_shared.cc`",
     ),
     (
+        "A multiplexer's health for Kubernetes probes, over HTTP",
+        "multiplexer/monitor.h",
+        "`Monitor::_check_loops`, a check posted to every loop; the server under it, `mx::HttpServer` in "
+        "`lib/http_server.h`; `--monitor-address` in `mxcontrol/start_multiplexer_server.cc`",
+    ),
+    (
         "Writing through: a connection several loops route to",
         "multiplexer/io/shared_outgoing.h",
         "`SharedOutgoing`; `Connection::enqueue_shared` and `write_claimed` in `multiplexer/io/connection.h`",

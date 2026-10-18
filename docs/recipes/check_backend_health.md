@@ -187,6 +187,47 @@ class Backend : public multiplexer::backend::BaseMultiplexerServer {
 };
 ```
 
+`mx::HttpServer` ([lib/http_server.h](../../lib/http_server.h)), what
+the multiplexer's own probes are served on
+([health](../operations.md#health)), answers the probe from it: in Bazel
+`@mx//lib:http_server`, and in the C++ library and its headers that
+`make install` and the Debian package install.
+
+```cpp
+#include <asio/ip/address_v4.hpp>
+#include <string>
+
+#include "lib/http_server.h"
+
+// Serves until the backend's loop returns, and meanwhile GET /healthz on
+// port 8080 of every address: 503 once the loop has not come round for
+// 30 s, the example's STALE_SECONDS.
+void serve(const multiplexer::backend::MultiplexerAddresses& addresses) {
+  Backend backend(addresses);
+  mx::HttpServer health(asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 8080),
+                        [&backend](const std::string& path, std::string& body) {
+                          if (path != "/healthz") {
+                            return 404;
+                          }
+                          if (backend.stale(std::chrono::seconds(30))) {
+                            body = "the serve loop has not come round for 30 s\n";
+                            return 503;
+                          }
+                          body = "ok\n";
+                          return 200;
+                        });
+  backend.serve_forever();
+}
+```
+
+The handler runs on the server's thread, one request at a time, where
+it reads the atomic; `health`, made after `backend`, is let go of first,
+so it never asks a backend that is gone. The server takes `GET` alone
+and closes each connection after its answer, and one that has not sent
+its request within 10 s, so that a client that connects and says
+nothing holds up no probe; an address in use throws `std::system_error`
+from the constructor.
+
 ## The threaded server classes
 
 `BaseThreadedMultiplexerServer`'s `serve_forever()` thread only waits

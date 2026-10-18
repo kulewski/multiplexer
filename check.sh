@@ -55,9 +55,12 @@ if [[ "${1:-}" == "--valgrind" ]]; then
   memcheck="valgrind --tool=memcheck --error-exitcode=99 --track-origins=yes --leak-check=no"
   memcheck+=" --suppressions=$PWD/tools/memcheck.supp"
   # The tests that cannot run under valgrind: those that count allocations
-  # by an operator new of their own, which valgrind replaces, and one that
-  # runs a renamed child, which valgrind refuses to start.
+  # by an operator new of their own, which valgrind replaces; one that runs
+  # a renamed child, which valgrind refuses to start; and one that runs the
+  # process out of descriptors, where valgrind closes what accept() took
+  # from the listening socket's queue, the connection waiting there lost.
   cannot="ProcessName.*:ParseTarget.*:ReceiveAllocations.*:SendAllocations.*:RouteAllocations.*"
+  cannot+=":HttpServer.AnAcceptThatFailsIsTriedAgainLater"
   bazel test --run_under="$memcheck" --test_lang_filters=cc --test_arg=--gtest_filter="-$cannot" \
     --test_timeout=3600 --test_tag_filters=-slow //lib/... //multiplexer/...
   bazel build //mxcontrol

@@ -188,7 +188,7 @@ cc_library(
 cc_library(
     name = "repr",
     hdrs = ["repr.h"],
-    visibility = ["//lib:__subpackages__"],
+    visibility = ["//:__subpackages__"],
 )
 
 cc_library(
@@ -242,6 +242,34 @@ cc_library(
         ":seconds",
         "//lib/logging",
         "@asio",
+    ],
+)
+
+cc_library(
+    name = "http_server",
+    srcs = ["http_server.cc"],
+    hdrs = ["http_server.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":assert",
+        ":repr",
+        ":seconds",
+        ":thread_annotations",
+        ":thread_checker",
+        "//lib/logging",
+        "@asio",
+    ],
+)
+
+cc_test(
+    name = "http_server_test",
+    size = "small",
+    srcs = ["http_server_test.cc"],
+    deps = [
+        ":http_server",
+        ":mutex",
+        "@asio",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

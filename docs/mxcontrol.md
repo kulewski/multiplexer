@@ -51,14 +51,15 @@ Runs one multiplexer.
 mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address HOST:PORT]
                           [--port-file PATH] [--peers-file PATH] [--record PATH]
                           [--record-payload-bytes N] [--recording-dir DIR] [--allow-tap]
-                          [--drain-seconds S] [--threads N] [--memory-log-every N]
+                          [--drain-seconds S] [--threads N] [--monitor-address HOST:PORT]
+                          [--monitor-port-file PATH] [--memory-log-every N]
 ```
 
 | Option | Default | Effect |
 |---|---|---|
 | `--rules FILE` | `multiplexer.rules` in the current directory | the [rules file](rules.md), read at start and again whenever it changes |
 | `--rules-check-interval S` | 2 | seconds between reads of the rules file, 0.01 at least, a shorter one refused as a malformed command line; a changed file is put in use without a restart once two reads in a row saw the same new bytes, see [changing the rules](operations.md#changing-the-rules); 0 never reads it again (`SIGHUP` and `mxcontrol rules reload` still do) |
-| `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on, `[ADDRESS]:PORT` for an IPv6 one ([addresses](#addresses)); `HOST` or `[ADDRESS]` alone keeps port 1980 |
+| `--address HOST:PORT`, `-M`, or the first positional argument | `0.0.0.0:1980` | the address to listen on, `[ADDRESS]:PORT` for an IPv6 one ([addresses](#addresses)); `HOST` or `[ADDRESS]` alone keeps port 1980. One that cannot be bound, in use or not this host's, ends the start with exit 1: `--address 0.0.0.0:1980: bind: Address already in use` |
 | `--port-file PATH` | none | after binding, write the address with the port bound, `host:port` or `[address]:port`, to this file, atomically; a write that fails, a full disk say, ends the start with exit 1 and the reason, the file left as it was |
 | `--peers-file PATH` | none | keep this file listing every connected peer, one `<instance id> <type name> <type>` per line, written at start and rewritten atomically after a change, at most once every 10 ms; a write that fails, a full disk say, leaves the file as it was and is logged at `ERROR` with the reason, once while the reason stays the same |
 | `--record PATH` | none | write every routed message and every peer arrival and departure to this file; see [operations](operations.md#recording). A file that cannot be opened is logged at `ERROR`, and the multiplexer runs on without recording |
@@ -67,6 +68,8 @@ mxcontrol run_multiplexer [--rules FILE] [--rules-check-interval S] [--address H
 | `--allow-tap` | off | let peers receive every record over their connection |
 | `--drain-seconds S` | 5 | on `SIGTERM` or `SIGINT`, how long to go on routing and sending what is queued before each connection closes; 0, or a negative value, stops at once, dropping what is queued |
 | `--threads N` | 0: the environment's `MX_SERVER_THREADS`, else 1 | the event loops the connections are dealt out over as they are accepted, each on a thread of its own, every message routed under one lock they share; 1 is the multiplexer on one thread, more for a host where that thread is full, see [several event loops](operations.md#several-event-loops). At most 256, and `MX_SERVER_THREADS` a number from 1 to 256, or the command line is refused as malformed. `MX_SERVER_THREADS` lets a deployment or a test suite set it for every multiplexer it starts |
+| `--monitor-address HOST:PORT` | none: nothing served | serve `/healthz` and `/readyz` over HTTP on this address, for Kubernetes probes: 200 while every event loop runs, and `/readyz` 503 once the multiplexer begins to stop; see [health](operations.md#health). The port is required; an address in use ends the start with exit 1 |
+| `--monitor-port-file PATH` | none | once the monitor listens, write its address with the port bound to this file, as `--port-file` does the multiplexer's and before it, so that a test or a supervisor that gave port 0 finds both once the port file is there; without `--monitor-address` the command line is refused as malformed |
 | `--memory-log-every N` | 0 (never) | log the C heap in use after every N routed messages, for soak tests |
 
 `--address` takes an IP address, not a host name, which would leave the
@@ -86,7 +89,8 @@ until what is queued for it is written; then it closes the polite way:
 the multiplexer's end of the stream follows everything written, and what
 the peer still sends is read and dropped until the peer's own end, 1 s at
 most. A peer that does not read by `--drain-seconds` loses what is still
-queued for it, and its connection is closed. Once every connection has
+queued for it, and its connection is closed. Meanwhile the monitor, with
+`--monitor-address`, answers `/readyz` with 503. Once every connection has
 ended, the process exits with 0, within `--drain-seconds` and a second; a
 second `SIGINT` or `SIGTERM` stops it at once, as does `--drain-seconds 0`.
 Its last line says how long the stop took and what it dropped, if

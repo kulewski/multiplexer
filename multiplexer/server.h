@@ -160,6 +160,16 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // last, which would make it join its own thread.
   void set_threads(unsigned int threads);
   void finish_loops();
+  // How many event loops serve the connections, the main one included;
+  // from any thread once set_threads() has run.
+  unsigned int loop_count() const { return loops_ ? loops_->count() : 1; }
+  // Runs `work` on event loop number `loop`, 0 the main one, as the log
+  // numbers them; from any thread once set_threads() has run. `work` runs
+  // when the loop gets to it, after what it is running and what was
+  // posted there before, or never, when the loop has stopped: what the
+  // monitor (multiplexer/monitor.h) posts to see that every loop runs. It
+  // runs with no routing scope held, so it must not touch the server.
+  void post_to_loop(unsigned int loop, std::function<void()> work);
 
   // The rules file. set_rules_file() names it and load_rules() reads it:
   // when the text differs from the rules in use, it is parsed and put in
@@ -191,10 +201,8 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // run_multiplexer's --rules-check-interval apply.
   static std::string rules_check_interval_refused(float seconds);
   // Whether stop() has run: the acceptor is closed and nothing re-arms.
-  bool stopped() const {
-    RoutingScope routing(*this);
-    return stopping_;
-  }
+  // From any thread: the monitor's /readyz asks from its own.
+  bool stopped() const { return stopping_; }
   // The CRC-32 of the rules in use, as the generated constants carry it.
   std::string rules_fingerprint() const {
     RoutingScope routing(*this);
@@ -740,8 +748,9 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   std::set<const Connection*> departed_ MX_GUARDED_BY(owner_thread_);
   asio::steady_timer accept_timer_ MX_GUARDED_BY(owner_thread_);
   // stop(): whether it ran, its deadline for the drain, its callback, and
-  // what it dropped, said in its last line.
-  bool stopping_ MX_GUARDED_BY(owner_thread_) = false;
+  // what it dropped, said in its last line. Whether it ran is written under
+  // the routing scope, by stop(), and read anywhere (stopped()).
+  std::atomic<bool> stopping_{false};
   bool stop_done_ MX_GUARDED_BY(owner_thread_) = false;
   std::chrono::steady_clock::time_point stop_started_ MX_GUARDED_BY(owner_thread_);
   asio::steady_timer drain_timer_ MX_GUARDED_BY(owner_thread_);

@@ -8,7 +8,8 @@
 // wait (Connection's "Writing through").
 //
 // Used by Server alone, on the main loop's thread: next() at each accept,
-// start() before the main loop runs, finish() once it has returned. The
+// start() before the main loop runs, finish() once it has returned; and
+// loop() from any thread, for a post there (Server::post_to_loop). The
 // reactor of each extra loop, its epoll, eventfd and timerfd descriptors,
 // is made with the loop: made at its first connection, as asio makes it,
 // it threw at the descriptor limit out of the accept that made that
@@ -39,6 +40,9 @@ class ServerLoops {
 
   // How many loops, the main one included; from any thread.
   unsigned int count() const { return count_; }
+  // Loop number `index`, 0 the main one, as the log numbers them; from any
+  // thread.
+  asio::io_service& loop(unsigned int index) const;
   // The loop the next connection accepted lives on, round robin from the
   // main one.
   asio::io_service& next();
@@ -62,12 +66,16 @@ class ServerLoops {
   // as the main loop is (mxcontrol/start_multiplexer_server.cc).
   static void _run(asio::io_service& io_service, unsigned int number);
 
-  // The thread that runs the main loop, which every method here runs on.
+  // The thread that runs the main loop, which every method here but
+  // count() and loop() runs on.
   mx::ThreadChecker main_thread_;
   asio::io_service& main_;
   const unsigned int count_;
   std::vector<std::unique_ptr<Loop>> loops_ MX_GUARDED_BY(main_thread_);
   unsigned int next_ MX_GUARDED_BY(main_thread_) = 0;
+  // Every loop's io_service, the main one first: made by the constructor
+  // and never changed, so that any thread reads it.
+  std::vector<asio::io_service*> services_;
 };
 
 }  // namespace multiplexer

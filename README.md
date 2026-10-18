@@ -162,8 +162,9 @@ The peers get `mx-0.mx:1980,mx-1.mx:1980,mx-2.mx:1980`. A rolling update
 restarts the multiplexers one at a time, which costs a request nothing
 while the peers are on the others, and an edit of the ConfigMap needs no
 rollout at all. [docs/operations.md](docs/operations.md#on-kubernetes) has
-the complete manifest, with the pods spread over nodes and a
-PodDisruptionBudget, and the inference example's `compose.yaml` runs a
+the complete manifest, with the pods spread over nodes, a
+PodDisruptionBudget and probes that ask each multiplexer over HTTP whether
+its event loops run, and the inference example's `compose.yaml` runs a
 whole stack with `docker compose up`: two multiplexers, the workers and
 the web app ([examples/inference](examples/inference)).
 

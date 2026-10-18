@@ -4,6 +4,9 @@ streamlogs and receivelogs (Task's client), in rules and recording
 (EveryAddress). A malformed one is a malformed command line, exit 1 with
 the reason, where run_multiplexer stopped on an assertion and the log
 commands warned and went on without it; nothing listens or connects.
+One run_multiplexer cannot bind, in use, ends the start with exit 1 and
+the option and the address named, where the exception's words alone,
+`bind: Address already in use`, said neither.
 Over IPv6, where the machine has a loopback for it: a multiplexer on
 [::1] writes its port file in brackets, `rules status` reaches it, and
 receivelogs registers with it."""
@@ -55,6 +58,32 @@ class AddressesTest(unittest.TestCase):
                 self.assertEqual(1, ended.returncode, ended.stderr)
                 self.assertIn(reason, ended.stderr)
                 self.assertFalse(os.path.exists(port_file), "a multiplexer listened")
+
+    def test_an_address_in_use_ends_the_start_naming_the_option(self):
+        port_file = os.path.join(tempfile.mkdtemp(), "mx.port")
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            address = "127.0.0.1:%d" % taken.getsockname()[1]
+            ended = subprocess.run(
+                [
+                    MXCONTROL,
+                    "run_multiplexer",
+                    "--rules",
+                    TESTING_RULES,
+                    "--port-file",
+                    port_file,
+                    "--address",
+                    address,
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=BOUND,
+            )
+        self.assertEqual(1, ended.returncode, ended.stderr)
+        self.assertIn("--address %s: bind: Address already in use" % address, ended.stderr)
+        self.assertFalse(os.path.exists(port_file), "a multiplexer listened")
 
     @unittest.skipUnless(ipv6_loopback(), "no IPv6 loopback")
     def test_over_ipv6(self):
