@@ -516,7 +516,12 @@ struct PythonClient : public Client {
 
 // The holder's deleter: a PythonClient is destroyed without the GIL, the
 // destructor of its io_service included, which waits for a name lookup
-// under way on asio's resolver thread, as long as the lookup takes.
+// under way on asio's resolver thread, as long as the lookup takes. Letting
+// go of the GIL in the middle of a deallocation, before pybind11 clears
+// the object's weakrefs, lets no other thread at the object: its refcount
+// is 0 by then, and CPython resolves a weakref to an object with none to
+// None, every version we support; pybind11 took the instance out of its
+// registry before calling this, so no cast finds it either.
 struct DeleteWithoutGil {
   void operator()(PythonClient* client) const {
     GilRelease release;
@@ -555,7 +560,12 @@ struct PythonThreadedClient {
   // confirmed batch it raised on is confirmed FAILED from here, which
   // the confirmation after its return then leaves alone: the exception
   // never reaches the C++ side. `client` is the one under construction,
-  // whose callback this is: called only once it is built.
+  // whose callback this is: called only once it is built, and never once it
+  // is gone. The callback multiplexer.threaded_client.ThreadedClient, the
+  // one maker of this class, gives refers back to that wrapper, which holds
+  // this object, and the client holds the callback until its io thread has
+  // ended, a shutdown() from within the callback included: while a call
+  // runs, the client lives.
   static ThreadedClient::MessageSink sink_for(pybind11::object callback, ThreadedClient* client) {
     std::shared_ptr<pybind11::object> held(new pybind11::object(callback), [](pybind11::object* object) {
       PythonCall call;
@@ -577,6 +587,8 @@ struct PythonThreadedClient {
       }
     };
   }
+  // Without the GIL, which the io thread's callbacks need to end; as safe
+  // in the middle of a deallocation as DeleteWithoutGil says.
   ~PythonThreadedClient() {
     GilRelease release;
     client.shutdown();

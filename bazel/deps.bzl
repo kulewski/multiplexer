@@ -18,7 +18,11 @@ py_repositories() (the targets use Bazel's native py_* rules), so any
 rules_python from 0.1.0 on works, and mx_setup(python = False) skips the
 call when another ruleset already made it, while a workspace without the
 Python package calls neither; standalone Asio for the io layer;
-pybind11 and pybind11_bazel for the Python extension; bazel_skylib
+pybind11 and pybind11_bazel for the Python extension, where a
+workspace's own pybind11, which maybe() keeps, works from 2.9 on: the
+Makefile builds test the extension with the distributions' 2.9 to 2.13,
+Bazel and the wheels with 3.1.0, each on the Python versions its release
+supports (3.13 from 2.13, 3.14 from 3.0); bazel_skylib
 for the build flags in the root BUILD; RE2 for the multiplexer's key
 filters, which only the multiplexer itself (//mxcontrol) links, so a
 workspace that builds peers alone never fetches it. protoc and libprotobuf are not
