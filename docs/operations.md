@@ -498,8 +498,8 @@ library, which makes a liveness check possible from any client.
 
 ### Health
 
-`run_multiplexer --monitor-address HOST:PORT` serves two paths over
-HTTP, on an address and a thread of their own, for Kubernetes probes, a
+`run_multiplexer --monitor-address HOST:PORT`, 4.1.0 or newer, serves
+two paths over HTTP, on an address and a thread of their own, for Kubernetes probes, a
 load balancer's health check or `curl`:
 
 - `GET /healthz`: `200 ok` while every event loop runs. Each loop is

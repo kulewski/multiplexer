@@ -1,6 +1,6 @@
 # Metrics
 
-`run_multiplexer --monitor-address HOST:PORT` serves `/metrics` beside
+`run_multiplexer --monitor-address HOST:PORT`, 4.1.0 or newer, serves `/metrics` beside
 `/healthz` and `/readyz` ([health](operations.md#health)): what the
 multiplexer has counted since it started, in Prometheus' text format,
 version 0.0.4, sent as `text/plain; version=0.0.4; charset=utf-8`.
