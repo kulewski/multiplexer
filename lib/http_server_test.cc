@@ -151,6 +151,23 @@ TEST(HttpServer, TheStatusTheHandlerGivesIsSent) {
   EXPECT_EQ(ask(other.port(), "GET / HTTP/1.1\r\n\r\n"), response("299 ", ""));
 }
 
+// A handler of the typed form sets the answer's content type, as /metrics
+// does for Prometheus; an error the server itself answers stays text/plain.
+TEST(HttpServer, ATypedHandlerSetsTheContentType) {
+  mx::HttpServer server(loopback(),
+                        mx::HttpTypedHandler([](const std::string&, std::string& body, std::string& content_type) {
+                          body = "mx_up 1\n";
+                          content_type = "text/plain; version=0.0.4; charset=utf-8";
+                          return 200;
+                        }));
+  const std::string answer = ask(server.port(), "GET /metrics HTTP/1.1\r\n\r\n");
+  EXPECT_EQ(answer,
+            "HTTP/1.0 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: 8\r\n"
+            "Connection: close\r\n\r\nmx_up 1\n");
+  EXPECT_EQ(ask(server.port(), "POST /metrics HTTP/1.1\r\n\r\n"),
+            response("405 Method Not Allowed", "GET is the one method served\n", "Allow: GET\r\n"));
+}
+
 TEST(HttpServer, AHeadEndingInBareLineFeedsIsAnswered) {
   Recorder recorder;
   mx::HttpServer server(loopback(), recorder.handler(200, "ok\n"));

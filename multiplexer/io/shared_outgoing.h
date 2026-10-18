@@ -164,6 +164,12 @@ class alignas(64) SharedOutgoing {  // its lock on a cache line of its own
     mx::AdaptiveMutexLock lock(mutex_);
     return limit_ <= queue_.size();
   }
+  // How many frames wait, the one being written included, from any thread:
+  // what the multiplexer's metrics sum by peer type.
+  std::size_t size() const MX_EXCLUDES(mutex_) {
+    mx::AdaptiveMutexLock lock(mutex_);
+    return queue_.size();
+  }
   // The queue's limit, from any thread.
   void set_limit(std::uint32_t limit) MX_EXCLUDES(mutex_) {
     mx::AdaptiveMutexLock lock(mutex_);

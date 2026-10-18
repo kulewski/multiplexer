@@ -666,6 +666,27 @@ class Mx:
         began, through the drain."""
         return self._ask_monitor("/readyz", timeout)
 
+    def metrics(self, timeout: float = 10) -> list[tuple[str, dict[str, str], float]]:
+        """GET /metrics from the multiplexer's monitor: every sample, as
+        (name, labels, value), in the order it wrote them
+        (docs/metrics.md). RuntimeError for an answer other than 200, its
+        main event loop not answering say; otherwise as healthz()."""
+        status, body = self._ask_monitor("/metrics", timeout)
+        if status != 200:
+            raise RuntimeError("mx%d's /metrics answered %d: %s" % (self.index, status, body.strip()))
+        return _parse_metrics(body)
+
+    def metric(self, name: str, timeout: float = 10, **labels: str) -> float:
+        """The sum of the samples of `name` whose labels include `labels`,
+        0 when none does: metric("mx_messages_dropped_total",
+        reason="queue_full") counts the copies full queues refused, of
+        every type."""
+        return sum(
+            value
+            for sample, sample_labels, value in self.metrics(timeout)
+            if sample == name and all(sample_labels.get(label) == wanted for label, wanted in labels.items())
+        )
+
     def _ask_monitor(self, path: str, timeout: float) -> tuple[int, str]:
         """GET `path` from the monitor, on the loopback for one that
         listens on every address: (status, body)."""
@@ -694,6 +715,30 @@ class Mx:
         except OSError:
             pass
         return samples
+
+
+# A sample line of Prometheus' text format, and a label in one.
+_SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})? (\S+)$")
+_LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
+
+
+def _parse_metrics(text: str) -> list[tuple[str, dict[str, str], float]]:
+    """(name, labels, value) for every sample of `text`, in Prometheus'
+    text format as a multiplexer's /metrics writes it; ValueError for a
+    line that is not one."""
+    samples = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = _SAMPLE.match(line)
+        if match is None:
+            raise ValueError("not a sample line: %r" % line)
+        labels = {
+            name: re.sub(r"\\(.)", lambda escaped: "\n" if escaped.group(1) == "n" else escaped.group(1), value)
+            for name, value in _LABEL.findall(match.group(2) or "")
+        }
+        samples.append((match.group(1), labels, float(match.group(3))))
+    return samples
 
 
 def _addresses(host: str) -> set[str]:

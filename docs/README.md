@@ -301,6 +301,10 @@ Each page is one fixed picture whose arrows light up one step at a time.
 - [Operations](operations.md): several multiplexers, on Kubernetes,
   restarts, logs, the peers file, recording what was routed and driving
   it on a running cluster, sizing.
+- [Metrics](metrics.md): what a multiplexer's `/metrics` tells
+  Prometheus, above all the messages that went nowhere and why, the
+  peers and their queues, its event loops' lag, and how to read them
+  across replicas and restarts.
 - [Questions people ask](faq.md): why it is built this way.
 - [The multiplexer and Kafka, measured](kafka.md): what one multiplexer and
   one Kafka broker move a second on one machine, both batching, how late

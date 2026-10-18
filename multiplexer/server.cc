@@ -262,6 +262,13 @@ void Server::connection_closed(Connection* conn) {
   if (departed_.erase(conn)) {
     _emit_peer(PeerEvent::DISCONNECTED, conn->peer_id(), conn->peer_type());
   }
+  // Out of accepted_ and into the totals under one scope, so that a
+  // snapshot counts it once (metrics()).
+  ended_received_messages_ += conn->received_messages();
+  ended_received_bytes_ += conn->received_bytes();
+  if (conn->dropped_while_closing()) {
+    _count_drop(CLOSING, NO_TYPE, NO_TYPE, conn->dropped_while_closing());
+  }
   if (stopping_) {
     stop_dropped_read_ += conn->dropped_while_closing();
     _stop_if_done();
@@ -378,6 +385,7 @@ void Server::_handle_accept(Connection::pointer new_connection, const asio::erro
   }
   if (error == asio::error::no_descriptors || error == asio::error::no_buffer_space ||
       error == asio::error::no_memory || error.value() == ENFILE) {
+    ++accept_failures_;
     if (drops_.first({ACCEPT_FAILED, ERROR, 0, 0}, [&] { return "cannot accept a connection: " + error.message(); })) {
       MX_LOG(ERROR, LogSummary::VERBOSITY,
              CTX("multiplexer.server") TEXT("cannot accept a connection: " + error.message() + "; trying again every " +
@@ -425,18 +433,22 @@ void Server::_accept_later() {
 
 void Server::handle_message(const Connection::pointer& conn, const std::shared_ptr<const RawMessage>& raw,
                             const std::shared_ptr<MultiplexerMessage>& msg) {
+  conn->count_received(raw->frame_length());  // its own loop's, no lock
   RoutingScope routing(*this);
   if (msg->sender() == instance_id_) {
     MX_LOG(ERROR, MEDIUMVERBOSITY,
            CTX("multiplexer.server") TEXT("received message from self") FLOW(msg->workflow())
                SKIPFILEIF(!(msg->logging_method() & multiplexer::LoggingMethod::FILE)));
+    _count_drop(UNKNOWN_PROTOCOL_TYPE, msg->type(), NO_TYPE);  // no peer may send as the multiplexer
     return;
   }
   // Read by a connection a newcomer with its instance id replaced, from
   // another loop, before its own loop ended it: dropped, as at one loop,
   // where the replacement ends the old connection at once and nothing it
-  // still held is read. At one loop replaced_ stays empty.
+  // still held is read, which is counted as what a closing connection read.
+  // At one loop replaced_ stays empty.
   if (!replaced_.empty() && replaced_.count(conn.get())) {
+    _count_drop(CLOSING, NO_TYPE, NO_TYPE);
     return;
   }
   return _handle_message(conn, *msg, raw);
@@ -523,6 +535,7 @@ void Server::_handle_message(const Connection::pointer& conn, const MultiplexerM
   // filters, and a search matches its key for the type it searches.
   if (msg.has_key() && !msg.to()) {
     if (msg.key().size() > MAX_KEY_SIZE) {
+      _count_drop(KEY_TOO_LONG, msg.type(), NO_TYPE);
       if (const std::string* line = drops_.first({KEY_TOO_LONG, WARNING, msg.type(), 0}, [&] {
             return "message of type " + _type_name(msg.type()) + " with a key over " + repr(MAX_KEY_SIZE) +
                    " bytes (MAX_KEY_SIZE); dropping";
@@ -548,6 +561,7 @@ void Server::_handle_message(const Connection::pointer& conn, const MultiplexerM
     const Config::MessageDescriptionById& definitions = config_.message_description_by_id();
     Config::MessageDescriptionById::const_iterator definition = definitions.find(msg.type());
     if (definition == definitions.end()) {
+      _count_drop(UNKNOWN_TYPE, msg.type(), NO_TYPE);
       if (const std::string* line = drops_.first({UNKNOWN_TYPE, WARNING, msg.type(), 0}, [&] {
             return "message of unknown type " + repr(msg.type()) + "; dropping";
           })) {
@@ -563,6 +577,7 @@ void Server::_handle_message(const Connection::pointer& conn, const MultiplexerM
     if (description.to().empty()) {
       // A reply type, or any other without a rule, sent without `to`: nobody
       // could ever receive it. Say so now rather than let the sender wait.
+      _count_drop(NO_RULE, msg.type(), NO_TYPE);
       if (const std::string* line = drops_.first({NO_RULE, WARNING, msg.type(), 0}, [&] {
             return "message of type " + repr(msg.type()) + " (" + description.name() +
                    ") has no routing rule and no `to`; dropping";
@@ -703,6 +718,7 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       // Only meaningful with a `to` field, which was handled before this:
       // without one nobody could receive it, which its sender is told, as
       // for a type of the rules file with no rule.
+      _count_drop(NO_RULE, meta_handler.msg.type(), NO_TYPE);
       if (const std::string* line = drops_.first({NO_RULE, WARNING, meta_handler.msg.type(), 0}, [&] {
             return "protocol message of type " + repr(meta_handler.msg.type()) + " without `to`; dropping";
           })) {
@@ -727,6 +743,7 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     case types::BACKEND_FOR_PACKET_SEARCH: {
       BackendForPacketSearch search;
       if (!search.ParseFromString(meta_handler.msg.message())) {
+        _count_drop(BAD_SEARCH, meta_handler.msg.type(), NO_TYPE);
         if (const std::string* line =
                 drops_.first({BAD_SEARCH, ERROR, 0, 0}, [] { return "garbled BACKEND_FOR_PACKET_SEARCH packet"; })) {
           MX_LOG(ERROR, LogSummary::VERBOSITY, CTX("multiplexer.server") FLOW(meta_handler.msg.workflow()) TEXT(*line));
@@ -736,6 +753,7 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
       }
       const MultiplexerMessageDescription* description = config_.message_description(search.packet_type());
       if (!description || !description->to().size()) {
+        _count_drop(BAD_SEARCH, meta_handler.msg.type(), NO_TYPE);
         if (const std::string* line = drops_.first({BAD_SEARCH, ERROR, search.packet_type(), 0}, [&] {
               return "BACKEND_FOR_PACKET_SEARCH: unknown packet type " + repr(search.packet_type()) +
                      " or type with no routing rules";
@@ -777,6 +795,7 @@ bool Server::_handle_meta_message(MessageMetaHandler& meta_handler) {
     default:
       // A number the protocol keeps and does not use, 0 among them: told to
       // its sender and recorded as a type of no entry is.
+      _count_drop(UNKNOWN_PROTOCOL_TYPE, meta_handler.msg.type(), NO_TYPE);
       if (const std::string* line = drops_.first({UNKNOWN_PROTOCOL_TYPE, WARNING, meta_handler.msg.type(), 0}, [&] {
             return "unknown protocol message type " + repr(meta_handler.msg.type()) + "; dropping";
           })) {
@@ -835,6 +854,7 @@ unsigned int Server::_schedule(MessageMetaHandler& meta_handler,
       // sender is told, whatever the rule's flag.
       _record(meta_handler, 0, peers::ALL_TYPES, _unrouted_disposition(why), false);
     }
+    _count_drop(why, meta_handler.msg.type(), rule.peer_type());
     // A key nobody takes is a kind of line per message type, in the place
     // of the instance id, and the first line of the kind names the key.
     const bool key = why == KEY_NOT_TAKEN;
@@ -923,6 +943,7 @@ void Server::_not_connected(MessageMetaHandler& meta_handler) {
   }
   _record(meta_handler, meta_handler.msg.to(), 0, RoutedMessage::NO_RECIPIENT,
           meta_handler.msg.report_delivery_error());
+  _count_drop(NOT_CONNECTED, meta_handler.msg.type(), NO_TYPE);
   if (const std::string* line = drops_.first({NOT_CONNECTED, WARNING, 0, meta_handler.msg.to()}, [&] {
         return "message to " + repr(meta_handler.msg.to()) + " which is not connected; dropping";
       })) {
@@ -931,6 +952,7 @@ void Server::_not_connected(MessageMetaHandler& meta_handler) {
 }
 
 void Server::_dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection) {
+  _count_drop(QUEUE_FULL, meta_handler.msg.type(), connection.peer_type());
   if (const std::string* line = drops_.first({QUEUE_FULL, WARNING, connection.peer_type(), connection.peer_id()}, [&] {
         return "outgoing queue full, dropping message to peer " + repr(connection.peer_id()) + " of type " +
                repr(connection.peer_type()) + " (" + _peer_name(connection.peer_type()) + ")";

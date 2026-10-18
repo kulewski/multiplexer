@@ -1,6 +1,8 @@
 """run_multiplexer --monitor-address serves /healthz and /readyz over HTTP,
-for Kubernetes probes (docs/operations.md): both answer 200 while the
-multiplexer runs, on one event loop and on several, and the monitor goes
+for Kubernetes probes (docs/operations.md), and /metrics for Prometheus
+(docs/metrics.md): the probes answer 200 while the multiplexer runs, on
+one event loop and on several, /metrics in Prometheus' text format with a
+lag for every loop, and the monitor goes
 with the multiplexer at a SIGTERM, which still exits 0; --monitor-port-file
 has the address the log names, there before the port file. Without the
 option nothing is served. An address that is not an IP address and a port
@@ -22,7 +24,7 @@ from multiplexer.testing import mx_runfile, runfile, wait_until
 MXCONTROL = mx_runfile("mxcontrol/mxcontrol")
 TESTING_RULES = runfile("tests/testing.rules")
 BOUND = 30  # seconds a step may take: a failure detector only
-SERVING = re.compile(r'serving /healthz and /readyz on http://([^\s"]+)')
+SERVING = re.compile(r'serving /healthz, /readyz and /metrics on http://([^\s"]+)')
 
 
 def text(path: str) -> str:
@@ -33,11 +35,16 @@ def text(path: str) -> str:
 
 def get(port: int, path: str) -> tuple[int, str]:
     """The status and the body of the answer to GET `path`."""
+    return get_typed(port, path)[:2]
+
+
+def get_typed(port: int, path: str) -> tuple[int, str, str]:
+    """The status, the body and the content type of the answer to GET `path`."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=BOUND)
     try:
         connection.request("GET", path)
         answer = connection.getresponse()
-        return answer.status, answer.read().decode()
+        return answer.status, answer.read().decode(), answer.getheader("Content-Type", "")
     finally:
         connection.close()
 
@@ -83,7 +90,11 @@ class MonitorTest(unittest.TestCase):
                 self.assertEqual("127.0.0.1", host)
                 self.assertEqual((200, "ok\n"), get(port, "/healthz"))
                 self.assertEqual((200, "ok\n"), get(port, "/readyz"))
-                self.assertEqual(404, get(port, "/metrics")[0])
+                status, body, content_type = get_typed(port, "/metrics")
+                self.assertEqual((200, "text/plain; version=0.0.4; charset=utf-8"), (status, content_type))
+                lags = re.findall(r'^mx_event_loop_lag_seconds\{loop="(\d+)"\}', body, re.MULTILINE)
+                self.assertEqual([str(loop) for loop in range(int(threads))], lags)
+                self.assertEqual(404, get(port, "/status")[0])
                 process.terminate()
                 if process.wait(BOUND) != 0:
                     self.fail(text(log_path))

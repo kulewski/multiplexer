@@ -113,7 +113,9 @@ so that a liveness probe never restarted it and a rolling update went on
 past it. `timeoutSeconds` is above the 2 s a check gives a loop, so that
 the check decides: on the default of 1 s, a loop slow for a moment would
 fail the probe while the check still waited for it. The monitor's port is
-the pods' alone: the Service leaves it out, and only the kubelet asks it.
+the pods' alone: the Service leaves it out, and only the kubelet asks it,
+and Prometheus, which scrapes `/metrics` there ([metrics](metrics.md)
+has the PodMonitor).
 
 The image runs as `nonroot` and holds only the binary, so there is no
 shell to `kubectl exec` into; the logs go to stderr, and
@@ -475,7 +477,7 @@ by default.
 
 ## Watching it
 
-There is no metrics endpoint. What you have:
+What you have:
 
 - the log, above: registrations tell you who is connected, undelivered
   messages tell you when a backend type has nobody behind it;
@@ -486,7 +488,9 @@ There is no metrics endpoint. What you have:
 - the peers themselves: a client that gets `OperationFailed` has learned that
   no backend of that type is connected anywhere, and a backend's
   `connections_count()` says how many multiplexers it currently reaches;
-- the health of each multiplexer over HTTP, below;
+- the health of each multiplexer over HTTP, below, and its
+  [metrics](metrics.md) for Prometheus on the same port: what went
+  nowhere and why, the peers and their queues, the event loops' lag;
 - the peers file and the recording, below.
 
 A `PING` addressed to a backend's instance id is answered by the backend's
@@ -516,8 +520,8 @@ Nothing is served without the option, and it has no default port. The
 address is an IP address and a port, which it needs, read as `--address`
 is ([addresses](mxcontrol.md#addresses)); one in use ends the start with
 exit 1, `--monitor-address 0.0.0.0:9180: bind: Address already in use`,
-before the multiplexer listens. At start the log says `serving /healthz
-and /readyz on http://0.0.0.0:9180`, and `--monitor-port-file PATH`
+before the multiplexer listens. At start the log says `serving /healthz,
+/readyz and /metrics on http://0.0.0.0:9180`, and `--monitor-port-file PATH`
 writes the address, the port the system picked for port 0, before the
 `--port-file`. In a test, `Cluster(monitor=True)` starts every
 multiplexer with a monitor, and `Mx.healthz()` and `Mx.readyz()` ask it

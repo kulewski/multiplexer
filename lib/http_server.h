@@ -1,7 +1,8 @@
 // mx::HttpServer: a minimal HTTP/1.0 server for a process's health and
 // metrics endpoints, on a thread of its own: GET only, one request per
-// connection, the reply text/plain with its length, then the connection
-// closed. What a kubelet probe or a Prometheus scrape needs and no more.
+// connection, the reply text/plain, or the type the handler gives, with
+// its length, then the connection closed. What a kubelet probe or a
+// Prometheus scrape needs and no more.
 // Used by the multiplexer's monitor (multiplexer/monitor.h, run_multiplexer
 // --monitor-address) and by a program's own health endpoint
 // (docs/recipes/check_backend_health.md).
@@ -45,6 +46,10 @@ namespace mx {
 // "/metrics", a query string included. A handler that throws has the
 // request answered 500.
 typedef std::function<int(const std::string& path, std::string& body)> HttpHandler;
+// The same, and `content_type`, text/plain when it comes, the handler may
+// set to another: "text/plain; version=0.0.4; charset=utf-8" is what a
+// Prometheus scrape of /metrics wants.
+typedef std::function<int(const std::string& path, std::string& body, std::string& content_type)> HttpTypedHandler;
 
 class HttpServer {
  public:
@@ -54,6 +59,7 @@ class HttpServer {
   // (lib/seconds.h). Throws std::system_error when the address cannot be
   // bound.
   HttpServer(const asio::ip::tcp::endpoint& endpoint, HttpHandler handler, float timeout = DEFAULT_TIMEOUT);
+  HttpServer(const asio::ip::tcp::endpoint& endpoint, HttpTypedHandler handler, float timeout = DEFAULT_TIMEOUT);
   // stop().
   ~HttpServer();
   HttpServer(const HttpServer&) = delete;
@@ -93,7 +99,7 @@ class HttpServer {
   // The thread's body: the io_service run until stop() left it no work.
   void _run();
 
-  const HttpHandler handler_;
+  const HttpTypedHandler handler_;
   const std::chrono::microseconds timeout_;
   // The server's thread, which everything below belongs to; bound by its
   // first handler.

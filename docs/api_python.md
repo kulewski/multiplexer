@@ -1586,7 +1586,12 @@ class SearchTest(unittest.TestCase):
   answer, `(200, "ok\n")` while every event loop runs and, for
   `readyz()`, `(503, "the multiplexer is stopping\n")` from the moment a
   stop began, its drain included, `ValueError` without a monitor and
-  `ConnectionRefusedError` while the process is not running, and
+  `ConnectionRefusedError` while the process is not running;
+  `metrics(timeout=10)` returns every sample of its `/metrics` as
+  `(name, labels, value)` ([metrics](metrics.md)), and `metric(name,
+  **labels)` the sum of those of `name` whose labels include `labels`, 0
+  when none does, `metric("mx_messages_dropped_total",
+  reason="queue_full")` say; and
   `monitor_address` is where it listens, the same port through a
   restart; `endpoint` is its `(host, port)`, and
   `cluster.multiplexer_at(endpoint)` is the `Mx` at the `(host, port)` a

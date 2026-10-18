@@ -56,6 +56,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "lib/adaptive_mutex.h"
@@ -170,6 +171,41 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // monitor (multiplexer/monitor.h) posts to see that every loop runs. It
   // runs with no routing scope held, so it must not touch the server.
   void post_to_loop(unsigned int loop, std::function<void()> work);
+
+  // What the monitor's /metrics says of the routing (multiplexer/monitor.h,
+  // docs/metrics.md), counted since the start: the frames peers sent to be
+  // routed and their bytes, the accepts that failed, the messages that went
+  // nowhere, by why, their type and the peer type they were for, the peers
+  // registered and the frames queued for them, by peer type, and the rules.
+  struct Metrics {
+    std::uint64_t received_messages = 0;
+    std::uint64_t received_bytes = 0;
+    std::uint64_t accept_failures = 0;
+    // One for each reason, type and peer type that dropped any: the types'
+    // names in the rules, "unknown" for one outside them, "" where the drop
+    // has none (docs/metrics.md says which).
+    struct Dropped {
+      std::string reason;
+      std::string type;
+      std::string peer_type;
+      std::uint64_t count = 0;
+    };
+    std::vector<Dropped> dropped;
+    // By peer type, every one of the rules' a peer may connect as: the
+    // living registered connections, and the frames waiting in their
+    // outgoing queues.
+    std::map<std::string, std::uint64_t> peers;
+    std::map<std::string, std::uint64_t> queued;
+    std::string rules_fingerprint;
+    bool rules_failing = false;  // the file on disk is not the rules in use: missing, or not parsing
+    bool stopping = false;
+  };
+  // The snapshot, on the main loop, where the routing state may be read:
+  // post_to_loop(0, ...) from another thread. The counts are kept as
+  // routing goes, the frames and bytes by each connection on its own loop
+  // (Connection::count_received), the drops on the failure paths alone;
+  // the peers and their queues are walked here, once a scrape.
+  Metrics metrics() const;
 
   // The rules file. set_rules_file() names it and load_rules() reads it:
   // when the text differs from the rules in use, it is parsed and put in
@@ -304,10 +340,13 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   // its queue or as it read on, is counted for the stop's last line.
   void register_connection(Connection::pointer conn, const WelcomeMessage& welcome);
   void connection_closed(Connection* conn);
-  void handle_orphaned_outgoing_messages(Connection*, Connection::MessagesBuffer& queue) {
+  void handle_orphaned_outgoing_messages(Connection* conn, Connection::MessagesBuffer& queue) {
     RoutingScope routing(*this);
     if (stopping_) {
       stop_dropped_queued_ += queue.size();
+    }
+    for (const std::shared_ptr<const RawMessage>& raw : queue) {
+      _count_drop(PEER_GONE, raw->type(), conn->peer_type());
     }
   }
   // The base class's, but for a connection a newcomer with its instance id
@@ -568,7 +607,27 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
     BAD_SEARCH,
     ACCEPT_FAILED,  // not a message: the accept loop out of descriptors
     KEY_TOO_LONG,   // a key over MAX_KEY_SIZE
+    // Counted for metrics() alone, never a line of their own: what was
+    // queued for a peer whose connection ended (handle_orphaned_outgoing_
+    // messages), and what a connection read and dropped as it closed.
+    PEER_GONE,
+    CLOSING,
   };
+  // A drop for metrics(), by kind, message type and the peer type it was
+  // for, each a type of the rules, NO_TYPE where it has none, or
+  // OUTSIDE_RULES for one the rules do not have, so that a peer naming
+  // types of its own cannot grow the map. Counted where each drop is
+  // classified, on the failure paths alone.
+  static constexpr std::uint64_t NO_TYPE = std::uint64_t(1) << 32;
+  static constexpr std::uint64_t OUTSIDE_RULES = NO_TYPE + 1;
+  void _count_drop(unsigned int kind, std::uint64_t type, std::uint64_t peer_type, std::uint64_t count = 1)
+      MX_RUN_ON(owner_thread_);
+  // A counted type's label: its name in the rules, "" for NO_TYPE,
+  // "unknown" for OUTSIDE_RULES, its number for one a reload took away.
+  std::string _type_label(std::uint64_t type) const MX_RUN_ON(owner_thread_);
+  std::string _peer_label(std::uint64_t peer_type) const MX_RUN_ON(owner_thread_);
+  // A kind of drop as its reason label (docs/metrics.md).
+  static const char* _reason_label(unsigned int kind);
   // A peer's copy its full queue refused; the line names the peer.
   void _dropped_queue_full(const MessageMetaHandler& meta_handler, const Connection& connection)
       MX_RUN_ON(owner_thread_);
@@ -757,6 +816,12 @@ class Server : public ConnectionsManager<Server>, public std::enable_shared_from
   std::function<void()> on_stopped_ MX_GUARDED_BY(owner_thread_);
   std::uint64_t stop_dropped_queued_ MX_GUARDED_BY(owner_thread_) = 0;
   std::uint64_t stop_dropped_read_ MX_GUARDED_BY(owner_thread_) = 0;
+  // For metrics(): the drops (_count_drop), what the connections that
+  // ended had received, and the accepts that failed.
+  std::map<std::tuple<unsigned int, std::uint64_t, std::uint64_t>, std::uint64_t> dropped_ MX_GUARDED_BY(owner_thread_);
+  std::uint64_t ended_received_messages_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::uint64_t ended_received_bytes_ MX_GUARDED_BY(owner_thread_) = 0;
+  std::uint64_t accept_failures_ MX_GUARDED_BY(owner_thread_) = 0;
   // The lines about messages that went nowhere: see LogSummary.
   LogSummary drops_ MX_GUARDED_BY(owner_thread_);
   // The patterns of every connected peer's key filters, by message type.

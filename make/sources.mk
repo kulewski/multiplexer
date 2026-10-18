@@ -41,6 +41,7 @@ LIB_SRCS := \
   multiplexer/recorder.cc \
   multiplexer/server.cc \
   multiplexer/server_loops.cc \
+  multiplexer/server_metrics.cc \
   multiplexer/server_shared.cc \
   multiplexer/threaded_client.cc \
   multiplexer/threaded_client_inbox.cc \
@@ -296,6 +297,7 @@ PY_TEST_FILES := \
   multiplexer/leak_test.py \
   multiplexer/lifetime_test.py \
   multiplexer/log_reader_gone_test.py \
+  multiplexer/metrics_test.py \
   multiplexer/monotonic_clock_test.py \
   multiplexer/mxcontrol_test.py \
   multiplexer/mxlog_test.py \

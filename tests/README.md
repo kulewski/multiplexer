@@ -76,9 +76,11 @@ with it the Rust toolchain Bazel would fetch.
   cap of a drain the test starts with the backend's `start_draining()`.
 - The multiplexer's health: `Cluster(monitor=True)` starts each
   multiplexer with `--monitor-address` on a port of its own, and
-  `Mx.healthz()` and `Mx.readyz()` return the monitor's `(status, body)`;
+  `Mx.healthz()` and `Mx.readyz()` return the monitor's `(status, body)`,
+  `Mx.metrics()` and `Mx.metric(name, **labels)` its `/metrics`;
   `multiplexer/graceful_stop_test.py` holds a drain open and watches
-  `/readyz` say 503 while `/healthz` says 200.
+  `/readyz` say 503 while `/healthz` says 200, and
+  `multiplexer/metrics_test.py` brings drops about and counts them.
 - The rules file under running multiplexers: a scenario gives `Cluster` a
   copy of the file it may edit, `rules=path`, and
   `rules_check_interval=0.1` to have it read again that often (0 never);

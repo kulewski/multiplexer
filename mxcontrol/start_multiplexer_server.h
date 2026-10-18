@@ -21,9 +21,10 @@ namespace mxcontrol {
 // environment's MX_SERVER_THREADS when it is not given, so that a test
 // suite runs its multiplexers on several loops without a change to its
 // harness), --monitor-address (where /healthz and /readyz are served over
-// HTTP for Kubernetes probes, multiplexer/monitor.h; nothing is served
-// without it) and --monitor-port-file (where to write the monitor's bound
-// address, as --port-file does the multiplexer's). See docs/mxcontrol.md.
+// HTTP for Kubernetes probes, and /metrics for Prometheus,
+// multiplexer/monitor.h; nothing is served without it) and
+// --monitor-port-file (where to write the monitor's bound address, as
+// --port-file does the multiplexer's). See docs/mxcontrol.md.
 class StartMultiplexerServer : public Task {
  public:
   virtual int run();
@@ -82,7 +83,8 @@ class StartMultiplexerServer : public Task {
     options.add("monitor-address", &monitor_host_port_,
                 "serve /healthz and /readyz over HTTP on this address, host:port or [IPv6 address]:port, for "
                 "Kubernetes probes (docs/operations.md): 200 while every event loop runs, and /readyz 503 once "
-                "the multiplexer stops; nothing is served without it");
+                "the multiplexer stops; and /metrics for Prometheus (docs/metrics.md); nothing is served "
+                "without it");
     options.add("monitor-port-file", &monitor_port_file_,
                 "once the monitor listens, write its bound address, host:port or [IPv6 address]:port, to this "
                 "file, before the --port-file (use with --monitor-address host:0 to let the system pick a port)");

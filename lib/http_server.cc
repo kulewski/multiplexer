@@ -60,9 +60,11 @@ const char* reason(int status) {
 
 // A whole response: the status line, the headers, `headers` among them,
 // each ending in CRLF, and the body.
-std::string response(int status, const std::string& body, const std::string& headers = "") {
+std::string response(int status, const std::string& body, const std::string& headers = "",
+                     const std::string& content_type = "text/plain") {
   std::string text = "HTTP/1.0 " + std::to_string(status) + " " + reason(status) + "\r\n";
-  text += "Content-Type: text/plain\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n";
+  text += "Content-Type: " + content_type + "\r\nContent-Length: " + std::to_string(body.size()) +
+          "\r\nConnection: close\r\n";
   text += headers;
   text += "\r\n";
   text += body;
@@ -188,10 +190,16 @@ void HttpServer::Connection::_write() {
   });
 }
 
+HttpServer::HttpServer(const asio::ip::tcp::endpoint& endpoint, HttpHandler handler, float timeout)
+    : HttpServer(endpoint,
+                 HttpTypedHandler([handler = std::move(handler)](const std::string& path, std::string& body,
+                                                                 std::string&) { return handler(path, body); }),
+                 timeout) {}
+
 // Bound and listening here, on the caller's thread, so that an address in
 // use throws to the caller rather than on the thread; the first accept is
 // the thread's.
-HttpServer::HttpServer(const asio::ip::tcp::endpoint& endpoint, HttpHandler handler, float timeout)
+HttpServer::HttpServer(const asio::ip::tcp::endpoint& endpoint, HttpTypedHandler handler, float timeout)
     : handler_(std::move(handler)),
       timeout_(from_seconds(timeout)),
       acceptor_(io_service_, endpoint),
@@ -294,9 +302,10 @@ std::string HttpServer::_reply(const std::string& head) {
   }
   const std::string target = line.substr(method_end + 1, target_end - method_end - 1);
   std::string body;
+  std::string content_type = "text/plain";
   int status = 500;
   try {
-    status = handler_(target, body);
+    status = handler_(target, body, content_type);
   } catch (const std::exception& error) {
     MX_LOG(ERROR, LOWVERBOSITY, CTX("http_server") TEXT("the handler threw for " + target + ": " + error.what()));
     return response(500, "the handler failed\n");
@@ -310,7 +319,7 @@ std::string HttpServer::_reply(const std::string& head) {
                TEXT("the handler answered " + target + " with status " + repr(status) + ", not one from 100 to 599"));
     return response(500, "the handler failed\n");
   }
-  return response(status, body);
+  return response(status, body, "", content_type);
 }
 
 // What escapes a handler, a std::bad_alloc say, is logged and the thread

@@ -468,6 +468,18 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   // close_gracefully).
   std::uint64_t dropped_while_closing() const { return dropped_while_closing_; }
 
+  // The frames this connection brought its manager to route, and their
+  // bytes, as the multiplexer counts them for its metrics
+  // (Server::handle_message): written on the connection's own loop alone,
+  // so a relaxed load and store, with no read-modify-write, and read from
+  // any thread. A client's connections never count.
+  void count_received(std::size_t bytes) {
+    received_messages_.store(received_messages_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    received_bytes_.store(received_bytes_.load(std::memory_order_relaxed) + bytes, std::memory_order_relaxed);
+  }
+  std::uint64_t received_messages() const { return received_messages_.load(std::memory_order_relaxed); }
+  std::uint64_t received_bytes() const { return received_bytes_.load(std::memory_order_relaxed); }
+
   // Queues a frame for writing and starts the write if the channel is free.
   // Returns what the manager's traits say a scheduling result is: a tribool
   // tracker for the client (unknown until written or lost), a bool for the
@@ -564,6 +576,18 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
     }
     MX_DCHECK_RUN_ON(&io_thread_);
     return outgoing_queue_max_size_ <= outgoing_queue_.size();
+  }
+  // How many frames wait in the outgoing queue, the one being written
+  // included; from any loop for a shared connection, as
+  // outgoing_queue_full(): what the multiplexer's metrics sum by peer type.
+  inline std::size_t outgoing_queue_size() const {
+    if constexpr (ConnectionsManagerTraits::WRITES_THROUGH) {
+      if (shared_) {
+        return shared_->size();
+      }
+    }
+    MX_DCHECK_RUN_ON(&io_thread_);
+    return outgoing_queue_.size();
   }
   inline bool outgoing_queue_empty() const {
     MX_DCHECK_RUN_ON(&io_thread_);
@@ -1522,6 +1546,8 @@ class Connection : public std::enable_shared_from_this<Connection<ConnectionsMan
   bool close_when_flushed_;  // close_gracefully(close_bound_) once the queue is written
   float close_bound_;
   std::uint64_t dropped_while_closing_;
+  std::atomic<std::uint64_t> received_messages_{0};  // see count_received()
+  std::atomic<std::uint64_t> received_bytes_{0};
   std::weak_ptr<ConnectionsManagerImplementation> manager_;
   bool should_send_heartbit_;  // a frame arrived since the last heartbeat: a passive peer is owed one
   // The send timer neither waits nor will be armed by a write in progress:

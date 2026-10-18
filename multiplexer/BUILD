@@ -1159,6 +1159,7 @@ cc_library(
     name = "server",
     srcs = [
         "server.cc",
+        "server_metrics.cc",
         "server_shared.cc",
     ],
     hdrs = ["server.h"],
@@ -1192,6 +1193,7 @@ cc_library(
         ":server",
         "//lib:http_server",
         "//lib:mutex",
+        "//lib:release",
         "//lib:repr",
         "//lib:seconds",
         "@asio",
@@ -1204,8 +1206,12 @@ cc_test(
     srcs = ["monitor_test.cc"],
     data = ["//tests:testing.rules"],
     deps = [
+        ":connections_manager",
         ":in_process_multiplexer",
         ":monitor",
+        ":multiplexer_cc_constants",
+        ":server",
+        "//lib:release",
         "@asio",
         "@com_google_googletest//:gtest_main",
     ],
@@ -1868,6 +1874,34 @@ py_test(
         ":mxclient",
         ":threaded_client_py",
         ":threaded_server",
+        "//multiplexer/testing",
+    ],
+)
+
+# What /metrics counts, read through the harness (docs/metrics.md).
+py_test(
+    name = "metrics_test",
+    size = "medium",
+    srcs = ["metrics_test.py"],
+    deps = [
+        ":_native",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
+        "//multiplexer/testing",
+    ],
+)
+
+# The same with every multiplexer on two event loops (Server::set_threads).
+py_test(
+    name = "metrics_several_loops_test",
+    size = "medium",
+    srcs = ["metrics_test.py"],
+    env = {"MX_SERVER_THREADS": "2"},
+    main = "metrics_test.py",
+    deps = [
+        ":_native",
+        ":multiplexer_constants",
+        ":multiplexer_py_proto",
         "//multiplexer/testing",
     ],
 )

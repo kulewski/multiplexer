@@ -182,7 +182,10 @@ cc_library(
     name = "release",
     srcs = ["release.cc"],
     hdrs = ["release.h"],
-    visibility = ["//lib/logging:__pkg__"],
+    visibility = [
+        "//lib/logging:__pkg__",
+        "//multiplexer:__pkg__",
+    ],
 )
 
 cc_library(

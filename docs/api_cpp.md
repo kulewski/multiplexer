@@ -1190,8 +1190,12 @@ mx::HttpServer health(asio::ip::tcp::endpoint(asio::ip::address_v4::any(), 8080)
                       });
 ```
 
-The constructor binds and starts serving, and throws `std::system_error`
-when it cannot bind; `port()` is the port, the one the system picked for
+A handler of the form
+`mx::HttpTypedHandler`, `int(const std::string& path, std::string& body,
+std::string& content_type)`, may set the answer's content type, which
+comes as `text/plain`: `/metrics` answers Prometheus with
+`text/plain; version=0.0.4; charset=utf-8`. The constructor binds and
+starts serving, and throws `std::system_error` when it cannot bind; `port()` is the port, the one the system picked for
 port 0; `stop()`, or the destructor, closes the listening socket and every
 connection and joins the thread, after a handler's call under way. The
 handler gets the request target as sent, a query string included, and

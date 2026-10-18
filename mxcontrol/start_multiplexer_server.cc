@@ -264,9 +264,9 @@ int StartMultiplexerServer::run() {
   const std::string bound = multiplexer::format_endpoint(host_, server->local_port());
   MX_LOG(INFO, LOWVERBOSITY, TEXT("starting MX server on " + bound));
   if (monitor) {
-    MX_LOG(
-        INFO, LOWVERBOSITY,
-        TEXT("serving /healthz and /readyz on http://" + multiplexer::format_endpoint(monitor_host_, monitor->port())));
+    MX_LOG(INFO, LOWVERBOSITY,
+           TEXT("serving /healthz, /readyz and /metrics on http://" +
+                multiplexer::format_endpoint(monitor_host_, monitor->port())));
   }
   // The monitor's file first: once the multiplexer's says it listens, a
   // reader finds the monitor's too.

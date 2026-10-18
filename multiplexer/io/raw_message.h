@@ -304,6 +304,11 @@ class RawMessage {
     return asio::buffer((void*)(contents_.size() ? &contents_[0] : NULL), contents_.size());
   }
 
+  // The whole frame's bytes, header and body, read or built: what the
+  // multiplexer counts for its metrics on the per-frame path, so without
+  // get_body_length()'s assertion.
+  inline size_t frame_length() const { return HEADER_LENGTH + length_; }
+
   // returns RawMessage body length
   inline size_t get_body_length() const {
     Assert((contents_.empty() && !length_) || length_ == contents_.size());

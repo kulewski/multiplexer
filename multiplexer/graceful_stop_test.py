@@ -3,7 +3,8 @@ is queued for a peer that reads is written before its connection closes; a
 peer that does not read ends the stop at the deadline, its queue dropped and
 counted; a connection that never sent its welcome does not hold the stop up;
 a second signal stops at once; through the drain the monitor's /readyz says
-503 while /healthz says 200, and the monitor goes with the process. And a
+503 while /healthz says 200 and /metrics' mx_stopping 1, and the monitor
+goes with the process. And a
 connection whose first frame is a
 heartbeat rather than its welcome, which used to stay forever, and the
 accept loop that spun when descriptors ran out. Counts, never speed: a receiver that does not read
@@ -116,6 +117,7 @@ class GracefulStopTest(unittest.TestCase):
             wait_until(lambda: multiplexer.log_contains("stopping:"), 20, "the stop began")
             self.assertEqual((503, "the multiplexer is stopping\n"), multiplexer.readyz())
             self.assertEqual((200, "ok\n"), multiplexer.healthz())
+            self.assertEqual(1, multiplexer.metric("mx_stopping"))
             self.assertEqual(sent, count_until_the_end(receiver, types.PYTHON_TEST_REQUEST))
             receiver.close()
             self.assertEqual(0, count_until_the_end(sender, types.PYTHON_TEST_REQUEST))

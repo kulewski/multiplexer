@@ -126,9 +126,10 @@ INDEX = [
         "`multiplexer/server_shared.cc`",
     ),
     (
-        "A multiplexer's health for Kubernetes probes, over HTTP",
+        "A multiplexer's health for Kubernetes probes and its metrics for Prometheus, over HTTP",
         "multiplexer/monitor.h",
-        "`Monitor::_check_loops`, a check posted to every loop; the server under it, `mx::HttpServer` in "
+        "`Monitor::_check`, a check posted to every loop; the routing's counts, `Server::metrics` and "
+        "`_count_drop` in `multiplexer/server_metrics.cc`; the server under it, `mx::HttpServer` in "
         "`lib/http_server.h`; `--monitor-address` in `mxcontrol/start_multiplexer_server.cc`",
     ),
     (
