@@ -157,9 +157,9 @@ class MetricsTest(unittest.TestCase):
             reader = threading.Thread(target=count_refusals)
             reader.start()
             for payload in fill_frames() + [b"x"] * COUNT:  # its sockets, then its queue, then past it
-                to_receiver.add(
-                    sender.send(payload, types.TEST_EVENT, to=receiver.instance_id, report_delivery_error=True)
-                )
+                copy = sender.message(payload, types.TEST_EVENT, to=receiver.instance_id, report_delivery_error=True)
+                to_receiver.add(copy.id)  # before it leaves: its DELIVERY_ERROR can be back before sendall() returns
+                sender.send_raw(frame(copy.SerializeToString()))
             for _ in range(COUNT):
                 sender.send(b"x", types.TEST_TINY_QUEUE_EVENT)
             sender.send(str(marker).encode(), types.TEST_EVENT, to=sender.instance_id)
