@@ -46,15 +46,15 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bazel test --build_tag_filters=-rust --test_tag_filters=-slow,-rust --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
+      - run: bazel test --test_output=errors --build_tag_filters=-rust --test_tag_filters=-slow,-rust --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
       # ThreadSanitizer over the multiplexer on several event loops: its
       # unit tests, and the scenarios whose roles are C++ with every
       # multiplexer on two loops (AGENTS.md's commands say why the tunable).
       # The runner's kernel randomizes mappings over more bits than the
       # sanitizer's runtime takes.
       - run: sudo sysctl -w vm.mmap_rnd_bits=28
-      - run: bazel test --config=tsan //lib:adaptive_mutex_test //multiplexer:server_loops_test //multiplexer/io:shared_outgoing_test //multiplexer:write_through_test //multiplexer:several_loops_test
-      - run: bazel test --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLES=glibc.rtld.optional_static_tls=262144 --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 --build_tests_only --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...
+      - run: bazel test --test_output=errors --config=tsan //lib:adaptive_mutex_test //multiplexer:server_loops_test //multiplexer/io:shared_outgoing_test //multiplexer:write_through_test //multiplexer:several_loops_test
+      - run: bazel test --test_output=errors --config=tsan --test_env=MX_SERVER_THREADS=2 --test_env=GLIBC_TUNABLES=glibc.rtld.optional_static_tls=262144 --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 --build_tests_only --test_tag_filters=lang-cc,-lang-py,-lang-rust,-lang-bin,-slow //tests/scenarios/...
 
   libcxx:
     # The fast tests against libc++, the standard library a build of @mx
@@ -71,7 +71,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bazel test --config=libcxx --build_tag_filters=-rust --test_tag_filters=-slow,-rust --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
+      - run: bazel test --test_output=errors --config=libcxx --build_tag_filters=-rust --test_tag_filters=-slow,-rust --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
 
   rust:
     # The Rust library: its fast tests under Bazel, which fetches the
@@ -94,7 +94,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bazel test --build_tag_filters=rust --test_tag_filters=rust,-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
+      - run: bazel test --test_output=errors --build_tag_filters=rust --test_tag_filters=rust,-slow --test_env=MX_REQUIRE_PRIVATE_NETWORK=1 //...
       - run: rust/vendor.sh --check
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: rust
